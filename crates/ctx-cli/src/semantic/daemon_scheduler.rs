@@ -1,3 +1,16 @@
+#[derive(Default)]
+pub(super) struct DaemonSidecarDrain {
+    pub(super) generation: Option<String>,
+    pub(super) pro_attempted_generation: Option<String>,
+    pub(super) relational_attempted_generation: Option<String>,
+    pub(super) semantic_attempted_generation: Option<String>,
+}
+
+fn immediate_follow_up(mut iteration: DaemonIteration) -> DaemonIteration {
+    iteration.continue_immediately = true;
+    iteration
+}
+
 pub(super) fn run_daemon_once_with_activity(
     args: &DaemonRunArgs,
     data_root: &Path,
@@ -27,22 +40,30 @@ pub(super) fn run_daemon_once_with_activity(
         ));
     }
     if source_refresh_requested {
-        return run_full_source_backed_refresh(
-            args,
-            data_root,
-            runtime,
-            deadline,
-            semantic_enabled,
-            source_refresh,
-            false,
-        );
+        return run_full_source_backed_refresh(data_root, runtime, source_refresh, false);
+    }
+    if args.once {
+        if !runtime.history_retry.ready() {
+            let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
+            write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
+            let state = daemon_source_backed_cycle_state(&job);
+            return Ok(DaemonIteration::new(false, false, state));
+        }
+        if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
+            return Ok(DaemonIteration::new(
+                false,
+                false,
+                DaemonCycleStateV1::unknown(),
+            ));
+        }
+        return run_full_source_backed_refresh(data_root, runtime, source_refresh, true);
+    }
+    if let Some(iteration) = run_pending_source_backed_relational_catch_up(data_root, runtime)? {
+        return Ok(iteration);
     }
     if let Some(iteration) =
         run_pending_source_backed_pro_catch_up(data_root, runtime, source_refresh)?
     {
-        return Ok(iteration);
-    }
-    if let Some(iteration) = run_pending_source_backed_relational_catch_up(data_root, runtime)? {
         return Ok(iteration);
     }
     if let Some(iteration) = run_pending_source_backed_semantic_catch_up(
@@ -53,6 +74,13 @@ pub(super) fn run_daemon_once_with_activity(
         semantic_enabled,
     )? {
         return Ok(iteration);
+    }
+    if runtime.sidecar_drain.generation.take().is_some() {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
     }
     if !runtime.history_retry.ready() {
         let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
@@ -67,15 +95,7 @@ pub(super) fn run_daemon_once_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    run_full_source_backed_refresh(
-        args,
-        data_root,
-        runtime,
-        deadline,
-        semantic_enabled,
-        source_refresh,
-        true,
-    )
+    run_full_source_backed_refresh(data_root, runtime, source_refresh, true)
 }
 
 fn run_pending_source_backed_relational_catch_up(
@@ -89,6 +109,15 @@ fn run_pending_source_backed_relational_catch_up(
         return Ok(None);
     };
     let generation_id = generation.generation_id();
+    if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
+        && runtime
+            .sidecar_drain
+            .relational_attempted_generation
+            .as_deref()
+            == Some(generation_id)
+    {
+        return Ok(None);
+    }
     if !relational_generation_needs_catch_up(data_root, generation_id) {
         runtime.relational_retry.reset();
         return Ok(None);
@@ -98,11 +127,13 @@ fn run_pending_source_backed_relational_catch_up(
         return Ok(None);
     }
     let run = run_relational_catch_up_with_retry(data_root, runtime, generation_id)?;
-    Ok(Some(DaemonIteration::new(
+    runtime.sidecar_drain.relational_attempted_generation = Some(generation_id.to_owned());
+    runtime.sidecar_drain.generation = Some(generation_id.to_owned());
+    Ok(Some(immediate_follow_up(DaemonIteration::new(
         run.did_work,
         false,
         DaemonCycleStateV1::unknown(),
-    )))
+    ))))
 }
 
 fn run_pending_source_backed_semantic_catch_up(
@@ -123,6 +154,15 @@ fn run_pending_source_backed_semantic_catch_up(
         return Ok(None);
     };
     let generation_id = generation.generation_id();
+    if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
+        && runtime
+            .sidecar_drain
+            .semantic_attempted_generation
+            .as_deref()
+            == Some(generation_id)
+    {
+        return Ok(None);
+    }
     if !semantic_generation_needs_catch_up(data_root, generation_id) {
         runtime.semantic_retry.reset();
         return Ok(None);
@@ -141,11 +181,13 @@ fn run_pending_source_backed_semantic_catch_up(
     );
     let did_work = daemon_semantic_job_did_work(&job);
     write_daemon_job_status_unless_deadline_skip(&daemon_semantic_job_path(data_root), &job)?;
-    Ok(Some(DaemonIteration::new(
+    runtime.sidecar_drain.semantic_attempted_generation = Some(generation_id.to_owned());
+    runtime.sidecar_drain.generation = Some(generation_id.to_owned());
+    Ok(Some(immediate_follow_up(DaemonIteration::new(
         did_work,
         false,
         DaemonCycleStateV1::unknown(),
-    )))
+    ))))
 }
 
 fn run_pending_source_backed_pro_catch_up(
@@ -162,7 +204,20 @@ fn run_pending_source_backed_pro_catch_up(
         return Ok(None);
     };
     let generation = authority.generation_id();
+    if runtime.sidecar_drain.generation.as_deref() == Some(generation)
+        && runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
+    {
+        return Ok(None);
+    }
     if !pro_generation_needs_catch_up(data_root, generation) {
+        return Ok(None);
+    }
+    if runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
+        && read_pro_status(data_root).is_some_and(|status| {
+            status.get("core_generation_id").and_then(Value::as_str) == Some(generation)
+                && status.get("retryable").and_then(Value::as_bool) == Some(false)
+        })
+    {
         return Ok(None);
     }
     prepare_pro_retry_for_generation(runtime, data_root, generation);
@@ -171,11 +226,13 @@ fn run_pending_source_backed_pro_catch_up(
     }
     let run =
         run_pro_catch_up_with_retry(data_root, runtime, generation, Some(authority.as_ref()))?;
-    Ok(Some(DaemonIteration::new(
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
+    runtime.sidecar_drain.generation = Some(generation.to_owned());
+    Ok(Some(immediate_follow_up(DaemonIteration::new(
         run.did_work,
         false,
         DaemonCycleStateV1::unknown(),
-    )))
+    ))))
 }
 
 fn run_pending_source_backed_refresh(
@@ -200,11 +257,8 @@ fn run_pending_source_backed_refresh(
 }
 
 fn run_full_source_backed_refresh(
-    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
-    deadline: Option<Instant>,
-    semantic_enabled: bool,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
     enqueue_periodic: bool,
 ) -> Result<DaemonIteration> {
@@ -238,104 +292,7 @@ fn run_full_source_backed_refresh(
             false,
         );
     };
-    let mut job = run.job;
-    let mut did_work = run.did_work;
-    if !run.failed && daemon_mode_runs_source_backed_relational_catch_up(runtime.config.daemon.mode)
-    {
-        if let Some(core_generation_id) = job
-            .get("published_generation")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
-            match run_relational_catch_up_with_retry(data_root, runtime, &core_generation_id) {
-                Ok(relational_run) => {
-                    did_work |= relational_run.did_work;
-                    job["relational_projection"] = relational_run.status;
-                }
-                Err(error) => {
-                    job["relational_projection"] = compact_json(json!({
-                        "schema_version": 1,
-                        "owner": "daemon",
-                        "kind": "source_backed_relational_catch_up",
-                        "status": "error",
-                        "pending": true,
-                        "retryable": true,
-                        "core_generation_id": core_generation_id,
-                        "active_core_generation_id": null,
-                        "receipt_core_generation_id": null,
-                        "projection_status": null,
-                        "build_generation": null,
-                        "attempts": 0,
-                        "last_attempt_at_ms": utc_now().timestamp_millis(),
-                        "error_code": "source_relational_status_unavailable",
-                        "last_error": format!("{error:#}"),
-                    }));
-                }
-            }
-        }
-    }
-    if !run.failed && daemon_mode_runs_source_backed_pro_catch_up(runtime.config.daemon.mode) {
-        if let Some(core_generation_id) = job
-            .get("published_generation")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
-            let authority = source_refresh
-                .and_then(SourceBackedRefreshCoordinator::retained_published_generation);
-            match run_pro_catch_up_with_retry(
-                data_root,
-                runtime,
-                &core_generation_id,
-                authority.as_deref(),
-            ) {
-                Ok(pro_run) => {
-                    did_work |= pro_run.did_work;
-                    job["pro_projection"] = pro_run.status;
-                }
-                Err(error) => {
-                    job["pro_projection"] = compact_json(json!({
-                        "schema_version": 1,
-                        "owner": "daemon",
-                        "kind": "source_backed_pro_catch_up",
-                        "status": "error",
-                        "pending": true,
-                        "retryable": true,
-                        "core_generation_id": core_generation_id,
-                        "receipt_core_generation_id": null,
-                        "error_code": "source_pro_status_unavailable",
-                        "last_error": format!("{error:#}"),
-                    }));
-                }
-            }
-        }
-    }
-    if !run.failed
-        && semantic_enabled
-        && daemon_mode_runs_source_backed_semantic_projection(runtime.config.daemon.mode)
-    {
-        if let Some(core_generation_id) = job
-            .get("published_generation")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
-            prepare_semantic_retry_for_generation(runtime, data_root, &core_generation_id);
-            let semantic_job = run_daemon_semantic_job_with_retry(
-                args,
-                data_root,
-                runtime,
-                deadline,
-                true,
-                Some(&core_generation_id),
-            );
-            did_work |= daemon_semantic_job_did_work(&semantic_job);
-            write_daemon_job_status_unless_deadline_skip(
-                &daemon_semantic_job_path(data_root),
-                &semantic_job,
-            )?;
-            job["semantic_projection"] = semantic_job;
-        }
-    }
-    finish_full_source_backed_refresh(data_root, runtime, job, did_work)
+    finish_full_source_backed_refresh(data_root, runtime, run.job, run.did_work)
 }
 
 fn run_relational_catch_up_with_retry(
@@ -478,7 +435,22 @@ fn finish_full_source_backed_refresh(
     write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
     let failed = daemon_job_failed(&job);
     let state = daemon_source_backed_cycle_state(&job);
-    Ok(DaemonIteration::new(did_work, failed, state))
+    let published_generation = (!failed
+        && job.get("status").and_then(Value::as_str) == Some("completed"))
+    .then(|| {
+        job.get("published_generation")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .flatten();
+    if let Some(generation) = published_generation {
+        runtime.sidecar_drain.generation = Some(generation);
+        Ok(immediate_follow_up(DaemonIteration::new(
+            did_work, false, state,
+        )))
+    } else {
+        Ok(DaemonIteration::new(did_work, failed, state))
+    }
 }
 
 fn daemon_source_backed_cycle_state(job: &Value) -> DaemonCycleStateV1 {

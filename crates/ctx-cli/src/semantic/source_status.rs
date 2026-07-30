@@ -16,10 +16,11 @@ use crate::{
 
 use super::{
     paths_status::{
-        daemon_jobs_path, daemon_report_with_disabled_status,
+        daemon_jobs_path, daemon_report_with_disabled_status, daemon_semantic_job_path,
         daemon_source_backed_refresh_job_path, read_daemon_job_status,
     },
     source_backed_refresh_coordinator::source_backed_lexical_artifact_is_uncommitted_schema_only,
+    source_backed_relational_catch_up::read_status_json as read_relational_catch_up_status,
     vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
 };
 
@@ -60,9 +61,14 @@ pub(crate) fn source_epoch_status_report(
         index.as_ref(),
     );
     let resolver = resolver_report(generation_id.as_deref(), refresh_job.as_ref(), &daemon);
-    let semantic = semantic_report(data_root, config, index.as_ref());
-    let (relational, relational_counts) =
+    let mut semantic = semantic_report(data_root, config, index.as_ref());
+    attach_catch_up_status(
+        &mut semantic,
+        read_daemon_job_status(&daemon_semantic_job_path(data_root)),
+    );
+    let (mut relational, relational_counts) =
         relational_report(data_root, index.as_ref(), &current_policy_hash);
+    attach_catch_up_status(&mut relational, read_relational_catch_up_status(data_root));
     let pro_projection = pro_projection_report(data_root, generation_id.as_deref());
     let refresh = refresh_report(refresh_job.as_ref(), generation_id.as_deref(), &daemon);
 
@@ -101,6 +107,12 @@ pub(crate) fn source_epoch_status_report(
             "read_only": true,
         })),
     })
+}
+
+fn attach_catch_up_status(report: &mut Value, status: Option<Value>) {
+    if let Some(status) = status {
+        report["catch_up"] = status;
+    }
 }
 
 fn source_daemon_report(data_root: &Path) -> Value {

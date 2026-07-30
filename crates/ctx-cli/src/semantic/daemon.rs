@@ -37,7 +37,7 @@ use super::{
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
         daemon_retry_due, daemon_run_start_mode, restore_daemon_consumer_retries,
-        restore_daemon_source_refresh_retry, run_daemon_once_with_activity,
+        restore_daemon_source_refresh_retry, run_daemon_once_with_activity, DaemonSidecarDrain,
     },
     daemon_status::{
         daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
@@ -87,9 +87,7 @@ pub(super) struct DaemonIteration {
     pub(super) did_work: bool,
     pub(super) failed: bool,
     pub(super) telemetry_state: DaemonCycleStateV1,
-    // Provider refresh drafts are not present on this branch yet. This owned
-    // handoff lets the scheduler append their completed events without changing
-    // the daemon loop or provider-owned foreground refresh code later.
+    pub(super) continue_immediately: bool,
     pub(super) provider_refresh_events: Vec<PublicEventV1>,
 }
 
@@ -99,6 +97,7 @@ impl DaemonIteration {
             did_work,
             failed,
             telemetry_state,
+            continue_immediately: false,
             provider_refresh_events: Vec::new(),
         }
     }
@@ -118,6 +117,7 @@ pub(super) struct DaemonRuntime {
     pub(super) relational_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
+    pub(super) sidecar_drain: DaemonSidecarDrain,
     pub(super) config: AppConfig,
 }
 
@@ -128,6 +128,7 @@ pub(super) struct DaemonTestJobHooks {
     pub(super) history_refresh: Option<Value>,
     pub(super) relational_projection: Option<Value>,
     pub(super) semantic_index: Option<Value>,
+    pub(super) relational_blocker: Option<std::rc::Rc<dyn Fn()>>,
 }
 
 #[cfg(test)]
@@ -166,6 +167,11 @@ pub(super) fn daemon_test_job(job: &'static str) -> Option<Value> {
         let hooks = slot.borrow();
         let hooks = hooks.as_ref()?;
         hooks.calls.borrow_mut().push(job);
+        if job == "relational_projection" {
+            if let Some(blocker) = hooks.relational_blocker.as_ref() {
+                blocker();
+            }
+        }
         match job {
             "history_refresh" => hooks.history_refresh.clone(),
             "relational_projection" => hooks.relational_projection.clone(),
@@ -790,6 +796,7 @@ pub(super) fn run_daemon_inner(
                     .as_ref()
                     .map(|service| service.source_refresh.as_ref()),
             )?;
+            let continue_immediately = iteration.continue_immediately;
             let cycle_duration = cycle_started.elapsed();
             let iteration_events =
                 daemon_iteration_events(telemetry.as_mut(), &mut iteration, cycle_duration);
@@ -808,6 +815,9 @@ pub(super) fn run_daemon_inner(
             failed |= iteration.failed;
             if run_once {
                 break;
+            }
+            if continue_immediately {
+                continue;
             }
             observe_daemon_query_activity(
                 query_service
