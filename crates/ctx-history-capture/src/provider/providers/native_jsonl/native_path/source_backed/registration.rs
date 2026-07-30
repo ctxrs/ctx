@@ -253,6 +253,9 @@ fn capture(
             Err(super::DirectJsonlSourceBackedError::RejectedSource { path, rejections })
                 if base.is_none() =>
             {
+                terminal_evidence
+                    .record_rejected_path(path.clone())
+                    .map_err(route_error)?;
                 admission_rejections.push((path, rejections));
                 continue;
             }

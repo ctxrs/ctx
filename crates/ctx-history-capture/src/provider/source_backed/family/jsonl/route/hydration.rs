@@ -118,37 +118,53 @@ fn hydrate_group(
                     "exact JSONL source is absent from the resident inventory",
                 )
             })?;
-        let (opened, opening_observation) = leaf
-            .open_for_hydration()
-            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
-        #[cfg(test)]
-        run_after_jsonl_group_open_hook();
-        let mut hydrator = adapter.hydrator(leaf, Arc::clone(&opened))?;
-        let mut records = Vec::with_capacity(requests.len());
-        for request in requests {
-            let record = hydrator.hydrate(request)?;
-            if record.event_id != request.event_id() {
+        for attempt in 0..2 {
+            let (opened, opening_observation) = leaf.open_for_hydration().map_err(|error| {
+                hydration_error(HydrationFailureKind::StaleRecordEvidence, error)
+            })?;
+            #[cfg(test)]
+            run_after_jsonl_group_open_hook();
+            let mut hydrator = adapter.hydrator(leaf, Arc::clone(&opened))?;
+            let mut records = Vec::with_capacity(requests.len());
+            for request in requests {
+                let record = hydrator.hydrate(request)?;
+                if record.event_id != request.event_id() {
+                    return Err(hydration_error(
+                        HydrationFailureKind::InvalidLocator,
+                        "JSONL hydrator changed the requested event identity",
+                    ));
+                }
+                records.push(record);
+            }
+            hydrator.finish()?;
+            let closing_observation =
+                observe_opened_file_same_object(leaf.source_path(), opened.as_ref()).map_err(
+                    |error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error),
+                )?;
+            if inventory.revalidate_root().is_err() {
                 return Err(hydration_error(
-                    HydrationFailureKind::InvalidLocator,
-                    "JSONL hydrator changed the requested event identity",
+                    HydrationFailureKind::StaleRecordEvidence,
+                    "JSONL source authority changed during grouped hydration",
                 ));
             }
-            records.push(record);
-        }
-        hydrator.finish()?;
-        let closing_observation =
-            observe_opened_file_same_object(leaf.source_path(), opened.as_ref()).map_err(
-                |error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error),
-            )?;
-        if !leaf.accepts_hydration_closing(&opening_observation, &closing_observation)
-            || inventory.revalidate_root().is_err()
-        {
+            if closing_observation == opening_observation {
+                return Ok(records);
+            }
+            if attempt == 0
+                && !leaf.whole_record
+                && opening_observation.is_same_file_growth_to(&closing_observation)
+            {
+                continue;
+            }
             return Err(hydration_error(
                 HydrationFailureKind::StaleRecordEvidence,
                 "JSONL source changed during grouped hydration",
             ));
         }
-        Ok(records)
+        Err(hydration_error(
+            HydrationFailureKind::StaleRecordEvidence,
+            "JSONL source did not stabilize during grouped hydration",
+        ))
     })();
     if result.as_ref().is_err_and(|failure| {
         matches!(

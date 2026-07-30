@@ -1,5 +1,5 @@
 use std::{
-    io::BufReader,
+    io::{BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
     thread,
     time::SystemTime,
@@ -533,7 +533,9 @@ fn catalog_codex_session_opened(
     })
 }
 fn read_codex_session_meta_from_opened(opened: &OpenedProviderSourceFile) -> Result<Option<Value>> {
-    let mut reader = BufReader::new(opened.file().try_clone()?);
+    let mut file = opened.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     for _ in 0..32 {
         match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {

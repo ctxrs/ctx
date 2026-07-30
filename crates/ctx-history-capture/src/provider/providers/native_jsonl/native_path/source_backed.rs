@@ -34,9 +34,10 @@ use lifecycle::{decode_certificate, decode_previous, DirectJsonlTerminalEvidence
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
 const DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION: &str = "direct-native-jsonl-source-backed-v2";
 const DIRECT_JSONL_SOURCE_FRONTIER_KIND: &str = "direct-native-jsonl-checkpoint-v1";
-const DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE: &str = "direct-native-jsonl-provider-root-v2";
+const DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE: &str = "direct-native-jsonl-provider-root-v1";
 const DIRECT_JSONL_INVENTORY_REVISION_KIND: &str = "direct-native-jsonl-inventory-sha256-v2";
 const DIRECT_JSONL_DISCOVERY_REVISION: &str = "direct-native-jsonl-discovery-v2";
+const DIRECT_JSONL_LEGACY_DISCOVERY_REVISION: &str = "direct-native-jsonl-discovery-v1";
 const DIRECT_JSONL_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const DIRECT_JSONL_MAX_TOUCHED_FILES: usize = 256;
 const DIRECT_JSONL_MAX_EXPANDED_RECORD_UNITS: usize = 64;

@@ -302,7 +302,8 @@ fn hydrate_bound_group(
 ) -> DirectJsonlSourceBackedResult<Vec<HydratedProviderRecord>> {
     #[cfg(test)]
     record_hydration_work(0, 0, 1);
-    let source_file = leaf.open_for_hydration()?;
+    let (current_leaf, source_file) =
+        adapter.open_leaf_for_hydration(leaf, source, native_session_id)?;
     let mut sub_ordinals = Vec::with_capacity(requests.len());
     let mut ranges = Vec::with_capacity(requests.len());
     for request in requests {
@@ -316,16 +317,24 @@ fn hydrate_bound_group(
         sub_ordinals.push(sub_ordinal);
         ranges.push(range);
     }
-    visit_verified_ranges(&leaf.path, &source_file, &ranges, |index, bytes| {
-        let value: serde_json::Value = serde_json::from_slice(bytes)?;
-        let display_text =
-            hydrated_direct_jsonl_lexical_text(adapter.provider, &value, sub_ordinals[index])?
-                .ok_or(DirectJsonlSourceBackedError::LocatorRecordNotRetained)?;
-        Ok(HydratedProviderRecord {
-            event_id: requests[index].event_id(),
-            provider_bytes: display_text.into_bytes(),
-        })
-    })
+    let records =
+        visit_verified_ranges(&current_leaf.path, &source_file, &ranges, |index, bytes| {
+            let value: serde_json::Value = serde_json::from_slice(bytes)?;
+            let display_text =
+                hydrated_direct_jsonl_lexical_text(adapter.provider, &value, sub_ordinals[index])?
+                    .ok_or(DirectJsonlSourceBackedError::LocatorRecordNotRetained)?;
+            Ok::<_, DirectJsonlSourceBackedError>(HydratedProviderRecord {
+                event_id: requests[index].event_id(),
+                provider_bytes: display_text.into_bytes(),
+            })
+        })?;
+    adapter.revalidate_opened_hydration_identity(
+        &current_leaf,
+        &source_file,
+        source,
+        native_session_id,
+    )?;
+    Ok(records)
 }
 
 fn hydration_locator_binding(

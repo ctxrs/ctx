@@ -10,10 +10,11 @@ use std::{
 };
 
 use ctx_history_core::{
-    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
-    HydrationFailureKind,
+    BatchHydrationRequest, CaptureProvider, CertifiedSourceDeletion, CertifiedSourceInventory,
+    ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, SourceInventoryObservation,
+    TypedKey,
 };
-use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
+use ctx_history_index::{GenerationWriter, IndexError, VerifiedIndex, WriterOptions};
 
 use super::*;
 use crate::{
@@ -187,6 +188,49 @@ fn cold_identity_rejection_isolated_from_valid_sibling_but_replacement_fails_clo
 }
 
 #[test]
+fn active_source_family_contract_direct_jsonl_rejects_late_identity_admission() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join(".qwen/projects");
+    let chats = provider_root.join("workspace/chats");
+    fs::create_dir_all(&chats).unwrap();
+    fs::write(chats.join("valid.jsonl"), QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
+    let rejected = chats.join("rejected.jsonl");
+    fs::write(&rejected, b"{\"sessionId\":\n").unwrap();
+    let index_root = temp.path().join("index");
+    let promote_rejected = Arc::new(AtomicBool::new(false));
+    let promotion_armed = Arc::clone(&promote_rejected);
+    let promoted_path = rejected.clone();
+    let registry = qwen_registry_with_test_observer(
+        &provider_root,
+        Arc::new(move |event| {
+            if event == registration::DirectJsonlRegistrationTestEvent::SourceRevalidated
+                && promotion_armed.swap(false, Ordering::SeqCst)
+            {
+                fs::write(
+                    &promoted_path,
+                    QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-promoted"),
+                )
+                .unwrap();
+            }
+        }),
+    );
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    promote_rejected.store(true, Ordering::SeqCst);
+
+    let error =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::CompleteInventoryInvalidated { .. })
+    ));
+    assert!(!promote_rejected.load(Ordering::SeqCst));
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        cold.commit.generation_id
+    );
+}
+
+#[test]
 fn malformed_sibling_does_not_invalidate_exact_deletion_proof() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let provider_root = temp.path().join(".qwen/projects");
@@ -216,6 +260,60 @@ fn malformed_sibling_does_not_invalidate_exact_deletion_proof() {
 }
 
 #[test]
+fn active_source_family_contract_direct_jsonl_recertifies_legacy_v1_removal() {
+    let (temp, provider_root, transcript, registry) = qwen_route_fixture();
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source().clone();
+    fs::remove_file(transcript).unwrap();
+
+    let observation = SourceInventoryObservation::new(
+        CaptureProvider::QwenCode.as_str(),
+        DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE,
+        TypedKey::bytes(provider_root.as_os_str().as_encoded_bytes().to_vec()).unwrap(),
+        "direct-native-jsonl-inventory-sha256-v1",
+        vec![0],
+    )
+    .unwrap();
+    let legacy_inventory = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        DIRECT_JSONL_LEGACY_DISCOVERY_REVISION,
+        Vec::new(),
+    )
+    .unwrap();
+    let legacy_deletion =
+        CertifiedSourceDeletion::from_inventory(source.clone(), &legacy_inventory).unwrap();
+    let mut writer = GenerationWriter::open(&index_root, writer_options()).unwrap();
+    writer
+        .certify_complete_inventory(legacy_inventory.clone())
+        .unwrap();
+    writer
+        .delete_source(legacy_deletion, legacy_inventory)
+        .unwrap();
+    writer
+        .commit_with_complete_inventory_revalidation(|_| true, |_| true)
+        .unwrap();
+
+    let migrated =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert!(migrated.sources.is_empty());
+    assert_eq!(migrated.removals.len(), 1);
+    assert_eq!(migrated.removals[0].deletion.source(), &source);
+    assert_eq!(
+        migrated.removals[0].deletion.discovery_revision(),
+        DIRECT_JSONL_DISCOVERY_REVISION
+    );
+    assert_eq!(
+        migrated.removals[0]
+            .deletion
+            .inventory()
+            .authority_namespace(),
+        DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE
+    );
+}
+
+#[test]
 fn exact_noop_performs_zero_provider_projections_and_preserves_generation() {
     let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
     let index_root = temp.path().join("index");
@@ -226,7 +324,11 @@ fn exact_noop_performs_zero_provider_projections_and_preserves_generation() {
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
 
-    assert_eq!(super::super::reader::provider_projection_count(), 0);
+    assert_eq!(
+        super::super::reader::provider_projection_count(),
+        0,
+        "exact no-op refresh must not project provider records"
+    );
     assert_eq!(
         inventory_traversals(),
         3,
@@ -251,7 +353,11 @@ fn metadata_only_same_content_churn_is_a_logical_noop() {
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
 
-    assert_eq!(super::super::reader::provider_projection_count(), 0);
+    assert_eq!(
+        super::super::reader::provider_projection_count(),
+        0,
+        "metadata-only logical no-op must not project provider records"
+    );
     assert_eq!(unchanged.sources, cold.sources);
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
@@ -452,7 +558,11 @@ fn grouped_checkpoint_hydration_binds_and_opens_once_without_header_projection()
     );
     assert_eq!(hydrated[0].provider_bytes, b"second sentinel");
     assert_eq!(hydrated[1].provider_bytes, b"lifecycle sentinel");
-    assert_eq!(super::super::reader::provider_projection_count(), 0);
+    assert_eq!(
+        super::super::reader::provider_projection_count(),
+        2,
+        "grouped hydration must verify the provider-native session owner before and after reads"
+    );
     assert_eq!(
         hydration_work(),
         DirectJsonlHydrationWork {
@@ -509,8 +619,8 @@ fn route_batch_discovers_and_binds_once_instead_of_per_event() {
     );
     assert_eq!(
         super::super::reader::provider_projection_count(),
-        0,
-        "locator-bound grouped hydration must not parse a provider identity record"
+        2,
+        "locator-bound grouped hydration must verify the provider identity before and after reads"
     );
 }
 
@@ -562,9 +672,48 @@ fn repeated_single_hydration_reuses_one_resident_inventory_and_source_binding() 
     );
     assert_eq!(
         super::super::reader::provider_projection_count(),
-        0,
-        "single hydration must use the same locator-bound resident catalog"
+        4,
+        "each single hydration must verify the provider-native session owner before and after reads"
     );
+}
+
+#[test]
+fn active_source_family_contract_direct_jsonl_hydration_rejects_identity_rewrite_with_append() {
+    let (temp, _provider_root, transcript, registry) = qwen_route_fixture();
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let event = index
+        .source_event_page(source, None, 10)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|event| event.event_sequence == 1)
+        .unwrap();
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let rewrite_path = transcript.clone();
+    crate::provider::source_backed::family::jsonl::set_after_jsonl_hydration_observation_hook(
+        move || {
+            let mut bytes = fs::read(&rewrite_path).unwrap();
+            let identity_offset = bytes
+                .windows(b"qwen-life".len())
+                .position(|window| window == b"qwen-life")
+                .unwrap();
+            bytes[identity_offset..identity_offset + b"qwen-life".len()]
+                .copy_from_slice(b"qwen-evil");
+            bytes.extend_from_slice(
+                b"{\"uuid\":\"late\",\"sessionId\":\"qwen-evil\",\"type\":\"assistant\"}\n",
+            );
+            fs::write(&rewrite_path, bytes).unwrap();
+        },
+    );
+
+    let error = registry
+        .resolver_registry()
+        .hydrate_event(&request)
+        .unwrap_err();
+    assert_eq!(error.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[test]

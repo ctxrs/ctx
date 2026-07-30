@@ -55,7 +55,6 @@ impl PartialEq for CodexExplicitSessionInventoryStateV0 {
                     && left_native_session_id == right_native_session_id
                     && left_source.source_root == right_source.source_root
                     && left_source.source_path == right_source.source_path
-                    && left_source.catalog_observation == right_source.catalog_observation
                     && left_source.catalog_native_session_id
                         == right_source.catalog_native_session_id
                     && left_source.catalog_parent_native_session_id
