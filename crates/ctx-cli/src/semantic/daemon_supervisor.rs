@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 #[cfg(any(test, windows))]
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ctx_history_core::default_data_root;
+use ctx_history_core::managed_data_root;
 use serde_json::{json, Value};
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -312,6 +312,27 @@ pub(super) fn disable_daemon_supervisor(data_root: &Path) -> Result<()> {
     let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
     let backend = PlatformNativeSupervisor;
     let current = stored_supervisor_report(data_root);
+    if !is_canonical_managed_data_root(data_root)? {
+        return write_supervisor_receipt(
+            data_root,
+            &SupervisorReceipt {
+                kind: "cli_self_heal".to_owned(),
+                status: "disabled",
+                autostart_supported: false,
+                restart_supported: false,
+                registration_verified: false,
+                live_owner_verified: false,
+                owner_pid: None,
+                artifact_path: None,
+                executable_path: None,
+                limitation: Some(
+                    "custom data roots never own or alter the singleton native supervisor"
+                        .to_owned(),
+                ),
+                last_error: None,
+            },
+        );
+    }
     let managed_executable = safely_supported_managed_install(data_root)?;
     let executable = current
         .get("executable_path")
@@ -610,11 +631,15 @@ fn supervisor_process_executable(pid: u32) -> Option<PathBuf> {
 }
 
 fn safely_supported_managed_install(data_root: &Path) -> Result<Option<PathBuf>> {
-    let default_root = default_data_root().context("resolve default ctx data root")?;
-    if data_root != default_root {
+    if !is_canonical_managed_data_root(data_root)? {
         return Ok(None);
     }
     crate::upgrade::managed_install_executable()
+}
+
+fn is_canonical_managed_data_root(data_root: &Path) -> Result<bool> {
+    let managed_root = managed_data_root().context("resolve canonical managed ctx data root")?;
+    Ok(data_root == managed_root)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
