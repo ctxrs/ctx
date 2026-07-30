@@ -247,12 +247,15 @@ Native JSON rows include `provider`, `path`, `exists`, `source_format`,
 `unsupported_reason`. Plugin JSON rows use
 `kind: "history_source_plugin"` and include `plugin`, `plugin_source`,
 `history_source`, `provider_key`, `source_id`, `manifest_path`, `enabled`,
+and source-authority fields. Durable regular-file rows report
+`status: "available"`, `importable: true`,
 `import_mode: "explicit_source_backed"`, and
-`provider_source_authority: true`. Valid plugin rows report
-`status: "available"` and `importable: true`. Invalid installed plugin
-manifests appear as non-importable plugin rows with `status: "invalid"` and an
-`error`. `sources` reads path metadata and plugin manifests, writes nothing to
-provider files or source repositories, and does not execute plugin commands.
+`provider_source_authority: true`. Command-only compatibility rows report
+`status: "unsupported"`, `importable: false`, and no provider-source
+authority. Invalid installed plugin manifests appear as non-importable plugin
+rows with `status: "invalid"` and an `error`. `sources` reads path metadata and
+plugin manifests, writes nothing to provider files or source repositories, and
+does not execute plugin commands.
 
 A detected current format that ctx cannot import has `status: "unsupported"`
 and `import_support: "unsupported"`. A supported source that requires user

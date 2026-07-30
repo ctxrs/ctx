@@ -68,6 +68,31 @@ fn command_only_plugin_is_discoverable_but_typed_unsupported_and_never_runs() {
     let plugin =
         write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
 
+    let human = ctx(&temp)
+        .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+        .args(["sources"])
+        .output()
+        .unwrap();
+    assert!(human.status.success(), "{human:#?}");
+    let human_stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        human_stdout.starts_with("! No importable history sources found\n"),
+        "{human_stdout}"
+    );
+    assert!(human_stdout.contains("unsupported"), "{human_stdout}");
+    assert!(
+        human_stdout.contains("no durable provider path"),
+        "{human_stdout}"
+    );
+    assert!(
+        human_stdout.contains("command stdout is not a provider-owned durable source"),
+        "{human_stdout}"
+    );
+    assert!(
+        !human_stdout.contains("history source is ready"),
+        "{human_stdout}"
+    );
+
     let sources = json_output(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
@@ -110,6 +135,22 @@ fn command_only_plugin_is_discoverable_but_typed_unsupported_and_never_runs() {
 fn durable_plugin_path_indexes_in_place_and_hydrates_exact_content() {
     let temp = tempdir();
     let (manifest_dir, source_path) = write_durable_plugin(&temp);
+    let sources = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &manifest_dir)
+            .args(["sources", "--format=json"]),
+    );
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["history_source"] == "example-agent/archive")
+        .unwrap();
+    assert_eq!(source["status"], "available", "{source:#}");
+    assert_eq!(source["importable"], true, "{source:#}");
+    assert_eq!(source["path"], json!(source_path), "{source:#}");
+    assert_eq!(source["provider_source_authority"], true, "{source:#}");
+
     let state = temp.path().join("state");
     fs::create_dir_all(&state).unwrap();
     let _daemon = start_source_refresh_daemon(&temp, &data_root(&temp), temp.path(), &state);

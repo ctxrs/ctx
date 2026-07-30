@@ -16,8 +16,9 @@ use crate::output::print_json;
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{
     discovered_sources_for_provider_report, discovered_sources_report,
-    discovery_report_issues_json, manual_path_guidance, plugin_manifest_failures_json,
-    plugin_sources_json, provider_cli_name, sources_json, SourceInfo,
+    discovery_report_issues_json, history_source_plugin_report, manual_path_guidance,
+    plugin_manifest_failures_json, plugin_sources_json, provider_cli_name, sources_json,
+    SourceInfo,
 };
 use crate::ui::{
     canonical_human_output_bytes, diagnostic, empty_state, hint, outcome, section, table, Action,
@@ -57,6 +58,10 @@ pub(crate) fn run_sources(
         (plugin_discovery.sources, plugin_discovery.failures)
     };
     let existing = sources.iter().filter(|source| source.exists).count();
+    let existing_plugin_sources = plugin_sources
+        .iter()
+        .filter(|source| history_source_plugin_report(source).is_importable())
+        .count();
     let importable = sources
         .iter()
         .filter(|source| {
@@ -72,10 +77,10 @@ pub(crate) fn run_sources(
             .saturating_add(plugin_failures.len()) as u64,
     ));
     telemetry.providers_existing = Some(count_bucket(
-        existing.saturating_add(plugin_sources.len()) as u64,
+        existing.saturating_add(existing_plugin_sources) as u64,
     ));
     telemetry.providers_importable = Some(count_bucket(
-        importable.saturating_add(plugin_sources.len()) as u64,
+        importable.saturating_add(existing_plugin_sources) as u64,
     ));
     let show_all_sources = args.all || args.show_missing || provider_filter.is_some();
     let visible_sources = sources
@@ -198,7 +203,12 @@ fn render_sources_human(
                 && source.import_support.is_importable()
         })
         .count()
-        .saturating_add(plugin_sources.len());
+        .saturating_add(
+            plugin_sources
+                .iter()
+                .filter(|source| history_source_plugin_report(source).is_importable())
+                .count(),
+        );
     let title = match importable {
         0 => "No importable history sources found".to_owned(),
         1 => "1 history source is ready".to_owned(),
@@ -208,6 +218,12 @@ fn render_sources_human(
         .iter()
         .filter(|source| source.status == ProviderSourceStatus::Unsupported)
         .count()
+        .saturating_add(
+            plugin_sources
+                .iter()
+                .filter(|source| !history_source_plugin_report(source).is_importable())
+                .count(),
+        )
         .saturating_add(issues.len())
         .saturating_add(plugin_failures.len());
     let detail = (attention > 0).then(|| match attention {
@@ -238,10 +254,14 @@ fn render_sources_human(
             ]);
         }
         for source in plugin_sources {
+            let report = history_source_plugin_report(source);
             locations.push_row([
                 format!("custom/{}", source.label()),
-                "available".to_owned(),
-                "history-source-plugin".to_owned(),
+                report.status.as_str().to_owned(),
+                report.durable_path.map_or_else(
+                    || "no durable provider path".to_owned(),
+                    |path| path.display().to_string(),
+                ),
                 source.source_format.clone(),
             ]);
         }
@@ -272,6 +292,36 @@ fn render_sources_human(
                     Field::new("Reason", reason),
                 ],
                 action: Some(Action { command: &command }),
+            },
+        ));
+    }
+    for source in plugin_sources {
+        let report = history_source_plugin_report(source);
+        if report.is_importable() {
+            continue;
+        }
+        let summary = format!("custom/{} history cannot be imported", source.label());
+        let manifest = source.manifest_path.display().to_string();
+        let location = report.durable_path.map_or_else(
+            || "not declared".to_owned(),
+            |path| path.display().to_string(),
+        );
+        let reason = report
+            .unsupported_reason
+            .unwrap_or("this history source plugin is unsupported");
+        document.push_blank();
+        document.append(diagnostic(
+            context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: &summary,
+                detail: Some("Declare a regular provider-owned ctx-history-jsonl-v1 path."),
+                fields: &[
+                    Field::new("Manifest", &manifest),
+                    Field::new("Location", &location),
+                    Field::new("Reason", reason),
+                ],
+                action: None,
             },
         ));
     }
