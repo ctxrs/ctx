@@ -21,10 +21,6 @@ where
         CRUSH_PARSER_REVISION
     }
 
-    fn logical_tables(&self) -> &'static [&'static str] {
-        &["sessions", "messages"]
-    }
-
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
         let inventory = bind_crush_inventory(
             &self.data_root,
