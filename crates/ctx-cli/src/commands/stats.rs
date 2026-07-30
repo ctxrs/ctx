@@ -113,12 +113,19 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
         for definition in definitions {
             let summary = &definition.summary;
             let heading = format!(
-                "Measured usage · definition {}",
+                "Measured local facts · definition {}",
                 definition.definition_version
             );
             let period = format!(
-                "{} UTC days · {} through {}",
-                definition.active_days, definition.first_day_utc, definition.last_day_utc
+                "{} active UTC {} · {} through {}",
+                definition.active_days,
+                if definition.active_days == 1 {
+                    "day"
+                } else {
+                    "days"
+                },
+                definition.first_day_utc,
+                definition.last_day_utc
             );
             let versions = definition.ctx_versions.join(", ");
             let calls = format!(
@@ -126,8 +133,17 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                 summary.calls, summary.successful_calls, summary.failed_calls
             );
             let result_sets = format!(
-                "{} nonempty · {} empty · {} unclassified",
-                summary.result_bearing_calls, summary.empty_calls, summary.not_applicable_calls
+                "{} nonempty, {} empty",
+                summary.result_bearing_calls, summary.empty_calls
+            );
+            let unclassified = format!(
+                "{} {}",
+                summary.not_applicable_calls,
+                if summary.not_applicable_calls == 1 {
+                    "call"
+                } else {
+                    "calls"
+                }
             );
             let results = format!(
                 "{} results · {} unique blame citations",
@@ -144,7 +160,8 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                 Field::new("Period", &period),
                 Field::new("ctx versions", &versions),
                 Field::new("Calls", &calls),
-                Field::new("Result sets", &result_sets),
+                Field::new("Classified result sets", &result_sets),
+                Field::new("No result-set classification", &unclassified),
                 Field::new("Results", &results),
                 Field::new("Delivered output", &output),
                 Field::new("Covered context", &covered_context),
@@ -154,7 +171,7 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
             let blame = &summary.pro_blame;
             let blame_outcomes = (blame.requests > 0).then(|| {
                 format!(
-                    "{} produced · {} possible · {} none · {} error",
+                    "{} produced-attribution · {} possible-only · {} none · {} error",
                     blame.produced_attribution_requests,
                     blame.possible_only_requests,
                     blame.none_requests,
@@ -316,6 +333,22 @@ mod ui_tests {
                 .starts_with("✓ Local usage summary\n"));
             assert_fits(&document, &context);
         }
+    }
+
+    #[test]
+    fn stats_uses_canonical_fact_wording_and_singular_grammar() {
+        let context = context(120, ColorMode::Never);
+        let rendered =
+            render_stats_human(&context, &UsageReport::ui_test_ready(), false).render_plain();
+        assert!(rendered.contains("Measured local facts · definition 2"));
+        assert!(rendered.contains("1 active UTC day"));
+        assert!(rendered.contains("Classified result sets"));
+        assert!(rendered.contains("1 nonempty, 2 empty"));
+        assert!(rendered.contains("No result-set classification"));
+        assert!(rendered.contains("1 call"));
+        assert!(rendered.contains("1 produced-attribution · 1 possible-only"));
+        assert!(!rendered.contains("1 UTC days"));
+        assert!(!rendered.contains("unclassified"));
     }
 
     #[test]

@@ -156,7 +156,7 @@ pub(crate) fn print_sql_table(result: &RawSqlResult, ui: &mut Ui) -> Result<usiz
 
 fn render_sql_table(context: &RenderContext, result: &RawSqlResult) -> Document {
     if result.rows.is_empty() {
-        return empty_state(
+        let mut document = empty_state(
             context,
             EmptyState {
                 title: "No rows returned",
@@ -164,6 +164,13 @@ fn render_sql_table(context: &RenderContext, result: &RawSqlResult) -> Document 
                 action: None,
             },
         );
+        let mut columns = Table::new(["Position", "Column"]);
+        for (index, column) in result.columns.iter().enumerate() {
+            columns.push_row([(index + 1).to_string(), column.name.clone()]);
+        }
+        document.push_blank();
+        document.append(section("Selected columns", table(context, &columns)));
+        return document;
     }
 
     let title = match result.returned_rows {
@@ -480,10 +487,14 @@ mod ui_tests {
     #[test]
     fn sql_empty_result_is_explicit() {
         let context = context(48, ColorMode::Never);
-        assert_eq!(
-            render_sql_table(&context, &result(Vec::new())).render_plain(),
-            "No rows returned\nThe read-only query completed successfully.\n"
+        let rendered = render_sql_table(&context, &result(Vec::new())).render_plain();
+        assert!(
+            rendered.starts_with("No rows returned\nThe read-only query completed successfully.\n")
         );
+        assert!(rendered.contains("\nSelected columns\n"));
+        assert!(rendered.contains("Position"));
+        assert!(rendered.contains("Column"));
+        assert!(rendered.find("provider").unwrap() < rendered.find("summary").unwrap());
     }
 
     #[test]

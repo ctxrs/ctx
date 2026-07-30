@@ -42,6 +42,7 @@ toml_edit = "0.22"
 ureq = { version = "2.10", default-features = true }
 url.workspace = true
 unicode-width.workspace = true
+unicode-segmentation.workspace = true
 uuid.workspace = true
 xz2.workspace = true
 zeroize = { workspace = true, features = ["derive"] }

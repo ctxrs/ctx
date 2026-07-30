@@ -123,6 +123,43 @@ impl UsageReport {
             "local usage configuration could not be read",
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn ui_test_ready() -> Self {
+        let pro_blame = ProBlameSummary {
+            requests: 2,
+            produced_attribution_requests: 1,
+            possible_only_requests: 1,
+            ..ProBlameSummary::default()
+        };
+        base_report(
+            true,
+            "ready",
+            Some(vec![UsageDefinition {
+                definition_version: DEFINITION_VERSION,
+                ctx_versions: vec!["1.0.0".to_owned()],
+                first_day_utc: "2026-07-29".to_owned(),
+                last_day_utc: "2026-07-29".to_owned(),
+                active_days: 1,
+                summary: UsageSummary {
+                    calls: 4,
+                    successful_calls: 3,
+                    failed_calls: 1,
+                    result_bearing_calls: 1,
+                    empty_calls: 2,
+                    not_applicable_calls: 1,
+                    result_count: 3,
+                    citation_count: 2,
+                    pro_blame,
+                    ..UsageSummary::default()
+                },
+                by_operation: Vec::new(),
+                duration_buckets: Vec::new(),
+            }]),
+            None,
+            None,
+        )
+    }
 }
 
 pub(crate) fn read_report(data_root: &Path, enabled: bool, detailed: bool) -> UsageReport {

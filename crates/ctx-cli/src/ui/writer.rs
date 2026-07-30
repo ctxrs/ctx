@@ -98,6 +98,10 @@ impl Ui {
         self.stderr.write(document)
     }
 
+    pub(crate) fn stdout_writer(&mut self) -> &mut (dyn Write + Send) {
+        self.stdout.writer()
+    }
+
     pub(crate) fn flush(&mut self) -> io::Result<()> {
         self.stdout.flush()?;
         self.stderr.flush()
@@ -131,6 +135,10 @@ impl Destination {
     fn write(&mut self, document: &Document) -> io::Result<()> {
         self.writer
             .write_all(document.render(&self.context).as_bytes())
+    }
+
+    fn writer(&mut self) -> &mut (dyn Write + Send) {
+        self.writer.as_mut()
     }
 
     fn flush(&mut self) -> io::Result<()> {

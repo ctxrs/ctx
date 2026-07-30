@@ -1,6 +1,32 @@
+use std::{
+    io,
+    sync::{Arc, Mutex},
+};
+
 use serde_json::json;
 
-use super::{index_terminal_error, IndexSelection, IndexWatchOutput};
+use super::{index_terminal_error, index_watch_output, IndexSelection, IndexWatchOutput};
+use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl SharedWriter {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 fn watch_status(
     lexical_done: usize,
@@ -56,6 +82,24 @@ fn noninteractive_watch_appends_plain_frames() {
     assert!(rendered.contains("Sessions    4 indexed"));
     assert!(rendered.contains("Records     40 searchable"));
     assert!(rendered.contains("Semantic search  Off"));
+}
+
+#[test]
+fn watch_writes_through_the_ui_selected_stdout_adapter() {
+    let stdout = SharedWriter::default();
+    let captured = stdout.clone();
+    let stdout_context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Always));
+    let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    let mut ui = Ui::with_writers(stdout, stdout_context, Vec::new(), stderr_context);
+
+    let mut output = index_watch_output(&mut ui);
+    output.print_human(&watch_status(4, 12, true)).unwrap();
+    drop(output);
+
+    let rendered = captured.text();
+    assert!(rendered.contains("\u{1b}["));
+    assert!(rendered.contains("Indexing your history"));
 }
 
 #[test]
