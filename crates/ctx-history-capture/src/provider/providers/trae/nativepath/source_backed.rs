@@ -29,7 +29,9 @@ use super::super::{TRAE_CHAT_KEYS, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 mod hydration;
 mod replacement;
 
-pub(crate) use hydration::{hydrate_trae_source_backed_locator_v0, TraeLocatorResolverV0};
+#[cfg(test)]
+pub(crate) use hydration::hydrate_trae_source_backed_locator_v0;
+pub(crate) use hydration::TraeLocatorResolverV0;
 pub(crate) use replacement::TraeReplacementTree;
 
 const TRAE_SOURCE_ANCHOR_NAMESPACE: &str = "trae.workspace-storage";
@@ -97,6 +99,7 @@ pub(crate) struct TraeSourceTerminalFence {
 ///
 /// The callback receives bounded pages from the existing ItemTable scanner.
 /// This leaf owns no automatic inventory, lifecycle, or publication behavior.
+#[cfg(test)]
 pub(crate) fn scan_trae_source_backed_explicit_v0(
     path: &Path,
     emit: &mut dyn FnMut(TraeSourceBackedPageV0) -> TraeSourceBackedResultV0<()>,

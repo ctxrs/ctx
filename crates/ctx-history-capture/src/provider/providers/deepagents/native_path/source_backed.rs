@@ -129,7 +129,7 @@ pub(crate) struct DeepAgentsDatabaseSelectionV0 {
 impl DeepAgentsDatabaseSelectionV0 {
     // Home selection is retained as the authoritative current-over-legacy,
     // fail-closed route policy even when release capture supplies an explicit path.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn from_home(home: &Path) -> Self {
         let current = home.join(".deepagents/.state/sessions.db");
         let legacy = home.join(".deepagents/sessions.db");
@@ -536,7 +536,7 @@ pub(crate) struct DeepAgentsLocatorResolverV0 {
 impl DeepAgentsLocatorResolverV0 {
     // Retain the home-route resolver to enforce the same no-fallback selection
     // policy at the hydration boundary.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn from_home(home: &Path) -> Self {
         Self {
             selection: DeepAgentsDatabaseSelectionV0::from_home(home),
@@ -549,6 +549,7 @@ impl DeepAgentsLocatorResolverV0 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn hydrate(
         &self,
         locator: &SourceRecordLocator,

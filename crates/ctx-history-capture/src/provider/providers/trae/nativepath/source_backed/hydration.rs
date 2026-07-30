@@ -21,6 +21,7 @@ impl TraeLocatorResolverV0 {
         Self { path: path.into() }
     }
 
+    #[cfg(test)]
     pub(crate) fn hydrate(
         &self,
         locator: &SourceRecordLocator,
@@ -104,6 +105,7 @@ impl TraeLocatorResolverV0 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn hydrate_trae_source_backed_locator_v0(
     path: &Path,
     locator: &SourceRecordLocator,

@@ -135,6 +135,7 @@ impl ForgeCodeSourceSelectionV0 {
 
 // Discovery transfers the live 984-byte scan directly into the source-backed
 // route; boxing it to match the 24-byte missing path adds an avoidable allocation.
+#[cfg(test)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ForgeCodeSourceBackedDiscoveryV0 {
     Missing {
@@ -152,6 +153,7 @@ pub(crate) struct ForgeCodeSourceBackedSourceV0 {
 }
 
 impl ForgeCodeSourceBackedSourceV0 {
+    #[cfg(test)]
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
     }
@@ -176,6 +178,7 @@ pub(crate) struct ForgeCodeSourceBackedPageV0 {
     pub(crate) terminal: bool,
 }
 
+#[cfg(test)]
 pub(crate) struct ForgeCodeSourceBackedScanV0 {
     source: ForgeCodeSourceBackedSourceV0,
     schema_evidence: Vec<u8>,
@@ -186,6 +189,7 @@ pub(crate) struct ForgeCodeSourceBackedScanV0 {
     terminal: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn open_forgecode_source_backed_v0(
     selection: ForgeCodeSourceSelectionV0,
 ) -> ForgeCodeSourceBackedResultV0<ForgeCodeSourceBackedDiscoveryV0> {
@@ -230,6 +234,7 @@ pub(crate) fn open_forgecode_source_backed_v0(
     ))
 }
 
+#[cfg(test)]
 impl ForgeCodeSourceBackedScanV0 {
     pub(crate) fn source(&self) -> &ForgeCodeSourceBackedSourceV0 {
         &self.source
