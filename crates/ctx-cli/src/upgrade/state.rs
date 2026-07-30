@@ -736,7 +736,6 @@ pub(super) fn set_auto_mode(data_root: &Path, mode: &str) -> Result<()> {
     let existing = read_upgrade_config(&config_path)?;
     let next = set_toml_section_value(&existing, "upgrade", "auto", &format!("\"{mode}\""));
     write_private_config(&config_path, next.as_bytes())?;
-    println!("ctx automatic upgrade {mode}");
     Ok(())
 }
 

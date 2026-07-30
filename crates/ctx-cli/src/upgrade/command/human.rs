@@ -1,5 +1,7 @@
 use anyhow::Result;
+use serde_json::{json, Value};
 
+use crate::output::print_json;
 use crate::ui::{
     fields, hint, outcome, section, Action, Document, Field, Hint, Outcome as UiOutcome,
     OutcomeState, RenderContext, Ui,
@@ -9,7 +11,7 @@ use super::UpgradeOutcome;
 
 pub(super) fn render_auto_mode(enabled: bool, json_output: bool, ui: &mut Ui) -> Result<()> {
     if json_output {
-        return Ok(());
+        return print_json(auto_mode_json(enabled));
     }
     let document = outcome(
         ui.stdout_context(),
@@ -29,6 +31,17 @@ pub(super) fn render_auto_mode(enabled: bool, json_output: bool, ui: &mut Ui) ->
     );
     ui.write_stdout(&document)?;
     Ok(())
+}
+
+fn auto_mode_json(enabled: bool) -> Value {
+    json!({
+        "schema_version": 1,
+        "command": if enabled { "upgrade_enable" } else { "upgrade_disable" },
+        "ok": true,
+        "status": if enabled { "enabled" } else { "disabled" },
+        "auto": if enabled { "apply" } else { "off" },
+        "enabled": enabled,
+    })
 }
 
 pub(super) fn render_outcome(
@@ -157,5 +170,31 @@ mod tests {
         };
         let rendered = render_upgrade_outcome_human(&context(80), &upgrade).render_plain();
         assert_eq!(rendered, "✓ Upgraded ctx 1.0.0 to 1.1.0.\n");
+    }
+
+    #[test]
+    fn automatic_mode_json_is_one_complete_machine_receipt() {
+        assert_eq!(
+            auto_mode_json(true),
+            serde_json::json!({
+                "schema_version": 1,
+                "command": "upgrade_enable",
+                "ok": true,
+                "status": "enabled",
+                "auto": "apply",
+                "enabled": true,
+            })
+        );
+        assert_eq!(
+            auto_mode_json(false),
+            serde_json::json!({
+                "schema_version": 1,
+                "command": "upgrade_disable",
+                "ok": true,
+                "status": "disabled",
+                "auto": "off",
+                "enabled": false,
+            })
+        );
     }
 }
