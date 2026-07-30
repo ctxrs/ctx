@@ -278,8 +278,8 @@ fn active_wal_physical_replay_is_bounded_and_opens_no_sqlite_snapshot() {
     let counters = replay_parent.snapshot_counters();
     assert_eq!(counters.physical_revision_captures(), 1);
     assert_eq!(counters.physical_replay_hits(), 1);
-    assert!(counters.physical_database_bytes_read() <= 128);
-    assert!(counters.physical_wal_bytes_read() <= 128);
+    assert!(counters.physical_database_bytes_read() <= 384);
+    assert!(counters.physical_wal_bytes_read() <= 384);
     assert_eq!(counters.immutable_snapshot_opens(), 0);
     assert_eq!(counters.copied_snapshot_opens(), 0);
     assert_eq!(counters.source_bytes_copied(), 0);
@@ -316,7 +316,7 @@ fn physical_replay_ignores_shared_memory_churn() {
     let counters = parent.snapshot_counters();
     assert_eq!(counters.physical_revision_captures(), 2);
     assert_eq!(counters.physical_replay_hits(), 1);
-    assert!(counters.physical_wal_bytes_read() <= 256);
+    assert!(counters.physical_wal_bytes_read() <= 768);
     assert_eq!(counters.copied_snapshot_opens(), 0);
     assert_eq!(counters.logical_rows_scanned(), 0);
 }

@@ -87,14 +87,22 @@ impl SqlitePhysicalRevisionFamily {
             wal_token,
             shared_memory_token: None,
         };
-        self.revalidate(&evidence)?;
-        Ok((evidence, database_bytes_read, wal_bytes_read))
+        let (revalidation_database_bytes, revalidation_wal_bytes) = self.revalidate(&evidence)?;
+        Ok((
+            evidence,
+            database_bytes_read
+                .checked_add(revalidation_database_bytes)
+                .ok_or(SqliteSourceAccessError::SourceChanged)?,
+            wal_bytes_read
+                .checked_add(revalidation_wal_bytes)
+                .ok_or(SqliteSourceAccessError::SourceChanged)?,
+        ))
     }
 
     pub(super) fn revalidate(
         &self,
         expected: &SqliteFamilyEvidence,
-    ) -> SqliteSourceAccessResult<()> {
+    ) -> SqliteSourceAccessResult<(u64, u64)> {
         self.authority.revalidate()?;
         if self.authority.identity != expected.parent_identity {
             return Err(SqliteSourceAccessError::SourceChanged);
@@ -108,6 +116,21 @@ impl SqlitePhysicalRevisionFamily {
             &self.wal_name,
             &self.wal_path,
         )?;
+        let (database_token, database_bytes_read) = self.database.bounded_token_with_bytes()?;
+        if database_token != expected.database_token {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        let wal_bytes_read = match (self.wal.as_ref(), expected.wal_token.as_ref()) {
+            (Some(wal), Some(expected_token)) => {
+                let (token, bytes_read) = wal.bounded_token_with_bytes()?;
+                if token != *expected_token {
+                    return Err(SqliteSourceAccessError::SourceChanged);
+                }
+                bytes_read
+            }
+            (None, None) => 0,
+            _ => return Err(SqliteSourceAccessError::SourceChanged),
+        };
         if SqliteFamilyMember::open_optional(
             &self.authority,
             self.journal_name.clone(),
@@ -118,6 +141,6 @@ impl SqlitePhysicalRevisionFamily {
         {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        Ok(())
+        Ok((database_bytes_read, wal_bytes_read))
     }
 }
