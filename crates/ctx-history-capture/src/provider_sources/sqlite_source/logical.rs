@@ -6,12 +6,13 @@ use sha2::{Digest, Sha256};
 const LOGICAL_REVISION_DOMAIN: &[u8] = b"ctx-sqlite-logical-snapshot-v1\0";
 const LOGICAL_REVISION_KIND: &str = "sqlite-logical-snapshot-v1";
 
-/// Provider-defined logical evidence from one pinned SQLite transaction.
+/// The provider-facing logical snapshot from one pinned SQLite transaction.
 ///
-/// Physical DB/WAL evidence belongs to acquisition and is deliberately absent
-/// here. The resulting observation is stable across checkpointing, sidecar
-/// removal, page-layout changes, and `VACUUM` when the relevant schema and rows
-/// are unchanged.
+/// Adapters supply only parser/schema evidence, a digest of the selected
+/// logical rows, and their counts. Physical DB/WAL evidence belongs to
+/// acquisition and is deliberately absent here. The resulting observation is
+/// stable across checkpointing, sidecar removal, page-layout changes, and
+/// `VACUUM` when the relevant schema and rows are unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SqliteLogicalSnapshot {
     parser_revision: String,
@@ -24,7 +25,7 @@ impl SqliteLogicalSnapshot {
     pub(crate) fn new(
         parser_revision: impl Into<String>,
         schema_evidence: &[u8],
-        content_digest: [u8; 32],
+        logical_row_digest: [u8; 32],
         counts: ScannedSourceCounts,
     ) -> Self {
         let parser_revision = parser_revision.into();
@@ -32,11 +33,11 @@ impl SqliteLogicalSnapshot {
         hasher.update(LOGICAL_REVISION_DOMAIN);
         hash_bytes(&mut hasher, parser_revision.as_bytes());
         hash_bytes(&mut hasher, schema_evidence);
-        hasher.update(content_digest);
+        hasher.update(logical_row_digest);
         hash_counts(&mut hasher, counts);
         Self {
             parser_revision,
-            content_digest,
+            content_digest: logical_row_digest,
             counts,
             revision: hasher.finalize().into(),
         }

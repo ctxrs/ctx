@@ -79,17 +79,17 @@ pub(crate) fn open_root_handle_sqlite_source_snapshot(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
-    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, || {})
+    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, || {}, || {})
 }
 
 fn open_root_handle_sqlite_source_snapshot_inner(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
+    after_parent_certification: impl FnOnce(),
     before_source_revalidation: impl FnOnce(),
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
-    let family = SqliteSourceFamily::open(authority, database_name)?;
+    let family = SqliteSourceFamily::open(authority, database_name, after_parent_certification)?;
     let native_evidence = family.capture_evidence()?;
-    family.revalidate(&native_evidence)?;
 
     let acquired = acquire_sqlite_connection(&family, &native_evidence)?;
     verify_connection_read_only(&acquired.connection)?;
@@ -128,7 +128,7 @@ fn acquire_sqlite_connection(
 ) -> SqliteSourceAccessResult<AcquiredSqliteConnection> {
     if family.wal.is_none() && family.shared_memory.is_none() {
         #[cfg(target_os = "linux")]
-        if immutable_procfd_available(&family.database.file) {
+        if immutable_procfd_available(family.database.file()) {
             return Ok(AcquiredSqliteConnection {
                 connection: open_immutable_main(&family.database)?,
                 strategy: SqliteSourceSnapshotStrategy::ImmutableMain,
@@ -164,7 +164,7 @@ fn immutable_procfd_available(database: &File) -> bool {
 
 #[cfg(target_os = "linux")]
 fn open_immutable_main(database: &SqliteFamilyMember) -> SqliteSourceAccessResult<Connection> {
-    let procfd_path = PathBuf::from(format!("/proc/self/fd/{}", database.file.as_raw_fd()));
+    let procfd_path = PathBuf::from(format!("/proc/self/fd/{}", database.file().as_raw_fd()));
     let mut uri = Url::from_file_path(&procfd_path).map_err(|()| {
         SqliteSourceAccessError::SnapshotUnavailable {
             reason: "the retained SQLite main handle cannot be represented as a file URI"
@@ -257,7 +257,6 @@ fn copy_sqlite_family_to_ctx(
     // SHM is lock coordination, not provider content. Copying it would retain
     // volatile reader marks. Stock SQLite rebuilds it only in this ctx-owned
     // directory from the certified DB/WAL pair.
-    family.revalidate(evidence)?;
     Ok((directory, snapshot_path, copied_bytes))
 }
 
@@ -268,7 +267,7 @@ fn copy_sqlite_member(
 ) -> SqliteSourceAccessResult<()> {
     let mut source_file =
         member
-            .file
+            .file()
             .try_clone()
             .map_err(|source| SqliteSourceAccessError::Io {
                 operation: "retaining a provider SQLite component for snapshot copy",
@@ -343,5 +342,24 @@ pub(super) fn open_root_handle_sqlite_source_snapshot_for_test(
     database_name: &OsStr,
     before_sqlite_open: impl FnOnce(),
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
-    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, before_sqlite_open)
+    open_root_handle_sqlite_source_snapshot_inner(
+        authority,
+        database_name,
+        || {},
+        before_sqlite_open,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    after_parent_certification: impl FnOnce(),
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    open_root_handle_sqlite_source_snapshot_inner(
+        authority,
+        database_name,
+        after_parent_certification,
+        || {},
+    )
 }
