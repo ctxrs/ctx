@@ -9,6 +9,7 @@ fi
 stage="${repo_root}/scripts/stage-github-release-assets.sh"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-stage-assets-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
+export CTX_PUBLIC_RELEASE_SOURCE_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 fake_bin="${tmp_dir}/bin"
 matrix="${tmp_dir}/matrix"
@@ -154,8 +155,7 @@ CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
 assert_exact_assets "${default_output}" 24 "${default_assets[@]}"
 test "$(wc -l < "${default_sbom_log}")" -eq 6
 test "$(wc -l < "${default_build_info_log}")" -eq 6
-source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
-test "$(grep -Fc -- "--source-commit ${source_commit}" "${default_build_info_log}")" -eq 6
+test "$(grep -Fc -- "--source-commit ${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" "${default_build_info_log}")" -eq 6
 
 semantic_output="${tmp_dir}/semantic"
 CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \

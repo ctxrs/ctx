@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 export CTX_PUBLIC_RELEASE_SOURCE_COMMIT
-CTX_PUBLIC_RELEASE_SOURCE_COMMIT="$(git rev-parse --verify HEAD^{commit})"
+CTX_PUBLIC_RELEASE_SOURCE_COMMIT="ffffffffffffffffffffffffffffffffffffffff"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
