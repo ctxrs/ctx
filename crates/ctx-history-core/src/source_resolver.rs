@@ -377,21 +377,122 @@ impl BatchHydrationResult {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stable coarse classes shared by every source-backed error boundary.
+///
+/// Classes intentionally contain no provider detail, source path, or record
+/// content. Precise causes remain available through [`HydrationFailureKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceBackedErrorClass {
+    Unavailable,
+    ConfirmedDeleted,
+    StaleEvidence,
+    Malformed,
+    Unsupported,
+    InvalidRequest,
+    Internal,
+}
+
+impl SourceBackedErrorClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::ConfirmedDeleted => "confirmed_deleted",
+            Self::StaleEvidence => "stale_evidence",
+            Self::Malformed => "malformed",
+            Self::Unsupported => "unsupported",
+            Self::InvalidRequest => "invalid_request",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "unavailable" => Some(Self::Unavailable),
+            "confirmed_deleted" => Some(Self::ConfirmedDeleted),
+            "stale_evidence" => Some(Self::StaleEvidence),
+            "malformed" => Some(Self::Malformed),
+            "unsupported" => Some(Self::Unsupported),
+            "invalid_request" => Some(Self::InvalidRequest),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HydrationFailureKind {
     TemporarilyUnavailable,
     ConfirmedDeleted,
     StaleSourceEvidence,
     StaleRecordEvidence,
     MissingRecord,
+    MalformedSource,
     UnsupportedParserRevision,
     InvalidLocator,
+    InvalidRequest,
+    Internal,
+}
+
+impl HydrationFailureKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::ConfirmedDeleted => "confirmed_deleted",
+            Self::StaleSourceEvidence => "stale_source_evidence",
+            Self::StaleRecordEvidence => "stale_record_evidence",
+            Self::MissingRecord => "missing_record",
+            Self::MalformedSource => "malformed_source",
+            Self::UnsupportedParserRevision => "unsupported_parser_revision",
+            Self::InvalidLocator => "invalid_locator",
+            Self::InvalidRequest => "invalid_request",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "temporarily_unavailable" => Some(Self::TemporarilyUnavailable),
+            "confirmed_deleted" => Some(Self::ConfirmedDeleted),
+            "stale_source_evidence" => Some(Self::StaleSourceEvidence),
+            "stale_record_evidence" => Some(Self::StaleRecordEvidence),
+            "missing_record" => Some(Self::MissingRecord),
+            "malformed_source" => Some(Self::MalformedSource),
+            "unsupported_parser_revision" => Some(Self::UnsupportedParserRevision),
+            "invalid_locator" => Some(Self::InvalidLocator),
+            "invalid_request" => Some(Self::InvalidRequest),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+
+    pub const fn class(self) -> SourceBackedErrorClass {
+        match self {
+            Self::TemporarilyUnavailable => SourceBackedErrorClass::Unavailable,
+            Self::ConfirmedDeleted => SourceBackedErrorClass::ConfirmedDeleted,
+            Self::StaleSourceEvidence | Self::StaleRecordEvidence | Self::MissingRecord => {
+                SourceBackedErrorClass::StaleEvidence
+            }
+            Self::MalformedSource => SourceBackedErrorClass::Malformed,
+            Self::UnsupportedParserRevision => SourceBackedErrorClass::Unsupported,
+            Self::InvalidLocator | Self::InvalidRequest => SourceBackedErrorClass::InvalidRequest,
+            Self::Internal => SourceBackedErrorClass::Internal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HydrationFailure {
     pub kind: HydrationFailureKind,
     pub detail: String,
+}
+
+impl HydrationFailure {
+    pub fn new(kind: HydrationFailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
 }
 
 /// Implemented now only by the local provider-native resolver.
@@ -428,14 +529,15 @@ pub trait ContentSourceResolver {
 }
 
 fn contract_hydration_failure(error: SourceResolverContractError) -> HydrationFailure {
-    invalid_batch_result(format!("invalid batch hydration contract: {error}"))
+    provider_contract_failure(format!("invalid batch hydration contract: {error}"))
 }
 
 fn invalid_batch_result(detail: impl Into<String>) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::InvalidLocator,
-        detail: detail.into(),
-    }
+    provider_contract_failure(detail)
+}
+
+fn provider_contract_failure(detail: impl Into<String>) -> HydrationFailure {
+    HydrationFailure::new(HydrationFailureKind::Internal, detail)
 }
 
 fn validate_coordinate(coordinate: &NativeRecordCoordinate) -> SourceResolverContractResult<()> {
@@ -487,6 +589,9 @@ fn validate_text(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod error_contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -662,6 +767,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    #[test]
+    fn provider_output_count_order_and_identity_violations_are_internal() {
+        let source = source(1);
+        let requests = vec![request(&source, "first"), request(&source, "second")];
+        let event_ids = requests
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>();
+        let batch = BatchHydrationRequest::new(requests).unwrap();
+        let record = |event_id| HydratedProviderRecord {
+            event_id,
+            provider_bytes: Vec::new(),
+        };
+
+        let wrong_count = BatchHydrationResult::new(vec![record(event_ids[0])]).unwrap();
+        let wrong_order =
+            BatchHydrationResult::new(vec![record(event_ids[1]), record(event_ids[0])]).unwrap();
+        let wrong_identity = BatchHydrationResult::new(vec![
+            record(event_ids[0]),
+            record(event_named(&source, "unrequested")),
+        ])
+        .unwrap();
+        let invalid_result_contract =
+            contract_hydration_failure(SourceResolverContractError::TooManyHydratedRecords);
+
+        for failure in [
+            wrong_count.validate_for_request(&batch).unwrap_err(),
+            wrong_order.validate_for_request(&batch).unwrap_err(),
+            wrong_identity.validate_for_request(&batch).unwrap_err(),
+            invalid_result_contract,
+        ] {
+            assert_eq!(failure.kind, HydrationFailureKind::Internal);
+            assert_eq!(failure.kind.class(), SourceBackedErrorClass::Internal);
+        }
     }
 
     struct ExactFailureResolver {
