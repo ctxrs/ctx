@@ -38,86 +38,22 @@ pub(super) fn register_task_json_route(
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
     let selected = vec![source.clone()];
-    let capture_selected = selected.clone();
-    let hydration_selected = selected;
     let provider = source.provider;
-    let source_format = source.source_format;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let mut adapter = match provider {
-                CaptureProvider::Cline => cline_task_json_source_backed_adapter(&capture_selected),
-                CaptureProvider::RooCode => roo_task_json_source_backed_adapter(&capture_selected),
-                _ => unreachable!("caller restricts task JSON providers"),
-            };
-            if !adapter.detected_but_unsupported().is_empty() {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unsupported,
-                    "the selected task directory is a detected but unsupported format",
-                ));
-            }
-            if !adapter.unavailable().is_empty() {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    "the selected task directory is unavailable",
-                ));
-            }
-            let mut begun = HashSet::new();
-            while let Some(page) = adapter.next_page().map_err(route_error)? {
-                let digest = page.source.identity().digest();
-                if begun.insert(digest) {
-                    sink.begin(page.source)?;
-                }
-                for document in page.documents {
-                    sink.document(document)?;
-                }
-            }
-            let completion = adapter.finish().map_err(route_error)?;
-            if !completion.detected_but_unsupported.is_empty() {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unsupported,
-                    "task discovery completed with an unsupported detected format",
-                ));
-            }
-            if !completion.unavailable.is_empty() {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    "task discovery completed with an unavailable selected route",
-                ));
-            }
-            for task in completion.tasks {
-                if begun.insert(task.source.identity().digest()) {
-                    sink.begin(task.source)?;
-                }
-                sink.certify(task.certified_source)?;
-            }
-            let _certified_inventories = completion.inventories.len();
-            Ok(())
-        },
-        provider_format_scope(provider, source_format),
-        move |request| {
-            let resolver = match provider {
-                CaptureProvider::Cline => {
-                    cline_task_json_source_backed_resolver(&hydration_selected)
-                }
-                CaptureProvider::RooCode => {
-                    roo_task_json_source_backed_resolver(&hydration_selected)
-                }
-                _ => unreachable!("caller restricts task JSON providers"),
-            }
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            resolver.hydrate_event(request)
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    let resolver = match provider {
+        CaptureProvider::Cline => cline_task_json_source_backed_resolver(&selected),
+        CaptureProvider::RooCode => roo_task_json_source_backed_resolver(&selected),
+        _ => unreachable!("caller restricts task JSON providers"),
+    }
+    .map_err(|error| invalid_route(provider, error.to_string()))?;
+    let adapter = match provider {
+        CaptureProvider::Cline => cline_task_json_source_backed_adapter(&selected),
+        CaptureProvider::RooCode => roo_task_json_source_backed_adapter(&selected),
+        _ => unreachable!("caller restricts task JSON providers"),
+    }
+    .with_resolver(resolver);
+    crate::provider::source_backed::family::document::register_replacement_document_tree_route(
+        registry, source, selection, adapter,
+    )
 }
 
 /// Registers one explicit NanoClaw compound project with caller-owned catalog

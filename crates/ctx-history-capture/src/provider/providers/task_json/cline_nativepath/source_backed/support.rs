@@ -1,4 +1,7 @@
 use super::*;
+use crate::{ProviderSourceKind, ProviderSourceStatus};
+
+use super::super::{discover_cline_root, discover_roo_root};
 
 pub(super) struct SelectedRoots {
     pub(super) roots: Vec<PathBuf>,
@@ -280,23 +283,6 @@ pub(super) fn count_overflow(dialect: TaskJsonNativeDialect) -> TaskJsonSourceBa
     }
 }
 
-pub(super) fn event_component_for_file(
-    dialect: TaskJsonNativeDialect,
-    file: &str,
-) -> Option<ClineEventComponent> {
-    [
-        ClineEventComponent::ApiHistory,
-        ClineEventComponent::UiMessages,
-        ClineEventComponent::FallbackHistory,
-    ]
-    .into_iter()
-    .find(|component| {
-        component.source_component().file_name() == file
-            && (dialect == TaskJsonNativeDialect::ROO
-                || *component != ClineEventComponent::FallbackHistory)
-    })
-}
-
 pub(super) fn hydration_failure(
     kind: HydrationFailureKind,
     detail: impl ToString,
@@ -304,23 +290,5 @@ pub(super) fn hydration_failure(
     HydrationFailure {
         kind,
         detail: detail.to_string(),
-    }
-}
-
-pub(super) fn invalid_locator(detail: impl ToString) -> HydrationFailure {
-    hydration_failure(HydrationFailureKind::InvalidLocator, detail)
-}
-
-pub(super) fn native_hydration_failure(error: ClineNativePathError) -> HydrationFailure {
-    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-}
-
-pub(super) fn local_hydration_failure(error: ClineLocalReadError) -> HydrationFailure {
-    match error {
-        ClineLocalReadError::Local(failure) => hydration_failure(
-            HydrationFailureKind::TemporarilyUnavailable,
-            failure.message,
-        ),
-        ClineLocalReadError::Fatal(error) => native_hydration_failure(error),
     }
 }

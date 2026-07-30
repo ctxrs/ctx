@@ -1,31 +1,45 @@
+//! Thin Cline/Roo adapter for the shared replacement-document lifecycle.
+
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
-    SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
     SubrecordSelector, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::provider_sources::{ProviderSource, ProviderSourceKind, ProviderSourceStatus};
+use crate::{
+    provider::source_backed::{
+        family::document::{
+            ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
+            DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+        },
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    },
+    provider_sources::ProviderSource,
+};
 
 use super::{
-    discover_cline_root, discover_roo_root,
     normalize::{
-        ClineArrayCheckpoint, ClineCertifiedPage, ClineEventComponent, ClineEventKind,
-        ClineEventRole, ClineEventRow, ClineNativeItemKey, ClinePublicationStats, ClineSessionRow,
-        ClineSourceRecordEvidence, ClineTaskCheckpoint,
+        ClineArrayCheckpoint, ClineCertifiedPage, ClineEventKind, ClineEventRole, ClineEventRow,
+        ClineNativeItemKey, ClineSessionRow, ClineSourceRecordEvidence, ClineTaskCheckpoint,
     },
-    parse::{hydrate_component, ClineArrayScanStep, ClineArrayScanner, ClineLocalReadError},
     source::{
         ClineComponent, ClineDiscovery, ClineLiveTaskObservation, ClineObservedFileState,
         TaskJsonNativeDialect,
@@ -40,9 +54,6 @@ use support::*;
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
 const SOURCE_SCHEMA_VARIANT: &str = "task-directory-v1";
 const SOURCE_REVISION_KIND: &str = "task-directory-compound-v1";
-const INVENTORY_AUTHORITY_NAMESPACE: &str = "task-json-tasks-root";
-const INVENTORY_REVISION_KIND: &str = "task-json-root-inventory-v1";
-const DISCOVERY_REVISION: &str = "task-json-source-discovery-v1";
 const PARSER_REVISION: &str = "task-json-source-backed-v1";
 const LOGICAL_SESSION_KIND: &str = "task-json-thread";
 const LOGICAL_EVENT_KIND: &str = "task-json-event";
@@ -61,17 +72,16 @@ pub(crate) enum TaskJsonSourceBackedError {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     Locator(#[from] SourceResolverContractError),
-    #[error("{provider} selected the same authoritative task root more than once: {path}")]
-    DuplicateRoot {
-        provider: &'static str,
-        path: PathBuf,
-    },
+    #[error("{provider} selected no authoritative task root")]
+    MissingRoot { provider: &'static str },
+    #[error("{provider} selected more than one authoritative task root")]
+    DuplicateRoot { provider: &'static str },
     #[error("{provider} selected duplicate task lineage {task_id:?}")]
     DuplicateTask {
         provider: &'static str,
         task_id: String,
     },
-    #[error("{provider} source-backed reader emitted a page outside its selected task roots")]
+    #[error("{provider} source-backed reader emitted a page outside its selected task")]
     UnownedPage { provider: &'static str },
     #[error("{provider} source-backed reader emitted a native item without record evidence")]
     MissingRecordEvidence { provider: &'static str },
@@ -100,45 +110,419 @@ pub(crate) enum TaskJsonSourceBackedError {
 
 pub(crate) type TaskJsonSourceBackedResult<T> = Result<T, TaskJsonSourceBackedError>;
 
-#[derive(Debug)]
-pub(crate) struct TaskJsonSourceBackedPage {
-    pub(crate) source: SourceKey,
-    pub(crate) documents: Box<[LexicalDocument]>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TaskJsonCertifiedTask {
-    pub(crate) source: SourceKey,
-    pub(crate) certified_source: CertifiedSource,
-}
-
-#[derive(Debug)]
-pub(crate) struct TaskJsonSourceBackedCompletion {
-    pub(crate) inventories: Box<[CertifiedSourceInventory]>,
-    pub(crate) tasks: Box<[TaskJsonCertifiedTask]>,
-    pub(crate) detected_but_unsupported: Box<[ProviderSource]>,
-    pub(crate) unavailable: Box<[ProviderSource]>,
-}
-
-pub(crate) struct TaskJsonSourceBackedAdapter {
+#[derive(Clone)]
+pub(crate) struct TaskJsonSourceBackedResolver {
     dialect: TaskJsonNativeDialect,
-    pending_roots: VecDeque<PathBuf>,
-    active: Option<ActiveRoot>,
-    seen_roots: BTreeSet<PathBuf>,
-    seen_sources: BTreeSet<[u8; 32]>,
-    inventories: Vec<CertifiedSourceInventory>,
-    tasks: Vec<TaskJsonCertifiedTask>,
-    detected_but_unsupported: Box<[ProviderSource]>,
-    unavailable: Box<[ProviderSource]>,
-    drained: bool,
+    selected: Box<[ProviderSource]>,
+    #[cfg(test)]
+    hydration_scans: Option<Arc<AtomicUsize>>,
 }
 
-struct ActiveRoot {
-    reader: ClineNativeReader,
-    opening_inventory: SourceInventoryObservation,
-    inventory_sources: Vec<SourceKey>,
-    component_owners: BTreeMap<PathBuf, PathBuf>,
-    tasks: BTreeMap<PathBuf, TaskAccumulator>,
+pub(crate) struct TaskJsonDocumentTreeAdapter {
+    dialect: TaskJsonNativeDialect,
+    selected: Box<[ProviderSource]>,
+    resolver: TaskJsonSourceBackedResolver,
+    #[cfg(test)]
+    projection_scans: Option<Arc<AtomicUsize>>,
+    #[cfg(test)]
+    terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+pub(crate) fn cline_task_json_source_backed_adapter(
+    selected: &[ProviderSource],
+) -> TaskJsonDocumentTreeAdapter {
+    TaskJsonDocumentTreeAdapter::new(TaskJsonNativeDialect::CLINE, selected)
+}
+
+pub(crate) fn roo_task_json_source_backed_adapter(
+    selected: &[ProviderSource],
+) -> TaskJsonDocumentTreeAdapter {
+    TaskJsonDocumentTreeAdapter::new(TaskJsonNativeDialect::ROO, selected)
+}
+
+pub(crate) fn cline_task_json_source_backed_resolver(
+    selected: &[ProviderSource],
+) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedResolver> {
+    Ok(TaskJsonSourceBackedResolver::new(
+        TaskJsonNativeDialect::CLINE,
+        selected,
+    ))
+}
+
+pub(crate) fn roo_task_json_source_backed_resolver(
+    selected: &[ProviderSource],
+) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedResolver> {
+    Ok(TaskJsonSourceBackedResolver::new(
+        TaskJsonNativeDialect::ROO,
+        selected,
+    ))
+}
+
+impl TaskJsonDocumentTreeAdapter {
+    fn new(dialect: TaskJsonNativeDialect, selected: &[ProviderSource]) -> Self {
+        Self {
+            dialect,
+            selected: selected.to_vec().into_boxed_slice(),
+            resolver: TaskJsonSourceBackedResolver::new(dialect, selected),
+            #[cfg(test)]
+            projection_scans: None,
+            #[cfg(test)]
+            terminal_revalidation_hook: None,
+        }
+    }
+
+    pub(crate) fn with_resolver(mut self, resolver: TaskJsonSourceBackedResolver) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_projection_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
+        self.projection_scans = Some(scans);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_terminal_revalidation_hook(
+        mut self,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        self.terminal_revalidation_hook = Some(hook);
+        self
+    }
+}
+
+impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
+    type Leaf = ClineLiveTaskObservation;
+    type TreeAuthority = ClineDiscovery;
+
+    fn parser_revision(&self) -> &'static str {
+        PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        owns_task_source(self.dialect, source)
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let root = selected_root(self.dialect, &self.selected)?;
+        discover_document_tree(self.dialect, &root).map_err(task_route_error)
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let current = authority
+            .task_routes()
+            .iter()
+            .find(|task| task.canonical_task_path == leaf.canonical_task_path)
+            .ok_or_else(|| {
+                source_changed("task leaf disappeared from its retained root authority")
+            })?;
+        if current != leaf {
+            return Err(source_changed(
+                "task leaf changed between cheap discovery and projection",
+            ));
+        }
+        #[cfg(test)]
+        if let Some(scans) = self.projection_scans.as_ref() {
+            scans.fetch_add(1, Ordering::Relaxed);
+        }
+        let source = task_source_key(self.dialect, leaf).map_err(task_route_error)?;
+        sink.begin_source(source.clone())?;
+        scan_task(self.dialect, authority, leaf, |document| {
+            sink.emit_document(document)
+        })
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        #[cfg(test)]
+        if let Some(hook) = self.terminal_revalidation_hook.as_ref() {
+            hook();
+        }
+        revalidate_document_tree(self.dialect, tree)
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        self.resolver.hydrate_group(request)
+    }
+}
+
+impl TaskJsonSourceBackedResolver {
+    fn new(dialect: TaskJsonNativeDialect, selected: &[ProviderSource]) -> Self {
+        Self {
+            dialect,
+            selected: selected.to_vec().into_boxed_slice(),
+            #[cfg(test)]
+            hydration_scans: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_hydration_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
+        self.hydration_scans = Some(scans);
+        self
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let first = request.events().first().ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "task hydration group is empty",
+            )
+        })?;
+        let root = selected_root(self.dialect, &self.selected).map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        let discovery = discover_document_tree(self.dialect, &root)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?
+            .authority;
+        let mut matched = None;
+        for task in discovery.task_routes() {
+            let source = task_source_key(self.dialect, task)
+                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+            if source.exact_descriptor_eq(first.locator().source()) {
+                if matched.replace((task, source)).is_some() {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "task source identity matched more than one retained leaf",
+                    ));
+                }
+            }
+        }
+        let (task, source) = matched.ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::ConfirmedDeleted,
+                "task source is absent from the selected authoritative root",
+            )
+        })?;
+        let observation = task_observation(&source, task)
+            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+        let revision_digest = digest_revision(&observation);
+        let mut positions = HashMap::with_capacity(request.len());
+        for (position, event) in request.events().iter().enumerate() {
+            event
+                .validate_contract()
+                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+            source
+                .validate_exact_descriptor(event.locator().source())
+                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+            if event.locator().revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
+                || event.locator().certified_source_revision_digest() != Some(&revision_digest)
+            {
+                return Err(hydration_failure(
+                    HydrationFailureKind::StaleSourceEvidence,
+                    "task source revision no longer matches the exact locator",
+                ));
+            }
+            positions.insert(event.event_id(), position);
+        }
+
+        let mut records = vec![None; request.len()];
+        #[cfg(test)]
+        if let Some(scans) = self.hydration_scans.as_ref() {
+            scans.fetch_add(1, Ordering::Relaxed);
+        }
+        scan_task(self.dialect, &discovery, task, |document| {
+            let Some(position) = positions.get(&document.event_id).copied() else {
+                return Ok(());
+            };
+            let expected = &request.events()[position];
+            if expected.locator() == &document.locator {
+                records[position] = Some(HydratedProviderRecord {
+                    event_id: document.event_id,
+                    provider_bytes: document.body.into_bytes(),
+                });
+            }
+            Ok(())
+        })
+        .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
+
+        let records = records
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    "task locator no longer projects a retained lexical event",
+                )
+            })?;
+        BatchHydrationResult::new(records)
+            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))
+    }
+}
+
+impl ContentSourceResolver for TaskJsonSourceBackedResolver {
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        let batch = BatchHydrationRequest::new(vec![request.clone()])
+            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+        self.hydrate_group(&batch)?
+            .into_records()
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    "task event disappeared during exact hydration",
+                )
+            })
+    }
+
+    fn hydrate_session(
+        &self,
+        request: &SessionHydrationRequest,
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        self.hydrate_group(request.batch())
+            .map(BatchHydrationResult::into_records)
+    }
+}
+
+fn selected_root(
+    dialect: TaskJsonNativeDialect,
+    selected: &[ProviderSource],
+) -> SourceBackedRouteResult<PathBuf> {
+    let selection = select_authoritative_roots(dialect, selected);
+    if !selection.detected_but_unsupported.is_empty() {
+        return Err(SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::Unsupported,
+            "the selected task directory is a detected but unsupported format",
+        ));
+    }
+    if !selection.unavailable.is_empty() {
+        return Err(SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::Unavailable,
+            "the selected task directory is unavailable",
+        ));
+    }
+    match selection.roots.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => Err(task_route_error(TaskJsonSourceBackedError::MissingRoot {
+            provider: dialect.display_name,
+        })),
+        _ => Err(task_route_error(TaskJsonSourceBackedError::DuplicateRoot {
+            provider: dialect.display_name,
+        })),
+    }
+}
+
+fn discover_document_tree(
+    dialect: TaskJsonNativeDialect,
+    root: &Path,
+) -> TaskJsonSourceBackedResult<CompleteDocumentTree<ClineLiveTaskObservation, ClineDiscovery>> {
+    let discovery = discover_root(dialect, root)?;
+    let mut sources = BTreeMap::new();
+    let mut leaves = Vec::with_capacity(discovery.task_routes().len());
+    for task in discovery.task_routes() {
+        let source = task_source_key(dialect, task)?;
+        if sources
+            .insert(source.identity().digest(), task.directory_task_id.clone())
+            .is_some()
+        {
+            return Err(TaskJsonSourceBackedError::DuplicateTask {
+                provider: dialect.display_name,
+                task_id: task.directory_task_id.to_string(),
+            });
+        }
+        leaves.push(observed_task_leaf(dialect, task)?);
+    }
+    let tree_fingerprint = task_tree_fingerprint(dialect, &discovery, &leaves);
+    Ok(CompleteDocumentTree::new(
+        tree_fingerprint,
+        leaves,
+        discovery,
+    ))
+}
+
+fn observed_task_leaf(
+    dialect: TaskJsonNativeDialect,
+    task: &ClineLiveTaskObservation,
+) -> TaskJsonSourceBackedResult<ObservedDocumentLeaf<ClineLiveTaskObservation>> {
+    let source = task_source_key(dialect, task)?;
+    let observation = task_observation(&source, task)?;
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-task-json-document-leaf-v1\0");
+    digest.update(source.exact_descriptor_digest());
+    digest.update(digest_revision(&observation));
+    let path = task.canonical_task_path.as_os_str().as_encoded_bytes();
+    digest.update((path.len() as u64).to_be_bytes());
+    digest.update(path);
+    Ok(ObservedDocumentLeaf::new(
+        DocumentLeafFingerprint::new(digest.finalize().into()),
+        task.clone(),
+    ))
+}
+
+fn task_tree_fingerprint(
+    dialect: TaskJsonNativeDialect,
+    discovery: &ClineDiscovery,
+    leaves: &[ObservedDocumentLeaf<ClineLiveTaskObservation>],
+) -> [u8; 32] {
+    let mut fingerprints = leaves
+        .iter()
+        .map(|leaf| leaf.fingerprint.as_bytes())
+        .collect::<Vec<_>>();
+    fingerprints.sort_unstable();
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-task-json-document-tree-v1\0");
+    digest.update(dialect.provider.as_str().as_bytes());
+    digest.update(discovery.root_authority().source_backed_revision());
+    digest.update((fingerprints.len() as u64).to_be_bytes());
+    for fingerprint in fingerprints {
+        digest.update(fingerprint);
+    }
+    digest.finalize().into()
+}
+
+fn revalidate_document_tree(
+    dialect: TaskJsonNativeDialect,
+    tree: &CompleteDocumentTree<ClineLiveTaskObservation, ClineDiscovery>,
+) -> SourceBackedRouteResult<[u8; 32]> {
+    if !tree
+        .authority
+        .root_authority()
+        .revalidate_catalog()
+        .map_err(|error| task_route_error(error.into()))?
+    {
+        return Err(source_changed(
+            "task document tree changed before terminal revalidation",
+        ));
+    }
+    for task in tree.authority.task_routes() {
+        if !task
+            .revalidate_all_components()
+            .map_err(|error| task_route_error(error.into()))?
+        {
+            return Err(source_changed(
+                "task document tree changed before terminal revalidation",
+            ));
+        }
+    }
+    let current = task_tree_fingerprint(dialect, &tree.authority, &tree.leaves);
+    if current != tree.tree_fingerprint {
+        return Err(source_changed(
+            "task document tree fingerprint changed before certification",
+        ));
+    }
+    Ok(current)
 }
 
 struct TaskAccumulator {
@@ -151,275 +535,90 @@ struct TaskAccumulator {
     session: Option<ClineSessionRow>,
 }
 
-#[derive(Debug, Clone)]
-struct ResolverTask {
-    task: ClineLiveTaskObservation,
-    source: SourceKey,
-    revision_digest: [u8; 32],
-}
-
-pub(crate) struct TaskJsonSourceBackedResolver {
+fn scan_task(
     dialect: TaskJsonNativeDialect,
-    selected: Box<[ProviderSource]>,
-    tasks: BTreeMap<[u8; 32], ResolverTask>,
-}
-
-pub(crate) fn cline_task_json_source_backed_adapter(
-    selected: &[ProviderSource],
-) -> TaskJsonSourceBackedAdapter {
-    TaskJsonSourceBackedAdapter::new(TaskJsonNativeDialect::CLINE, selected)
-}
-
-pub(crate) fn roo_task_json_source_backed_adapter(
-    selected: &[ProviderSource],
-) -> TaskJsonSourceBackedAdapter {
-    TaskJsonSourceBackedAdapter::new(TaskJsonNativeDialect::ROO, selected)
-}
-
-pub(crate) fn cline_task_json_source_backed_resolver(
-    selected: &[ProviderSource],
-) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedResolver> {
-    TaskJsonSourceBackedResolver::new(TaskJsonNativeDialect::CLINE, selected)
-}
-
-pub(crate) fn roo_task_json_source_backed_resolver(
-    selected: &[ProviderSource],
-) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedResolver> {
-    TaskJsonSourceBackedResolver::new(TaskJsonNativeDialect::ROO, selected)
-}
-
-impl TaskJsonSourceBackedAdapter {
-    fn new(dialect: TaskJsonNativeDialect, selected: &[ProviderSource]) -> Self {
-        let selection = select_authoritative_roots(dialect, selected);
-        Self {
-            dialect,
-            pending_roots: selection.roots.into(),
-            active: None,
-            seen_roots: BTreeSet::new(),
-            seen_sources: BTreeSet::new(),
-            inventories: Vec::new(),
-            tasks: Vec::new(),
-            detected_but_unsupported: selection.detected_but_unsupported.into_boxed_slice(),
-            unavailable: selection.unavailable.into_boxed_slice(),
-            drained: false,
-        }
-    }
-
-    pub(crate) fn detected_but_unsupported(&self) -> &[ProviderSource] {
-        &self.detected_but_unsupported
-    }
-
-    pub(crate) fn unavailable(&self) -> &[ProviderSource] {
-        &self.unavailable
-    }
-
-    pub(crate) fn next_page(
-        &mut self,
-    ) -> TaskJsonSourceBackedResult<Option<TaskJsonSourceBackedPage>> {
-        loop {
-            if self.active.is_none() && !self.start_next_root()? {
-                self.drained = true;
-                return Ok(None);
-            }
-            let native_page = {
-                let active = self
-                    .active
-                    .as_mut()
-                    .expect("active root was just established");
-                active.reader.next_page()?
-            };
-            if let Some(native_page) = native_page {
-                if let Some(page) =
-                    project_native_page(self.dialect, self.active.as_mut().unwrap(), native_page)?
-                {
-                    return Ok(Some(page));
-                }
-                continue;
-            }
-            let active = self.active.take().expect("drained root must be active");
-            self.finish_root(active)?;
-        }
-    }
-
-    pub(crate) fn finish(self) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedCompletion> {
-        if !self.drained || self.active.is_some() || !self.pending_roots.is_empty() {
-            return Err(TaskJsonSourceBackedError::IncompleteTask {
-                provider: self.dialect.display_name,
-                path: self
-                    .active
-                    .as_ref()
-                    .and_then(|active| active.tasks.keys().next().cloned())
-                    .unwrap_or_default(),
-            });
-        }
-        Ok(TaskJsonSourceBackedCompletion {
-            inventories: self.inventories.into_boxed_slice(),
-            tasks: self.tasks.into_boxed_slice(),
-            detected_but_unsupported: self.detected_but_unsupported,
-            unavailable: self.unavailable,
-        })
-    }
-
-    fn start_next_root(&mut self) -> TaskJsonSourceBackedResult<bool> {
-        let Some(root) = self.pending_roots.pop_front() else {
-            return Ok(false);
-        };
-        let discovery = discover_root(self.dialect, &root)?;
-        let canonical_root = discovery.root_authority().tasks_root().to_path_buf();
-        if !self.seen_roots.insert(canonical_root.clone()) {
-            return Err(TaskJsonSourceBackedError::DuplicateRoot {
-                provider: self.dialect.display_name,
-                path: canonical_root,
-            });
-        }
-        let active = active_root(self.dialect, discovery, &mut self.seen_sources)?;
-        self.active = Some(active);
-        Ok(true)
-    }
-
-    fn finish_root(&mut self, mut active: ActiveRoot) -> TaskJsonSourceBackedResult<()> {
-        let completion = active.reader.finish_catalog()?;
-        if !completion.inventory_complete
-            || !completion.inventory_revalidated
-            || completion
-                .component_outcomes
-                .iter()
-                .any(|outcome| outcome.failure.is_some())
+    authority: &ClineDiscovery,
+    task: &ClineLiveTaskObservation,
+    mut emit: impl FnMut(LexicalDocument) -> SourceBackedRouteResult<()>,
+) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+    let source = task_source_key(dialect, task).map_err(task_route_error)?;
+    let observation = task_observation(&source, task).map_err(task_route_error)?;
+    let revision_digest = digest_revision(&observation);
+    let mut content_digest = Sha256::new();
+    content_digest.update(b"ctx-task-json-source-content-v1\0");
+    content_digest.update(source.identity().digest());
+    content_digest.update(revision_digest);
+    let mut accumulator = TaskAccumulator {
+        opening: task.clone(),
+        source: source.clone(),
+        observation,
+        revision_digest,
+        content_digest,
+        counts: ScannedSourceCounts::default(),
+        session: None,
+    };
+    let mut reader = ClineNativeReader::new(authority.for_task(task.clone()));
+    while let Some(page) = reader
+        .next_page()
+        .map_err(|error| task_route_error(error.into()))?
+    {
+        for document in
+            project_native_page(dialect, &mut accumulator, page).map_err(task_route_error)?
         {
-            let path = active.tasks.keys().next().cloned().unwrap_or_default();
-            return Err(TaskJsonSourceBackedError::IncompleteTask {
-                provider: self.dialect.display_name,
-                path,
-            });
+            emit(document)?;
         }
-        let checkpoints = completion
-            .live_checkpoints
-            .iter()
-            .map(|checkpoint| (checkpoint.canonical_task_path.clone(), checkpoint))
-            .collect::<BTreeMap<_, _>>();
-        for (path, accumulator) in active.tasks {
-            if !accumulator.opening.revalidate_all_components()? {
-                return Err(TaskJsonSourceBackedError::TaskChanged {
-                    provider: self.dialect.display_name,
-                    path,
-                });
-            }
-            let checkpoint = checkpoints.get(&path).ok_or_else(|| {
-                TaskJsonSourceBackedError::MissingCheckpoint {
-                    provider: self.dialect.display_name,
-                    path: path.clone(),
-                }
-            })?;
-            self.tasks
-                .push(certify_task(self.dialect, accumulator, checkpoint)?);
-        }
-        let inventory = CertifiedSourceInventory::certify(
-            active.opening_inventory.clone(),
-            active.opening_inventory,
-            DISCOVERY_REVISION,
-            active.inventory_sources,
-        )?;
-        self.inventories.push(inventory);
-        Ok(())
     }
-}
-
-fn active_root(
-    dialect: TaskJsonNativeDialect,
-    discovery: ClineDiscovery,
-    seen_sources: &mut BTreeSet<[u8; 32]>,
-) -> TaskJsonSourceBackedResult<ActiveRoot> {
-    let authority_key = TypedKey::bytes(
-        discovery
-            .root_authority()
-            .tasks_root()
-            .as_os_str()
-            .as_encoded_bytes()
-            .to_vec(),
-    )?;
-    let opening_inventory = SourceInventoryObservation::new(
-        dialect.provider.as_str(),
-        INVENTORY_AUTHORITY_NAMESPACE,
-        authority_key,
-        INVENTORY_REVISION_KIND,
-        discovery.root_authority().source_backed_revision(),
-    )?;
-    let mut tasks = BTreeMap::new();
-    let mut component_owners = BTreeMap::new();
-    let mut inventory_sources = Vec::new();
-    for task in discovery.task_routes() {
-        let source = task_source_key(dialect, task)?;
-        let source_digest = source.identity().digest();
-        if !seen_sources.insert(source_digest) {
-            return Err(TaskJsonSourceBackedError::DuplicateTask {
+    let completion = reader
+        .finish_task()
+        .map_err(|error| task_route_error(error.into()))?;
+    if completion
+        .component_outcomes
+        .iter()
+        .any(|outcome| outcome.failure.is_some())
+    {
+        return Err(task_route_error(
+            TaskJsonSourceBackedError::IncompleteTask {
                 provider: dialect.display_name,
-                task_id: task.directory_task_id.to_string(),
-            });
-        }
-        let observation = task_observation(&source, task)?;
-        let revision_digest = digest_revision(&observation);
-        let mut content_digest = Sha256::new();
-        content_digest.update(b"ctx-task-json-source-content-v1\0");
-        content_digest.update(source_digest);
-        content_digest.update(revision_digest);
-        for component in [
-            ClineComponent::ApiHistory,
-            ClineComponent::UiMessages,
-            ClineComponent::FallbackHistory,
-            ClineComponent::TaskMetadata,
-            ClineComponent::HistoryItem,
-            ClineComponent::TaskIndex,
-        ] {
-            component_owners.insert(
-                task.component(component).path.clone(),
-                task.canonical_task_path.clone(),
-            );
-        }
-        inventory_sources.push(source.clone());
-        tasks.insert(
-            task.canonical_task_path.clone(),
-            TaskAccumulator {
-                opening: task.clone(),
-                source,
-                observation,
-                revision_digest,
-                content_digest,
-                counts: ScannedSourceCounts::default(),
-                session: None,
+                path: task.canonical_task_path.clone(),
             },
-        );
+        ));
     }
-    Ok(ActiveRoot {
-        reader: ClineNativeReader::new(discovery, &[]),
-        opening_inventory,
-        inventory_sources,
-        component_owners,
-        tasks,
-    })
+    if !accumulator
+        .opening
+        .revalidate_all_components()
+        .map_err(|error| task_route_error(error.into()))?
+    {
+        return Err(task_route_error(TaskJsonSourceBackedError::TaskChanged {
+            provider: dialect.display_name,
+            path: task.canonical_task_path.clone(),
+        }));
+    }
+    let checkpoint = completion
+        .live_checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.canonical_task_path == task.canonical_task_path)
+        .ok_or_else(|| {
+            task_route_error(TaskJsonSourceBackedError::MissingCheckpoint {
+                provider: dialect.display_name,
+                path: task.canonical_task_path.clone(),
+            })
+        })?;
+    task_terminal(dialect, accumulator, checkpoint).map_err(task_route_error)
 }
 
 fn project_native_page(
     dialect: TaskJsonNativeDialect,
-    active: &mut ActiveRoot,
+    task: &mut TaskAccumulator,
     page: ClineCertifiedPage,
-) -> TaskJsonSourceBackedResult<Option<TaskJsonSourceBackedPage>> {
-    let task_path = active
-        .component_owners
-        .get(&page.source.canonical_path)
-        .ok_or(TaskJsonSourceBackedError::UnownedPage {
+) -> TaskJsonSourceBackedResult<Vec<LexicalDocument>> {
+    if !task_owns_component(&task.opening, &page.source.canonical_path) {
+        return Err(TaskJsonSourceBackedError::UnownedPage {
             provider: dialect.display_name,
-        })?
-        .clone();
-    let task = active
-        .tasks
-        .get_mut(&task_path)
-        .ok_or(TaskJsonSourceBackedError::UnownedPage {
-            provider: dialect.display_name,
-        })?;
+        });
+    }
     if let Some(session) = page.core.session.as_ref() {
         task.session = Some(session.clone());
     }
-
     let retained = u64::try_from(page.core.events.len()).map_err(|_| count_overflow(dialect))?;
     let rejected =
         u64::try_from(page.core.rejections.len()).map_err(|_| count_overflow(dialect))?;
@@ -448,9 +647,8 @@ fn project_native_page(
             provider: dialect.display_name,
         });
     }
-
     if page.core.events.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let session = task
         .session
@@ -472,33 +670,47 @@ fn project_native_page(
         .as_ref()
         .and_then(|session| session.workspace_directory.as_deref())
         .map(str::to_owned);
-    let mut documents = Vec::with_capacity(page.core.events.len());
-    for event in page.core.events {
-        documents.push(project_event(
-            dialect,
-            &task.source,
-            task.revision_digest,
-            session_id,
-            &session,
-            workspace.as_deref(),
-            event,
-        )?);
-    }
-    let estimated_owned_bytes = estimated_documents_bytes(&documents);
+    let documents = page
+        .core
+        .events
+        .into_vec()
+        .into_iter()
+        .map(|event| {
+            project_event(
+                dialect,
+                &task.source,
+                task.revision_digest,
+                session_id,
+                &session,
+                workspace.as_deref(),
+                event,
+            )
+        })
+        .collect::<TaskJsonSourceBackedResult<Vec<_>>>()?;
     if documents.len() > MAX_SOURCE_BACKED_PAGE_DOCUMENTS
-        || estimated_owned_bytes > MAX_SOURCE_BACKED_PAGE_BYTES
+        || estimated_documents_bytes(&documents) > MAX_SOURCE_BACKED_PAGE_BYTES
     {
         return Err(TaskJsonSourceBackedError::PageBound {
             provider: dialect.display_name,
         });
     }
-    Ok(Some(TaskJsonSourceBackedPage {
-        source: task.source.clone(),
-        documents: documents.into_boxed_slice(),
-    }))
+    Ok(documents)
 }
 
-pub(super) fn estimated_documents_bytes(documents: &[LexicalDocument]) -> usize {
+fn task_owns_component(task: &ClineLiveTaskObservation, path: &Path) -> bool {
+    [
+        ClineComponent::ApiHistory,
+        ClineComponent::UiMessages,
+        ClineComponent::FallbackHistory,
+        ClineComponent::TaskMetadata,
+        ClineComponent::HistoryItem,
+        ClineComponent::TaskIndex,
+    ]
+    .into_iter()
+    .any(|component| task.component(component).path == path)
+}
+
+fn estimated_documents_bytes(documents: &[LexicalDocument]) -> usize {
     documents.iter().fold(0_usize, |total, document| {
         total
             .saturating_add(document.body.len())
@@ -564,8 +776,6 @@ fn project_event(
         Some(revision_digest),
         evidence.record_digest,
     )?;
-    let event_sequence = event_sequence(dialect, &event)?;
-    let body = lexical_event_body(&event);
     Ok(LexicalDocument {
         event_id,
         session_id,
@@ -583,11 +793,11 @@ fn project_event(
         }
         .to_owned(),
         is_primary: true,
-        event_sequence,
+        event_sequence: event_sequence(dialect, &event)?,
         occurred_at_unix_ms: event.occurred_at_millis,
         event_type: event_kind(event.kind).to_owned(),
         role: Some(event_role(event.role).to_owned()),
-        body,
+        body: lexical_event_body(&event),
         workspace: workspace.map(str::to_owned),
         cwd: workspace.map(str::to_owned),
         touched_files: event
@@ -598,12 +808,12 @@ fn project_event(
     })
 }
 
-fn certify_task(
+fn task_terminal(
     dialect: TaskJsonNativeDialect,
-    mut accumulator: TaskAccumulator,
+    mut task: TaskAccumulator,
     checkpoint: &ClineTaskCheckpoint,
-) -> TaskJsonSourceBackedResult<TaskJsonCertifiedTask> {
-    hash_metadata_checkpoint(&mut accumulator.content_digest, checkpoint);
+) -> TaskJsonSourceBackedResult<DocumentSourceTerminal> {
+    hash_metadata_checkpoint(&mut task.content_digest, checkpoint);
     let mut certified_bytes = checkpoint
         .task_metadata
         .observation
@@ -617,283 +827,47 @@ fn certify_task(
     .into_iter()
     .flatten()
     {
-        hash_array_checkpoint(&mut accumulator.content_digest, array);
+        hash_array_checkpoint(&mut task.content_digest, array);
         certified_bytes = checked_add(dialect, certified_bytes, array.complete_bytes)?;
     }
-    accumulator.counts.certified_bytes = certified_bytes;
-    let content_digest = accumulator.content_digest.finalize().into();
-    let certified_source = CertifiedSource::certify(
-        accumulator.observation.clone(),
-        accumulator.observation,
-        PARSER_REVISION,
-        content_digest,
-        accumulator.counts,
-    )?;
-    Ok(TaskJsonCertifiedTask {
-        source: accumulator.source,
-        certified_source,
+    task.counts.certified_bytes = certified_bytes;
+    Ok(DocumentSourceTerminal {
+        source: task.source,
+        opening: task.observation.clone(),
+        closing: task.observation,
+        parser_revision: PARSER_REVISION,
+        content_digest: task.content_digest.finalize().into(),
+        counts: task.counts,
     })
 }
 
-impl TaskJsonSourceBackedResolver {
-    fn new(
-        dialect: TaskJsonNativeDialect,
-        selected: &[ProviderSource],
-    ) -> TaskJsonSourceBackedResult<Self> {
-        let selection = select_authoritative_roots(dialect, selected);
-        let mut seen_roots = BTreeSet::new();
-        let mut tasks = BTreeMap::new();
-        for root in selection.roots {
-            let discovery = discover_root(dialect, &root)?;
-            let root = discovery.root_authority().tasks_root().to_path_buf();
-            if !seen_roots.insert(root.clone()) {
-                return Err(TaskJsonSourceBackedError::DuplicateRoot {
-                    provider: dialect.display_name,
-                    path: root,
-                });
-            }
-            for task in discovery.task_routes() {
-                let source = task_source_key(dialect, task)?;
-                let observation = task_observation(&source, task)?;
-                let entry = ResolverTask {
-                    revision_digest: digest_revision(&observation),
-                    task: task.clone(),
-                    source,
-                };
-                let digest = entry.source.identity().digest();
-                if tasks.insert(digest, entry).is_some() {
-                    return Err(TaskJsonSourceBackedError::DuplicateTask {
-                        provider: dialect.display_name,
-                        task_id: task.directory_task_id.to_string(),
-                    });
-                }
-            }
-        }
-        Ok(Self {
-            dialect,
-            selected: selected.to_vec().into_boxed_slice(),
-            tasks,
-        })
-    }
-
-    fn validate_locator_bytes(
-        &self,
-        locator: &SourceRecordLocator,
-    ) -> Result<Vec<u8>, HydrationFailure> {
-        locator
-            .validate_contract()
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-        let task = self
-            .tasks
-            .get(&locator.source().identity().digest())
-            .ok_or_else(|| {
-                hydration_failure(
-                    HydrationFailureKind::ConfirmedDeleted,
-                    "task source is absent from the selected authoritative roots",
-                )
-            })?;
-        task.source
-            .validate_exact_descriptor(locator.source())
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-        if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-            || locator.certified_source_revision_digest() != Some(&task.revision_digest)
-        {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "task source revision no longer matches the exact locator",
-            ));
-        }
-        if !task
-            .task
-            .revalidate_all_components()
-            .map_err(native_hydration_failure)?
-        {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "task source changed before hydration",
-            ));
-        }
-        let bytes = match locator.coordinate() {
-            NativeRecordCoordinate::Document {
-                object_key,
-                json_pointer,
-            } if json_pointer.is_none() => {
-                self.hydrate_document(task, object_key, locator.record_digest())?
-            }
-            NativeRecordCoordinate::TreeRecord {
-                relative_file_key,
-                record_coordinate,
-            } => self.hydrate_tree_record(
-                task,
-                relative_file_key,
-                record_coordinate,
-                locator.record_digest(),
-            )?,
-            _ => {
-                return Err(hydration_failure(
-                    HydrationFailureKind::InvalidLocator,
-                    "locator is not a task-relative Document or TreeRecord coordinate",
-                ));
-            }
-        };
-        if !task
-            .task
-            .revalidate_all_components()
-            .map_err(native_hydration_failure)?
-        {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "task source changed during hydration",
-            ));
-        }
-        Ok(bytes)
-    }
-
-    fn hydrate_document(
-        &self,
-        task: &ResolverTask,
-        object_key: &TypedKey,
-        expected_digest: &[u8; 32],
-    ) -> Result<Vec<u8>, HydrationFailure> {
-        let TypedKey::Utf8(relative_file) = object_key else {
-            return Err(invalid_locator(
-                "document object key is not a UTF-8 task-relative file",
-            ));
-        };
-        let observation = task.task.metadata_authority();
-        if relative_file != observation.component.file_name() {
-            return Err(invalid_locator(
-                "document object key is not the selected metadata authority",
-            ));
-        }
-        let mut stats = ClinePublicationStats::default();
-        let hydrated =
-            hydrate_component(observation, &mut stats).map_err(local_hydration_failure)?;
-        if &hydrated.content_sha256 != expected_digest {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleRecordEvidence,
-                "metadata record digest no longer matches provider bytes",
-            ));
-        }
-        Ok(hydrated.bytes)
-    }
-
-    fn hydrate_tree_record(
-        &self,
-        task: &ResolverTask,
-        relative_file_key: &TypedKey,
-        record_coordinate: &TypedKey,
-        expected_digest: &[u8; 32],
-    ) -> Result<Vec<u8>, HydrationFailure> {
-        let TypedKey::Utf8(relative_file) = relative_file_key else {
-            return Err(invalid_locator("tree-record file key is not UTF-8"));
-        };
-        let component = event_component_for_file(self.dialect, relative_file)
-            .ok_or_else(|| invalid_locator("tree-record file is not an event component"))?;
-        let observation = task.task.component(component.source_component());
-        let TypedKey::Composite(parts) = record_coordinate else {
-            return Err(invalid_locator("tree-record coordinate is not composite"));
-        };
-        let Some(TypedKey::U64(target_index)) = parts.first() else {
-            return Err(invalid_locator(
-                "tree-record coordinate has no native item index",
-            ));
-        };
-        let mut stats = ClinePublicationStats::default();
-        let mut scanner = ClineArrayScanner::open(observation, &mut stats, true)
-            .map_err(local_hydration_failure)?;
-        loop {
-            match scanner.next_step().map_err(local_hydration_failure)? {
-                ClineArrayScanStep::Item(item) if item.native_index == *target_index => {
-                    if item.record_digest.as_ref() != Some(expected_digest) {
-                        return Err(hydration_failure(
-                            HydrationFailureKind::StaleRecordEvidence,
-                            "native item digest no longer matches provider bytes",
-                        ));
-                    }
-                    return item.bytes.ok_or_else(|| {
-                        hydration_failure(
-                            HydrationFailureKind::MissingRecord,
-                            "native item exceeds the bounded hydration record size",
-                        )
-                    });
-                }
-                ClineArrayScanStep::Item(item) if item.native_index < *target_index => {}
-                ClineArrayScanStep::Item(_) | ClineArrayScanStep::EmptyTerminal { .. } => {
-                    return Err(hydration_failure(
-                        HydrationFailureKind::MissingRecord,
-                        "native item coordinate is absent from the provider array",
-                    ));
-                }
-            }
-        }
-    }
+fn owns_task_source(dialect: TaskJsonNativeDialect, source: &SourceKey) -> bool {
+    source.provider() == dialect.provider.as_str()
+        && source.source_format() == dialect.source_format
+        && source.schema_variant() == SOURCE_SCHEMA_VARIANT
+        && source.provider_identity_version() == 1
 }
 
-impl ContentSourceResolver for TaskJsonSourceBackedResolver {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        let mut hydrated = self.hydrate_requests(std::slice::from_ref(request))?;
-        hydrated.pop().ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::MissingRecord,
-                "task event disappeared during exact display hydration",
-            )
-        })
-    }
-
-    fn hydrate_session(
-        &self,
-        request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        self.hydrate_requests(request.events())
-    }
+fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
 }
 
-impl TaskJsonSourceBackedResolver {
-    fn hydrate_requests(
-        &self,
-        requests: &[EventHydrationRequest],
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        for request in requests {
-            let _ = self.validate_locator_bytes(request.locator())?;
+fn task_route_error(error: TaskJsonSourceBackedError) -> SourceBackedRouteError {
+    let kind = match &error {
+        TaskJsonSourceBackedError::Native(ClineNativePathError::SourceChanged { .. })
+        | TaskJsonSourceBackedError::TaskChanged { .. } => {
+            SourceBackedRouteErrorKind::SourceChanged
         }
-        let mut records = vec![None; requests.len()];
-        let mut adapter = TaskJsonSourceBackedAdapter::new(self.dialect, &self.selected);
-        while let Some(page) = adapter
-            .next_page()
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?
+        TaskJsonSourceBackedError::Native(ClineNativePathError::SourceIo { kind, .. })
+            if matches!(
+                kind,
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
         {
-            for document in page.documents {
-                if let Some((index, request)) =
-                    requests.iter().enumerate().find(|(index, request)| {
-                        records[*index].is_none()
-                            && request.event_id() == document.event_id
-                            && request.locator() == &document.locator
-                    })
-                {
-                    records[index] = Some(HydratedProviderRecord {
-                        event_id: request.event_id(),
-                        provider_bytes: document.body.into_bytes(),
-                    });
-                }
-            }
+            SourceBackedRouteErrorKind::Unavailable
         }
-        adapter
-            .finish()
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
-        records
-            .into_iter()
-            .map(|record| {
-                record.ok_or_else(|| {
-                    hydration_failure(
-                        HydrationFailureKind::MissingRecord,
-                        "task locator no longer projects a retained lexical event",
-                    )
-                })
-            })
-            .collect()
-    }
+        TaskJsonSourceBackedError::MissingRoot { .. } => SourceBackedRouteErrorKind::Unavailable,
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }

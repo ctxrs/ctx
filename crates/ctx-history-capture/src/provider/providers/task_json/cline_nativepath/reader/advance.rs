@@ -11,10 +11,7 @@ impl ClineNativeReader {
                 message: "Cline active task disappeared".to_owned(),
             })?;
         if task.next_component >= task.event_components.len() {
-            if task.component_failed
-                && !task.component_page_certified
-                && task.discard_deferred_metadata_on_failure
-            {
+            if task.component_failed && !task.component_page_certified {
                 task.deferred_metadata_page = None;
                 return Ok(None);
             }
@@ -26,7 +23,7 @@ impl ClineNativeReader {
             .into_iter()
             .flatten()
             .any(|checkpoint| checkpoint.retained_rows != 0);
-            if !has_retained_rows && task.discard_deferred_metadata_on_failure {
+            if !has_retained_rows {
                 task.deferred_metadata_page = None;
             }
             if let Some(page) = task.deferred_metadata_page.take() {
@@ -35,11 +32,6 @@ impl ClineNativeReader {
                     &mut task.metadata_content_authority,
                 )? {
                     self.outcomes.push(component_failure_outcome(failure));
-                    if let Some(previous) =
-                        self.previous_by_path.get(&task.task.canonical_task_path)
-                    {
-                        self.live_checkpoints.push(previous.clone());
-                    }
                     return Ok(None);
                 }
                 self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
@@ -59,34 +51,7 @@ impl ClineNativeReader {
         }
         let component = task.event_components[task.next_component];
         task.next_component = task.next_component.saturating_add(1);
-        let prior = match component {
-            ClineEventComponent::ApiHistory => task.api_history.clone(),
-            ClineEventComponent::UiMessages => task.ui_messages.clone(),
-            ClineEventComponent::FallbackHistory => task.fallback_history.clone(),
-        };
         let observation = task.task.component(component.source_component()).clone();
-        if !task.identity_changed
-            && prior
-                .as_ref()
-                .is_some_and(|prior| prior.observation == observation)
-        {
-            if let Some(failure) = component_authority_failure(&observation, false)?
-                .or(directory_authority_failure(&task.task, &observation)?)
-            {
-                task.component_failed = true;
-                self.outcomes.push(component_failure_outcome(failure));
-            } else {
-                self.outcomes.push(ClineComponentReadOutcome {
-                    component: observation.component,
-                    path: observation.path.clone(),
-                    transition: Some(ClineComponentTransition::Unchanged),
-                    pages: 0,
-                    failure: None,
-                });
-            }
-            self.active_task = Some(task);
-            return Ok(None);
-        }
         match &observation.state {
             ClineObservedFileState::Unavailable(message) => {
                 task.component_failed = true;
@@ -110,49 +75,16 @@ impl ClineNativeReader {
                     self.active_task = Some(task);
                     return Ok(None);
                 }
-                if prior.is_none() {
-                    self.outcomes.push(ClineComponentReadOutcome {
-                        component: observation.component,
-                        path: observation.path.clone(),
-                        transition: Some(ClineComponentTransition::MissingPhysical),
-                        pages: 0,
-                        failure: None,
-                    });
-                    Self::set_task_component(&mut task, component, None);
-                    self.active_task = Some(task);
-                    return Ok(None);
-                }
-                let metadata_failure = Self::certify_metadata_boundary(
-                    &task.metadata,
-                    &mut task.metadata_content_authority,
-                )?;
-                let deletion_authority_failure = metadata_failure
-                    .or_else(|| deletion_metadata_authority_refusal(&task.metadata, &observation));
-                if let Some(failure) = deletion_authority_failure {
-                    task.component_failed = true;
-                    self.outcomes.push(ClineComponentReadOutcome {
-                        component: observation.component,
-                        path: observation.path.clone(),
-                        transition: None,
-                        pages: 0,
-                        failure: Some(failure),
-                    });
-                    self.active_task = Some(task);
-                    return Ok(None);
-                }
-                let page = self.build_deleted_array_page(&observation)?;
                 Self::set_task_component(&mut task, component, None);
-                task.needs_session = false;
                 self.outcomes.push(ClineComponentReadOutcome {
                     component: observation.component,
                     path: observation.path.clone(),
                     transition: Some(ClineComponentTransition::MissingPhysical),
-                    pages: 1,
+                    pages: 0,
                     failure: None,
                 });
-                self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
                 self.active_task = Some(task);
-                Ok(Some(self.expose_component_page_after_metadata(page)?))
+                Ok(None)
             }
             ClineObservedFileState::Present(_) => {
                 let scanner = match ClineArrayScanner::open(&observation, &mut self.stats, true) {
@@ -168,14 +100,10 @@ impl ClineNativeReader {
                 let source = file_source(observation.component, &observation.path);
                 let revision_sha256 = scanner.revision_sha256();
                 let frontier = ClinePageFrontier::zero(component);
-                let prior_prefix_matches = prior.as_ref().is_some_and(|prior| {
-                    prior.observed_items == 0 && prior.final_frontier == frontier
-                });
                 self.active_array = Some(ActiveArray {
                     task: task.task.clone(),
                     metadata: task.metadata.clone(),
                     component,
-                    prior,
                     scanner,
                     source,
                     revision_sha256,
@@ -183,7 +111,6 @@ impl ClineNativeReader {
                     observed_items: 0,
                     retained_rows: 0,
                     native_id_occurrences: BTreeMap::new(),
-                    prior_prefix_matches,
                     attach_session: task.needs_session,
                     pages: 0,
                 });
@@ -224,11 +151,7 @@ impl ClineNativeReader {
                     0,
                     active.frontier.clone(),
                 );
-                let transition = classify_transition(
-                    active.prior.as_ref(),
-                    &checkpoint,
-                    active.prior_prefix_matches,
-                );
+                let transition = cold_transition(&checkpoint);
                 if let Some(failure) = self.certify_array_boundary(&active)? {
                     self.finish_array_failure(&active, failure);
                     return Ok(None);
@@ -274,16 +197,6 @@ impl ClineNativeReader {
                 let expected = active.frontier.clone();
                 let next = expected.advance(&item.checkpoint);
                 active.frontier = next.clone();
-                if active
-                    .prior
-                    .as_ref()
-                    .is_some_and(|prior| prior.observed_items == active.observed_items)
-                {
-                    active.prior_prefix_matches = active
-                        .prior
-                        .as_ref()
-                        .is_some_and(|prior| prior.final_frontier == active.frontier);
-                }
                 let terminal_checkpoint = if terminal {
                     Some(ClineArrayCheckpoint::new(
                         active.component,
@@ -302,13 +215,7 @@ impl ClineNativeReader {
                 } else {
                     None
                 };
-                let transition = terminal_checkpoint.as_ref().map(|checkpoint| {
-                    classify_transition(
-                        active.prior.as_ref(),
-                        checkpoint,
-                        active.prior_prefix_matches,
-                    )
-                });
+                let transition = terminal_checkpoint.as_ref().map(cold_transition);
                 if let Some(failure) = self.certify_array_boundary(&active)? {
                     self.finish_array_failure(&active, failure);
                     return Ok(None);
