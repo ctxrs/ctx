@@ -172,7 +172,7 @@ fn load_catalog_revision(
             path.display()
         );
     }
-    let file = File::open(&path)
+    let file = File::open(path)
         .with_context(|| format!("open explicit source catalog {}", path.display()))?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(CATALOG_MAX_BYTES.saturating_add(1))
