@@ -41,51 +41,6 @@ fn search_event_ids(index: &VerifiedIndex, query: &str) -> Vec<StableEntityId> {
         .collect()
 }
 
-fn exact_source_page_oracle(sessions: &Path, index: &VerifiedIndex) -> (u64, [u8; 32]) {
-    const ORACLE_PAGE_ITEMS: usize = 256;
-
-    let resolver = CodexLocatorResolverV0::discover([sessions]).unwrap();
-    let mut sources = index
-        .manifest()
-        .sources
-        .iter()
-        .map(|source| source.observation().source().clone())
-        .collect::<Vec<_>>();
-    sources.sort_by_key(SourceKey::exact_descriptor_digest);
-    let mut count = 0_u64;
-    let mut digest = Sha256::new();
-    for source in sources {
-        let mut cursor = None;
-        loop {
-            let page = index
-                .source_event_page(&source, cursor.as_ref(), ORACLE_PAGE_ITEMS)
-                .unwrap();
-            for event in &page.items {
-                let hydrated = resolver.hydrate(&event.locator).unwrap();
-                let text = hydrated.decoded_display_text.as_deref().unwrap_or_else(|| {
-                    panic!(
-                        "Core-published Codex event {} has no exact display text",
-                        event.event_id
-                    )
-                });
-                digest.update(source.exact_descriptor_digest());
-                digest.update(event.event_id.digest());
-                digest.update((text.len() as u64).to_be_bytes());
-                digest.update(text.as_bytes());
-                count = count.checked_add(1).unwrap();
-            }
-            if page.terminal {
-                break;
-            }
-            cursor = Some(
-                page.next_cursor
-                    .expect("non-terminal source page must carry a cursor"),
-            );
-        }
-    }
-    (count, digest.finalize().into())
-}
-
 fn session_path(sessions: &Path, native_session_id: &str) -> PathBuf {
     sessions.join(format!("rollout-{native_session_id}.jsonl"))
 }
