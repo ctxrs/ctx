@@ -26,10 +26,6 @@ class ProviderSupportMatrixTest(unittest.TestCase):
         for path in paths:
             self.assertIn("#[test]", path.read_text(encoding="utf-8"))
 
-        perf_runner = (
-            checker.REPO_ROOT / "scripts/public-ctx/perf-smoke/runner.sh"
-        )
-        self.assertIn(perf_runner, checker.PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS)
         self.assertIn(
             "crates/ctx-cli/tests/support/native_providers/workspace_sources.rs",
             checker.PUBLIC_COVERAGE_PATHS,

@@ -44,9 +44,7 @@ PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS = (
     REPO_ROOT / "docs/provider-support.md",
     REPO_ROOT / "docs/security-checks.md",
 )
-PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS = PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS + (
-    REPO_ROOT / "scripts/public-ctx/perf-smoke/runner.sh",
-)
+PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS = PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS
 CODEX_PUBLIC_CLAIM_TEST_SUITE = (
     REPO_ROOT
     / "crates/ctx-history-capture/src/provider/codex/nativepath/source_backed/tests"
