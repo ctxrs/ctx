@@ -8,7 +8,9 @@ Usage: build-linux-x64-bazel-dogfood.sh --staging-dogfood --source-commit SHA --
 
 Builds and packages one staging-only Linux x64 Core dogfood candidate through
 //:ctx_release_linux_x64 --config=release. This command does not sign, upload,
-publish, deploy, or update a release channel.
+publish, deploy, or update a release channel. Absolute CTX_OSV_SCANNER,
+CTX_OSV_DATABASE_DIR, and CTX_OSV_DATABASE_METADATA inputs are required for
+the offline advisory gate.
 USAGE
 }
 
@@ -78,6 +80,33 @@ for command in docker flock git python3 sha256sum; do
   command -v "${command}" >/dev/null 2>&1 \
     || die "required builder command is unavailable: ${command}"
 done
+
+osv_scanner_input="${CTX_OSV_SCANNER:-}"
+osv_database_input="${CTX_OSV_DATABASE_DIR:-}"
+osv_metadata_input="${CTX_OSV_DATABASE_METADATA:-}"
+for variable in \
+  CTX_OSV_SCANNER CTX_OSV_DATABASE_DIR CTX_OSV_DATABASE_METADATA; do
+  [[ -n "${!variable:-}" ]] \
+    || die "Linux x64 Bazel dogfood construction requires ${variable}"
+  [[ "${!variable}" == /* ]] \
+    || die "${variable} must be an absolute path"
+done
+[[ -f "${osv_scanner_input}" && ! -L "${osv_scanner_input}" \
+  && -x "${osv_scanner_input}" ]] \
+  || die "CTX_OSV_SCANNER must be an executable non-symlink file"
+[[ -d "${osv_database_input}" && ! -L "${osv_database_input}" ]] \
+  || die "CTX_OSV_DATABASE_DIR must be a non-symlink directory"
+[[ -f "${osv_metadata_input}" && ! -L "${osv_metadata_input}" ]] \
+  || die "CTX_OSV_DATABASE_METADATA must be a regular non-symlink file"
+osv_scanner_input="$(
+  cd "$(dirname "${osv_scanner_input}")"
+  printf '%s/%s\n' "$(pwd -P)" "$(basename "${osv_scanner_input}")"
+)"
+osv_database_input="$(cd "${osv_database_input}" && pwd -P)"
+osv_metadata_input="$(
+  cd "$(dirname "${osv_metadata_input}")"
+  printf '%s/%s\n' "$(pwd -P)" "$(basename "${osv_metadata_input}")"
+)"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${repo_root}"
@@ -261,8 +290,14 @@ docker_run_args=(
   -e TMPDIR=/tmp
   -e CTX_BAZEL_BIN=/opt/ctx/bin/bazel
   -e CTX_BAZEL_CACHE_ROOT=/build/cache
+  -e CTX_OSV_SCANNER=/release-advisory/osv-scanner
+  -e CTX_OSV_DATABASE_DIR=/release-advisory/database
+  -e CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json
   -v "${repo_root}:${repo_root}:ro"
   -v "${task_root}:/build:rw"
+  -v "${osv_scanner_input}:/release-advisory/osv-scanner:ro"
+  -v "${osv_database_input}:/release-advisory/database:ro"
+  -v "${osv_metadata_input}:/release-advisory/database-metadata.json:ro"
   -w "${repo_root}"
 )
 git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"

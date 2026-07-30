@@ -308,6 +308,12 @@ esac
         self.assertIn('BUILD_WORKSPACE_DIRECTORY="$PWD"', builder)
         self.assertIn('RUNFILES_DIR="$route.runfiles"', builder)
         self.assertIn("--network none", builder)
+        for value in (
+            "CTX_OSV_SCANNER=/release-advisory/osv-scanner",
+            "CTX_OSV_DATABASE_DIR=/release-advisory/database",
+            "CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json",
+        ):
+            self.assertIn(value, builder)
         self.assertNotIn("cargo build", builder)
         self.assertNotIn("cargo zigbuild", builder)
         self.assertNotIn("qemu-", builder)

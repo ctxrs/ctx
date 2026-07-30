@@ -48,12 +48,31 @@ for required in \
   'bazel_binary_sha256=c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b' \
   '--build-arg "BAZEL_ARCH=${bazel_binary_arch}"' \
   '--build-arg "BAZEL_SHA256=${bazel_binary_sha256}"' \
-  '--build-arg "RELEASE_ARCH=x86_64"'; do
+  '--build-arg "RELEASE_ARCH=x86_64"' \
+  'CTX_OSV_SCANNER=/release-advisory/osv-scanner' \
+  'CTX_OSV_DATABASE_DIR=/release-advisory/database' \
+  'CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json'; do
   grep -Fq -- "${required}" "${dogfood_wrapper}" || {
     printf 'Linux x64 dogfood wrapper missing architecture pin: %s\n' \
       "${required}" >&2
     exit 1
   }
+done
+
+for release_wrapper in "${wrapper}" "${dogfood_wrapper}"; do
+  for required in \
+    'CTX_OSV_SCANNER must be an executable non-symlink file' \
+    'CTX_OSV_DATABASE_DIR must be a non-symlink directory' \
+    'CTX_OSV_DATABASE_METADATA must be a regular non-symlink file' \
+    '${osv_scanner_input}:/release-advisory/osv-scanner:ro' \
+    '${osv_database_input}:/release-advisory/database:ro' \
+    '${osv_metadata_input}:/release-advisory/database-metadata.json:ro'; do
+    grep -Fq -- "${required}" "${release_wrapper}" || {
+      printf 'native Linux Bazel wrapper omits advisory input: %s\n' \
+        "${required}" >&2
+      exit 1
+    }
+  done
 done
 
 for required in \

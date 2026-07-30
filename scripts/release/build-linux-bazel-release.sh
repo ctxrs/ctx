@@ -9,7 +9,9 @@ Usage: build-linux-bazel-release.sh --platform <linux-x64|linux-arm64> --source-
 Builds and packages one native Linux Core candidate through the matching
 //:ctx_release_<target> --config=release route. The package version and output
 name come from the tracked source and release-target contract. This command
-does not sign, upload, publish, deploy, or update a release channel.
+requires absolute CTX_OSV_SCANNER, CTX_OSV_DATABASE_DIR, and
+CTX_OSV_DATABASE_METADATA inputs for its offline advisory gate. It does not
+sign, upload, publish, deploy, or update a release channel.
 USAGE
 }
 
@@ -87,6 +89,33 @@ for command in docker flock git python3 sha256sum; do
   command -v "${command}" >/dev/null 2>&1 \
     || die "required builder command is unavailable: ${command}"
 done
+
+osv_scanner_input="${CTX_OSV_SCANNER:-}"
+osv_database_input="${CTX_OSV_DATABASE_DIR:-}"
+osv_metadata_input="${CTX_OSV_DATABASE_METADATA:-}"
+for variable in \
+  CTX_OSV_SCANNER CTX_OSV_DATABASE_DIR CTX_OSV_DATABASE_METADATA; do
+  [[ -n "${!variable:-}" ]] \
+    || die "native Linux release construction requires ${variable}"
+  [[ "${!variable}" == /* ]] \
+    || die "${variable} must be an absolute path"
+done
+[[ -f "${osv_scanner_input}" && ! -L "${osv_scanner_input}" \
+  && -x "${osv_scanner_input}" ]] \
+  || die "CTX_OSV_SCANNER must be an executable non-symlink file"
+[[ -d "${osv_database_input}" && ! -L "${osv_database_input}" ]] \
+  || die "CTX_OSV_DATABASE_DIR must be a non-symlink directory"
+[[ -f "${osv_metadata_input}" && ! -L "${osv_metadata_input}" ]] \
+  || die "CTX_OSV_DATABASE_METADATA must be a regular non-symlink file"
+osv_scanner_input="$(
+  cd "$(dirname "${osv_scanner_input}")"
+  printf '%s/%s\n' "$(pwd -P)" "$(basename "${osv_scanner_input}")"
+)"
+osv_database_input="$(cd "${osv_database_input}" && pwd -P)"
+osv_metadata_input="$(
+  cd "$(dirname "${osv_metadata_input}")"
+  printf '%s/%s\n' "$(pwd -P)" "$(basename "${osv_metadata_input}")"
+)"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${repo_root}"
@@ -291,8 +320,14 @@ docker_run_args=(
   -e "CTX_RELEASE_ROUTE_BINARY=${route_binary}"
   -e "CTX_RELEASE_TARGET_ID=${CTX_PUBLIC_TARGET_ID}"
   -e "CTX_RELEASE_BINARY_NAME=${CTX_PUBLIC_TARGET_BINARY}"
+  -e CTX_OSV_SCANNER=/release-advisory/osv-scanner
+  -e CTX_OSV_DATABASE_DIR=/release-advisory/database
+  -e CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json
   -v "${repo_root}:${repo_root}:ro"
   -v "${task_root}:/build:rw"
+  -v "${osv_scanner_input}:/release-advisory/osv-scanner:ro"
+  -v "${osv_database_input}:/release-advisory/database:ro"
+  -v "${osv_metadata_input}:/release-advisory/database-metadata.json:ro"
   -w "${repo_root}"
 )
 if [[ "${cache_root}" != "${task_root}/cache" ]]; then
