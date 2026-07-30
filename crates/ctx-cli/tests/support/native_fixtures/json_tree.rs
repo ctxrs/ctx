@@ -567,11 +567,11 @@ pub(crate) fn write_native_qoder_fixture(temp: &TempDir, query: &str) -> String 
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": "call-qoder-cli-read",
-                        "content": "qoder-success-tool-output-sentinel",
+                        "content": "qoderleakproofxylophonium",
                         "is_error": false
                     }]
                 },
-                "toolUseResult": "qoder-success-tool-output-sentinel"
+                "toolUseResult": "qoderleakproofxylophonium"
             })
         ),
     )

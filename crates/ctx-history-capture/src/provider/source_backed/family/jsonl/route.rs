@@ -89,6 +89,10 @@ pub(crate) trait JsonlFamilyProjector: Send {
     ) -> Result<()> {
         self.finish()
     }
+
+    fn rejected_records(&self) -> u64 {
+        0
+    }
 }
 
 pub(crate) trait JsonlFamilyHydrator {
@@ -140,6 +144,7 @@ pub(crate) struct JsonlFamilyLeaf {
     observation: JsonlFileObservation,
     binding: TypedKey,
     identity_probe: Option<JsonlProbe>,
+    identity_probe_rejected_records: u64,
     whole_record: bool,
 }
 
@@ -185,6 +190,7 @@ impl JsonlFamilyLeaf {
         authority_path: PathBuf,
         binding: TypedKey,
         identity_probe: JsonlProbe,
+        identity_probe_rejected_records: u64,
     ) -> Result<Self> {
         let opened = authority.open_file(&authority_path)?;
         let observation = observe_opened_file(&source_path, &opened)?;
@@ -200,6 +206,7 @@ impl JsonlFamilyLeaf {
             observation,
             binding,
             identity_probe: Some(identity_probe),
+            identity_probe_rejected_records,
             whole_record: false,
         })
     }
@@ -223,6 +230,7 @@ impl JsonlFamilyLeaf {
             observation,
             binding,
             identity_probe: None,
+            identity_probe_rejected_records: 0,
             whole_record,
         })
     }
@@ -339,11 +347,12 @@ struct FamilyCheckpoint {
     binding_digest: [u8; 32],
     physical: JsonlCheckpoint,
     represented_physical_records: u64,
+    rejected_records: u64,
     indexed_documents: u64,
 }
 
 impl FamilyCheckpoint {
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
 
     fn valid_for(&self, adapter: &dyn JsonlFamilyAdapter, leaf: &JsonlFamilyLeaf) -> bool {
         self.version == Self::VERSION
@@ -351,7 +360,10 @@ impl FamilyCheckpoint {
             && binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
             && self.physical.is_internally_consistent()
             && self.physical.identity() == &physical_identity(adapter, leaf)
-            && self.represented_physical_records <= self.physical.next_physical_ordinal()
+            && self
+                .represented_physical_records
+                .checked_add(self.rejected_records)
+                .is_some_and(|classified| classified <= self.physical.next_physical_ordinal())
     }
 }
 
@@ -543,7 +555,11 @@ fn scan_leaf(
     let mut projector = adapter
         .projector(leaf, opened, DateTime::<Utc>::UNIX_EPOCH)
         .map_err(route_invalid)?;
-    let mut physical_records = u64::from(leaf.identity_probe.is_some());
+    let mut physical_records = leaf
+        .identity_probe
+        .as_ref()
+        .map(JsonlProbe::next_physical_ordinal)
+        .unwrap_or(0);
     let mut represented_records = 0_u64;
     let mut documents = 0_u64;
     while reader
@@ -585,6 +601,10 @@ fn scan_leaf(
             Ok(())
         })
         .map_err(route_invalid)?;
+    let rejected_records = leaf
+        .identity_probe_rejected_records
+        .checked_add(projector.rejected_records())
+        .ok_or_else(|| route_invalid("JSONL rejected count overflowed"))?;
     if documents != before_finish {
         represented_records = physical_records;
     }
@@ -602,6 +622,7 @@ fn scan_leaf(
         binding_digest: binding_digest(leaf).map_err(route_invalid)?,
         physical: outcome.checkpoint().clone(),
         represented_physical_records: represented_records,
+        rejected_records,
         indexed_documents: documents,
     };
     let certificate = certify(adapter, leaf, checkpoint)?;
@@ -618,14 +639,19 @@ fn certify(
     if !checkpoint.valid_for(adapter, leaf) {
         return Err(route_invalid("JSONL checkpoint is internally inconsistent"));
     }
+    let classified = checkpoint
+        .represented_physical_records
+        .checked_add(checkpoint.rejected_records)
+        .ok_or_else(|| route_invalid("JSONL classified count overflowed"))?;
     let ignored = checkpoint
         .physical
         .next_physical_ordinal()
-        .checked_sub(checkpoint.represented_physical_records)
+        .checked_sub(classified)
         .ok_or_else(|| route_invalid("JSONL ignored count underflowed"))?;
     let complete_records = checkpoint
         .indexed_documents
-        .checked_add(ignored)
+        .checked_add(checkpoint.rejected_records)
+        .and_then(|records| records.checked_add(ignored))
         .ok_or_else(|| route_invalid("JSONL complete count overflowed"))?;
     let frontier = SourceFrontier::new(
         FAMILY_FRONTIER_KIND,
@@ -643,7 +669,7 @@ fn certify(
         ScannedSourceCounts {
             complete_records,
             retained_records: checkpoint.indexed_documents,
-            rejected_records: 0,
+            rejected_records: checkpoint.rejected_records,
             ignored_records: ignored,
             indexed_documents: checkpoint.indexed_documents,
             certified_bytes: checkpoint.physical.complete_prefix_end(),
@@ -681,10 +707,14 @@ fn decode_checkpoint(
         ));
     };
     let checkpoint: FamilyCheckpoint = serde_json::from_slice(bytes)?;
+    let classified = checkpoint
+        .represented_physical_records
+        .checked_add(checkpoint.rejected_records)
+        .ok_or_else(|| CaptureError::InvalidPayload("JSONL base counts are invalid".to_owned()))?;
     let ignored = checkpoint
         .physical
         .next_physical_ordinal()
-        .checked_sub(checkpoint.represented_physical_records)
+        .checked_sub(classified)
         .ok_or_else(|| CaptureError::InvalidPayload("JSONL base counts are invalid".to_owned()))?;
     let counts = certificate.counts();
     if !checkpoint.valid_for(adapter, leaf)
@@ -693,9 +723,13 @@ fn decode_checkpoint(
         || checkpoint.physical.complete_prefix_sha256() != certificate.content_digest()
         || checkpoint.indexed_documents != counts.retained_records
         || checkpoint.indexed_documents != counts.indexed_documents
+        || checkpoint.rejected_records != counts.rejected_records
         || ignored != counts.ignored_records
-        || checkpoint.indexed_documents.checked_add(ignored) != Some(counts.complete_records)
-        || counts.rejected_records != 0
+        || checkpoint
+            .indexed_documents
+            .checked_add(checkpoint.rejected_records)
+            .and_then(|records| records.checked_add(ignored))
+            != Some(counts.complete_records)
         || checkpoint.physical.complete_prefix_end() != counts.certified_bytes
         || certificate.observation()
             != &source_observation(&leaf.source, checkpoint.physical.source_observation())?

@@ -135,6 +135,12 @@ pub(crate) struct JsonlProbe {
     next_physical_ordinal: u64,
 }
 
+impl JsonlProbe {
+    pub(crate) fn next_physical_ordinal(&self) -> u64 {
+        self.next_physical_ordinal
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JsonlCheckpoint {
@@ -621,6 +627,36 @@ pub(crate) fn probe_first_record<T, E>(
 where
     E: From<CaptureError>,
 {
+    let mut visit = Some(visit);
+    probe_records_until(source_path, source_file, 1, |record| {
+        visit.take().ok_or_else(|| {
+            E::from(CaptureError::SystemInvariant(
+                "provider identity probe visited more than one record",
+            ))
+        })?(record)
+        .map(Some)
+    })?
+    .ok_or_else(|| {
+        E::from(CaptureError::InvalidPayload(
+            "provider identity record is missing or incomplete".to_owned(),
+        ))
+    })
+}
+
+pub(crate) fn probe_records_until<T, E>(
+    source_path: &Path,
+    source_file: &Arc<OpenedProviderSourceFile>,
+    max_records: usize,
+    mut visit: impl FnMut(JsonlRecordRef<'_>) -> std::result::Result<Option<T>, E>,
+) -> std::result::Result<Option<(T, JsonlProbe)>, E>
+where
+    E: From<CaptureError>,
+{
+    if max_records == 0 || max_records > PAGE_MAX_RECORDS {
+        return Err(E::from(CaptureError::SystemInvariant(
+            "provider identity probe record bound is invalid",
+        )));
+    }
     source_file.revalidate().map_err(E::from)?;
     let observation = observe_metadata(source_path, source_file.file(), source_file.metadata())
         .map_err(E::from)?;
@@ -635,20 +671,24 @@ where
     let mut reader = BufReader::new(file);
     let mut hasher = new_prefix_hasher();
     let mut buffer = Vec::new();
-    let (end, record_digest, wire_bytes) =
-        match read_bounded_line(&mut reader, &mut buffer, &mut hasher, observation.length, 0)
-            .map_err(E::from)?
+    let mut start = 0_u64;
+    let mut page_bytes = 0_usize;
+    for ordinal in 0..max_records {
+        let (end, record_digest, wire_bytes) = match read_bounded_line(
+            &mut reader,
+            &mut buffer,
+            &mut hasher,
+            observation.length,
+            start,
+        )
+        .map_err(E::from)?
         {
             RawLine::Complete {
                 end,
                 record_digest,
                 wire_bytes,
             } => (end, record_digest, wire_bytes),
-            RawLine::EndOfFile | RawLine::IncompleteTail => {
-                return Err(E::from(CaptureError::InvalidPayload(
-                    "provider identity record is missing or incomplete".to_owned(),
-                )));
-            }
+            RawLine::EndOfFile | RawLine::IncompleteTail => break,
             RawLine::Oversized => {
                 return Err(E::from(CaptureError::InvalidPayload(format!(
                     "provider identity record exceeds the {} byte JSONL record limit",
@@ -656,21 +696,52 @@ where
                 ))));
             }
         };
-    if wire_bytes > PAGE_MAX_BYTES {
-        return Err(E::from(CaptureError::InvalidPayload(format!(
-            "provider identity record exceeds the {} byte JSONL physical page limit",
-            PAGE_MAX_BYTES
-        ))));
+        page_bytes = page_bytes.saturating_add(wire_bytes);
+        if page_bytes > PAGE_MAX_BYTES {
+            return Err(E::from(CaptureError::InvalidPayload(format!(
+                "provider identity probe exceeds the {} byte JSONL physical page limit",
+                PAGE_MAX_BYTES
+            ))));
+        }
+        let physical_ordinal = u64::try_from(ordinal).map_err(|_| {
+            E::from(CaptureError::SystemInvariant(
+                "provider identity probe ordinal exceeds u64",
+            ))
+        })?;
+        if let Some(value) = visit(JsonlRecordRef {
+            bytes: &buffer,
+            evidence: JsonlRecordEvidence {
+                physical_ordinal,
+                byte_start: start,
+                byte_end_exclusive: end,
+                record_digest,
+            },
+        })? {
+            if observe_metadata(
+                source_path,
+                reader.get_ref(),
+                &reader
+                    .get_ref()
+                    .metadata()
+                    .map_err(CaptureError::from)
+                    .map_err(E::from)?,
+            )? != observation
+            {
+                return Err(E::from(CaptureError::SourceChangedDuringCapture));
+            }
+            source_file.revalidate().map_err(E::from)?;
+            return Ok(Some((
+                value,
+                JsonlProbe {
+                    observation,
+                    prefix_hasher: hasher,
+                    complete_prefix_end: end,
+                    next_physical_ordinal: physical_ordinal.saturating_add(1),
+                },
+            )));
+        }
+        start = end;
     }
-    let value = visit(JsonlRecordRef {
-        bytes: &buffer,
-        evidence: JsonlRecordEvidence {
-            physical_ordinal: 0,
-            byte_start: 0,
-            byte_end_exclusive: end,
-            record_digest,
-        },
-    })?;
     if observe_metadata(
         source_path,
         reader.get_ref(),
@@ -684,15 +755,7 @@ where
         return Err(E::from(CaptureError::SourceChangedDuringCapture));
     }
     source_file.revalidate().map_err(E::from)?;
-    Ok((
-        value,
-        JsonlProbe {
-            observation,
-            prefix_hasher: hasher,
-            complete_prefix_end: end,
-            next_physical_ordinal: 1,
-        },
-    ))
+    Ok(None)
 }
 
 pub(crate) fn observe_opened_file(

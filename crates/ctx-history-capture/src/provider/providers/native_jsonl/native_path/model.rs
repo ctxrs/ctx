@@ -73,6 +73,7 @@ pub(crate) struct DirectJsonlCheckpoint {
     pub(crate) accepted_events: u64,
     pub(crate) accepted_file_touches: u64,
     pub(crate) rejected_records: u64,
+    pub(crate) rejection_details: Vec<DirectJsonlRejection>,
     pub(crate) represented_physical_records: u64,
     pub(crate) ignored_records: u64,
     pub(crate) indexed_documents: u64,
@@ -80,7 +81,7 @@ pub(crate) struct DirectJsonlCheckpoint {
 }
 
 impl DirectJsonlCheckpoint {
-    pub(crate) const VERSION: u32 = 2;
+    pub(crate) const VERSION: u32 = 3;
 
     pub(crate) fn is_internally_consistent(&self) -> bool {
         let Some(classified_physical) = self
@@ -94,6 +95,15 @@ impl DirectJsonlCheckpoint {
             && self.physical.is_internally_consistent()
             && classified_physical == self.physical.next_physical_ordinal()
             && self.accepted_events == self.indexed_documents
+            && self.rejection_details.len()
+                <= super::source_backed::DIRECT_JSONL_MAX_REJECTION_DETAILS
+            && u64::try_from(self.rejection_details.len())
+                .is_ok_and(|details| details <= self.rejected_records)
+            && self.rejection_details.iter().all(|rejection| {
+                rejection.raw_ordinal < self.physical.next_physical_ordinal()
+                    && rejection.byte_start < rejection.byte_end_exclusive
+                    && rejection.byte_end_exclusive <= self.physical.complete_prefix_end()
+            })
             && self.session.is_some()
     }
 }

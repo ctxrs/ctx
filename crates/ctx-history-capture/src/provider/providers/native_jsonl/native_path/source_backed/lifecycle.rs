@@ -14,9 +14,9 @@ use super::{
     DirectJsonlSourceBackedError, DirectJsonlSourceBackedResult, ProjectedLine,
     DIRECT_JSONL_DISCOVERY_REVISION, DIRECT_JSONL_DOCUMENT_METADATA_BYTES,
     DIRECT_JSONL_MAX_EXPANDED_RECORD_BYTES, DIRECT_JSONL_MAX_EXPANDED_RECORD_UNITS,
-    DIRECT_JSONL_MAX_TOUCHED_FILES, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
-    DIRECT_JSONL_NATIVEPATH_POLICY_REVISION, DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION,
-    DIRECT_JSONL_SOURCE_FRONTIER_KIND,
+    DIRECT_JSONL_MAX_REJECTION_DETAILS, DIRECT_JSONL_MAX_TOUCHED_FILES,
+    DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
+    DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION, DIRECT_JSONL_SOURCE_FRONTIER_KIND,
 };
 use crate::{
     provider::source_backed::family::jsonl::{JsonlFileObservation, JsonlReader},
@@ -59,9 +59,7 @@ impl DirectJsonlSourceAdapter {
             return Ok(false);
         }
         let current = self.discover(root)?;
-        Ok(current.is_exact_complete()
-            && &current.observation == expected.observation()
-            && current.leaves.len() == expected.observed_sources())
+        Ok(current.is_exact_complete() && &current.observation == expected.observation())
     }
 
     pub(crate) fn revalidate_deletion(
@@ -77,9 +75,7 @@ impl DirectJsonlSourceAdapter {
             return Ok(false);
         }
         let current = self.discover(root)?;
-        Ok(current.is_exact_complete()
-            && &current.observation == deletion.inventory()
-            && u64::try_from(current.leaves.len()).ok() == Some(deletion.observed_sources()))
+        Ok(current.is_exact_complete() && &current.observation == deletion.inventory())
     }
 }
 
@@ -93,6 +89,7 @@ pub(crate) struct DirectJsonlSourceReader {
     pub(super) accepted_events: u64,
     pub(super) accepted_file_touches: u64,
     pub(super) rejected_records: u64,
+    pub(super) rejection_details: Vec<super::super::DirectJsonlRejection>,
     pub(super) represented_physical_records: u64,
     pub(super) ignored_records: u64,
     pub(super) indexed_documents: u64,
@@ -124,6 +121,8 @@ impl DirectJsonlSourceReader {
                 projected,
                 &mut self.accepted_events,
                 &mut self.accepted_file_touches,
+                &mut self.rejected_records,
+                &mut self.rejection_details,
                 &mut self.represented_physical_records,
                 &mut self.ignored_records,
                 &mut self.indexed_documents,
@@ -136,6 +135,8 @@ impl DirectJsonlSourceReader {
             let projector = &mut self.projector;
             let accepted_events = &mut self.accepted_events;
             let accepted_file_touches = &mut self.accepted_file_touches;
+            let rejected_records = &mut self.rejected_records;
+            let rejection_details = &mut self.rejection_details;
             let represented_physical_records = &mut self.represented_physical_records;
             let ignored_records = &mut self.ignored_records;
             let indexed_documents = &mut self.indexed_documents;
@@ -150,6 +151,8 @@ impl DirectJsonlSourceReader {
                         projected,
                         accepted_events,
                         accepted_file_touches,
+                        rejected_records,
+                        rejection_details,
                         represented_physical_records,
                         ignored_records,
                         indexed_documents,
@@ -185,6 +188,7 @@ impl DirectJsonlSourceReader {
             accepted_events: self.accepted_events,
             accepted_file_touches: self.accepted_file_touches,
             rejected_records: self.rejected_records,
+            rejection_details: self.rejection_details.clone(),
             represented_physical_records: self.represented_physical_records,
             ignored_records: self.ignored_records,
             indexed_documents: self.indexed_documents,
@@ -270,6 +274,7 @@ impl DirectJsonlSourceReader {
         Ok(DirectJsonlScanReceipt {
             source: self.selected.source,
             certificate,
+            rejection_details: self.rejection_details,
             #[cfg(test)]
             disposition: self.disposition,
             append,
@@ -286,6 +291,8 @@ fn emit_projected(
     projected: ProjectedLine,
     accepted_events: &mut u64,
     accepted_file_touches: &mut u64,
+    rejected_records: &mut u64,
+    rejection_details: &mut Vec<super::super::DirectJsonlRejection>,
     represented_physical_records: &mut u64,
     ignored_records: &mut u64,
     indexed_documents: &mut u64,
@@ -309,10 +316,18 @@ fn emit_projected(
         ));
     }
     if !projected.rejections.is_empty() {
-        return Err(DirectJsonlSourceBackedError::RejectedSource {
-            path: selected.leaf.path.clone(),
-            rejected: projected.rejections.len(),
-        });
+        if !projected.events.is_empty() {
+            return Err(DirectJsonlSourceBackedError::CountMismatch);
+        }
+        let rejected = u64::try_from(projected.rejections.len())
+            .map_err(|_| DirectJsonlSourceBackedError::CountMismatch)?;
+        *rejected_records = rejected_records
+            .checked_add(rejected)
+            .ok_or(DirectJsonlSourceBackedError::CountMismatch)?;
+        let remaining_details =
+            DIRECT_JSONL_MAX_REJECTION_DETAILS.saturating_sub(rejection_details.len());
+        rejection_details.extend(projected.rejections.into_iter().take(remaining_details));
+        return Ok(());
     }
     let session = session.ok_or(DirectJsonlSourceBackedError::NativeSessionChanged)?;
     if session.native_session_id != selected.session.native_session_id
@@ -353,6 +368,7 @@ fn emit_projected(
 pub(crate) struct DirectJsonlScanReceipt {
     source: SourceKey,
     certificate: CertifiedSource,
+    rejection_details: Vec<super::super::DirectJsonlRejection>,
     #[cfg(test)]
     disposition: DirectJsonlDisposition,
     append: Option<CertifiedSourceAppend>,
@@ -366,6 +382,10 @@ impl DirectJsonlScanReceipt {
 
     pub(crate) fn certificate(&self) -> &CertifiedSource {
         &self.certificate
+    }
+
+    pub(crate) fn rejections(&self) -> &[super::super::DirectJsonlRejection] {
+        &self.rejection_details
     }
 
     #[cfg(test)]

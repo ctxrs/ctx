@@ -120,14 +120,22 @@ fn capture(
     }
     let base_sources = source_backed_base_sources(sink, |source| adapter.owns(source));
     let mut sources = Vec::with_capacity(inventory.leaves().len());
+    let mut admission_rejections = Vec::new();
     for leaf in inventory.leaves() {
         let base = base_sources
             .iter()
             .find(|base| adapter.certificate_belongs_to_leaf(leaf, base))
             .cloned();
-        let mut reader = adapter
-            .open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH, base.as_ref())
-            .map_err(route_error)?;
+        let mut reader = match adapter.open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH, base.as_ref()) {
+            Ok(reader) => reader,
+            Err(super::DirectJsonlSourceBackedError::RejectedSource { path, rejections })
+                if base.is_none() =>
+            {
+                admission_rejections.push((path, rejections));
+                continue;
+            }
+            Err(error) => return Err(route_error(error)),
+        };
         let source = reader.source().clone();
         match reader.disposition() {
             DirectJsonlDisposition::Unchanged | DirectJsonlDisposition::Append => {
@@ -154,6 +162,14 @@ fn capture(
             })
             .map_err(route_error)?;
         let receipt = reader.finish().map_err(route_error)?;
+        if u64::try_from(receipt.rejections().len()).map_or(true, |details| {
+            details > receipt.certificate().counts().rejected_records
+        }) {
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                "direct JSONL typed rejection details exceed the certified rejection count",
+            ));
+        }
         terminal_evidence
             .record(receipt.terminal_evidence())
             .map_err(route_error)?;
@@ -165,6 +181,25 @@ fn capture(
             sink.certify_source(receipt.certificate().clone())
                 .map_err(route_coordinator_error)?;
         }
+    }
+    if sources.is_empty() && !admission_rejections.is_empty() {
+        let rejected_records = admission_rejections
+            .iter()
+            .map(|(_, rejections)| rejections.len())
+            .sum::<usize>();
+        let (path, rejections) = &admission_rejections[0];
+        let first_reason = rejections
+            .first()
+            .map(|rejection| rejection.reason.as_str())
+            .unwrap_or("provider-native session identity was rejected");
+        return Err(SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::InvalidSource,
+            format!(
+                "direct JSONL route rejected {rejected_records} records across {} sources; first rejection in {}: {first_reason}",
+                admission_rejections.len(),
+                path.display()
+            ),
+        ));
     }
     let closing = adapter.discover(root).map_err(route_error)?;
     let certified_inventory = inventory

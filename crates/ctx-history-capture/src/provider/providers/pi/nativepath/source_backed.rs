@@ -29,7 +29,7 @@ use crate::{
         provider_path_identity,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
-            observe_opened_file, probe_first_record, JsonlFamilyAdapter, JsonlFamilyHydrator,
+            observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyHydrator,
             JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
             JsonlRecordRef,
         },
@@ -50,8 +50,9 @@ const NATIVE_EVENT_POSITION_KIND: &str = "pi.jsonl.record-ordinal";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v1";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v2";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
+const MAX_HEADER_PROBE_RECORDS: usize = 64;
 
 #[cfg(test)]
 thread_local! {
@@ -107,6 +108,7 @@ struct PiJsonlAdapter {
 struct CachedBinding {
     observation: JsonlFileObservation,
     binding: Binding,
+    identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +118,7 @@ struct Binding {
     parent_session_id: Option<String>,
     cwd: Option<String>,
     header_digest: [u8; 32],
+    leading_rejected_records: u64,
 }
 
 impl JsonlFamilyAdapter for PiJsonlAdapter {
@@ -175,11 +178,35 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
             let opened = Arc::new(authority.open_file(&relative_path)?);
             let observation = observe_opened_file(&path, opened.as_ref())?;
             let (binding, identity_probe) = match previous.get(&path) {
-                Some(cached) if cached.observation == observation => (cached.binding.clone(), None),
+                Some(cached) if cached.observation == observation => {
+                    (cached.binding.clone(), cached.identity_probe.clone())
+                }
                 _ => {
-                    let (binding, probe) =
-                        probe_first_record(&path, &opened, parse_header_binding)?;
-                    (binding, Some(probe))
+                    let mut leading_rejected_records = 0_u64;
+                    let (binding, probe) = probe_records_until(
+                        &path,
+                        &opened,
+                        MAX_HEADER_PROBE_RECORDS,
+                        |record| -> Result<Option<Binding>> {
+                            let Some(mut binding) = parse_header_binding(record)? else {
+                                leading_rejected_records = leading_rejected_records
+                                    .checked_add(1)
+                                    .ok_or(CaptureError::SystemInvariant(
+                                        "Pi identity rejection count overflowed",
+                                    ))?;
+                                return Ok(None);
+                            };
+                            binding.leading_rejected_records = leading_rejected_records;
+                            Ok(Some(binding))
+                        },
+                    )?
+                    .ok_or_else(|| {
+                        CaptureError::InvalidPayload(
+                            "Pi source has no valid session header within the bounded identity probe"
+                                .to_owned(),
+                        )
+                    })?;
+                    (binding, probe)
                 }
             };
             let source = source_key(&binding.native_session_id)?;
@@ -191,6 +218,7 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
                         CachedBinding {
                             observation,
                             binding,
+                            identity_probe,
                         },
                     );
                     continue;
@@ -205,26 +233,19 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
                 CachedBinding {
                     observation,
                     binding: binding.clone(),
+                    identity_probe: identity_probe.clone(),
                 },
             );
             let binding_key = TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?;
-            leaves.push(match identity_probe {
-                Some(probe) => JsonlFamilyLeaf::observe_after_identity_probe(
-                    source,
-                    path,
-                    Arc::clone(&authority),
-                    relative_path,
-                    binding_key,
-                    probe,
-                )?,
-                None => JsonlFamilyLeaf::observe(
-                    source,
-                    path,
-                    Arc::clone(&authority),
-                    relative_path,
-                    binding_key,
-                )?,
-            });
+            leaves.push(JsonlFamilyLeaf::observe_after_identity_probe(
+                source,
+                path,
+                Arc::clone(&authority),
+                relative_path,
+                binding_key,
+                identity_probe,
+                binding.leading_rejected_records,
+            )?);
         }
         *self
             .bindings
@@ -253,6 +274,7 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
             parent_session_id,
             session_id,
             binding,
+            rejected_records: 0,
         }))
     }
 
@@ -276,6 +298,7 @@ struct PiProjector {
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
+    rejected_records: u64,
 }
 
 impl JsonlFamilyProjector for PiProjector {
@@ -286,16 +309,16 @@ impl JsonlFamilyProjector for PiProjector {
     ) -> Result<()> {
         let evidence = record.evidence();
         let bytes = record.bytes();
-        if evidence.physical_ordinal() == 0 {
-            if Sha256::digest(bytes).as_slice() != self.binding.header_digest {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            return Ok(());
-        }
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(());
         }
         let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+            self.rejected_records =
+                self.rejected_records
+                    .checked_add(1)
+                    .ok_or(CaptureError::SystemInvariant(
+                        "Pi projection rejection count overflowed",
+                    ))?;
             return Ok(());
         };
         if value.get("type").and_then(Value::as_str) == Some("session") {
@@ -405,6 +428,10 @@ impl JsonlFamilyProjector for PiProjector {
             touched_files,
         })
     }
+
+    fn rejected_records(&self) -> u64 {
+        self.rejected_records
+    }
 }
 
 struct PiHydrator {
@@ -469,34 +496,27 @@ impl JsonlFamilyHydrator for PiHydrator {
     }
 }
 
-fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Binding> {
+fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
     #[cfg(test)]
     HEADER_PROBES.with(|count| count.set(count.get().saturating_add(1)));
-    if record.evidence().physical_ordinal() != 0 {
-        return Err(CaptureError::SystemInvariant(
-            "Pi identity probe did not read the first record",
-        ));
-    }
-    let value: Value = serde_json::from_slice(record.bytes())?;
+    let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
+        return Ok(None);
+    };
     if value.get("type").and_then(Value::as_str) != Some("session") {
-        return Err(CaptureError::InvalidPayload(
-            "Pi source does not start with a session header".to_owned(),
-        ));
+        return Ok(None);
     }
-    let native_session_id = value
+    let Some(native_session_id) = value
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload("Pi session header is missing its identity".to_owned())
-        })?
-        .to_owned();
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
     if event_timestamp(&value).is_none() {
-        return Err(CaptureError::InvalidPayload(
-            "Pi session header has no valid timestamp".to_owned(),
-        ));
+        return Ok(None);
     }
-    Ok(Binding {
+    Ok(Some(Binding {
         native_session_id,
         parent_session_id: value
             .get("parentSession")
@@ -504,7 +524,8 @@ fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Binding> {
             .map(str::to_owned),
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
         header_digest: Sha256::digest(record.bytes()).into(),
-    })
+        leading_rejected_records: 0,
+    }))
 }
 
 fn projected_body(value: &Value, event_type: EventType) -> Option<String> {

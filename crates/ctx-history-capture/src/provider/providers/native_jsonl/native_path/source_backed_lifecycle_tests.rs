@@ -68,6 +68,121 @@ fn writer_options() -> WriterOptions {
 }
 
 #[test]
+fn mixed_valid_and_malformed_records_publish_with_typed_rejection_evidence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join(".qwen/projects");
+    let transcript = provider_root.join("workspace/chats/qwen-mixed.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        &transcript,
+        QWEN_LIFECYCLE_TRANSCRIPT.replacen(
+            "\n",
+            "\n{\"type\":\"message\",\"message\":{\"content\":[\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let adapter = super::super::qwen_code_source_backed_adapter();
+    let inventory = adapter.discover(&provider_root).unwrap();
+    let mut reader = adapter
+        .open_leaf(
+            &inventory.leaves()[0],
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            None,
+        )
+        .unwrap();
+    let mut documents = Vec::new();
+    reader
+        .visit_documents(&mut |document| {
+            documents.push(document);
+            Ok(())
+        })
+        .unwrap();
+    let receipt = reader.finish().unwrap();
+
+    assert_eq!(documents.len(), 2);
+    assert_eq!(receipt.certificate().counts().complete_records, 3);
+    assert_eq!(receipt.certificate().counts().retained_records, 2);
+    assert_eq!(receipt.certificate().counts().rejected_records, 1);
+    assert_eq!(receipt.rejections().len(), 1);
+    assert_eq!(receipt.rejections()[0].raw_ordinal, 1);
+    assert!(receipt.rejections()[0].reason.contains("malformed JSONL"));
+
+    let base = receipt.certificate().clone();
+    let replay_inventory = adapter.discover(&provider_root).unwrap();
+    let mut replay = adapter
+        .open_leaf(
+            &replay_inventory.leaves()[0],
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            Some(&base),
+        )
+        .unwrap();
+    replay.visit_documents(&mut |_document| Ok(())).unwrap();
+    let replay = replay.finish().unwrap();
+    assert_eq!(replay.certificate(), &base);
+    assert_eq!(replay.rejections(), receipt.rejections());
+}
+
+#[test]
+fn cold_identity_rejection_isolated_from_valid_sibling_but_replacement_fails_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join(".qwen/projects");
+    let chats = provider_root.join("workspace/chats");
+    fs::create_dir_all(&chats).unwrap();
+    let valid = chats.join("valid.jsonl");
+    fs::write(&valid, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
+    fs::write(chats.join("malformed.jsonl"), b"{\"sessionId\":\n").unwrap();
+    let registry = qwen_registry(&provider_root);
+    let index_root = temp.path().join("index");
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.sources.len(), 1);
+    assert_eq!(cold.sources[0].counts().indexed_documents, 2);
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(unchanged.sources, cold.sources);
+
+    fs::write(&valid, b"{\"sessionId\":\n").unwrap();
+    assert!(
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err(),
+        "a previously certified leaf becoming identity-less must fail the route"
+    );
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        cold.commit.generation_id
+    );
+}
+
+#[test]
+fn malformed_sibling_does_not_invalidate_exact_deletion_proof() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join(".qwen/projects");
+    let chats = provider_root.join("workspace/chats");
+    fs::create_dir_all(&chats).unwrap();
+    let deleted = chats.join("deleted.jsonl");
+    fs::write(&deleted, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
+    fs::write(
+        chats.join("retained.jsonl"),
+        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-retained"),
+    )
+    .unwrap();
+    fs::write(chats.join("malformed.jsonl"), b"{\"sessionId\":\n").unwrap();
+    let registry = qwen_registry(&provider_root);
+    let index_root = temp.path().join("index");
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.sources.len(), 2);
+
+    fs::remove_file(deleted).unwrap();
+    let deletion =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(deletion.sources.len(), 1);
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(unchanged.sources, deletion.sources);
+}
+
+#[test]
 fn exact_noop_performs_zero_provider_projections_and_preserves_generation() {
     let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
     let index_root = temp.path().join("index");

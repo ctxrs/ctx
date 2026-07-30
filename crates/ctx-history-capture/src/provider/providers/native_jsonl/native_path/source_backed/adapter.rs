@@ -373,7 +373,7 @@ impl DirectJsonlSourceAdapter {
             if !projected.rejections.is_empty() {
                 return Err(DirectJsonlSourceBackedError::RejectedSource {
                     path: leaf.path.clone(),
-                    rejected: projected.rejections.len(),
+                    rejections: projected.rejections,
                 });
             }
             Ok(projected)
@@ -517,17 +517,19 @@ impl DirectJsonlSourceAdapter {
             accepted_events,
             accepted_file_touches,
             rejected_records,
+            rejection_details,
             represented_physical_records,
             ignored_records,
             indexed_documents,
             resumed_session,
         ) = resumed
             .as_ref()
-            .map_or((0, 0, 0, 0, 0, 0, None), |checkpoint| {
+            .map_or((0, 0, 0, Vec::new(), 0, 0, 0, None), |checkpoint| {
                 (
                     checkpoint.accepted_events,
                     checkpoint.accepted_file_touches,
                     checkpoint.rejected_records,
+                    checkpoint.rejection_details.clone(),
                     checkpoint.represented_physical_records,
                     checkpoint.ignored_records,
                     checkpoint.indexed_documents,
@@ -558,6 +560,7 @@ impl DirectJsonlSourceAdapter {
             accepted_events,
             accepted_file_touches,
             rejected_records,
+            rejection_details,
             represented_physical_records,
             ignored_records,
             indexed_documents,
