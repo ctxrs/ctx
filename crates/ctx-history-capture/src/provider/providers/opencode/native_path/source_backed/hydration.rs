@@ -6,7 +6,7 @@ use std::cell::Cell;
 use ctx_history_core::{
     BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, EventHydrationRequest,
     HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeRecordCoordinate, SessionHydrationRequest, SourceKey, SourceRecordLocator, TypedKey,
+    NativeRecordCoordinate, SourceRecordLocator, TypedKey,
 };
 use rusqlite::{types::Value, Connection};
 
@@ -16,7 +16,7 @@ use super::{
         decode_source_event_row, retained_projection, source_backed_retained_event_kind,
         source_backed_retained_searchable_text,
     },
-    source_event_row_digest, source_key, OpenCodeSourceBackedError,
+    schema_family_for_source, source_event_row_digest, source_key, OpenCodeSourceBackedError,
     OpenCodeSourceBackedRegistration, OpenCodeSourceBackedResult,
 };
 use crate::{
@@ -106,14 +106,6 @@ impl ContentSourceResolver for OpenCodeSourceBackedExactResolver {
         result.validate_for_request(request)?;
         Ok(result)
     }
-
-    fn hydrate_session(
-        &self,
-        request: &SessionHydrationRequest,
-    ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        self.hydrate_batch(request.batch())
-            .map(BatchHydrationResult::into_records)
-    }
 }
 
 impl OpenCodeSourceBackedExactResolver {
@@ -142,7 +134,7 @@ impl OpenCodeSourceBackedExactResolver {
         for locator in locators {
             self.validate_locator(locator)?;
         }
-        let family = locator_schema_family(self.registration.dialect, locators[0].source())
+        let family = schema_family_for_source(self.registration.dialect, locators[0].source())
             .ok_or_else(|| {
                 hydration_failure(
                     HydrationFailureKind::InvalidLocator,
@@ -207,7 +199,7 @@ impl OpenCodeSourceBackedExactResolver {
             || locator.source().source_format() != self.registration.source_format()
             || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
             || locator.certified_source_revision_digest().is_some()
-            || locator_schema_family(self.registration.dialect, locator.source()).is_none()
+            || schema_family_for_source(self.registration.dialect, locator.source()).is_none()
         {
             return Err(hydration_failure(
                 HydrationFailureKind::InvalidLocator,
@@ -274,23 +266,6 @@ fn probe_hydration_schema(
         schema_version,
         session_columns: session_columns.keys().cloned().collect(),
         event_has_type,
-    })
-}
-
-fn locator_schema_family(
-    dialect: &OpenCodeSqliteDialect,
-    source: &SourceKey,
-) -> Option<OpenCodeNativeSchemaFamily> {
-    [
-        OpenCodeNativeSchemaFamily::SessionMessageSeq,
-        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
-        OpenCodeNativeSchemaFamily::SessionEntry,
-        OpenCodeNativeSchemaFamily::LegacyMessage,
-        OpenCodeNativeSchemaFamily::MessagePart,
-    ]
-    .into_iter()
-    .find(|family| {
-        source_key(dialect, *family).is_ok_and(|candidate| candidate.exact_descriptor_eq(source))
     })
 }
 

@@ -38,7 +38,7 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider::{
         normalization::provider_required_timestamp_millis,
-        providers::opencode::OpenCodeSqliteDialect,
+        providers::opencode::OpenCodeSqliteDialect, source_backed::SourceBackedRouteError,
     },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
@@ -54,7 +54,6 @@ const PARSER_REVISION: &str = "opencode-family-source-backed-v2";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
-const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 const SOURCE_BACKED_MAX_FILE_TOUCHES: usize = 32;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
@@ -71,6 +70,8 @@ pub(crate) enum OpenCodeSourceBackedError {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     Resolver(#[from] SourceResolverContractError),
+    #[error(transparent)]
+    Route(#[from] SourceBackedRouteError),
     #[error("OpenCode-family source-backed counter overflow")]
     CountOverflow,
     #[error("OpenCode-family source-backed event references an unprojected session {0:?}")]
@@ -81,13 +82,13 @@ pub(crate) enum OpenCodeSourceBackedError {
 
 pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedError>;
 
+mod adapter;
 mod hydration;
 mod projection;
-mod registration;
 
+pub(crate) use adapter::register as register_source_backed_route;
 pub(crate) use hydration::OpenCodeSourceBackedExactResolver;
 use projection::{decode_source_event_row, lexical_document, retained_projection};
-pub(crate) use registration::register_source_backed_route;
 
 /// Provider-local hook consumed later by the shared registration layer.
 #[derive(Clone, Copy, Debug)]
@@ -97,9 +98,6 @@ pub(crate) struct OpenCodeSourceBackedRegistration {
 
 impl OpenCodeSourceBackedRegistration {
     pub(crate) const fn new(dialect: &'static OpenCodeSqliteDialect) -> Self {
-        // Keep route construction bound to the same family registration type
-        // as scanning, fencing, and hydration.
-        let _ = register_source_backed_route;
         Self { dialect }
     }
 
@@ -111,30 +109,16 @@ impl OpenCodeSourceBackedRegistration {
         self.dialect.source_format
     }
 
+    #[cfg(test)]
     pub(crate) fn scan(
         self,
         path: &Path,
         emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
     ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-        scan_source(path, self.dialect, emit)
-    }
-
-    /// Cheap commit-time fence over acquisition evidence only.
-    ///
-    /// The evidence is transient runtime state and is never part of the
-    /// logical certificate or locator revision.
-    pub(crate) fn terminal_fence(
-        self,
-        path: &Path,
-        expected: &OpenCodeSourceTerminalFence,
-    ) -> OpenCodeSourceBackedResult<bool> {
-        if expected.provider != self.provider() {
-            return Ok(false);
-        }
-        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
-        let current = sqlite_snapshot.finish()?;
-        source_root.revalidate()?;
-        Ok(current == expected.physical_evidence)
+        scan_source(path, self.dialect, None, &mut |output| match output {
+            OpenCodeScanOutput::Begin(_) => Ok(()),
+            OpenCodeScanOutput::Document(document) => emit(vec![document]),
+        })
     }
 
     pub(crate) fn exact_resolver(
@@ -144,10 +128,8 @@ impl OpenCodeSourceBackedRegistration {
         OpenCodeSourceBackedExactResolver::new(self, path)
     }
 
-    // No append frontier is asserted: a matching logical snapshot is unchanged
-    // and every other accepted snapshot is a full replacement.
-    pub(crate) const fn mutation_policy(self) -> OpenCodeSourceMutationPolicy {
-        OpenCodeSourceMutationPolicy::UnchangedOrReplace
+    fn owns_source(self, source: &SourceKey) -> bool {
+        schema_family_for_source(self.dialect, source).is_some()
     }
 }
 
@@ -172,27 +154,10 @@ pub(crate) const fn opencode_family_source_backed_registrations(
     ]
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OpenCodeSourceMutationPolicy {
-    UnchangedOrReplace,
-}
-
 #[derive(Debug)]
 pub(crate) struct OpenCodeSourceBackedScan {
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
-    pub(crate) terminal_fence: OpenCodeSourceTerminalFence,
-    pub(crate) schema_family: &'static str,
-    pub(crate) emitted_pages: u64,
-    pub(crate) row_decode_passes: u64,
-    pub(crate) decoded_rows: u64,
-    pub(crate) peak_buffered_rows: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct OpenCodeSourceTerminalFence {
-    provider: CaptureProvider,
-    physical_evidence: SqliteSourceEvidence,
 }
 
 #[derive(Clone, Debug)]
@@ -220,11 +185,11 @@ type RawSession = (
 struct WorkingScan {
     source: SourceKey,
     logical_snapshot: SqliteLogicalSnapshot,
-    schema_family: &'static str,
-    emitted_pages: u64,
-    row_decode_passes: u64,
-    decoded_rows: u64,
-    peak_buffered_rows: u64,
+}
+
+enum OpenCodeScanOutput {
+    Begin(SourceKey),
+    Document(LexicalDocument),
 }
 
 #[derive(Debug)]
@@ -301,15 +266,20 @@ impl SqliteSourceValue {
 fn scan_source(
     path: &Path,
     dialect: &'static OpenCodeSqliteDialect,
-    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
+    expected_physical: Option<&SqliteSourceEvidence>,
+    emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    if expected_physical.is_some_and(|expected| sqlite_snapshot.evidence() != expected) {
+        return Err(CaptureError::SourceChangedDuringCapture.into());
+    }
     let working = {
         let connection = sqlite_snapshot.connection()?;
         register_projection_function(connection, dialect)?;
         let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
-        let source = source_key(dialect, schema.family).map_err(source_backed_as_capture)?;
+        let source = source_key(dialect, schema.family)?;
         let sessions = load_sessions(connection, &schema, &source)?;
+        emit(OpenCodeScanOutput::Begin(source.clone()))?;
         let streamed =
             stream_logical_rows(connection, &schema, dialect, path, &source, &sessions, emit)?;
         let schema_evidence = relevant_schema_evidence(&schema);
@@ -322,31 +292,17 @@ fn scan_source(
         WorkingScan {
             source,
             logical_snapshot,
-            schema_family: schema.family.label(),
-            emitted_pages: streamed.emitted_pages,
-            row_decode_passes: 1,
-            decoded_rows: streamed.decoded_rows,
-            peak_buffered_rows: streamed.peak_buffered_rows,
         }
     };
     let physical_evidence = sqlite_snapshot.finish()?;
     source_root.revalidate()?;
-    let certificate = working
-        .logical_snapshot
-        .certify(working.source.clone())
-        .map_err(map_certification_error)?;
+    if expected_physical.is_some_and(|expected| physical_evidence != *expected) {
+        return Err(CaptureError::SourceChangedDuringCapture.into());
+    }
+    let certificate = working.logical_snapshot.certify(working.source.clone())?;
     Ok(OpenCodeSourceBackedScan {
         source: working.source,
         certificate,
-        terminal_fence: OpenCodeSourceTerminalFence {
-            provider: dialect.provider,
-            physical_evidence,
-        },
-        schema_family: working.schema_family,
-        emitted_pages: working.emitted_pages,
-        row_decode_passes: working.row_decode_passes,
-        decoded_rows: working.decoded_rows,
-        peak_buffered_rows: working.peak_buffered_rows,
     })
 }
 
@@ -354,9 +310,6 @@ fn scan_source(
 struct StreamedLogicalRows {
     counts: ScannedSourceCounts,
     content_digest: [u8; 32],
-    emitted_pages: u64,
-    decoded_rows: u64,
-    peak_buffered_rows: u64,
 }
 
 // These seven inputs keep one ordered SQL decode pass explicit; a one-use
@@ -369,7 +322,7 @@ fn stream_logical_rows(
     path: &Path,
     source: &SourceKey,
     sessions: &BTreeMap<String, SourceSession>,
-    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
+    emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<StreamedLogicalRows> {
     let mut hasher = Sha256::new();
     hasher.update(b"ctx-opencode-family-logical-content-v2\0");
@@ -381,15 +334,10 @@ fn stream_logical_rows(
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query([max_json_bytes])?;
     let mut counts = ScannedSourceCounts::default();
-    let mut emitted_pages = 0_u64;
-    let mut decoded_rows = 0_u64;
-    let mut peak_buffered_rows = 0_u64;
-    let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
     let mut session_sequences = HashMap::<String, u64>::new();
 
     while let Some(row) = rows.next()? {
         let event = decode_source_event_row(row, schema, dialect)?;
-        decoded_rows = checked_add(decoded_rows, 1)?;
         hash_source_event(&mut hasher, &event);
         counts.complete_records = checked_add(counts.complete_records, 1)?;
         counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
@@ -424,25 +372,11 @@ fn stream_logical_rows(
                 .entry(session.native_identity.clone())
                 .or_default(),
         )?;
-        page.push(document);
-        peak_buffered_rows = peak_buffered_rows
-            .max(u64::try_from(page.len()).map_err(|_| OpenCodeSourceBackedError::CountOverflow)?);
-        if page.len() == SOURCE_BACKED_PAGE_ROWS {
-            emit(std::mem::take(&mut page))?;
-            page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
-            emitted_pages = checked_add(emitted_pages, 1)?;
-        }
-    }
-    if !page.is_empty() {
-        emit(page)?;
-        emitted_pages = checked_add(emitted_pages, 1)?;
+        emit(OpenCodeScanOutput::Document(document))?;
     }
     Ok(StreamedLogicalRows {
         counts,
         content_digest: hasher.finalize().into(),
-        emitted_pages,
-        decoded_rows,
-        peak_buffered_rows,
     })
 }
 
@@ -553,6 +487,23 @@ fn source_key(
         SOURCE_IDENTITY_VERSION,
         anchor,
     )?)
+}
+
+fn schema_family_for_source(
+    dialect: &OpenCodeSqliteDialect,
+    source: &SourceKey,
+) -> Option<OpenCodeNativeSchemaFamily> {
+    [
+        OpenCodeNativeSchemaFamily::SessionMessageSeq,
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
+        OpenCodeNativeSchemaFamily::SessionEntry,
+        OpenCodeNativeSchemaFamily::LegacyMessage,
+        OpenCodeNativeSchemaFamily::MessagePart,
+    ]
+    .into_iter()
+    .find(|family| {
+        source_key(dialect, *family).is_ok_and(|candidate| candidate.exact_descriptor_eq(source))
+    })
 }
 
 fn open_root_authorized_snapshot(
@@ -744,25 +695,6 @@ fn nonempty(value: String) -> Option<String> {
 fn checked_add(left: u64, right: u64) -> OpenCodeSourceBackedResult<u64> {
     left.checked_add(right)
         .ok_or(OpenCodeSourceBackedError::CountOverflow)
-}
-
-fn source_backed_as_capture(error: OpenCodeSourceBackedError) -> CaptureError {
-    match error {
-        OpenCodeSourceBackedError::Capture(error) => error,
-        OpenCodeSourceBackedError::Sqlite(error) => CaptureError::Sqlite(error),
-        OpenCodeSourceBackedError::SqliteSource(error) => {
-            CaptureError::InvalidPayload(error.to_string())
-        }
-        error => CaptureError::InvalidPayload(error.to_string()),
-    }
-}
-
-fn map_certification_error(error: ProjectionContractError) -> OpenCodeSourceBackedError {
-    if error == ProjectionContractError::SourceRevisionChanged {
-        OpenCodeSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture)
-    } else {
-        OpenCodeSourceBackedError::Projection(error)
-    }
 }
 
 #[cfg(test)]
