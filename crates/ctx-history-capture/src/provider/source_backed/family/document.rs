@@ -270,11 +270,30 @@ pub(crate) fn register_replacement_document_tree_route<A>(
 where
     A: ReplacementDocumentTree,
 {
+    register_replacement_document_tree_route_with_authority(
+        registry,
+        source,
+        selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        adapter,
+    )
+}
+
+pub(crate) fn register_replacement_document_tree_route_with_authority<A>(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    selector_authority: SourceBackedSelectorAuthority,
+    adapter: A,
+) -> SourceBackedCoordinatorResult<()>
+where
+    A: ReplacementDocumentTree,
+{
     let driver = replacement_document_tree_driver(&source, adapter);
     registry.register(executable_route(
         source,
         selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
+        selector_authority,
         driver,
     )?);
     Ok(())
@@ -288,7 +307,9 @@ where
     A: ReplacementDocumentTree,
 {
     let adapter = Arc::new(adapter);
-    let state = Arc::new(Mutex::new(DocumentCommitState::default()));
+    let state = Arc::new(Mutex::new(
+        DocumentCommitState::<A::Leaf, A::TreeAuthority>::default(),
+    ));
     let inventory_authority = DocumentInventoryAuthority::new(route);
 
     let scan_adapter = Arc::clone(&adapter);
@@ -335,7 +356,7 @@ fn scan_document_tree<A>(
     adapter: &A,
     inventory_authority: &DocumentInventoryAuthority,
     sink: &mut SourceBackedGenerationSink<'_>,
-) -> SourceBackedRouteResult<ExpectedDocumentRoute>
+) -> SourceBackedRouteResult<ExpectedDocumentRoute<A::Leaf, A::TreeAuthority>>
 where
     A: ReplacementDocumentTree,
 {
@@ -406,12 +427,6 @@ where
         certificates.push(certificate);
     }
 
-    let terminal_tree_fingerprint = adapter.revalidate_complete(&tree)?;
-    if terminal_tree_fingerprint != tree.tree_fingerprint {
-        return Err(document_changed(
-            "complete document tree changed before terminal certification",
-        ));
-    }
     let inventory = inventory_authority.certify(
         tree.tree_fingerprint,
         current_sources.values().cloned().collect(),
@@ -434,11 +449,7 @@ where
             .map_err(route_coordinator_error)?;
     }
 
-    Ok(ExpectedDocumentRoute::new(
-        tree.tree_fingerprint,
-        certificates,
-        inventory,
-    ))
+    Ok(ExpectedDocumentRoute::new(tree, certificates, inventory))
 }
 
 fn validate_unique_leaf_fingerprints<L>(
@@ -512,26 +523,34 @@ where
     })
 }
 
-#[derive(Default)]
-struct DocumentCommitState {
-    expected: Option<ExpectedDocumentRoute>,
+struct DocumentCommitState<L, A> {
+    expected: Option<ExpectedDocumentRoute<L, A>>,
     current: Option<bool>,
 }
 
-struct ExpectedDocumentRoute {
-    tree_fingerprint: [u8; 32],
+impl<L, A> Default for DocumentCommitState<L, A> {
+    fn default() -> Self {
+        Self {
+            expected: None,
+            current: None,
+        }
+    }
+}
+
+struct ExpectedDocumentRoute<L, A> {
+    tree: CompleteDocumentTree<L, A>,
     certificates: HashMap<[u8; 32], CertifiedSource>,
     inventory: CertifiedSourceInventory,
 }
 
-impl ExpectedDocumentRoute {
+impl<L, A> ExpectedDocumentRoute<L, A> {
     fn new(
-        tree_fingerprint: [u8; 32],
+        tree: CompleteDocumentTree<L, A>,
         certificates: Vec<CertifiedSource>,
         inventory: CertifiedSourceInventory,
     ) -> Self {
         Self {
-            tree_fingerprint,
+            tree,
             certificates: certificates
                 .into_iter()
                 .map(|certificate| {
@@ -548,7 +567,7 @@ impl ExpectedDocumentRoute {
 
 fn revalidate_document_target<A>(
     adapter: &A,
-    state: &Mutex<DocumentCommitState>,
+    state: &Mutex<DocumentCommitState<A::Leaf, A::TreeAuthority>>,
     target: SourceBackedRevalidationTarget<'_>,
 ) -> bool
 where
@@ -579,7 +598,7 @@ where
 
 fn revalidate_document_inventory<A>(
     adapter: &A,
-    state: &Mutex<DocumentCommitState>,
+    state: &Mutex<DocumentCommitState<A::Leaf, A::TreeAuthority>>,
     inventory: &CertifiedSourceInventory,
 ) -> bool
 where
@@ -595,7 +614,10 @@ where
     expected_matches && revalidate_document_tree_once(adapter, &mut state)
 }
 
-fn revalidate_document_tree_once<A>(adapter: &A, state: &mut DocumentCommitState) -> bool
+fn revalidate_document_tree_once<A>(
+    adapter: &A,
+    state: &mut DocumentCommitState<A::Leaf, A::TreeAuthority>,
+) -> bool
 where
     A: ReplacementDocumentTree,
 {
@@ -607,13 +629,8 @@ where
         return false;
     };
     let current = adapter
-        .discover_complete()
-        .and_then(|tree| {
-            validate_unique_leaf_fingerprints(&tree.leaves)?;
-            let terminal = adapter.revalidate_complete(&tree)?;
-            Ok(terminal == tree.tree_fingerprint && terminal == expected.tree_fingerprint)
-        })
-        .unwrap_or(false);
+        .revalidate_complete(&expected.tree)
+        .is_ok_and(|terminal| terminal == expected.tree.tree_fingerprint);
     state.current = Some(current);
     current
 }
