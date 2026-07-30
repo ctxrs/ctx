@@ -87,7 +87,8 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     if service == DaemonIpcService::SourceRefresh {
         if op == "source_hydrate_batch" {
             let response = handle_source_hydration_batch(data_root, source_refresh, &request);
-            writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+            serde_json::to_writer(&mut *stream, &response)?;
+            stream.write_all(b"\n")?;
             return Ok(());
         }
         if let Some(response) = source_refresh.handle_ipc_request(data_root, &request)? {

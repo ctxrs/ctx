@@ -50,7 +50,8 @@ pub(in crate::semantic) struct DaemonQueryService {
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_MAX_BYTES: usize = 256 * 1024;
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_READ_TIMEOUT: StdDuration =
     StdDuration::from_secs(2);
-pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_ITEMS: usize = 128;
+pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_ITEMS: usize =
+    ctx_history_core::MAX_BATCH_HYDRATION_EVENTS;
 pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_WORKERS: usize = 8;
 pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES: usize =
     SOURCE_HYDRATION_MAX_BYTES;

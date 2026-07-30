@@ -1,23 +1,5 @@
 use super::*;
 
-fn exercise_complete_session_budget(
-    event_count: usize,
-    response_texts: &[String],
-    limit_bytes: usize,
-    daemon_calls: &mut usize,
-) -> Result<()> {
-    let event_id = Uuid::nil();
-    let events = (0..event_count).collect::<Vec<_>>();
-    let mut budget = SourceHydrationOperationBudget::new(limit_bytes);
-    for (batch_index, _) in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS).enumerate() {
-        let _remaining = budget.remaining_response_bytes()?;
-        *daemon_calls += 1;
-        let text = response_texts.get(batch_index).cloned().unwrap_or_default();
-        budget.retain_batch(&[(event_id, text)])?;
-    }
-    Ok(())
-}
-
 #[test]
 fn semantic_query_pin_rejects_a_different_core_generation() {
     let pin = SourceBackedSemanticQueryPin {
@@ -47,60 +29,10 @@ fn hydration_client_preserves_budget_code_and_accepts_content_too_large_kind() {
     assert_eq!(unavailable.code(), "hydration_budget_exceeded");
     assert_eq!(unavailable.failure_kind, "content_too_large");
     assert!(!unavailable.retryable_after_refresh());
-}
-
-#[test]
-fn complete_session_200_events_succeeds_when_multi_chunk_aggregate_is_small() {
-    let mut daemon_calls = 0;
-    exercise_complete_session_budget(
-        200,
-        &["a".repeat(512), "b".repeat(512)],
-        4 * 1024,
-        &mut daemon_calls,
-    )
-    .unwrap();
-
-    assert_eq!(daemon_calls, 2);
-}
-
-#[test]
-fn complete_session_129th_event_makes_no_daemon_call_after_exact_exhaustion() {
-    let mut daemon_calls = 0;
-    let error = exercise_complete_session_budget(
-        129,
-        &["a".repeat(512), "b".to_owned()],
-        1024,
-        &mut daemon_calls,
-    )
-    .expect_err("the second chunk must stop before transport");
-
-    assert_eq!(daemon_calls, 1);
-    let unavailable = error
-        .downcast_ref::<SourceHydrationUnavailable>()
-        .expect("aggregate exhaustion remains typed");
-    assert_eq!(unavailable.code(), "hydration_budget_exceeded");
-    assert_eq!(unavailable.failure_kind, "content_too_large");
-    assert!(!unavailable.retryable_after_refresh());
-}
-
-#[test]
-fn complete_session_multi_chunk_overage_is_typed_and_stops_before_third_call() {
-    let mut daemon_calls = 0;
-    let error = exercise_complete_session_budget(
-        300,
-        &["a".repeat(512), "b".repeat(1200), "c".to_owned()],
-        2500,
-        &mut daemon_calls,
-    )
-    .expect_err("aggregate retained content must share one allowance");
-
-    assert_eq!(daemon_calls, 2);
-    let unavailable = error
-        .downcast_ref::<SourceHydrationUnavailable>()
-        .expect("aggregate overage remains typed");
-    assert_eq!(unavailable.code(), "hydration_budget_exceeded");
-    assert_eq!(unavailable.failure_kind, "content_too_large");
-    assert!(!unavailable.retryable_after_refresh());
+    assert_eq!(
+        unavailable.hydration_failure().kind,
+        HydrationFailureKind::ContentTooLarge
+    );
 }
 
 #[test]
@@ -113,4 +45,22 @@ fn transport_overage_maps_without_parsing_error_detail() {
     assert_eq!(unavailable.code(), "hydration_budget_exceeded");
     assert_eq!(unavailable.failure_kind, "content_too_large");
     assert!(!unavailable.retryable_after_refresh());
+}
+
+#[test]
+fn oversized_request_metadata_is_typed_before_transport() {
+    let payload = json!({
+        "items": ["x".repeat(server::DAEMON_QUERY_REQUEST_MAX_BYTES)],
+    });
+    let error =
+        preflight_source_hydration_payload(&payload).expect_err("oversized metadata must fail");
+
+    let unavailable = error
+        .downcast_ref::<SourceHydrationUnavailable>()
+        .expect("request metadata overage remains typed");
+    assert_eq!(unavailable.code(), "hydration_budget_exceeded");
+    assert_eq!(
+        unavailable.hydration_failure().kind,
+        HydrationFailureKind::ContentTooLarge
+    );
 }

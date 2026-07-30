@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::{HydrationFailure, HydrationFailureKind as K, SourceBackedErrorClass as C};
 
-const PRECISE_FAILURES: [(K, &str, C); 10] = [
+const PRECISE_FAILURES: [(K, &str, C); 11] = [
     (
         K::TemporarilyUnavailable,
         "temporarily_unavailable",
@@ -31,6 +31,7 @@ const PRECISE_FAILURES: [(K, &str, C); 10] = [
         C::Unsupported,
     ),
     (K::InvalidLocator, "invalid_locator", C::InvalidRequest),
+    (K::ContentTooLarge, "content_too_large", C::InvalidRequest),
     (K::InvalidRequest, "invalid_request", C::InvalidRequest),
     (K::Internal, "internal", C::Internal),
 ];
@@ -109,8 +110,8 @@ fn every_precise_failure_maps_to_exactly_one_of_seven_classes() {
 }
 
 #[test]
-fn caller_locator_and_request_defects_remain_invalid_request() {
-    for kind in [K::InvalidLocator, K::InvalidRequest] {
+fn caller_locator_resource_and_request_defects_remain_invalid_request() {
+    for kind in [K::InvalidLocator, K::ContentTooLarge, K::InvalidRequest] {
         let failure = HydrationFailure::new(kind, "/private/source/path");
         assert_eq!(failure.kind.class(), C::InvalidRequest);
         assert_eq!(failure.kind.class().as_str(), "invalid_request");

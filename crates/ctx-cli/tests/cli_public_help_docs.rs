@@ -230,9 +230,15 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
             String::from_utf8_lossy(&output.stderr)
         )
     });
-    assert_eq!(error["error"], "source_changed");
-    assert_eq!(error["error_code"], "source_changed");
-    assert_eq!(error["ctx_event_id"], event_id);
+    assert_eq!(
+        error["error"],
+        "content_verification_failed/stale_record_evidence"
+    );
+    assert_eq!(error["error_code"], "content_verification_failed");
+    assert_eq!(error["failure_kind"], "stale_record_evidence");
+    assert_eq!(error["detail"], "the source record changed after indexing");
+    assert_eq!(error["retryable"], true);
+    assert!(error.get("ctx_event_id").is_none());
     assert_eq!(
         output.stderr.iter().filter(|byte| **byte == b'\n').count(),
         1

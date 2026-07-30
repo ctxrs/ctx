@@ -429,6 +429,7 @@ pub enum HydrationFailureKind {
     MalformedSource,
     UnsupportedParserRevision,
     InvalidLocator,
+    ContentTooLarge,
     InvalidRequest,
     Internal,
 }
@@ -444,6 +445,7 @@ impl HydrationFailureKind {
             Self::MalformedSource => "malformed_source",
             Self::UnsupportedParserRevision => "unsupported_parser_revision",
             Self::InvalidLocator => "invalid_locator",
+            Self::ContentTooLarge => "content_too_large",
             Self::InvalidRequest => "invalid_request",
             Self::Internal => "internal",
         }
@@ -459,6 +461,7 @@ impl HydrationFailureKind {
             "malformed_source" => Some(Self::MalformedSource),
             "unsupported_parser_revision" => Some(Self::UnsupportedParserRevision),
             "invalid_locator" => Some(Self::InvalidLocator),
+            "content_too_large" => Some(Self::ContentTooLarge),
             "invalid_request" => Some(Self::InvalidRequest),
             "internal" => Some(Self::Internal),
             _ => None,
@@ -474,7 +477,9 @@ impl HydrationFailureKind {
             }
             Self::MalformedSource => SourceBackedErrorClass::Malformed,
             Self::UnsupportedParserRevision => SourceBackedErrorClass::Unsupported,
-            Self::InvalidLocator | Self::InvalidRequest => SourceBackedErrorClass::InvalidRequest,
+            Self::InvalidLocator | Self::ContentTooLarge | Self::InvalidRequest => {
+                SourceBackedErrorClass::InvalidRequest
+            }
             Self::Internal => SourceBackedErrorClass::Internal,
         }
     }
