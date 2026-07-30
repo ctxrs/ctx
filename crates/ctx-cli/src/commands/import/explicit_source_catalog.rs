@@ -542,7 +542,7 @@ fn register_explicit_source_catalog_snapshot_routes(
         } else {
             register_disabled_catalog_route(
                 data_root,
-                &snapshot,
+                snapshot,
                 entry,
                 &base_sources,
                 &mut build.registry,
