@@ -76,6 +76,10 @@ fn mcp_command(temp: &tempfile::TempDir) -> StdCommand {
     command
 }
 
+fn usage_db_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
+    data_root(temp).join("usage.sqlite")
+}
+
 fn write_message(writer: &mut impl Write, message: &Value) {
     serde_json::to_writer(&mut *writer, message).unwrap();
     writer.write_all(b"\n").unwrap();
@@ -134,7 +138,7 @@ fn operation_calls(connection: &Connection) -> BTreeMap<String, i64> {
 fn delivered_search_and_prefix_open_record_once_with_exact_transport_and_context_channels() {
     let temp = tempdir();
     let (_daemon, _) = import_custom_history_fixture_source_backed(&temp, "basic.jsonl");
-    assert!(!temp.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&temp).exists());
 
     let marker = "MCP_USAGE_QUERY_MUST_NOT_PERSIST_7f3d";
     let mut client = McpClient::start(&temp);
@@ -172,7 +176,7 @@ fn delivered_search_and_prefix_open_record_once_with_exact_transport_and_context
     let delivered_wire_bytes = search.wire_bytes + opened.wire_bytes + status.wire_bytes;
     client.finish();
 
-    let usage_path = temp.path().join("usage.sqlite");
+    let usage_path = usage_db_path(&temp);
     let connection = Connection::open(&usage_path).unwrap();
     assert_eq!(
         operation_calls(&connection),
@@ -237,7 +241,7 @@ fn delivered_search_and_prefix_open_record_once_with_exact_transport_and_context
 
     let persisted = ["usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"]
         .into_iter()
-        .filter_map(|name| fs::read(temp.path().join(name)).ok())
+        .filter_map(|name| fs::read(data_root(&temp).join(name)).ok())
         .flatten()
         .collect::<Vec<_>>();
     for forbidden in [
@@ -275,7 +279,7 @@ fn delivered_recognized_failures_record_once_but_protocol_control_does_not() {
     assert_eq!(invalid_blame.value["result"]["isError"], true);
     client.finish();
 
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
     assert_eq!(
         operation_calls(&connection),
         BTreeMap::from([("blame".to_owned(), 1), ("search".to_owned(), 1)])
@@ -333,7 +337,7 @@ fn protocol_control_and_invalid_input_create_no_usage_store() {
         .write_stdin(messages)
         .assert()
         .success();
-    assert!(!temp.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&temp).exists());
 }
 
 #[cfg(unix)]
@@ -359,5 +363,5 @@ fn stdout_delivery_failure_does_not_record_the_tool_call() {
     drop(stdin);
     let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
-    assert!(!temp.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&temp).exists());
 }

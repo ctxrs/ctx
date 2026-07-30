@@ -4,8 +4,8 @@ use clap::Parser as _;
 use ctx_history_core::platform_security::restrict_private_directory;
 
 use super::{
-    read_report, CliUsage, CompletedOperation, ContextCoverage, ResultObservationAction,
-    SearchContextObservation, ValueClass,
+    read_report, CliUsage, CompletedOperation, ContextCoverage, McpInvocation,
+    ResultObservationAction, SearchContextObservation, ValueClass,
 };
 
 mod mcp_tests;
@@ -79,6 +79,37 @@ fn cli_show_operations_are_typed_and_stats_status_are_excluded() {
     for args in [vec!["ctx", "status"], vec!["ctx", "stats"]] {
         let cli = crate::Cli::try_parse_from(args).unwrap();
         assert!(CliUsage::from_command(&cli.command).operation.is_none());
+    }
+}
+
+#[test]
+fn cli_and_mcp_use_identical_duration_bucket_boundaries() {
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"structuredContent": {}}
+    });
+    for (duration, expected) in [
+        (Duration::ZERO, "under_10_ms"),
+        (Duration::from_nanos(9_999_999), "under_10_ms"),
+        (Duration::from_millis(10), "10_to_49_ms"),
+        (Duration::from_nanos(49_999_999), "10_to_49_ms"),
+        (Duration::from_millis(50), "50_to_249_ms"),
+        (Duration::from_nanos(249_999_999), "50_to_249_ms"),
+        (Duration::from_millis(250), "250_to_999_ms"),
+        (Duration::from_nanos(999_999_999), "250_to_999_ms"),
+        (Duration::from_secs(1), "1_to_4_s"),
+        (Duration::from_nanos(4_999_999_999), "1_to_4_s"),
+        (Duration::from_secs(5), "5_to_29_s"),
+        (Duration::from_nanos(29_999_999_999), "5_to_29_s"),
+        (Duration::from_secs(30), "30_s_or_more"),
+    ] {
+        let cli = CompletedOperation::cli("doctor", true, duration);
+        let mcp = McpInvocation::recognized("status")
+            .unwrap()
+            .completed(&response, duration, 1);
+        assert_eq!(cli.duration_bucket_for_test(), expected);
+        assert_eq!(mcp.duration_bucket_for_test(), expected);
     }
 }
 
