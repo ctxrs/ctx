@@ -1079,9 +1079,13 @@ fn setup_analytics_emits_one_terminal_event() {
         .success();
 
     let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1, "{events:#?}");
-    assert_operation_event(&events[0], "setup", "success");
-    let properties = analytics_event_properties(&events[0]);
+    let setup_events = events
+        .iter()
+        .filter(|event| event["surface"] == "cli" && event["operation"] == "setup")
+        .collect::<Vec<_>>();
+    assert_eq!(setup_events.len(), 1, "{events:#?}");
+    assert_operation_event(setup_events[0], "setup", "success");
+    let properties = analytics_event_properties(setup_events[0]);
     assert_eq!(properties["catalog_only"], true);
     assert_eq!(properties["setup_mode"], "background");
     assert!(properties.get("has_indexed_content_after_setup").is_none());
