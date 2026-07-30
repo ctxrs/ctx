@@ -75,21 +75,7 @@ use tantivy::{
 use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
-use staging::finish_identical_staging;
-
-struct PendingSource {
-    source: SourceKey,
-    mode: PendingSourceMode,
-    staged_documents: u64,
-    certificate: Option<CertifiedSource>,
-}
-
-// Keep the append base inline to avoid allocation and indirection.
-#[allow(clippy::large_enum_variant)]
-enum PendingSourceMode {
-    Replace,
-    Append { base: CertifiedSource },
-}
+use staging::{finish_identical_staging, PendingSource, PendingSourceMode};
 
 fn reclaim_orphaned_managed_files(index: &mut Index, base_metas: &IndexMeta) -> Result<()> {
     let mut living_files = base_metas
