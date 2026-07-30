@@ -7,6 +7,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Primitive {
     PrintMacro,
+    DirectWrite,
     StdoutConstructor,
     StderrConstructor,
     OutputRawHelper,
@@ -20,6 +21,7 @@ impl Primitive {
     const fn as_str(self) -> &'static str {
         match self {
             Self::PrintMacro => "print_macro",
+            Self::DirectWrite => "direct_write",
             Self::StdoutConstructor => "stdout_constructor",
             Self::StderrConstructor => "stderr_constructor",
             Self::OutputRawHelper => "output_raw_helper",
@@ -90,12 +92,20 @@ impl AllowEntry {
 mod allowlist;
 use allowlist::ALLOWLIST;
 
+#[path = "raw_output_policy/owning_test.rs"]
+mod owning_test;
+use owning_test::validate as validate_owning_test;
+
+#[path = "raw_output_policy/sink_analysis.rs"]
+mod sink_analysis;
+use sink_analysis::{render_receiver_is_glyph, write_method_has_document_argument};
+
 #[derive(Debug, Default)]
 struct PolicyDiff {
     unmatched: Vec<Site>,
     stale: Vec<AllowEntry>,
     duplicate_allowlist_keys: Vec<SiteKey>,
-    invalid_metadata: Vec<AllowEntry>,
+    invalid_metadata: Vec<(AllowEntry, String)>,
     violations: Vec<(Site, AllowEntry)>,
 }
 
@@ -140,13 +150,14 @@ impl PolicyDiff {
             }
         }
         if !self.invalid_metadata.is_empty() {
-            report.push_str("allowlist entries with missing rationale or owning test:\n");
-            for entry in &self.invalid_metadata {
+            report.push_str("allowlist entries with invalid rationale or owning test:\n");
+            for (entry, reason) in &self.invalid_metadata {
                 report.push_str(&format!(
-                    "  {} {} {}\n",
+                    "  {} {} {} -- {}\n",
                     entry.path,
                     entry.primitive.as_str(),
-                    entry.fingerprint
+                    entry.fingerprint,
+                    reason
                 ));
             }
         }
@@ -178,8 +189,12 @@ fn compare_policy(sites: Vec<Site>, allowlist: &[AllowEntry]) -> PolicyDiff {
         if allowed.insert(key.clone(), *entry).is_some() {
             duplicate_keys.insert(key);
         }
-        if entry.rationale.trim().is_empty() || entry.owning_test.trim().is_empty() {
-            diff.invalid_metadata.push(*entry);
+        if entry.rationale.trim().is_empty() {
+            diff.invalid_metadata
+                .push((*entry, "rationale is empty".to_owned()));
+        }
+        if let Err(reason) = validate_owning_test(entry.owning_test) {
+            diff.invalid_metadata.push((*entry, reason));
         }
     }
     diff.duplicate_allowlist_keys = duplicate_keys.into_iter().collect();
@@ -543,11 +558,94 @@ fn matching_delimiter(
 #[derive(Debug)]
 struct FunctionSpan {
     name: String,
+    parameters: Vec<String>,
+    document_parameters: BTreeSet<String>,
+    glyph_parameters: BTreeSet<String>,
+    impl_type: Option<String>,
     open: usize,
     close: usize,
 }
 
+#[derive(Debug)]
+struct ImplSpan {
+    type_name: String,
+    open: usize,
+    close: usize,
+}
+
+fn impl_spans(tokens: &[Token], excluded: &[bool]) -> Vec<ImplSpan> {
+    let mut spans = Vec::new();
+    for index in 0..tokens.len() {
+        if excluded[index] || tokens[index].text != "impl" {
+            continue;
+        }
+        let mut cursor = index + 1;
+        if tokens.get(cursor).map(|token| token.text.as_str()) == Some("<") {
+            let Some(close) = matching_angle(tokens, cursor) else {
+                continue;
+            };
+            cursor = close + 1;
+        }
+        let mut type_name = None;
+        let mut after_for = false;
+        let mut open = None;
+        let mut angle_depth = 0usize;
+        while cursor < tokens.len() {
+            match tokens[cursor].text.as_str() {
+                "<" => angle_depth += 1,
+                ">" => angle_depth = angle_depth.saturating_sub(1),
+                "for" if angle_depth == 0 => {
+                    after_for = true;
+                    type_name = None;
+                }
+                "{" if angle_depth == 0 => {
+                    open = Some(cursor);
+                    break;
+                }
+                ";" if angle_depth == 0 => break,
+                text if angle_depth == 0
+                    && is_path_ident(text)
+                    && (after_for || type_name.is_none()) =>
+                {
+                    type_name = Some(text.to_owned());
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let (Some(type_name), Some(open)) = (type_name, open) else {
+            continue;
+        };
+        if let Some(close) = matching_delimiter(tokens, open, "{", "}") {
+            spans.push(ImplSpan {
+                type_name,
+                open,
+                close,
+            });
+        }
+    }
+    spans
+}
+
+fn matching_angle(tokens: &[Token], open_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        match token.text.as_str() {
+            "<" => depth += 1,
+            ">" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
+    let impls = impl_spans(tokens, excluded);
     let mut spans = Vec::new();
     for index in 0..tokens.len() {
         if excluded[index] || tokens[index].text != "fn" {
@@ -557,19 +655,41 @@ fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
             continue;
         };
         let mut cursor = index + 2;
+        let mut parameters = Vec::new();
+        let mut document_parameters = BTreeSet::new();
+        let mut glyph_parameters = BTreeSet::new();
+        let mut captured_parameters = false;
         let mut parens = 0usize;
         let mut brackets = 0usize;
         while cursor < tokens.len() {
             match tokens[cursor].text.as_str() {
-                "(" => parens += 1,
+                "(" => {
+                    if !captured_parameters && parens == 0 && brackets == 0 {
+                        if let Some(close) = matching_delimiter(tokens, cursor, "(", ")") {
+                            (parameters, document_parameters, glyph_parameters) =
+                                parameter_metadata(&tokens[cursor + 1..close]);
+                            captured_parameters = true;
+                        }
+                    }
+                    parens += 1;
+                }
                 ")" => parens = parens.saturating_sub(1),
                 "[" => brackets += 1,
                 "]" => brackets = brackets.saturating_sub(1),
                 ";" if parens == 0 && brackets == 0 => break,
                 "{" if parens == 0 && brackets == 0 => {
                     if let Some(close) = matching_delimiter(tokens, cursor, "{", "}") {
+                        let impl_type = impls
+                            .iter()
+                            .filter(|span| span.open < cursor && close < span.close)
+                            .min_by_key(|span| span.close - span.open)
+                            .map(|span| span.type_name.clone());
                         spans.push(FunctionSpan {
                             name,
+                            parameters,
+                            document_parameters,
+                            glyph_parameters,
+                            impl_type,
                             open: cursor,
                             close,
                         });
@@ -584,12 +704,427 @@ fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
     spans
 }
 
-fn primitive_at(path: &str, tokens: &[Token], index: usize) -> Option<Primitive> {
+fn parameter_metadata(tokens: &[Token]) -> (Vec<String>, BTreeSet<String>, BTreeSet<String>) {
+    let mut names = Vec::new();
+    let mut documents = BTreeSet::new();
+    let mut glyphs = BTreeSet::new();
+    for (start, end) in split_top_level(tokens, ",") {
+        let parameter = &tokens[start..end];
+        let Some(colon) = parameter.iter().position(|token| token.text == ":") else {
+            continue;
+        };
+        let Some(name) = parameter[..colon]
+            .iter()
+            .rev()
+            .find(|token| is_path_ident(&token.text) && token.text != "mut")
+            .map(|token| token.text.clone())
+        else {
+            continue;
+        };
+        if parameter[colon + 1..]
+            .iter()
+            .any(|token| token.text == "Document")
+        {
+            documents.insert(name.clone());
+        }
+        if parameter[colon + 1..]
+            .iter()
+            .any(|token| token.text == "Glyph")
+        {
+            glyphs.insert(name.clone());
+        }
+        names.push(name);
+    }
+    (names, documents, glyphs)
+}
+
+fn split_top_level(tokens: &[Token], delimiter: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    let mut angles = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.text.as_str() {
+            "(" => parens += 1,
+            ")" => parens = parens.saturating_sub(1),
+            "[" => brackets += 1,
+            "]" => brackets = brackets.saturating_sub(1),
+            "{" => braces += 1,
+            "}" => braces = braces.saturating_sub(1),
+            "<" => angles += 1,
+            ">" => angles = angles.saturating_sub(1),
+            text if text == delimiter
+                && parens == 0
+                && brackets == 0
+                && braces == 0
+                && angles == 0 =>
+            {
+                ranges.push((start, index));
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < tokens.len() {
+        ranges.push((start, tokens.len()));
+    }
+    ranges
+}
+
+#[derive(Debug, Default)]
+struct OutputOrigins {
+    bindings: Vec<BTreeSet<String>>,
+    fields: BTreeSet<(String, String)>,
+}
+
+impl OutputOrigins {
+    fn analyze(tokens: &[Token], functions: &[FunctionSpan]) -> Self {
+        let mut origins = Self {
+            bindings: vec![BTreeSet::new(); functions.len()],
+            fields: BTreeSet::new(),
+        };
+        loop {
+            let mut changed = false;
+            for (function_index, function) in functions.iter().enumerate() {
+                changed |= origins.discover_local_bindings(tokens, functions, function_index);
+                changed |= origins.propagate_call_arguments(tokens, functions, function_index);
+                changed |= origins.discover_fields(tokens, functions, function_index);
+                debug_assert!(function.open < function.close);
+            }
+            if !changed {
+                return origins;
+            }
+        }
+    }
+
+    fn discover_local_bindings(
+        &mut self,
+        tokens: &[Token],
+        functions: &[FunctionSpan],
+        function_index: usize,
+    ) -> bool {
+        let function = &functions[function_index];
+        let mut changed = false;
+        let mut index = function.open + 1;
+        while index < function.close {
+            if tokens[index].text != "let" {
+                index += 1;
+                continue;
+            }
+            let Some(equal) = (index + 1..function.close)
+                .find(|cursor| matches!(tokens[*cursor].text.as_str(), "=" | ";"))
+            else {
+                break;
+            };
+            if tokens[equal].text != "=" {
+                index = equal + 1;
+                continue;
+            }
+            let Some(end) = statement_end(tokens, equal + 1, function.close) else {
+                break;
+            };
+            let binding = tokens[index + 1..equal]
+                .iter()
+                .find(|token| is_path_ident(&token.text) && token.text != "mut")
+                .map(|token| token.text.clone());
+            if let Some(binding) = binding {
+                if self.expression_has_origin(tokens, functions, function_index, equal + 1, end) {
+                    changed |= self.bindings[function_index].insert(binding);
+                }
+            }
+            index += 1;
+        }
+        changed
+    }
+
+    fn propagate_call_arguments(
+        &mut self,
+        tokens: &[Token],
+        functions: &[FunctionSpan],
+        caller_index: usize,
+    ) -> bool {
+        let caller = &functions[caller_index];
+        let mut changes = Vec::new();
+        for index in caller.open + 1..caller.close {
+            if !is_path_ident(&tokens[index].text)
+                || tokens.get(index + 1).map(|token| token.text.as_str()) != Some("(")
+                || previous_is(tokens, index, "fn")
+                || previous_is(tokens, index, ".")
+            {
+                continue;
+            }
+            let Some(close) = matching_delimiter(tokens, index + 1, "(", ")") else {
+                continue;
+            };
+            if close > caller.close {
+                continue;
+            }
+            let qualifier = if index >= 3
+                && tokens[index - 1].text == ":"
+                && tokens[index - 2].text == ":"
+                && is_path_ident(&tokens[index - 3].text)
+            {
+                Some(tokens[index - 3].text.as_str())
+            } else {
+                None
+            };
+            let arguments = &tokens[index + 2..close];
+            for (callee_index, callee) in functions.iter().enumerate() {
+                if callee.name != tokens[index].text
+                    || !callee_matches_qualifier(callee, qualifier, caller.impl_type.as_deref())
+                {
+                    continue;
+                }
+                for ((start, end), parameter) in split_top_level(arguments, ",")
+                    .into_iter()
+                    .zip(&callee.parameters)
+                {
+                    if self.expression_has_origin(
+                        tokens,
+                        functions,
+                        caller_index,
+                        index + 2 + start,
+                        index + 2 + end,
+                    ) {
+                        changes.push((callee_index, parameter.clone()));
+                    }
+                }
+            }
+        }
+        let mut changed = false;
+        for (function_index, binding) in changes {
+            changed |= self.bindings[function_index].insert(binding);
+        }
+        changed
+    }
+
+    fn discover_fields(
+        &mut self,
+        tokens: &[Token],
+        functions: &[FunctionSpan],
+        function_index: usize,
+    ) -> bool {
+        let function = &functions[function_index];
+        let Some(impl_type) = function.impl_type.as_deref() else {
+            return false;
+        };
+        let mut changes = Vec::new();
+        for index in function.open + 1..function.close {
+            if tokens[index].text != "Self"
+                || tokens.get(index + 1).map(|token| token.text.as_str()) != Some("{")
+            {
+                continue;
+            }
+            let Some(close) = matching_delimiter(tokens, index + 1, "{", "}") else {
+                continue;
+            };
+            for (start, end) in split_top_level(&tokens[index + 2..close], ",") {
+                let entry_start = index + 2 + start;
+                let entry_end = index + 2 + end;
+                let Some(field) = tokens[entry_start..entry_end]
+                    .iter()
+                    .find(|token| is_path_ident(&token.text))
+                    .map(|token| token.text.clone())
+                else {
+                    continue;
+                };
+                let colon = (entry_start..entry_end).find(|cursor| tokens[*cursor].text == ":");
+                let value_start = colon.map_or(entry_start, |colon| colon + 1);
+                if self.expression_has_origin(
+                    tokens,
+                    functions,
+                    function_index,
+                    value_start,
+                    entry_end,
+                ) {
+                    changes.push(field);
+                }
+            }
+        }
+        let mut changed = false;
+        for field in changes {
+            changed |= self.fields.insert((impl_type.to_owned(), field));
+        }
+        changed
+    }
+
+    fn expression_has_origin(
+        &self,
+        tokens: &[Token],
+        functions: &[FunctionSpan],
+        function_index: usize,
+        start: usize,
+        end: usize,
+    ) -> bool {
+        let function = &functions[function_index];
+        for index in start..end.min(tokens.len()) {
+            if matches!(tokens[index].text.as_str(), "stdout" | "stderr")
+                && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+                && is_io_path(tokens, index)
+            {
+                return true;
+            }
+            if matches!(
+                tokens[index].text.as_str(),
+                "stdout_writer" | "stderr_writer"
+            ) && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+                && !previous_is(tokens, index, "fn")
+            {
+                return true;
+            }
+            if self.bindings[function_index].contains(&tokens[index].text) {
+                return true;
+            }
+            if tokens[index].text == "self"
+                && tokens.get(index + 1).map(|token| token.text.as_str()) == Some(".")
+            {
+                if let (Some(impl_type), Some(field)) = (
+                    function.impl_type.as_deref(),
+                    tokens.get(index + 2).map(|token| token.text.as_str()),
+                ) {
+                    if self
+                        .fields
+                        .contains(&(impl_type.to_owned(), field.to_owned()))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn write_macro_has_origin(
+        &self,
+        tokens: &[Token],
+        functions: &[FunctionSpan],
+        index: usize,
+    ) -> bool {
+        if tokens.get(index + 1).map(|token| token.text.as_str()) != Some("!")
+            || tokens.get(index + 2).map(|token| token.text.as_str()) != Some("(")
+        {
+            return false;
+        }
+        let Some(close) = matching_delimiter(tokens, index + 2, "(", ")") else {
+            return false;
+        };
+        let Some((start, end)) = split_top_level(&tokens[index + 3..close], ",")
+            .into_iter()
+            .next()
+        else {
+            return false;
+        };
+        let Some(function_index) = innermost_function_index(functions, index) else {
+            return false;
+        };
+        self.expression_has_origin(
+            tokens,
+            functions,
+            function_index,
+            index + 3 + start,
+            index + 3 + end,
+        )
+    }
+
+    fn write_method_has_origin(
+        &self,
+        tokens: &[Token],
+        functions: &[FunctionSpan],
+        index: usize,
+    ) -> bool {
+        let Some(function_index) = innermost_function_index(functions, index) else {
+            return false;
+        };
+        let start = expression_start(tokens, index.saturating_sub(1));
+        self.expression_has_origin(tokens, functions, function_index, start, index - 1)
+    }
+}
+
+fn callee_matches_qualifier(
+    callee: &FunctionSpan,
+    qualifier: Option<&str>,
+    caller_impl: Option<&str>,
+) -> bool {
+    match qualifier {
+        Some("Self") => callee.impl_type.as_deref() == caller_impl,
+        Some(type_name) => callee.impl_type.as_deref() == Some(type_name),
+        None => callee.impl_type.is_none(),
+    }
+}
+
+fn statement_end(tokens: &[Token], start: usize, limit: usize) -> Option<usize> {
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    for index in start..limit {
+        match tokens[index].text.as_str() {
+            "(" => parens += 1,
+            ")" => parens = parens.saturating_sub(1),
+            "[" => brackets += 1,
+            "]" => brackets = brackets.saturating_sub(1),
+            "{" => braces += 1,
+            "}" if braces > 0 => braces -= 1,
+            ";" if parens == 0 && brackets == 0 && braces == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn innermost_function_index(functions: &[FunctionSpan], index: usize) -> Option<usize> {
+    functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| function.open < index && index < function.close)
+        .min_by_key(|(_, function)| function.close - function.open)
+        .map(|(index, _)| index)
+}
+
+fn expression_start(tokens: &[Token], end: usize) -> usize {
+    let mut start = end;
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    while start > 0 {
+        match tokens[start - 1].text.as_str() {
+            ")" => parens += 1,
+            "(" if parens > 0 => parens -= 1,
+            "]" => brackets += 1,
+            "[" if brackets > 0 => brackets -= 1,
+            ";" | "," | "{" | "}" | "=" if parens == 0 && brackets == 0 => break,
+            _ => {}
+        }
+        start -= 1;
+    }
+    start
+}
+
+fn primitive_at(
+    path: &str,
+    tokens: &[Token],
+    index: usize,
+    functions: &[FunctionSpan],
+    origins: &OutputOrigins,
+) -> Option<Primitive> {
     let text = tokens[index].text.as_str();
     if matches!(text, "print" | "println" | "eprint" | "eprintln" | "dbg")
         && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("!")
     {
         return Some(Primitive::PrintMacro);
+    }
+    if matches!(text, "write" | "writeln")
+        && origins.write_macro_has_origin(tokens, functions, index)
+    {
+        return Some(Primitive::DirectWrite);
+    }
+    if matches!(text, "write" | "write_all" | "write_fmt")
+        && previous_is(tokens, index, ".")
+        && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+        && !write_method_has_document_argument(tokens, functions, index)
+        && origins.write_method_has_origin(tokens, functions, index)
+    {
+        return Some(Primitive::DirectWrite);
     }
     if matches!(text, "stdout" | "stderr")
         && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
@@ -646,10 +1181,9 @@ fn primitive_at(path: &str, tokens: &[Token], index: usize) -> Option<Primitive>
     }
     if text == "render" && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(") {
         let document_call = previous_is(tokens, index, ".")
-            && tokens
-                .get(index.wrapping_sub(2))
-                .is_some_and(|token| token.text == "document")
-            && render_uses_context(tokens, index + 2);
+            && tokens.get(index + 2).map(|token| token.text.as_str()) == Some("&")
+            && tokens.get(index + 3).map(|token| token.text.as_str()) != Some("mut")
+            && !render_receiver_is_glyph(tokens, functions, index);
         let document_api = path == "src/ui/document.rs" && previous_is(tokens, index, "fn");
         if document_call || document_api {
             return Some(Primitive::DocumentRender);
@@ -700,17 +1234,11 @@ fn is_path_ident(text: &str) -> bool {
     text.bytes().next().is_some_and(is_ident_start) && text.bytes().all(is_ident_continue)
 }
 
-fn render_uses_context(tokens: &[Token], argument_start: usize) -> bool {
-    let end = (argument_start + 8).min(tokens.len());
-    tokens[argument_start..end].iter().any(|token| {
-        token.text == "context" || token.text == "stdout_context" || token.text == "stderr_context"
-    })
-}
-
 fn scan_source(path: &str, source: &str) -> Vec<Site> {
     let tokens = lex(source);
     let excluded = test_only_mask(&tokens);
     let functions = function_spans(&tokens, &excluded);
+    let origins = OutputOrigins::analyze(&tokens, &functions);
     let mut ordinals: BTreeMap<(String, Primitive), usize> = BTreeMap::new();
     let mut sites = Vec::new();
 
@@ -718,7 +1246,7 @@ fn scan_source(path: &str, source: &str) -> Vec<Site> {
         if excluded[index] {
             continue;
         }
-        let Some(primitive) = primitive_at(path, &tokens, index) else {
+        let Some(primitive) = primitive_at(path, &tokens, index, &functions, &origins) else {
             continue;
         };
         let owner = functions
