@@ -1,7 +1,9 @@
 #[path = "source_backed_feed/admission.rs"]
 mod admission;
 
-pub(super) use admission::{cursor_after_page, sync_source_backed_pro_feed_paged};
+#[cfg(test)]
+pub(super) use admission::cursor_after_page;
+pub(super) use admission::sync_source_backed_pro_feed_paged;
 
 use super::*;
 use ctx_pro_host_protocol::{

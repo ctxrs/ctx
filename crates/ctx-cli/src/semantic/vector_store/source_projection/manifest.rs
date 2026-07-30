@@ -192,20 +192,13 @@ pub(super) fn hydration_failure_invalidates(kind: HydrationFailureKind) -> bool 
             | HydrationFailureKind::StaleSourceEvidence
             | HydrationFailureKind::StaleRecordEvidence
             | HydrationFailureKind::MissingRecord
+            | HydrationFailureKind::MalformedSource
             | HydrationFailureKind::InvalidLocator
     )
 }
 
 pub(super) fn hydration_failure_name(kind: HydrationFailureKind) -> &'static str {
-    match kind {
-        HydrationFailureKind::TemporarilyUnavailable => "temporarily_unavailable",
-        HydrationFailureKind::ConfirmedDeleted => "confirmed_deleted",
-        HydrationFailureKind::StaleSourceEvidence => "stale_source_evidence",
-        HydrationFailureKind::StaleRecordEvidence => "stale_record_evidence",
-        HydrationFailureKind::MissingRecord => "missing_record",
-        HydrationFailureKind::UnsupportedParserRevision => "unsupported_parser_revision",
-        HydrationFailureKind::InvalidLocator => "invalid_locator",
-    }
+    kind.as_str()
 }
 
 pub(super) fn source_contract_fingerprint() -> String {
