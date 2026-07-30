@@ -270,10 +270,7 @@ fn locator_wire_has_one_message_role_and_rejects_removed_result_vocabulary() {
 fn route_registry_exactly_covers_matrix_formats_with_message_routes() {
     use std::{collections::HashSet, str::FromStr};
 
-    let matrix: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../docs/provider-support-matrix.json"
-    ))
-    .unwrap();
+    let matrix = crate::test_support_paths::provider_support_matrix();
     let expected = matrix["providers"]
         .as_array()
         .unwrap()

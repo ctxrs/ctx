@@ -230,10 +230,7 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
 
 #[test]
 fn public_supported_formats_have_one_exact_hydratable_landed_route() {
-    let matrix: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../../docs/provider-support-matrix.json"
-    ))
-    .unwrap();
+    let matrix = crate::test_support_paths::provider_support_matrix();
 
     for provider in matrix["providers"].as_array().unwrap() {
         let capture_provider =
