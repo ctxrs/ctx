@@ -270,50 +270,6 @@ pub(super) fn decode_locator(
     })
 }
 
-pub(super) fn read_exact_record(
-    file: &mut File,
-    locator: &SourceRecordLocator,
-    coordinate: &DecodedKimiLocator,
-) -> KimiSourceBackedResult<Vec<u8>> {
-    let range_end = coordinate
-        .byte_offset
-        .checked_add(coordinate.byte_length)
-        .ok_or(KimiSourceBackedError::LocatorRangeTooLarge)?;
-    if file.metadata()?.len() < range_end {
-        return Err(KimiSourceBackedError::LocatorRangeMissing);
-    }
-    file.seek(SeekFrom::Start(coordinate.byte_offset))?;
-    let length = usize::try_from(coordinate.byte_length)
-        .map_err(|_| KimiSourceBackedError::LocatorRangeTooLarge)?;
-    let mut provider_bytes = vec![0; length];
-    file.read_exact(&mut provider_bytes)?;
-    if provider_bytes[..provider_bytes.len().saturating_sub(1)].contains(&b'\n')
-        || (provider_bytes.last() != Some(&b'\n') && range_end != file.metadata()?.len())
-    {
-        return Err(KimiSourceBackedError::StaleRecordEvidence);
-    }
-    let record_bytes = json_record_bytes(&provider_bytes);
-    if &Sha256::digest(record_bytes)[..] != locator.record_digest() {
-        return Err(KimiSourceBackedError::StaleRecordEvidence);
-    }
-    let value = serde_json::from_slice::<Value>(record_bytes)
-        .map_err(|_| KimiSourceBackedError::StaleRecordEvidence)?;
-    let record_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let line_number = usize::try_from(coordinate.physical_ordinal)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or(KimiSourceBackedError::InvalidLocator)?;
-    if kimi_legacy_provider_event_hash(record_type, &value, line_number)
-        != coordinate.native_event_id
-    {
-        return Err(KimiSourceBackedError::StaleRecordEvidence);
-    }
-    Ok(provider_bytes)
-}
-
 pub(super) fn hydration_failure(kind: HydrationFailureKind, detail: &str) -> HydrationFailure {
     HydrationFailure {
         kind,
@@ -323,18 +279,15 @@ pub(super) fn hydration_failure(kind: HydrationFailureKind, detail: &str) -> Hyd
 
 pub(super) fn map_hydration_error(error: KimiSourceBackedError) -> HydrationFailure {
     let kind = match error {
-        KimiSourceBackedError::UnknownSource => HydrationFailureKind::ConfirmedDeleted,
         KimiSourceBackedError::InvalidLocator
         | KimiSourceBackedError::LocatorRangeTooLarge
         | KimiSourceBackedError::Projection(_)
         | KimiSourceBackedError::Resolver(_) => HydrationFailureKind::InvalidLocator,
-        KimiSourceBackedError::LocatorRangeMissing => HydrationFailureKind::MissingRecord,
         KimiSourceBackedError::StaleRecordEvidence => HydrationFailureKind::StaleRecordEvidence,
         KimiSourceBackedError::SourceChanged | KimiSourceBackedError::InventoryChanged => {
             HydrationFailureKind::StaleSourceEvidence
         }
-        KimiSourceBackedError::InventoryUnavailable
-        | KimiSourceBackedError::Capture(_)
+        KimiSourceBackedError::Capture(_)
         | KimiSourceBackedError::Io(_)
         | KimiSourceBackedError::Index(_)
         | KimiSourceBackedError::DuplicateLineage(_)

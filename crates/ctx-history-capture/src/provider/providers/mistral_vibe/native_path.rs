@@ -1,16 +1,14 @@
 use std::{
     collections::BTreeSet,
-    fs::{self, File, Metadata},
-    io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    fs::Metadata,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{AgentType, CaptureProvider, EventType};
+use ctx_history_core::{AgentType, EventType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::{
     provider::{
@@ -19,8 +17,7 @@ use crate::{
         providers::native_jsonl::native_jsonl_timestamp,
         tool_input,
     },
-    CaptureError, OutputObservationKind, OutputOutcome, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
-    MISTRAL_VIBE_SOURCE_FORMAT,
+    CaptureError, OutputObservationKind, OutputOutcome, Result, MISTRAL_VIBE_SOURCE_FORMAT,
 };
 
 use super::{
@@ -34,6 +31,8 @@ use super::{
 };
 
 pub(crate) mod source_backed;
+#[cfg(test)]
+mod source_backed_tests;
 
 const MAX_TOUCHES_PER_RECORD: usize = 60;
 
@@ -74,10 +73,6 @@ impl SessionFact {
             },
             failure,
         ))
-    }
-
-    fn is_primary(&self) -> bool {
-        self.parent_provider_session_id.is_none()
     }
 }
 
@@ -147,77 +142,6 @@ struct SourceObservation {
     messages: FileStamp,
     metadata_sha256: [u8; 32],
     exact_content_revision: String,
-}
-
-enum Line {
-    EndOfFile,
-    IncompleteTail,
-    Oversized { end: u64 },
-    Complete { bytes: Vec<u8>, end: u64 },
-}
-
-fn read_bounded_line(
-    reader: &mut BufReader<File>,
-    hasher: &mut Sha256,
-    frozen_length: u64,
-    start: u64,
-) -> Result<Line> {
-    if start >= frozen_length {
-        return Ok(Line::EndOfFile);
-    }
-    let mut bytes = Vec::new();
-    let mut total = 0_u64;
-    let mut oversized = false;
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            return Ok(if total == 0 {
-                Line::EndOfFile
-            } else {
-                Line::IncompleteTail
-            });
-        }
-        let remaining = frozen_length.saturating_sub(start.saturating_add(total));
-        if remaining == 0 {
-            return Ok(Line::IncompleteTail);
-        }
-        let bounded = &available[..available
-            .len()
-            .min(usize::try_from(remaining).unwrap_or(usize::MAX))];
-        let take = bounded
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(bounded.len(), |index| index.saturating_add(1));
-        let chunk = &bounded[..take];
-        hasher.update(chunk);
-        total = total.saturating_add(chunk.len() as u64);
-        if !oversized {
-            if bytes.len().saturating_add(chunk.len())
-                > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2)
-            {
-                oversized = true;
-                bytes.clear();
-            } else {
-                bytes.extend_from_slice(chunk);
-            }
-        }
-        let complete = chunk.last() == Some(&b'\n');
-        reader.consume(take);
-        if complete {
-            let end = start.saturating_add(total);
-            if oversized {
-                return Ok(Line::Oversized { end });
-            }
-            bytes.pop();
-            if bytes.last() == Some(&b'\r') {
-                bytes.pop();
-            }
-            return Ok(Line::Complete { bytes, end });
-        }
-        if start.saturating_add(total) == frozen_length {
-            return Ok(Line::IncompleteTail);
-        }
-    }
 }
 
 fn valid_mistral_vibe_record_role(value: &Value) -> std::result::Result<&str, &'static str> {
