@@ -70,10 +70,6 @@ use super::providers::{
         DeepAgentsDatabaseSelectionV0, DeepAgentsLocatorResolverV0, DeepAgentsSourceBackedScannerV0,
     },
     firebender::firebender_message_text,
-    firebender::native_path::{
-        hydrate_firebender_source_backed_row, prepare_firebender_source_backed,
-        FirebenderSourceBackedPlan,
-    },
     forgecode::nativepath::source_backed::{
         open_forgecode_source_backed_v0, ForgeCodeSourceBackedDiscoveryV0,
         ForgeCodeSourceBackedResolverV0, ForgeCodeSourceSelectionV0,
