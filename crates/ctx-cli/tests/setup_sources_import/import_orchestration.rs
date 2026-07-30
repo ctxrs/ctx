@@ -336,7 +336,7 @@ fn human_native_import_starts_a_reported_daemon_process() {
             "none",
         ])
         .env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2")
-        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
+        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "60")
         .env("CTX_UPGRADE_AUTO", "off")
         .env_remove("CI")
         .env_remove("CTX_DAEMON_AUTOSTART_OFF")
