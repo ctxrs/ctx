@@ -14,14 +14,20 @@ struct SourceRefreshDaemon {
 
 impl Drop for SourceRefreshDaemon {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Err(error) =
+            terminate_and_reap_test_child(&mut self.child, "setup source-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("setup source-refresh daemon teardown also failed: {error}");
+            } else {
+                panic!("setup source-refresh daemon teardown failed: {error}");
+            }
         }
     }
 }
 
 fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    bind_test_ctx_binary(temp);
     fs::create_dir_all(data_root(temp)).unwrap();
     fs::write(
         data_root(temp).join("config.toml"),
@@ -739,6 +745,10 @@ fn import_all_without_sources_does_not_report_missing_explicit_path() {
     assert_eq!(report["outcome"], "success", "{report:#}");
     assert_eq!(report["totals"]["change"], "no_op", "{report:#}");
     assert_eq!(report["totals"]["current_source_count"], 0, "{report:#}");
+    assert_eq!(
+        report["totals"]["current_indexed_documents"], 0,
+        "{report:#}"
+    );
 }
 
 #[test]
