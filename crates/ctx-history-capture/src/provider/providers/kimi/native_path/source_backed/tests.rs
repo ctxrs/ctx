@@ -148,4 +148,27 @@ fn shared_family_kimi_noop_projection_and_grouped_hydration_oracle() {
         format!("{:x}", digest.finalize()),
         "5c30f1ed49d4941877f12f170dcb44e8810c72c301ba610345a016fc8f1ce0de"
     );
+
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("sessions/work/session-1/agents/main/wire.jsonl"))
+            .unwrap(),
+        "{}",
+        json!({
+            "type": "turn.prompt",
+            "time": 1_784_289_600_003_i64,
+            "input": "tiny append"
+        })
+    )
+    .unwrap();
+    reset_jsonl_family_work();
+    let growth =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(
+        jsonl_family_work().provider_projections,
+        4,
+        "one Kimi record append still reprojects the complete four-record source"
+    );
+    assert_eq!(growth.sources[0].counts().indexed_documents, 3);
 }

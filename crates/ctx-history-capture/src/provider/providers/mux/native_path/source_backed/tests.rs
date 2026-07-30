@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -224,6 +225,24 @@ fn shared_family_mux_replacement_truncate_deletion_and_unavailable_root() {
         )
         .unwrap();
     assert_eq!(changed.provider_bytes, b"change");
+
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(session.join("chat.jsonl"))
+            .unwrap(),
+        "{}",
+        message("message-2", "user", 2, "tiny append")
+    )
+    .unwrap();
+    reset_jsonl_family_work();
+    let grown = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(
+        jsonl_family_work().provider_projections,
+        3,
+        "one Mux record append still reprojects the complete three-record source"
+    );
+    assert_eq!(grown.sources[0].counts().indexed_documents, 3);
 
     write_chat(&session, &[message("message-0", "user", 0, "truncated")]);
     reset_jsonl_family_work();
