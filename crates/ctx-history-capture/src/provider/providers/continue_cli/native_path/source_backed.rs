@@ -23,7 +23,6 @@ use serde::Serialize;
 use thiserror::Error;
 
 use self::hydration::hydrate_continue_group_with_observer;
-pub(crate) use self::hydration::hydrate_continue_source_backed_record;
 use super::{
     normalize::{
         ContinuePreparedPage, ContinuePreparedSource, CONTINUE_NATIVE_MAX_PAGE_BYTES,

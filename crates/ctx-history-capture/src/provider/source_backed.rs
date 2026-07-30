@@ -49,10 +49,7 @@ use super::providers::{
         scan_astrbot_source_backed_v0, AstrBotSourceBackedInventoryV0,
         AstrBotSourceBackedResolverV0,
     },
-    continue_cli::native_path::{
-        discover_continue_root, hydrate_continue_source_backed_record, ContinueSourceBackedOutcome,
-        ContinueSourceBackedReader,
-    },
+    continue_cli::native_path::{ContinueSourceBackedOutcome, ContinueSourceBackedReader},
     crush::native_path::source_backed::{
         bind_inventory as bind_crush_inventory, closing_observation as closing_crush_observation,
         exact_replay_matches as crush_exact_replay_matches,

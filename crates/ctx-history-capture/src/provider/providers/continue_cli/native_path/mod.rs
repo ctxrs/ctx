@@ -12,10 +12,7 @@ mod source_backed;
 pub(crate) use normalize::{
     ContinueEventKind, ContinueEventRole, ContinueEventRow, ContinueGenerationAuthority,
 };
-pub(crate) use source::discover_continue_root;
-pub(crate) use source_backed::{
-    hydrate_continue_source_backed_record, ContinueSourceBackedOutcome, ContinueSourceBackedReader,
-};
+pub(crate) use source_backed::{ContinueSourceBackedOutcome, ContinueSourceBackedReader};
 
 use std::{io, path::PathBuf};
 
