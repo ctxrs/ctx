@@ -33,6 +33,7 @@ pub(crate) const MAX_EVENT_WINDOW: usize = 50;
 #[derive(Debug, Parser)]
 #[command(
     name = "ctx",
+    bin_name = "ctx",
     version,
     about = "Search local agent history",
     styles = crate::ui::CLAP_STYLES

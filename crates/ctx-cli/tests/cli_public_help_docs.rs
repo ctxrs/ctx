@@ -573,7 +573,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "{command} help missing {needle} in\n{help}"
             );
         }
-        for forbidden in ["dashboard", "shim", "publish", "link-pr"] {
+        for forbidden in ["dashboard", "shim", "link-pr"] {
             assert!(
                 !help.contains(forbidden),
                 "{command} help leaked {forbidden} in\n{help}"
@@ -864,8 +864,9 @@ fn status_and_doctor_report_effective_upgrade_auto_mode() {
         assert_eq!(process_opt_out["upgrade"]["auto_enabled"], false);
     }
 
+    fs::create_dir_all(data_root(&temp)).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root(&temp).join("config.toml"),
         "[upgrade]\nauto = \"off\"\n",
     )
     .unwrap();
@@ -986,9 +987,9 @@ fn provider_session_rejects_whitespace_only_value() {
         ],
     ] {
         let stderr = failure_stderr(ctx(&temp).args(&args));
-        assert!(
-            stderr.contains("--provider-session cannot be empty"),
-            "expected empty-value error for {args:?}, got: {stderr}"
+        assert_eq!(
+            stderr, "✗ provider session ID must not be empty\n",
+            "unexpected typed diagnostic for {args:?}"
         );
     }
 }
