@@ -256,6 +256,21 @@ ctx_rust_test(
     tags = ["exclusive"],
 )
 
+ctx_rust_test(
+    name = "raw_output_policy_tests",
+    srcs = [
+        "tests/raw_output_policy.rs",
+        "tests/raw_output_policy/allowlist.rs",
+        "tests/raw_output_policy/self_tests.rs",
+    ],
+    crate_name = "raw_output_policy_tests",
+    crate_root = "tests/raw_output_policy.rs",
+    data = glob(["src/**/*.rs"]) + ["build.rs"],
+    edition = crate_edition(),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_CLI_RUSTC_FLAGS,
+)
+
 ctx_cli_integration_test(
     name = "test_targets_minimal_fixture",
     src = "tests/build_support/minimal.rs",
