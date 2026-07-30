@@ -1,20 +1,28 @@
 use std::{
-    collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use chrono::{TimeZone, Utc};
-use ctx_history_core::{NativeRecordCoordinate, TypedKey};
+use ctx_history_core::{
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
+    HydrationFailureKind, NativeRecordCoordinate, SourceRecordLocator, TypedKey,
+};
+use ctx_history_index::{EventRecord, VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
 use super::*;
 use crate::{
-    provider_sources::{
-        discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryPlatform,
-        DiscoveryPlatformDirs,
+    provider::source_backed::{
+        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     test_support_paths::tempdir,
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
 };
 
 fn adapter_context(root: &Path) -> ProviderAdapterContext {
@@ -24,6 +32,50 @@ fn adapter_context(root: &Path) -> ProviderAdapterContext {
         source_root: Some(root.to_path_buf()),
         imported_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
     }
+}
+
+fn route_source(root: &Path) -> ProviderSource {
+    ProviderSource {
+        provider: CaptureProvider::RovoDev,
+        path: root.to_path_buf(),
+        exists: true,
+        source_format: ROVODEV_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    }
+}
+
+fn writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+fn registry_with_counters(
+    root: &Path,
+) -> (
+    SourceBackedProviderRegistry,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let projection_scans = Arc::new(AtomicUsize::new(0));
+    let hydration_scans = Arc::new(AtomicUsize::new(0));
+    let adapter = RovoDevDocumentTreeAdapter::new(root.to_path_buf(), adapter_context(root))
+        .with_projection_scans(Arc::clone(&projection_scans))
+        .with_hydration_scans(Arc::clone(&hydration_scans));
+    let mut registry = SourceBackedProviderRegistry::new();
+    crate::provider::source_backed::family::document::register_replacement_document_tree_route(
+        &mut registry,
+        route_source(root),
+        SourceBackedRouteSelection::Automatic,
+        adapter,
+    )
+    .unwrap();
+    (registry, projection_scans, hydration_scans)
 }
 
 fn write_session(
@@ -51,7 +103,7 @@ fn write_session(
             "session_id": provider_session_id,
             "parent_session_id": parent_session_id,
             "workspace_path": "/workspace/rovo",
-            "git_branch": "feature/source-backed",
+            "git_branch": "feature/shared-document",
         }))
         .unwrap(),
     )
@@ -59,413 +111,326 @@ fn write_session(
     context
 }
 
-fn collect_scan(
-    leaf: &RovoDevSourceBackedLeaf,
-    context: ProviderAdapterContext,
-    previous: Option<&CertifiedSource>,
-) -> (
-    RovoDevSourceBackedScan,
-    Vec<LexicalDocument>,
-    Vec<RovoDevSourceBackedPage>,
-) {
-    let mut reader = RovoDevSourceBackedReader::new(leaf, context, previous).unwrap();
-    let mut documents = Vec::new();
-    let mut pages = Vec::new();
-    while let Some(mut page) = reader.next_page().unwrap() {
-        documents.append(&mut page.documents);
-        pages.push(page);
-    }
-    (reader.finish().unwrap(), documents, pages)
+fn source_events(index_root: &Path, source: &SourceKey) -> Vec<EventRecord> {
+    let mut events = VerifiedIndex::open(index_root)
+        .unwrap()
+        .source_event_page(source, None, 16)
+        .unwrap()
+        .items;
+    events.sort_by_key(|event| event.event_sequence);
+    events
 }
 
 #[test]
-fn cold_scan_emits_stable_full_documents_tree_coordinates_and_exact_counts() {
+fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".rovodev/sessions");
-    let full_body = format!("{}rovodev-tail", "bounded ".repeat(400));
+    let index_root = temp.path().join("index");
     write_session(
         &root,
-        "session-a",
-        "session-a",
+        "root",
+        "root-thread",
         None,
-        &[
-            json!({
-                "id": "message-a",
-                "role": "user",
-                "timestamp": "2026-01-01T00:00:00Z",
-                "content": full_body
-            }),
-            json!({
-                "id": "tool-success",
-                "role": "tool_result",
-                "status": "success",
-                "content": "successful output is intentionally not retained"
-            }),
-            json!("malformed-message"),
-        ],
+        &[json!({"id": "root-message", "role": "user", "content": "root"})],
     );
-    let context = adapter_context(&root);
-    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    assert_eq!(inventory.leaves().len(), 1);
-    assert_eq!(inventory.certify().unwrap().observed_sources(), 1);
-
-    let leaf = &inventory.leaves()[0];
-    let (cold, documents, _) = collect_scan(leaf, context.clone(), None);
-    assert_eq!(cold.disposition, RovoDevSourceBackedDisposition::Cold);
-    assert_eq!(documents.len(), 1);
-    assert_eq!(cold.source.counts().complete_records, 3);
-    assert_eq!(cold.source.counts().retained_records, 1);
-    assert_eq!(cold.source.counts().rejected_records, 1);
-    assert_eq!(cold.source.counts().ignored_records, 1);
-    assert_eq!(cold.source.counts().indexed_documents, 1);
-    assert_eq!(documents[0].body, full_body);
-    assert!(documents[0].body.ends_with("rovodev-tail"));
-    assert_eq!(documents[0].session_id, leaf.session_id);
-    assert_eq!(documents[0].parent_session_id, None);
-    assert_eq!(documents[0].root_session_id, leaf.session_id);
-    assert_eq!(documents[0].source, *leaf.source_key());
-    assert_eq!(
-        documents[0].provider_session_id.as_deref(),
-        Some("session-a")
-    );
-    assert_eq!(
-        documents[0].branch.as_deref(),
-        Some("feature/source-backed")
-    );
-    assert_eq!(
-        documents[0].source_path.as_deref(),
-        Some(
-            root.join("session-a/session_context.json")
-                .to_str()
-                .unwrap()
-        )
-    );
-    assert_eq!(documents[0].agent_type, AgentType::Primary.as_str());
-    assert!(documents[0].is_primary);
-    assert_eq!(
-        documents[0].locator.certified_source_revision_digest(),
-        Some(cold.source.content_digest())
-    );
-    assert_eq!(
-        cold.source.frontier().unwrap().checkpoint_kind(),
-        FRONTIER_KIND
-    );
-    match documents[0].locator.coordinate() {
-        NativeRecordCoordinate::TreeRecord {
-            relative_file_key: TypedKey::Utf8(relative),
-            record_coordinate: TypedKey::Composite(parts),
-        } => {
-            assert_eq!(relative, RELATIVE_CONTEXT_FILE);
-            assert_eq!(
-                parts,
-                &[
-                    TypedKey::Utf8(MESSAGE_OBJECT_KIND.to_owned()),
-                    TypedKey::U64(0),
-                    TypedKey::Utf8("message-a".to_owned()),
-                ]
-            );
-        }
-        coordinate => panic!("unexpected coordinate: {coordinate:?}"),
-    }
-
-    let (noop, noop_documents, noop_pages) = collect_scan(leaf, context, Some(&cold.source));
-    assert_eq!(noop.disposition, RovoDevSourceBackedDisposition::Unchanged);
-    assert!(noop_documents.is_empty());
-    assert!(noop_pages.is_empty());
-    assert_eq!(noop.source, cold.source);
-}
-
-#[test]
-fn lineage_fields_bind_parent_root_thread_and_agent_semantics() {
-    let temp = tempdir().unwrap();
-    let root = temp.path().join(".rovodev/sessions");
-    for (provider_session_id, parent_session_id) in [
-        ("root-thread", None),
-        ("child-thread", Some("root-thread")),
-        ("grandchild-thread", Some("child-thread")),
-    ] {
-        write_session(
-            &root,
-            provider_session_id,
-            provider_session_id,
-            parent_session_id,
-            &[json!({
-                "id": format!("{provider_session_id}-message"),
-                "role": "assistant",
-                "content": provider_session_id,
-            })],
-        );
-    }
-    let context = adapter_context(&root);
-    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    let mut documents = HashMap::new();
-    for leaf in inventory.leaves() {
-        let (_, mut leaf_documents, _) = collect_scan(leaf, context.clone(), None);
-        assert_eq!(leaf_documents.len(), 1);
-        let document = leaf_documents.pop().unwrap();
-        documents.insert(
-            document.provider_session_id.clone().unwrap(),
-            (leaf.session_id, document),
-        );
-    }
-
-    let (root_session_id, root_document) = &documents["root-thread"];
-    let (child_session_id, child_document) = &documents["child-thread"];
-    let (grandchild_session_id, grandchild_document) = &documents["grandchild-thread"];
-    assert_eq!(root_document.parent_session_id, None);
-    assert_eq!(root_document.root_session_id, *root_session_id);
-    assert_eq!(root_document.agent_type, AgentType::Primary.as_str());
-    assert!(root_document.is_primary);
-    assert_eq!(child_document.parent_session_id, Some(*root_session_id));
-    assert_eq!(child_document.root_session_id, *root_session_id);
-    assert_eq!(child_document.agent_type, AgentType::Subagent.as_str());
-    assert!(!child_document.is_primary);
-    assert_eq!(
-        grandchild_document.parent_session_id,
-        Some(*child_session_id)
-    );
-    assert_eq!(grandchild_document.root_session_id, *root_session_id);
-    assert_eq!(grandchild_document.agent_type, AgentType::Subagent.as_str());
-    assert!(!grandchild_document.is_primary);
-    assert_ne!(grandchild_session_id, root_session_id);
-}
-
-#[test]
-fn exact_route_reopens_full_body_and_replacement_rejects_stale_revision() {
-    let temp = tempdir().unwrap();
-    let root = temp.path().join(".rovodev/sessions");
-    let original_text = format!("original exact body {}", "content ".repeat(500));
-    let path = write_session(
-        &root,
-        "session-a",
-        "session-a",
-        None,
-        &[
-            json!({"id": "stable-message", "role": "user", "content": original_text.clone()}),
-            json!({"role": "assistant", "content": "positional"}),
-        ],
-    );
-    let context = adapter_context(&root);
-    let original_inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    let original_leaf = &original_inventory.leaves()[0];
-    let (cold, original_documents, _) = collect_scan(original_leaf, context.clone(), None);
-    assert_eq!(original_documents.len(), 2);
-    assert_eq!(original_documents[0].body, original_text);
-    let hydrated = hydrate_rovodev_source_record(
-        &original_inventory,
-        original_documents[0].event_id,
-        &original_documents[0].locator,
-    )
-    .unwrap();
-    assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some(original_text.as_str())
-    );
-    assert_eq!(
-        hydrated.provider_bytes,
-        original_documents[0].body.as_bytes()
-    );
-
-    let replacement_text = format!("replaced exact body {}", "content ".repeat(500));
-    assert_eq!(replacement_text.len(), original_text.len());
-    let replacement_document = json!({
-        "session_id": "session-a",
-        "message_history": [
-            {"id": "stable-message", "role": "user", "content": replacement_text},
-            {"role": "assistant", "content": "positional"}
-        ]
-    });
-    fs::write(&path, serde_json::to_vec(&replacement_document).unwrap()).unwrap();
-
-    let replacement_inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    let stale = hydrate_rovodev_source_record(
-        &replacement_inventory,
-        original_documents[0].event_id,
-        &original_documents[0].locator,
-    )
-    .unwrap_err();
-    assert!(matches!(
-        stale,
-        RovoDevSourceBackedError::LocatorSourceChanged
-    ));
-
-    let replacement_leaf = &replacement_inventory.leaves()[0];
-    let (replacement, replacement_documents, _) =
-        collect_scan(replacement_leaf, context, Some(&cold.source));
-    assert_eq!(
-        replacement.disposition,
-        RovoDevSourceBackedDisposition::Replacement
-    );
-    assert_eq!(replacement_documents.len(), 2);
-    assert_eq!(
-        replacement_documents[0].event_id, original_documents[0].event_id,
-        "native message identity survives a document replacement"
-    );
-    assert_ne!(
-        replacement_documents[1].event_id, original_documents[1].event_id,
-        "positional message identity is revision scoped"
-    );
-    let hydrated = hydrate_rovodev_source_record(
-        &replacement_inventory,
-        replacement_documents[0].event_id,
-        &replacement_documents[0].locator,
-    )
-    .unwrap();
-    assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some(replacement_text.as_str())
-    );
-}
-
-#[test]
-fn configured_root_wins_and_unsafe_replacement_suppresses_default_fallback() {
-    let temp = tempdir().unwrap();
-    let home = temp.path().join("home");
-    let cwd = temp.path().join("cwd");
-    let custom = temp.path().join("custom-rovo-sessions");
-    let default = home.join(".rovodev/sessions");
-    fs::create_dir_all(&cwd).unwrap();
-    write_session(
-        &custom,
-        "custom",
-        "custom",
-        None,
-        &[json!({"id": "custom-message", "role": "user", "content": "custom"})],
-    );
-    write_session(
-        &default,
-        "stale",
-        "stale",
-        None,
-        &[json!({"id": "stale-message", "role": "user", "content": "stale"})],
-    );
-    fs::create_dir_all(home.join(".rovodev")).unwrap();
-    let discovery_context = DiscoveryContext::new(
-        &home,
-        &cwd,
-        DiscoveryPlatform::Linux,
-        DiscoveryPlatformDirs {
-            data: Some(home.join(".local/share")),
-            config: Some(home.join(".config")),
-            state: Some(home.join(".local/state")),
-            local_data: Some(home.join(".local/share")),
-        },
-    );
-    let selected_default = discover_provider_sources_for_provider_with_context(
-        &discovery_context,
-        CaptureProvider::RovoDev,
-    );
-    assert_eq!(
-        selected_default
-            .sources
-            .iter()
-            .map(|source| source.path.clone())
-            .collect::<Vec<_>>(),
-        vec![default.clone()]
-    );
-
-    fs::write(
-        home.join(".rovodev/config.yml"),
-        format!(
-            "sessions:\n  persistenceDir: {}\n",
-            serde_json::to_string(custom.to_str().unwrap()).unwrap()
-        ),
-    )
-    .unwrap();
-    let selected = discover_provider_sources_for_provider_with_context(
-        &discovery_context,
-        CaptureProvider::RovoDev,
-    );
-    assert_eq!(
-        selected
-            .sources
-            .iter()
-            .map(|source| source.path.clone())
-            .collect::<Vec<_>>(),
-        vec![custom.clone()]
-    );
-    discover_rovodev_source_backed(&selected.sources[0].path, adapter_context(&custom)).unwrap();
-
-    fs::write(
-        home.join(".rovodev/config.yml"),
-        "sessions:\n  persistenceDir: relative/unsafe\n",
-    )
-    .unwrap();
-    let blocked = discover_provider_sources_for_provider_with_context(
-        &discovery_context,
-        CaptureProvider::RovoDev,
-    );
-    assert!(blocked.sources.is_empty());
-    assert_eq!(blocked.issues.len(), 1);
-
-    let direct_leaf = custom.join("custom/session_context.json");
-    let error = discover_rovodev_source_backed(&direct_leaf, adapter_context(&custom)).unwrap_err();
-    assert!(matches!(
-        error,
-        RovoDevSourceBackedError::NonAuthoritativeRoot
-    ));
-}
-
-#[test]
-fn compound_authority_rovodev_rejects_missing_auxiliary_and_sibling_swap() {
-    let temp = tempdir().unwrap();
-    let root = temp.path().join(".rovodev/sessions");
+    let full_body = format!("full-prefix-{}-rovodev-tail", "x".repeat(3_000));
     let context_path = write_session(
         &root,
-        "session-a",
-        "session-a",
-        None,
-        &[json!({"id": "message-a", "role": "user", "content": "hello"})],
+        "child",
+        "child-thread",
+        Some("root-thread"),
+        &[
+            json!({"id": "child-user", "role": "user", "content": full_body}),
+            json!({"id": "child-assistant", "role": "assistant", "content": "exact response"}),
+            json!({"id": "tool-success", "role": "tool_result", "status": "success", "content": "ignored"}),
+            json!("malformed"),
+        ],
     );
-    let metadata_path = context_path.parent().unwrap().join("metadata.json");
-    fs::remove_file(&metadata_path).unwrap();
-    let context = adapter_context(&root);
-    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    fs::write(&metadata_path, br#"{"session_id":"session-a"}"#).unwrap();
-    assert!(inventory.certify().is_err());
+    let (registry, projection_scans, hydration_scans) = registry_with_counters(&root);
 
-    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    let leaf = &inventory.leaves()[0];
-    let mut reader = RovoDevSourceBackedReader::new(leaf, context, None).unwrap();
-    while reader.next_page().unwrap().is_some() {}
-    fs::write(
-        &metadata_path,
-        br#"{"session_id":"session-a","git_branch":"replacement"}"#,
+    let receipt =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(receipt.sources.len(), 2);
+    let child_source = rovodev_source_key("child-thread").unwrap();
+    let child_certificate = receipt
+        .sources
+        .iter()
+        .find(|source| {
+            source
+                .observation()
+                .source()
+                .exact_descriptor_eq(&child_source)
+        })
+        .unwrap();
+    assert_eq!(child_certificate.parser_revision(), PARSER_REVISION);
+    assert_eq!(child_certificate.counts().complete_records, 4);
+    assert_eq!(child_certificate.counts().retained_records, 2);
+    assert_eq!(child_certificate.counts().rejected_records, 1);
+    assert_eq!(child_certificate.counts().ignored_records, 1);
+    assert_eq!(child_certificate.counts().indexed_documents, 2);
+
+    let events = source_events(&index_root, &child_source);
+    assert_eq!(events.len(), 2);
+    let root_source = rovodev_source_key("root-thread").unwrap();
+    let root_session_id = rovodev_session_identity(&root_source, "root-thread").unwrap();
+    let child_session_id = rovodev_session_identity(&child_source, "child-thread").unwrap();
+    assert_eq!(events[0].session_id, child_session_id);
+    assert_eq!(events[0].parent_session_id, Some(root_session_id));
+    assert_eq!(events[0].root_session_id, root_session_id);
+    assert_eq!(
+        events[0].provider_session_id.as_deref(),
+        Some("child-thread")
+    );
+    assert_eq!(events[0].branch.as_deref(), Some("feature/shared-document"));
+    assert_eq!(events[0].source_path.as_deref(), context_path.to_str());
+    assert_eq!(events[0].agent_type, AgentType::Subagent.as_str());
+    assert!(!events[0].is_primary);
+    assert_eq!(
+        events[0].locator.certified_source_revision_digest(),
+        Some(child_certificate.content_digest())
+    );
+    let NativeRecordCoordinate::TreeRecord {
+        relative_file_key: TypedKey::Utf8(relative),
+        record_coordinate: TypedKey::Composite(parts),
+    } = events[0].locator.coordinate()
+    else {
+        panic!("Rovo Dev locator lost its typed tree coordinate");
+    };
+    assert_eq!(relative, RELATIVE_CONTEXT_FILE);
+    assert_eq!(
+        parts,
+        &[
+            TypedKey::Utf8(MESSAGE_OBJECT_KIND.to_owned()),
+            TypedKey::U64(0),
+            TypedKey::Utf8("child-user".to_owned()),
+        ]
+    );
+
+    let requests = [1_usize, 0]
+        .into_iter()
+        .map(|index| {
+            EventHydrationRequest::new(events[index].event_id, events[index].locator.clone())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
+    let hydrated = registry.resolver_registry().hydrate_batch(&batch).unwrap();
+    assert_eq!(hydration_scans.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        hydrated
+            .records()
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        requests
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(hydrated.records()[0].provider_bytes, b"exact response");
+    assert!(hydrated.records()[1]
+        .provider_bytes
+        .ends_with(b"rovodev-tail"));
+
+    let missing_locator = SourceRecordLocator::new(
+        child_source,
+        NativeRecordCoordinate::TreeRecord {
+            relative_file_key: TypedKey::utf8(RELATIVE_CONTEXT_FILE).unwrap(),
+            record_coordinate: TypedKey::composite(vec![
+                TypedKey::utf8(MESSAGE_OBJECT_KIND).unwrap(),
+                TypedKey::U64(99),
+                TypedKey::utf8("missing").unwrap(),
+            ])
+            .unwrap(),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        events[0]
+            .locator
+            .certified_source_revision_digest()
+            .copied(),
+        *events[0].locator.record_digest(),
     )
     .unwrap();
-    assert!(reader.finish().is_err());
+    let partly_valid = BatchHydrationRequest::new(vec![
+        requests[0].clone(),
+        EventHydrationRequest::new(events[0].event_id, missing_locator).unwrap(),
+    ])
+    .unwrap();
+    let error = registry
+        .resolver_registry()
+        .hydrate_batch(&partly_valid)
+        .unwrap_err();
+    assert_eq!(error.kind, HydrationFailureKind::MissingRecord);
+    assert_eq!(hydration_scans.load(Ordering::Relaxed), 2);
 }
 
-#[cfg(unix)]
 #[test]
-fn compound_authority_rovodev_rejects_ancestor_swap_and_stale_locator() {
+fn durable_replay_scans_one_changed_leaf_and_distinguishes_delete_from_unavailable() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".rovodev/sessions");
-    write_session(
+    let index_root = temp.path().join("index");
+    let path_a = write_session(
         &root,
-        "session-a",
+        "a",
         "session-a",
         None,
-        &[json!({"id": "message-a", "role": "user", "content": "hello"})],
+        &[json!({"id": "a-message", "role": "user", "content": "alpha-before"})],
     );
-    let context = adapter_context(&root);
-    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
-    let (_, documents, _) = collect_scan(&inventory.leaves()[0], context, None);
-
-    let retired = temp.path().join("retired-sessions");
-    fs::rename(&root, &retired).unwrap();
     write_session(
         &root,
-        "session-a",
+        "b",
+        "session-b",
+        None,
+        &[json!({"id": "b-message", "role": "user", "content": "bravo-stable"})],
+    );
+    let (registry, projection_scans, _) = registry_with_counters(&root);
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+
+    let original = fs::metadata(&path_a).unwrap();
+    write_session(
+        &root,
+        "a",
         "session-a",
         None,
-        &[json!({"id": "message-a", "role": "user", "content": "hello"})],
+        &[json!({"id": "a-message", "role": "user", "content": "alpha-after-"})],
+    );
+    assert_eq!(fs::metadata(&path_a).unwrap().len(), original.len());
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path_a)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original.modified().unwrap()))
+        .unwrap();
+    let changed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 3);
+
+    fs::remove_dir_all(root.join("b")).unwrap();
+    let deleted =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(deleted.sources.len(), 1);
+    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 3);
+
+    write_session(
+        &root,
+        "b",
+        "session-b",
+        None,
+        &[json!({"id": "b-message", "role": "user", "content": "bravo-stable"})],
+    );
+    let restored =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 4);
+    let retained_generation = restored.commit.generation_id;
+    fs::remove_dir_all(&root).unwrap();
+    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        retained_generation
+    );
+}
+
+#[test]
+fn terminal_tree_fence_runs_once_and_rejects_a_race() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".rovodev/sessions");
+    let index_root = temp.path().join("index");
+    write_session(
+        &root,
+        "session",
+        "session",
+        None,
+        &[json!({"id": "message", "role": "user", "content": "cold"})],
+    );
+    let (cold_registry, _, _) = registry_with_counters(&root);
+    let cold =
+        refresh_source_backed_generation(&index_root, &cold_registry, writer_options()).unwrap();
+    write_session(
+        &root,
+        "session",
+        "session",
+        None,
+        &[json!({"id": "message", "role": "user", "content": "before-fence"})],
     );
 
-    assert!(hydrate_rovodev_source_record(
-        &inventory,
-        documents[0].event_id,
-        &documents[0].locator,
+    let projection_scans = Arc::new(AtomicUsize::new(0));
+    let fence_calls = Arc::new(AtomicUsize::new(0));
+    let hook_root = root.clone();
+    let hook_calls = Arc::clone(&fence_calls);
+    let adapter = RovoDevDocumentTreeAdapter::new(root.clone(), adapter_context(&root))
+        .with_projection_scans(Arc::clone(&projection_scans))
+        .with_terminal_revalidation_hook(Arc::new(move || {
+            hook_calls.fetch_add(1, Ordering::Relaxed);
+            write_session(
+                &hook_root,
+                "session",
+                "session",
+                None,
+                &[json!({"id": "message", "role": "user", "content": "during-fence"})],
+            );
+        }));
+    let mut race_registry = SourceBackedProviderRegistry::new();
+    crate::provider::source_backed::family::document::register_replacement_document_tree_route(
+        &mut race_registry,
+        route_source(&root),
+        SourceBackedRouteSelection::Automatic,
+        adapter,
     )
-    .is_err());
+    .unwrap();
+
+    assert!(
+        refresh_source_backed_generation(&index_root, &race_registry, writer_options()).is_err()
+    );
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 1);
+    assert_eq!(fence_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        cold.commit.generation_id
+    );
+}
+
+#[test]
+fn production_route_is_thin_and_below_the_loc_gate() {
+    let adapter = include_str!("../source_backed.rs");
+    let document = include_str!("document.rs");
+    let registration = include_str!("../../../../source_backed/registration/families/document.rs");
+    for (name, production) in [
+        ("rovodev_adapter", adapter),
+        ("rovodev_document", document),
+        ("document_registration", registration),
+    ] {
+        assert!(
+            production.lines().count() < 1_000,
+            "{name} exceeded the 1,000-line production gate"
+        );
+    }
+    let start = registration.find("fn register_rovodev_route").unwrap();
+    let end = registration[start..]
+        .find("fn register_continue_route")
+        .map(|offset| start + offset)
+        .unwrap();
+    let rovodev_registration = &registration[start..end];
+    let captured = ["captured_route", "_driver"].concat();
+    assert!(!rovodev_registration.contains(&captured));
+    for obsolete in [
+        "RovoDevSourceBackedPage",
+        "RovoDevSourceBackedScan",
+        "next_page",
+        "finish(",
+        "CertifiedSourceInventory",
+    ] {
+        assert!(!adapter.contains(obsolete) && !document.contains(obsolete));
+    }
+    assert_eq!(adapter.matches("scan_rovodev_document(").count(), 1);
+    assert!(!adapter.contains("Vec<LexicalDocument>"));
+    assert!(!document.contains("Vec<LexicalDocument>"));
 }

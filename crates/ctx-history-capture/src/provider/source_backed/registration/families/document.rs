@@ -79,69 +79,16 @@ pub(super) fn register_rovodev_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
     let context = ProviderAdapterContext {
         machine_id: "source-backed-rovodev".to_owned(),
-        source_path: Some(root.clone()),
-        source_root: Some(root.clone()),
+        source_path: Some(source.path.clone()),
+        source_root: Some(source.path.clone()),
         imported_at: DateTime::<Utc>::UNIX_EPOCH,
     };
-    let capture_root = root.clone();
-    let capture_context = context.clone();
-    let hydration_root = root;
-    let hydration_context = context;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let inventory = discover_rovodev_source_backed(&capture_root, capture_context.clone())
-                .map_err(route_error)?;
-            for leaf in inventory.leaves() {
-                let mut reader =
-                    RovoDevSourceBackedReader::new(leaf, capture_context.clone(), None)
-                        .map_err(route_error)?;
-                sink.begin(leaf.source_key().clone())?;
-                while let Some(page) = reader.next_page().map_err(route_error)? {
-                    for document in page.documents {
-                        sink.document(document)?;
-                    }
-                }
-                let scan = reader.finish().map_err(route_error)?;
-                if scan.disposition == RovoDevSourceBackedDisposition::Unchanged {
-                    return Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "cold Rovo Dev coordinator scan reported unchanged",
-                    ));
-                }
-                sink.certify(scan.source)?;
-            }
-            let inventory = inventory.certify().map_err(route_error)?;
-            sink.certify_complete_inventory(inventory)
-        },
-        provider_format_scope(CaptureProvider::RovoDev, "rovodev_session_json_tree"),
-        move |request| {
-            let inventory =
-                discover_rovodev_source_backed(&hydration_root, hydration_context.clone())
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                    })?;
-            let hydrated =
-                hydrate_rovodev_source_record(&inventory, request.event_id(), request.locator())
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                    })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    let adapter = RovoDevDocumentTreeAdapter::new(source.path.clone(), context);
+    crate::provider::source_backed::family::document::register_replacement_document_tree_route(
+        registry, source, selection, adapter,
+    )
 }
 pub(super) fn register_continue_route(
     registry: &mut SourceBackedProviderRegistry,
