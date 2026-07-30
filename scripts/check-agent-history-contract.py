@@ -146,6 +146,51 @@ def validate_fixture(path: Path, schema: dict) -> None:
         require(isinstance(search.get("results"), list), f"{path}: missing search.results[]")
         for result in search["results"]:
             require("resultScope" in result, f"{path}: result missing resultScope")
+        result_window = search.get("resultWindow")
+        require(isinstance(result_window, dict), f"{path}: missing search.resultWindow")
+        limit = result_window.get("limit")
+        returned = result_window.get("returned")
+        more_available = result_window.get("moreAvailable")
+        require(
+            isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0,
+            f"{path}: bad search.resultWindow.limit",
+        )
+        require(
+            isinstance(returned, int) and not isinstance(returned, bool) and returned >= 0,
+            f"{path}: bad search.resultWindow.returned",
+        )
+        require(
+            isinstance(more_available, bool),
+            f"{path}: bad search.resultWindow.moreAvailable",
+        )
+        require(
+            returned == len(search["results"]),
+            f"{path}: search.resultWindow.returned does not match search.results",
+        )
+        require(
+            returned <= limit,
+            f"{path}: search.resultWindow.returned exceeds limit",
+        )
+        if more_available:
+            require(
+                returned == limit,
+                f"{path}: search.resultWindow.moreAvailable requires a full window",
+            )
+
+        pagination = search.get("pagination")
+        require(isinstance(pagination, dict), f"{path}: missing compatibility search.pagination")
+        require(
+            pagination.get("limit") == limit,
+            f"{path}: search.pagination.limit disagrees with resultWindow",
+        )
+        require(
+            pagination.get("hasMore") == more_available,
+            f"{path}: search.pagination.hasMore disagrees with resultWindow",
+        )
+        require(
+            "nextCursor" not in pagination,
+            f"{path}: search result windows must not invent cursor pagination",
+        )
 
     if operation == "showEvent":
         require(isinstance(data.get("event"), dict), f"{path}: missing event envelope")

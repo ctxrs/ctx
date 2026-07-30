@@ -197,6 +197,12 @@ export interface ImportResult {
   sources?: JsonObject[];
 }
 
+export interface SearchResultWindow {
+  limit: number;
+  returned: number;
+  moreAvailable: boolean;
+}
+
 export interface SearchResult {
   query: string | null;
   filters?: JsonObject;
@@ -204,6 +210,7 @@ export interface SearchResult {
   retrieval?: SearchRetrieval;
   generatedAt?: string | null;
   results: SearchHit[];
+  resultWindow?: SearchResultWindow;
   pagination?: JsonObject;
   truncation?: JsonObject;
 }

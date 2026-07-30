@@ -96,6 +96,10 @@ def normalize_import(raw: Mapping[str, Any]) -> ImportResult:
 
 
 def normalize_search(raw: Mapping[str, Any]) -> SearchResult:
+    result_window = raw.get("result_window", raw.get("resultWindow"))
+    pagination = raw.get("pagination")
+    if pagination is None and isinstance(result_window, Mapping):
+        pagination = _result_window_pagination(result_window)
     return cast(
         SearchResult,
         _drop_none(
@@ -106,11 +110,23 @@ def normalize_search(raw: Mapping[str, Any]) -> SearchResult:
                 "retrieval": _camelize_public(raw.get("retrieval")),
                 "generatedAt": raw.get("generated_at", raw.get("generatedAt")),
                 "results": [_camelize_public(result) for result in raw.get("results", [])],
-                "pagination": _camelize_public(raw.get("pagination", {})),
+                "resultWindow": _camelize_public(result_window),
+                "pagination": _camelize_public(pagination if pagination is not None else {}),
                 "truncation": _camelize_public(raw.get("truncation", {})),
             }
         ),
     )
+
+
+def _result_window_pagination(result_window: Mapping[str, Any]) -> JsonObject:
+    pagination: JsonObject = {}
+    if "limit" in result_window:
+        pagination["limit"] = result_window["limit"]
+    if "more_available" in result_window:
+        pagination["hasMore"] = result_window["more_available"]
+    elif "moreAvailable" in result_window:
+        pagination["hasMore"] = result_window["moreAvailable"]
+    return pagination
 
 
 def normalize_event(raw: Mapping[str, Any]) -> EventResult:

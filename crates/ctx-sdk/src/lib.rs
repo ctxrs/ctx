@@ -15,9 +15,9 @@ use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
     AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, EventResult, Freshness,
-    ImportResult, LocationResult, ProviderSource, SearchHit, SearchResult, SearchRetrieval,
-    SearchRetrievalCoverage, SessionResult, SourceLocation, Totals, CONTRACT_VERSION,
-    SCHEMA_VERSION,
+    ImportResult, LocationResult, ProviderSource, SearchHit, SearchResult, SearchResultWindow,
+    SearchRetrieval, SearchRetrievalCoverage, SessionResult, SourceLocation, Totals,
+    CONTRACT_VERSION, SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -593,7 +593,30 @@ fn normalize_import(raw: &Value) -> Result<ImportResult, AgentHistoryError> {
 
 fn normalize_search(raw: &Value) -> Result<SearchResult, AgentHistoryError> {
     let value = camel_alias_object(raw, &[("generated_at", "generatedAt")]);
-    decode_payload(camelize_object_keys(&value), "search")
+    let mut value = camelize_object_keys(&value);
+    bridge_search_pagination(&mut value);
+    decode_payload(value, "search")
+}
+
+fn bridge_search_pagination(value: &mut Value) {
+    let Some(search) = value.as_object_mut() else {
+        return;
+    };
+    if search.contains_key("pagination") {
+        return;
+    }
+    let Some(result_window) = search.get("resultWindow").and_then(Value::as_object) else {
+        return;
+    };
+
+    let mut pagination = serde_json::Map::new();
+    if let Some(limit) = result_window.get("limit") {
+        pagination.insert("limit".to_owned(), limit.clone());
+    }
+    if let Some(more_available) = result_window.get("moreAvailable") {
+        pagination.insert("hasMore".to_owned(), more_available.clone());
+    }
+    search.insert("pagination".to_owned(), Value::Object(pagination));
 }
 
 fn normalize_event(raw: &Value) -> Result<EventResult, AgentHistoryError> {
@@ -654,9 +677,46 @@ mod tests {
         assert_eq!(search.query.as_deref(), Some("local agent history"));
         assert_eq!(search.results.len(), 1);
         assert_eq!(
+            search.result_window,
+            Some(SearchResultWindow {
+                limit: 20,
+                returned: 1,
+                more_available: false,
+                extra: JsonObject::new(),
+            })
+        );
+        assert_eq!(search.pagination.as_ref().unwrap()["limit"], 20);
+        assert_eq!(search.pagination.as_ref().unwrap()["hasMore"], false);
+        assert_eq!(
             search.results[0].ctx_event_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
+    }
+
+    #[test]
+    fn search_normalization_bridges_result_window_to_published_pagination() {
+        let search = normalize_search(&json!({
+            "query": "bounded",
+            "results": [{"result_scope": "event"}],
+            "result_window": {
+                "limit": 1,
+                "returned": 1,
+                "more_available": true
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(search.result_window.as_ref().unwrap().limit, 1);
+        assert_eq!(search.result_window.as_ref().unwrap().returned, 1);
+        assert!(search.result_window.as_ref().unwrap().more_available);
+        assert_eq!(search.pagination.as_ref().unwrap()["limit"], 1);
+        assert_eq!(search.pagination.as_ref().unwrap()["hasMore"], true);
+        assert!(search
+            .pagination
+            .as_ref()
+            .unwrap()
+            .get("nextCursor")
+            .is_none());
     }
 
     #[test]

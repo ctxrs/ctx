@@ -121,6 +121,7 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
     public var generatedAt: String?
     public var retrieval: JSONValue?
     public var results: [AgentHistorySearchHit]
+    public var resultWindow: AgentHistorySearchResultWindow?
     public var pagination: AgentHistoryPagination?
     public var truncation: AgentHistoryTruncation?
 
@@ -131,6 +132,7 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
         generatedAt: String? = nil,
         retrieval: JSONValue? = nil,
         results: [AgentHistorySearchHit] = [],
+        resultWindow: AgentHistorySearchResultWindow? = nil,
         pagination: AgentHistoryPagination? = nil,
         truncation: AgentHistoryTruncation? = nil
     ) {
@@ -140,6 +142,7 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
         self.generatedAt = generatedAt
         self.retrieval = retrieval
         self.results = results
+        self.resultWindow = resultWindow
         self.pagination = pagination
         self.truncation = truncation
     }
@@ -151,6 +154,7 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
         case generatedAt
         case retrieval
         case results
+        case resultWindow
         case pagination
         case truncation
     }
@@ -163,6 +167,7 @@ public struct AgentHistorySearchResult: Codable, Equatable, Sendable {
         generatedAt = try container.decodeIfPresent(String.self, forKey: .generatedAt)
         retrieval = try container.decodeIfPresent(JSONValue.self, forKey: .retrieval)
         results = try container.decodeIfPresent([AgentHistorySearchHit].self, forKey: .results) ?? []
+        resultWindow = try container.decodeIfPresent(AgentHistorySearchResultWindow.self, forKey: .resultWindow)
         pagination = try container.decodeIfPresent(AgentHistoryPagination.self, forKey: .pagination)
         truncation = try container.decodeIfPresent(AgentHistoryTruncation.self, forKey: .truncation)
     }
@@ -552,11 +557,25 @@ public struct AgentHistoryTotals: Codable, Equatable, Sendable {
     }
 }
 
+public struct AgentHistorySearchResultWindow: Codable, Equatable, Sendable {
+    public var limit: Int
+    public var returned: Int
+    public var moreAvailable: Bool
+
+    public init(limit: Int, returned: Int, moreAvailable: Bool) {
+        self.limit = limit
+        self.returned = returned
+        self.moreAvailable = moreAvailable
+    }
+}
+
 public struct AgentHistoryPagination: Codable, Equatable, Sendable {
     public var limit: Int?
+    public var hasMore: Bool?
 
-    public init(limit: Int? = nil) {
+    public init(limit: Int? = nil, hasMore: Bool? = nil) {
         self.limit = limit
+        self.hasMore = hasMore
     }
 }
 

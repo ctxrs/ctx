@@ -152,7 +152,7 @@ test("builds search flags and normalizes nested CLI search output", async () => 
           ],
         },
       ],
-      pagination: { next_cursor: "page-2", has_more: true },
+      result_window: { limit: 1, returned: 1, more_available: true },
       truncation: { truncated: false },
     }),
   );
@@ -197,8 +197,14 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   assert.equal(result.search.retrieval.coverage.embeddedItems, 4);
   assert.equal(result.search.retrieval.coverage.indexedNow, 1);
   assert.equal(result.search.retrieval.diagnostics.queryEmbedMs, 2);
-  assert.equal(result.search.pagination.nextCursor, "page-2");
+  assert.deepEqual(result.search.resultWindow, {
+    limit: 1,
+    returned: 1,
+    moreAvailable: true,
+  });
+  assert.equal(result.search.pagination.limit, 1);
   assert.equal(result.search.pagination.hasMore, true);
+  assert.equal(result.search.pagination.nextCursor, undefined);
 
   assert.deepEqual(calls[0].args, [
     "--data-root",
@@ -362,6 +368,8 @@ test("dogfood toy app runs status/search/show/locate with mocked ctx", async () 
     ready: true,
     query: "local agent history",
     firstScope: "event",
+    returned: 1,
+    moreAvailable: true,
     eventCount: 1,
     sessionMode: "lite",
     eventPath: "/tmp/ctx-sdk-dogfood/session.jsonl",
@@ -436,6 +444,16 @@ function assertFixturePayload(entry, fixture) {
       break;
     case "search":
       assert.ok(Array.isArray(fixture.search.results), `${entry} search.results`);
+      assert.equal(
+        fixture.search.resultWindow.returned,
+        fixture.search.results.length,
+        `${entry} search.resultWindow.returned`,
+      );
+      assert.equal(
+        fixture.search.pagination.hasMore,
+        fixture.search.resultWindow.moreAvailable,
+        `${entry} search.pagination.hasMore`,
+      );
       if (fixture.search.results.length > 0) {
         assert.equal(
           typeof fixture.search.results[0].resultScope,

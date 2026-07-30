@@ -22,6 +22,7 @@ func TestDogfoodExampleUsesFakeTransportByDefault(t *testing.T) {
 		"import sessions=1",
 		"sync events=1",
 		"search results=1",
+		"search window=1/1 more=true",
 		"show event=11111111-1111-4111-8111-111111111111 sequence=1",
 		"show session events=1 mode=lite",
 		"locate provider=codex cursor=line:1",

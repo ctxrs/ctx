@@ -24,6 +24,9 @@ public final class ToyAgentHistoryApp {
 
         System.out.println("status.initialized=" + status.getStatus().getInitialized());
         System.out.println("search.results=" + search.getSearch().getResults().size());
+        System.out.println("search.window=" + search.getSearch().getResultWindow().getReturned()
+                + "/" + search.getSearch().getResultWindow().getLimit()
+                + " more=" + search.getSearch().getResultWindow().getMoreAvailable());
         System.out.println("show.event=" + shown.getEvent().getEvent().getCtxEventId());
         System.out.println("locate.path=" + located.getLocation().getSource().getPath());
     }
@@ -52,7 +55,7 @@ public final class ToyAgentHistoryApp {
                     + "\"snippet\":\"toy local agent history result\","
                     + "\"citations\":[{\"target_type\":\"event\",\"label\":\"toy event\",\"ctx_event_id\":\"evt-toy-1\"}]"
                     + "}],"
-                    + "\"pagination\":{\"limit\":5},"
+                    + "\"result_window\":{\"limit\":1,\"returned\":1,\"more_available\":true},"
                     + "\"truncation\":{\"truncated\":false}"
                     + "}");
             responses.put("showEvent", "{"

@@ -203,14 +203,22 @@ type SearchResponse struct {
 
 // SearchResult contains agent history search results.
 type SearchResult struct {
-	Query       string            `json:"query,omitempty"`
-	Filters     Object            `json:"filters,omitempty"`
-	Freshness   *Freshness        `json:"freshness,omitempty"`
-	GeneratedAt string            `json:"generatedAt,omitempty"`
-	Retrieval   any               `json:"retrieval,omitempty"`
-	Results     []SearchHit       `json:"results"`
-	Pagination  *SearchPagination `json:"pagination,omitempty"`
-	Truncation  *SearchTruncation `json:"truncation,omitempty"`
+	Query        string              `json:"query,omitempty"`
+	Filters      Object              `json:"filters,omitempty"`
+	Freshness    *Freshness          `json:"freshness,omitempty"`
+	GeneratedAt  string              `json:"generatedAt,omitempty"`
+	Retrieval    any                 `json:"retrieval,omitempty"`
+	Results      []SearchHit         `json:"results"`
+	ResultWindow *SearchResultWindow `json:"resultWindow,omitempty"`
+	Pagination   *SearchPagination   `json:"pagination,omitempty"`
+	Truncation   *SearchTruncation   `json:"truncation,omitempty"`
+}
+
+// SearchResultWindow describes the bounded result window returned by search.
+type SearchResultWindow struct {
+	Limit         int  `json:"limit"`
+	Returned      int  `json:"returned"`
+	MoreAvailable bool `json:"moreAvailable"`
 }
 
 // SearchPagination describes paging metadata for search results.

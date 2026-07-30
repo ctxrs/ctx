@@ -107,9 +107,32 @@ internal static class AgentHistoryContract
         search["freshness"] = CamelizePublic(raw["freshness"] ?? new JsonObject());
         SetIfAbsent(search, "generatedAt", JsonHelpers.Clone(raw["generated_at"] ?? raw["generatedAt"]));
         search["results"] = results;
-        search["pagination"] = CamelizePublic(raw["pagination"] ?? new JsonObject());
+        search["pagination"] = NormalizeSearchPagination(raw, search);
         search["truncation"] = CamelizePublic(raw["truncation"] ?? new JsonObject());
         return search;
+    }
+
+    private static JsonObject NormalizeSearchPagination(JsonObject raw, JsonObject search)
+    {
+        if (raw["pagination"] is JsonObject pagination)
+        {
+            return (JsonObject)CamelizePublic(pagination)!;
+        }
+
+        var compatibility = new JsonObject();
+        if (search["resultWindow"] is not JsonObject resultWindow)
+        {
+            return compatibility;
+        }
+        if (resultWindow["limit"] is not null)
+        {
+            compatibility["limit"] = JsonHelpers.Clone(resultWindow["limit"]);
+        }
+        if (resultWindow["moreAvailable"] is not null)
+        {
+            compatibility["hasMore"] = JsonHelpers.Clone(resultWindow["moreAvailable"]);
+        }
+        return compatibility;
     }
 
     public static JsonObject NormalizeEvent(JsonObject raw)

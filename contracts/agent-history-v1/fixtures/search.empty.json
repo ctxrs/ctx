@@ -35,6 +35,11 @@
       }
     },
     "results": [],
+    "resultWindow": {
+      "limit": 20,
+      "returned": 0,
+      "moreAvailable": false
+    },
     "pagination": {
       "limit": 20,
       "hasMore": false

@@ -113,6 +113,7 @@ public class AgentHistoryEnvelope {
                 fields.put("import", camel);
                 break;
             case "search":
+                bridgeSearchPagination(camel);
                 fields.put("search", camel);
                 break;
             case "showEvent":
@@ -141,6 +142,24 @@ public class AgentHistoryEnvelope {
                 break;
         }
         return buildCanonical(operation, backend, fields);
+    }
+
+    private static void bridgeSearchPagination(Map<String, Object> search) {
+        if (search.containsKey("pagination")) {
+            return;
+        }
+        Map<String, Object> resultWindow = AgentHistoryValue.objectOrNull(search.get("resultWindow"));
+        if (resultWindow == null) {
+            return;
+        }
+        Map<String, Object> pagination = new LinkedHashMap<>();
+        if (resultWindow.containsKey("limit")) {
+            pagination.put("limit", resultWindow.get("limit"));
+        }
+        if (resultWindow.containsKey("moreAvailable")) {
+            pagination.put("hasMore", resultWindow.get("moreAvailable"));
+        }
+        search.put("pagination", pagination);
     }
 
     private static Map<String, Object> buildCanonical(

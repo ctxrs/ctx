@@ -82,8 +82,14 @@
         "visibility": "local_only"
       }
     ],
+    "resultWindow": {
+      "limit": 20,
+      "returned": 1,
+      "moreAvailable": false
+    },
     "pagination": {
-      "limit": 20
+      "limit": 20,
+      "hasMore": false
     },
     "truncation": {
       "truncated": false

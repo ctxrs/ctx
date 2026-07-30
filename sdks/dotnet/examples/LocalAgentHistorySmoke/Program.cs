@@ -35,6 +35,7 @@ var output = new JsonObject
     ["locateSession"] = locateSession.ToJsonObject()
 };
 
+_ = search.Search.ResultWindow?.MoreAvailable;
 Console.WriteLine(output.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
 
 static AgentHistoryClient CreateClient()
@@ -173,6 +174,12 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
                 ["source_path"] = $"{DataRoot}/session.jsonl",
                 ["source_exists"] = true
             }
+        };
+        payload["result_window"] = new JsonObject
+        {
+            ["limit"] = 1,
+            ["returned"] = 1,
+            ["more_available"] = true
         };
         return payload;
     }

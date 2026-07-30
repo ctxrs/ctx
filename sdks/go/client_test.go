@@ -49,14 +49,14 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 		"filters": {},
 		"freshness": {"mode": "off", "status": "skipped", "source_count": 0, "totals": {}},
 		"generated_at": "2026-01-01T00:00:00Z",
-		"results": [],
-		"pagination": {},
+		"results": [{"result_scope": "event"}],
+		"result_window": {"limit": 1, "returned": 1, "more_available": true},
 		"truncation": {}
 	}`}
 	client := NewClient(WithTransport(transport))
 	semanticWeight := 0.35
 
-	_, err := client.Search(context.Background(), SearchOptions{
+	response, err := client.Search(context.Background(), SearchOptions{
 		Query:                 "panic",
 		Terms:                 []string{"sqlite", "retry"},
 		Limit:                 5,
@@ -74,6 +74,18 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
+	}
+	if response.Search.ResultWindow == nil ||
+		response.Search.ResultWindow.Limit != 1 ||
+		response.Search.ResultWindow.Returned != 1 ||
+		!response.Search.ResultWindow.MoreAvailable {
+		t.Fatalf("unexpected result window: %+v", response.Search.ResultWindow)
+	}
+	if response.Search.Pagination == nil ||
+		response.Search.Pagination.Limit != 1 ||
+		!response.Search.Pagination.HasMore ||
+		response.Search.Pagination.NextCursor != "" {
+		t.Fatalf("unexpected compatibility pagination: %+v", response.Search.Pagination)
 	}
 
 	want := []string{
@@ -349,8 +361,14 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	if search.Search.Results[0].ResultType != "event" || search.Search.Results[0].Citations[0].TargetType != "event" {
 		t.Fatalf("unexpected typed result/citation type: %+v", search.Search.Results[0])
 	}
-	if search.Search.Pagination == nil || search.Search.Pagination.Limit != 20 {
+	if search.Search.Pagination == nil || search.Search.Pagination.Limit != 20 || search.Search.Pagination.HasMore {
 		t.Fatalf("unexpected pagination: %+v", search.Search.Pagination)
+	}
+	if search.Search.ResultWindow == nil ||
+		search.Search.ResultWindow.Limit != 20 ||
+		search.Search.ResultWindow.Returned != 1 ||
+		search.Search.ResultWindow.MoreAvailable {
+		t.Fatalf("unexpected result window: %+v", search.Search.ResultWindow)
 	}
 	if search.Search.Truncation == nil || search.Search.Truncation.Truncated {
 		t.Fatalf("unexpected truncation: %+v", search.Search.Truncation)

@@ -113,8 +113,19 @@
           "type": "array",
           "items": { "$ref": "#/$defs/searchHit" }
         },
+        "resultWindow": { "$ref": "#/$defs/searchResultWindow" },
         "pagination": { "type": "object", "additionalProperties": true },
         "truncation": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "searchResultWindow": {
+      "type": "object",
+      "required": ["limit", "returned", "moreAvailable"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 0 },
+        "returned": { "type": "integer", "minimum": 0 },
+        "moreAvailable": { "type": "boolean" }
       },
       "additionalProperties": true
     },

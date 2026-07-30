@@ -231,9 +231,21 @@ pub struct SearchResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<SearchHit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_window: Option<SearchResultWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pagination: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncation: Option<JsonObject>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: JsonObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultWindow {
+    pub limit: u64,
+    pub returned: u64,
+    pub more_available: bool,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -596,7 +608,13 @@ mod tests {
                     assert!(envelope.import_result.is_some(), "{:?}", entry.path());
                 }
                 AgentHistoryOperation::Search => {
-                    assert!(envelope.search.is_some(), "{:?}", entry.path())
+                    let search = envelope.search.as_ref().expect("search fixture payload");
+                    let result_window = search
+                        .result_window
+                        .as_ref()
+                        .expect("search fixture resultWindow");
+                    assert_eq!(result_window.returned, search.results.len() as u64);
+                    assert!(search.pagination.is_some(), "{:?}", entry.path());
                 }
                 AgentHistoryOperation::ShowEvent => {
                     assert!(envelope.event.is_some(), "{:?}", entry.path())

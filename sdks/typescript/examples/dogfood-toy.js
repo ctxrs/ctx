@@ -44,6 +44,8 @@ export async function runDogfoodToy(options = {}) {
     ready: status.status.initialized,
     query: search.search.query,
     firstScope: firstHit?.resultScope ?? null,
+    returned: search.search.resultWindow?.returned ?? 0,
+    moreAvailable: search.search.resultWindow?.moreAvailable ?? false,
     eventCount: event.event.events.length,
     sessionMode: session.session.mode,
     eventPath: eventLocation.location.source.path,
@@ -95,6 +97,7 @@ function mockResponse(args) {
           cursor: "line:2",
         },
       ],
+      result_window: { limit: 1, returned: 1, more_available: true },
     };
   }
   if (command === "show" && subcommand === "event") {

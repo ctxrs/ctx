@@ -36,6 +36,7 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	case "import", "sync":
 		envelope["import"] = camel
 	case "search":
+		bridgeSearchPagination(camel)
 		envelope["search"] = camel
 	case "showEvent":
 		envelope["event"] = map[string]any{
@@ -56,6 +57,28 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(envelope)
+}
+
+func bridgeSearchPagination(value any) {
+	search, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	if _, exists := search["pagination"]; exists {
+		return
+	}
+	resultWindow, ok := search["resultWindow"].(map[string]any)
+	if !ok {
+		return
+	}
+	pagination := map[string]any{}
+	if limit, exists := resultWindow["limit"]; exists {
+		pagination["limit"] = limit
+	}
+	if moreAvailable, exists := resultWindow["moreAvailable"]; exists {
+		pagination["hasMore"] = moreAvailable
+	}
+	search["pagination"] = pagination
 }
 
 func agentHistoryOperationName(name string) string {

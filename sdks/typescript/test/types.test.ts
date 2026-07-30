@@ -50,6 +50,9 @@ expectType<number | null | undefined>(search.search.retrieval?.semanticWeight);
 expectType<string | null | undefined>(search.search.retrieval?.semanticFallbackCode);
 expectType<number | undefined>(search.search.retrieval?.coverage?.embeddedItems);
 expectType<JsonValue | undefined>(search.search.retrieval?.diagnostics?.queryEmbedMs);
+expectType<number | undefined>(search.search.resultWindow?.limit);
+expectType<number | undefined>(search.search.resultWindow?.returned);
+expectType<boolean | undefined>(search.search.resultWindow?.moreAvailable);
 // @ts-expect-error search results expose ctxEventId, not ctx_event_id.
 search.search.results[0]!.ctx_event_id;
 
