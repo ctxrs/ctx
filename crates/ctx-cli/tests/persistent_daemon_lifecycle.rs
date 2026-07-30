@@ -5,9 +5,9 @@ mod native {
     use std::{
         collections::BTreeMap,
         fs,
-        io::Write,
+        io::{BufRead, BufReader, Write},
         path::{Path, PathBuf},
-        process::{Child, Command as StdCommand, Output, Stdio},
+        process::{Child, ChildStdin, ChildStdout, Command as StdCommand, Output, Stdio},
         sync::Mutex,
         thread,
         time::{Duration, Instant, SystemTime},
@@ -121,6 +121,21 @@ mod native {
             )
         }
 
+        fn mcp_session(&self) -> McpSession {
+            let mut command = self.std_command();
+            command
+                .args(["mcp", "serve"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().expect("spawn persistent MCP session");
+            McpSession {
+                stdin: child.stdin.take().expect("MCP session stdin"),
+                stdout: BufReader::new(child.stdout.take().expect("MCP session stdout")),
+                child,
+            }
+        }
+
         fn daemon_status(&self) -> Value {
             self.json(&["daemon", "status", "--format=json"])["daemon"].clone()
         }
@@ -171,6 +186,33 @@ mod native {
     impl Drop for Harness {
         fn drop(&mut self) {
             self.best_effort_disable();
+        }
+    }
+
+    struct McpSession {
+        child: Child,
+        stdin: ChildStdin,
+        stdout: BufReader<ChildStdout>,
+    }
+
+    impl McpSession {
+        fn request(&mut self, request: Value) -> Value {
+            serde_json::to_writer(&mut self.stdin, &request).expect("encode MCP request");
+            self.stdin.write_all(b"\n").expect("terminate MCP request");
+            self.stdin.flush().expect("flush MCP request");
+            let mut line = String::new();
+            self.stdout
+                .read_line(&mut line)
+                .expect("read MCP response");
+            assert!(!line.is_empty(), "MCP server exited without a response");
+            serde_json::from_str(&line).expect("decode MCP response")
+        }
+    }
+
+    impl Drop for McpSession {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
@@ -444,6 +486,60 @@ mod native {
             "{dedup_status:#}"
         );
         assert_single_daemon_process(&harness, dedup_pid);
+    }
+
+    #[test]
+    fn long_lived_mcp_search_recovers_daemon_after_startup() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let harness = Harness::new();
+        write_codex_session(harness.root(), "long lived mcp recovery oracle");
+        let generation = harness.setup_wait();
+        let daemon = wait_for_daemon(&harness, None);
+        let daemon_pid = live_pid(&daemon);
+
+        let mut mcp = harness.mcp_session();
+        let initialized = mcp.request(json!({
+            "jsonrpc": "2.0",
+            "id": "init",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "daemon-recovery-test", "version": "0" }
+            }
+        }));
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "ctx");
+
+        let stale = force_unexpected_death(&harness, daemon_pid);
+        let searched = mcp.request(json!({
+            "jsonrpc": "2.0",
+            "id": "search-after-daemon-death",
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": {
+                    "query": "long lived mcp recovery oracle",
+                    "provider": "codex",
+                    "limit": 5
+                }
+            }
+        }));
+        assert!(
+            searched.get("error").is_none()
+                && searched["result"]["isError"].as_bool() != Some(true),
+            "{searched:#}"
+        );
+        let recovered = wait_for_daemon(&harness, Some(daemon_pid));
+        let recovered_pid = live_pid(&recovered);
+        assert_replaced_stale_owner(&harness, &stale, recovered_pid);
+
+        let payload = &searched["result"]["structuredContent"];
+        assert_eq!(
+            payload["retrieval"]["generation_id"], generation,
+            "{searched:#}"
+        );
     }
 
     #[cfg(target_os = "linux")]
