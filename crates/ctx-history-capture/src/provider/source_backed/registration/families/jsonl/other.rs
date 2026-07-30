@@ -239,42 +239,10 @@ pub(super) fn register_kimi_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let catalog = KimiSourceBackedCatalog::discover(&capture_root).map_err(route_error)?;
-            let sources = catalog.source_keys().cloned().collect::<Vec<_>>();
-            for source in sources {
-                sink.begin(source.clone())?;
-                let certificate = catalog
-                    .scan_source(&source, |document| {
-                        sink.document(document).map_err(|error| {
-                            crate::provider::providers::kimi::native_path::source_backed::KimiSourceBackedError::Capture(
-                                CaptureError::InvalidPayload(error.to_string()),
-                            )
-                        })
-                    })
-                    .map_err(route_error)?;
-                sink.certify(certificate)?;
-            }
-            if !catalog.revalidate_inventory().map_err(route_error)? {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::SourceChanged,
-                    "Kimi catalog changed before shared publication",
-                ));
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::KimiCodeCli, "kimi_code_cli_wire_jsonl"),
-        move |request| {
-            let catalog = KimiSourceBackedCatalog::discover(&hydration_root).map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            KimiSourceBackedResolver::new(catalog).hydrate_event(request)
-        },
+    let adapter: KimiSourceBackedResolver = KimiSourceBackedCatalog::shared();
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        adapter.into_shared(),
+        source.path.clone(),
     );
     registry.register(executable_route(
         source,
@@ -289,32 +257,9 @@ pub(super) fn register_mistral_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let scan = scan_mistral_vibe_source_backed(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
-                .map_err(route_error)?;
-            for leaf in scan.leaves {
-                sink.begin(leaf.source.observation().source().clone())?;
-                for document in leaf.documents {
-                    sink.document(document)?;
-                }
-                sink.certify(leaf.source)?;
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::MistralVibe, "mistral_vibe_session_jsonl"),
-        move |request| {
-            let scan =
-                scan_mistral_vibe_source_backed(&hydration_root, DateTime::<Utc>::UNIX_EPOCH)
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                    })?;
-            scan.resolver.hydrate_event(request)
-        },
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        scan_mistral_vibe_source_backed(),
+        source.path.clone(),
     );
     registry.register(executable_route(
         source,
