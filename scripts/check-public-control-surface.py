@@ -83,7 +83,7 @@ def tracked_text_files(root: Path, excluded: set[Path]) -> list[Path]:
                 path.is_file()
                 and path not in excluded
                 and path.suffix in TEXT_SUFFIXES
-                and not SKIP_PARTS.intersection(path.parts)
+                and not SKIP_PARTS.intersection(path.relative_to(root).parts)
             ):
                 files.append(path)
     return files
@@ -381,6 +381,30 @@ def main() -> None:
             "retired control migration reference is incomplete: "
             + ", ".join(missing_references)
         )
+    retired_containment_paths: set[Path] = set()
+    for containment in contract.get("retired_control_containment", []):
+        path = root / containment["path"]
+        purpose = containment.get("purpose")
+        declared_controls = containment.get("controls")
+        if (
+            path in retired_containment_paths
+            or not path.is_file()
+            or not isinstance(purpose, str)
+            or not purpose.strip()
+            or not isinstance(declared_controls, list)
+            or not declared_controls
+            or len(set(declared_controls)) != len(declared_controls)
+            or not set(declared_controls).issubset(retired)
+        ):
+            fail(f"invalid retired control containment: {containment!r}")
+        text = path.read_text(encoding="utf-8")
+        present = sorted(control for control in retired if control in text)
+        if present != sorted(declared_controls):
+            fail(
+                f"retired control containment {containment['path']} differs from inventory: "
+                f"implemented={present} declared={sorted(declared_controls)}"
+            )
+        retired_containment_paths.add(path)
     compatibility_handler = root / contract["deprecated_compatibility_handler"]
     compatibility_source = compatibility_handler.read_text(encoding="utf-8")
     deprecated = re.findall(r'^\s+name:\s+"(CTX_[A-Z0-9_]+)",', compatibility_source, re.MULTILINE)
@@ -432,7 +456,9 @@ def main() -> None:
             )
         consumer_paths.add(path)
     violations: list[str] = []
-    for path in tracked_text_files(root, {contract_path, retired_reference}):
+    for path in tracked_text_files(
+        root, {contract_path, retired_reference, *retired_containment_paths}
+    ):
         text = path.read_text(encoding="utf-8", errors="replace")
         for control in retired:
             if control in text:
@@ -469,7 +495,7 @@ def main() -> None:
     print(
         "public control surface check passed: "
         f"{len(controls)} behaviors, {len(deprecated)} deprecated compatibility controls, "
-        f"{len(retired)} retired controls absent, "
+        f"{len(retired)} retired controls contained, "
         f"{len(runtime_defaults)} empty-config released defaults"
     )
 

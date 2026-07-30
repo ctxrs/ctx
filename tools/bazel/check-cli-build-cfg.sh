@@ -14,18 +14,24 @@ bazel_cfg="${root}/crates/ctx-cli/test_targets.bzl"
 for cfg in ctx_semantic_fastembed; do
   grep -F "cargo:rustc-check-cfg=cfg(${cfg})" "${build_rs}" >/dev/null
   grep -F -- "--check-cfg=cfg(${cfg})" "${bazel_cfg}" >/dev/null
+done
+
+for cfg in ctx_cli_bazel_test; do
+  grep -F "cargo:rustc-check-cfg=cfg(${cfg})" "${build_rs}" >/dev/null
+  grep -F -- "--check-cfg=cfg(${cfg})" "${bazel_cfg}" >/dev/null
   grep -F -- "--cfg=${cfg}" "${bazel_cfg}" >/dev/null
 done
 
-for triple in \
-  aarch64-apple-darwin \
-  aarch64-unknown-linux-gnu \
-  x86_64-apple-darwin \
-  x86_64-pc-windows-gnu \
-  x86_64-pc-windows-msvc \
-  x86_64-unknown-freebsd \
-  x86_64-unknown-linux-gnu; do
-  awk -v selector="@rules_rust//rust/platform:${triple}" '
+for selector in \
+  '@rules_rust//rust/platform:aarch64-apple-darwin' \
+  '@rules_rust//rust/platform:aarch64-unknown-linux-gnu' \
+  '@rules_rust//rust/platform:x86_64-apple-darwin' \
+  '//tools/bazel/platforms:x86_64-pc-windows-gnu' \
+  '@rules_rust//rust/platform:x86_64-pc-windows-msvc' \
+  '@rules_rust//rust/platform:x86_64-unknown-freebsd' \
+  '@rules_rust//rust/platform:x86_64-unknown-linux-gnu' \
+  '@rules_rust//rust/platform:x86_64-unknown-nixos-gnu'; do
+  awk -v selector="${selector}" '
     index($0, selector) {
       selected = 1
       active = 1

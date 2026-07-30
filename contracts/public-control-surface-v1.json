@@ -80,6 +80,11 @@
       }
     },
     {
+      "behavior": "daemon scheduling mode",
+      "config_key": "daemon.mode",
+      "environment_variable": "CTX_DAEMON_MODE"
+    },
+    {
       "behavior": "semantic search",
       "config_key": "search.semantic",
       "environment_variable": "CTX_SEARCH_SEMANTIC",
@@ -106,6 +111,53 @@
     "upgrade.interval_seconds"
   ],
   "retired_control_reference": "docs/storage.md",
+  "retired_control_containment": [
+    {
+      "path": "crates/ctx-cli/src/config_tests.rs",
+      "purpose": "Assert that the removed persistent release-authority key is rejected.",
+      "controls": [
+        "upgrade.functions_base"
+      ]
+    },
+    {
+      "path": "crates/ctx-cli/src/process_environment.rs",
+      "purpose": "Strip retired release-authority variables from child processes and test that containment.",
+      "controls": [
+        "CTX_FUNCTIONS_BASE",
+        "CTX_UPGRADE_FUNCTIONS_BASE"
+      ]
+    },
+    {
+      "path": "crates/ctx-cli/src/upgrade/metadata.rs",
+      "purpose": "Assert that retired ambient release-authority variables cannot change production metadata trust.",
+      "controls": [
+        "CTX_FUNCTIONS_BASE",
+        "CTX_UPGRADE_FUNCTIONS_BASE"
+      ]
+    },
+    {
+      "path": "crates/ctx-cli/tests/upgrade.rs",
+      "purpose": "Remove retired ambient release-authority variables from hermetic upgrade test processes.",
+      "controls": [
+        "CTX_FUNCTIONS_BASE",
+        "CTX_UPGRADE_FUNCTIONS_BASE"
+      ]
+    },
+    {
+      "path": "scripts/smoke-daemon-semantic-release.ps1",
+      "purpose": "Remove retired ambient release authority from the hermetic Windows release smoke environment.",
+      "controls": [
+        "CTX_UPGRADE_FUNCTIONS_BASE"
+      ]
+    },
+    {
+      "path": "scripts/smoke-daemon-semantic-release.sh",
+      "purpose": "Remove retired ambient release authority from the hermetic Unix release smoke environment.",
+      "controls": [
+        "CTX_UPGRADE_FUNCTIONS_BASE"
+      ]
+    }
+  ],
   "deprecated_compatibility_handler": "crates/ctx-cli/src/deprecated_controls.rs",
   "deprecated_compatibility_count": 7,
   "deprecated_compatibility_removal_version": null,
