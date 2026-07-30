@@ -139,8 +139,9 @@ fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
 #[test]
 fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
     let temp = tempdir();
-    initialize_current_query_store(temp.path());
-    let helper = temp.path().join("ctx-pro-blame");
+    let root = data_root(&temp);
+    initialize_current_query_store(&root);
+    let helper = root.join("ctx-pro-blame");
     write_blame_helper(&helper);
     let responses = mcp_roundtrip_with_env(
         &temp,
@@ -162,7 +163,7 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
         &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
     );
     let result = &responses[1]["result"];
-    assert!(result["isError"].is_null());
+    assert!(result["isError"].is_null(), "{result:#}");
     let structured = &result["structuredContent"];
     assert_eq!(structured["target"]["kind"], "commit");
     assert_eq!(structured["matches"][0]["kind"], "commit");
@@ -181,8 +182,9 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
 #[test]
 fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
     let temp = tempdir();
-    initialize_current_query_store(temp.path());
-    let helper = temp.path().join("ctx-pro-blame");
+    let root = data_root(&temp);
+    initialize_current_query_store(&root);
+    let helper = root.join("ctx-pro-blame");
     write_oversized_blame_helper(&helper);
     let responses = mcp_roundtrip_with_env(
         &temp,
@@ -226,8 +228,9 @@ fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
 #[test]
 fn mcp_pr_activity_does_not_claim_commit_membership() {
     let temp = tempdir();
-    initialize_current_query_store(temp.path());
-    let helper = temp.path().join("ctx-pro-blame");
+    let root = data_root(&temp);
+    initialize_current_query_store(&root);
+    let helper = root.join("ctx-pro-blame");
     write_blame_helper(&helper);
     let responses = mcp_roundtrip_with_env(
         &temp,
@@ -253,8 +256,8 @@ fn mcp_pr_activity_does_not_claim_commit_membership() {
     );
     let structured = &responses[1]["result"]["structuredContent"];
     assert_eq!(
-        structured["matches"][0]["value"]["relationship"]["kind"],
-        "activity"
+        structured["matches"][0]["value"]["relationship"]["kind"], "activity",
+        "{structured:#}"
     );
     assert!(structured["matches"].as_array().is_some_and(|matches| {
         matches
