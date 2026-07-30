@@ -59,6 +59,31 @@ pub(crate) struct Cli {
     pub(crate) command: CommandRoot,
 }
 
+#[cfg(any(test, ctx_pro_test_helper))]
+#[derive(Debug, Parser)]
+#[command(
+    name = commands::index::dashboard_fixture::COMMAND_NAME,
+    disable_help_subcommand = true,
+    styles = crate::ui::CLAP_STYLES
+)]
+pub(crate) struct IndexDashboardFixtureArgs {
+    #[arg(long, value_enum)]
+    pub(crate) case: commands::index::dashboard_fixture::FixtureCase,
+    #[arg(
+        long,
+        value_parser = commands::index::dashboard_fixture::parse_columns
+    )]
+    pub(crate) columns: usize,
+    #[arg(long, value_parser = commands::index::dashboard_fixture::parse_rows)]
+    pub(crate) rows: usize,
+    #[arg(long)]
+    pub(crate) clock: String,
+    #[arg(long = "random-seed")]
+    pub(crate) random_seed: String,
+    #[arg(long, value_enum, default_value = "auto")]
+    pub(crate) color: ColorMode,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum CommandRoot {
     #[command(about = "Create local ctx storage and index discovered history")]

@@ -85,6 +85,11 @@ fn flush_cli_output_then<T>(
 }
 
 pub(crate) fn run() -> ExitCode {
+    #[cfg(any(test, ctx_pro_test_helper))]
+    if let Some(exit_code) = run_index_dashboard_fixture_if_requested() {
+        return exit_code;
+    }
+
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() => {
@@ -97,6 +102,60 @@ pub(crate) fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(any(test, ctx_pro_test_helper))]
+fn run_index_dashboard_fixture_if_requested() -> Option<ExitCode> {
+    use std::ffi::{OsStr, OsString};
+
+    let mut process_args = env::args_os();
+    let _program = process_args.next();
+    if process_args.next().as_deref()
+        != Some(OsStr::new(
+            crate::commands::index::dashboard_fixture::COMMAND_NAME,
+        ))
+    {
+        return None;
+    }
+
+    let fixture_args = std::iter::once(OsString::from(
+        crate::commands::index::dashboard_fixture::COMMAND_NAME,
+    ))
+    .chain(process_args);
+    let args = match crate::cli::IndexDashboardFixtureArgs::try_parse_from(fixture_args) {
+        Ok(args) => args,
+        Err(error) => {
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(2);
+            let _ = error.print();
+            return Some(ExitCode::from(exit_code));
+        }
+    };
+    let mut ui = Ui::stdio(args.color);
+    let result =
+        crate::commands::index::dashboard_fixture::run(args, &mut ui).and_then(|exit_code| {
+            ui.flush()
+                .context("flush index dashboard fixture output")
+                .map(|()| exit_code)
+        });
+    Some(match result {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            let summary = format!("{error:#}");
+            let document = crate::ui::diagnostic(
+                ui.stderr_context(),
+                crate::ui::Diagnostic {
+                    level: crate::ui::DiagnosticLevel::Error,
+                    summary: &summary,
+                    detail: None,
+                    fields: &[],
+                    action: None,
+                },
+            );
+            let _ = ui.write_stderr(&document);
+            let _ = ui.flush();
+            ExitCode::FAILURE
+        }
+    })
 }
 
 fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {

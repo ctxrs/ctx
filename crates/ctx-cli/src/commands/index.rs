@@ -17,6 +17,9 @@ use crate::ui::{RenderContext, Ui};
 
 use super::index_dashboard::IndexDashboard;
 
+#[cfg(any(test, ctx_pro_test_helper))]
+pub(crate) mod dashboard_fixture;
+
 #[derive(Debug, Args)]
 pub(crate) struct IndexArgs {
     #[command(subcommand)]
