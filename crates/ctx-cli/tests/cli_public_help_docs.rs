@@ -886,6 +886,35 @@ fn status_and_doctor_report_effective_upgrade_auto_mode() {
 }
 
 #[test]
+fn upgrade_auto_mode_has_one_human_or_machine_receipt() {
+    let temp = tempdir();
+    let human = ctx(&temp)
+        .args(["upgrade", "enable"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert_eq!(stdout.matches("Automatic upgrades enabled").count(), 1);
+    assert!(!stdout.contains("ctx automatic upgrade"), "{stdout}");
+    assert!(human.stderr.is_empty(), "{:?}", human.stderr);
+
+    let enabled = json_output(ctx(&temp).args(["upgrade", "--format=json", "enable"]));
+    assert_eq!(enabled["schema_version"], 1);
+    assert_eq!(enabled["command"], "upgrade_enable");
+    assert_eq!(enabled["status"], "enabled");
+    assert_eq!(enabled["auto"], "apply");
+    assert_eq!(enabled["enabled"], true);
+
+    let disabled = json_output(ctx(&temp).args(["upgrade", "--format=json", "disable"]));
+    assert_eq!(disabled["schema_version"], 1);
+    assert_eq!(disabled["command"], "upgrade_disable");
+    assert_eq!(disabled["status"], "disabled");
+    assert_eq!(disabled["auto"], "off");
+    assert_eq!(disabled["enabled"], false);
+}
+
+#[test]
 fn docs_show_out_creates_parent_directories() {
     let temp = tempdir();
     let out = temp.path().join("nested").join("doc.txt");
