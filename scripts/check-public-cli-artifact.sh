@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/check-public-cli-artifact.sh PLATFORM [ARTIFACT_DIR]
+Usage: scripts/check-public-cli-artifact.sh PLATFORM [ARTIFACT_DIR] [DECLARED_LLVM_READOBJ]
 
 Checks one locally staged public ctx CLI artifact. This validates construction
 outputs: artifact presence, SHA-256 consistency, the construction-time version
@@ -14,6 +14,11 @@ USAGE
 
 platform="${1:-}"
 artifact_dir="${2:-target/public-cli-artifacts}"
+declared_llvm_readobj="${3:-}"
+if [[ $# -gt 3 ]]; then
+  usage
+  exit 2
+fi
 if [[ -z "${platform}" || "${platform}" == "-h" || "${platform}" == "--help" ]]; then
   usage
   exit 2
@@ -144,7 +149,12 @@ case "${actual_version}" in
     ;;
 esac
 
-bash scripts/check-release-binary-compat.sh "${platform}" "${artifact}"
+if [[ -n "${declared_llvm_readobj}" ]]; then
+  bash scripts/check-release-binary-compat.sh \
+    "${platform}" "${artifact}" "${declared_llvm_readobj}"
+else
+  bash scripts/check-release-binary-compat.sh "${platform}" "${artifact}"
+fi
 
 printf 'public CLI artifact ok: %s sha256=%s construction_version=%s native_runtime_proof=not-claimed\n' \
   "${platform}" "${actual_sha}" "${construction_version_status}"

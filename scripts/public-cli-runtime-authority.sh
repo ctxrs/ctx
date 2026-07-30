@@ -12,7 +12,7 @@ emulation="${8:-unknown}"
 hypervisor="${9:-unknown}"
 evidence_complete="${10:-0}"
 runner_id="${11:-}"
-pinned_macos_x64_kvm_runner="precision-7780-macos-x64-kvm-v1"
+pinned_macos_x64_kvm_runner="ctx-mac-gui-shared-x64"
 
 case "${runtime_status}" in
   not_run) printf 'not_run\n' ;;

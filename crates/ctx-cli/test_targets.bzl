@@ -25,6 +25,9 @@ CTX_CLI_RUSTC_FLAGS = [
     "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
         "--cfg=ctx_semantic_fastembed",
     ],
+    "@rules_rust//rust/platform:x86_64-pc-windows-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
     "@rules_rust//rust/platform:x86_64-unknown-freebsd": [
         "--cfg=ctx_semantic_fastembed",
     ],

@@ -120,6 +120,7 @@ fi
 
 artifact_runfile=""
 rustc_runfile=""
+llvm_readobj_runfile=""
 sbom_inventory_runfile=""
 license_materials_runfile=""
 cargo_lock_runfile=""
@@ -129,6 +130,7 @@ output_dir="target/public-cli-artifacts"
 build_info=""
 seen_artifact=0
 seen_rustc=0
+seen_llvm_readobj=0
 seen_sbom_inventory=0
 seen_license_materials=0
 seen_cargo_lock=0
@@ -155,6 +157,14 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
       rustc_runfile="$1"
+      ;;
+    --declared-llvm-readobj-runfile)
+      seen_llvm_readobj=$((seen_llvm_readobj + 1))
+      [[ "${seen_llvm_readobj}" == "1" ]] \
+        || usage_error "duplicate reserved argument: ${option}"
+      shift
+      [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
+      llvm_readobj_runfile="$1"
       ;;
     --declared-sbom-inventory-runfile)
       seen_sbom_inventory=$((seen_sbom_inventory + 1))
@@ -231,6 +241,15 @@ artifact="$(resolve_declared_runfile "${artifact_runfile}")" \
   || die "declared Bazel artifact runfile is unavailable"
 rustc="$(resolve_declared_runfile "${rustc_runfile}")" \
   || die "declared Bazel rustc runfile is unavailable"
+llvm_readobj=""
+if [[ "${target_id}" == "windows-x64" ]]; then
+  [[ "${seen_llvm_readobj}" == "1" ]] \
+    || usage_error "windows-x64 requires --declared-llvm-readobj-runfile"
+  llvm_readobj="$(resolve_declared_runfile "${llvm_readobj_runfile}")" \
+    || die "declared Bazel LLVM reader runfile is unavailable"
+elif [[ "${seen_llvm_readobj}" != "0" ]]; then
+  usage_error "--declared-llvm-readobj-runfile is reserved for windows-x64"
+fi
 sbom_inventory="$(resolve_declared_runfile "${sbom_inventory_runfile}")" \
   || die "declared target SBOM inventory runfile is unavailable"
 license_materials="$(resolve_declared_runfile "${license_materials_runfile}")" \
@@ -459,9 +478,15 @@ fi
 grep -Fq '"status":"passed"' "${smoke_result}" \
   || die "native candidate smoke did not record a pass"
 
-CTX_PUBLIC_CLI_EXPECTED_VERSION="${version}" \
-  "${repo_root}/scripts/check-public-cli-artifact.sh" \
-  "${CTX_PUBLIC_TARGET_PLATFORM}" "${stage_dir}"
+if [[ -n "${llvm_readobj}" ]]; then
+  CTX_PUBLIC_CLI_EXPECTED_VERSION="${version}" \
+    "${repo_root}/scripts/check-public-cli-artifact.sh" \
+    "${CTX_PUBLIC_TARGET_PLATFORM}" "${stage_dir}" "${llvm_readobj}"
+else
+  CTX_PUBLIC_CLI_EXPECTED_VERSION="${version}" \
+    "${repo_root}/scripts/check-public-cli-artifact.sh" \
+    "${CTX_PUBLIC_TARGET_PLATFORM}" "${stage_dir}"
+fi
 
 if [[ "${CTX_PUBLIC_TARGET_OS}" == "macos" \
   && "${macos_signing_mode}" == "required" ]]; then

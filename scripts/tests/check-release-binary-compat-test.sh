@@ -40,7 +40,7 @@ printf 'not a real binary\n' > "${tmp}/candidate"
 # caller-selected tool path.
 fixture_checker="${tmp}/check-release-binary-compat-fixture.sh"
 sed \
-  "s#^LLVM_TOOL_ROOT=.*#LLVM_TOOL_ROOT=\"${tmp}\"#" \
+  "s#^  LLVM_TOOL_ROOT=.*#  LLVM_TOOL_ROOT=\"${tmp}\"#" \
   "${checker}" > "${fixture_checker}"
 chmod 700 "${fixture_checker}"
 
@@ -51,6 +51,12 @@ run_check() {
   FAKE_READOBJ_OUTPUT="${readobj}" \
     FAKE_OBJDUMP_OUTPUT="${objdump}" \
     "${fixture_checker}" "${platform}" "${tmp}/candidate"
+}
+
+run_declared_windows_check() {
+  local readobj="$1"
+  FAKE_READOBJ_OUTPUT="${readobj}" \
+    "${checker}" windows-x64 "${tmp}/candidate" "${tmp}/llvm-readobj"
 }
 
 expect_pass() {
@@ -307,8 +313,17 @@ expect_pass linux_arm64 run_check linux-aarch64 "${linux_arm64}"
 expect_pass mac_arm64_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${mac_objdump}"
 expect_pass mac_x64_security_framework run_check macos-x64 "${mac_x64_readobj}" "${mac_objdump}"
 expect_pass windows run_check windows-x64 "${windows}"
+expect_pass windows_declared_tool run_declared_windows_check "${windows}"
 expect_pass freebsd run_check freebsd-x64 "${freebsd}"
 expect_fail malformed run_check linux-x64 "${tmp}/empty"
+
+if "${checker}" linux-x64 "${tmp}/candidate" "${tmp}/llvm-readobj" \
+  >"${tmp}/declared-linux.out" 2>"${tmp}/declared-linux.err"; then
+  echo "non-Windows checker accepted a declared LLVM reader" >&2
+  exit 1
+fi
+grep -Fq 'a declared LLVM reader is supported only for windows-x64' \
+  "${tmp}/declared-linux.err"
 
 missing_symbols="${tmp}/missing-symbols.txt"
 sed '/^Symbols \[$/,/^\]$/d' "${linux_x64}" > "${missing_symbols}"
