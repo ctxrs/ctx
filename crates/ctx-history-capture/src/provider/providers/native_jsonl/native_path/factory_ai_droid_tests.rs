@@ -36,6 +36,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "droid-parent",
         "subagent",
         false,
+        "d9fa2d0a583e01f3081ce69ad92f55590e84cfb8ff54fcc192f10a42ee54b122",
     );
 }
 

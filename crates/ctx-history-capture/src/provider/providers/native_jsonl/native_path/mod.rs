@@ -21,10 +21,9 @@ pub(super) use factory_ai_droid::{
     factory_droid_session_relationships, factory_droid_source_backed_adapter,
 };
 pub(crate) use model::{
-    DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlFileObservation, DirectJsonlObservedTime,
-    DirectJsonlPage, DirectJsonlRejection, DirectJsonlScanOutcome, DirectJsonlSession,
-    DirectJsonlSourceChange, DirectJsonlSourceRecord, DirectJsonlTouch,
-    DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
+    DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlRejection, DirectJsonlSession,
+    DirectJsonlSourceRecord, DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
 pub(crate) use qoder::qoder_source_backed_adapter;
 pub(crate) use qoder_parser::qoder_complete_content_message_record;

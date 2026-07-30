@@ -9,7 +9,7 @@ fn owned_source_backed_constructors_have_no_preview_body_or_store_fallback() {
             "nanoclaw",
             include_str!("../../nanoclaw/native_path/source_backed.rs"),
         ),
-        ("native_jsonl", include_str!("source_backed.rs")),
+        ("native_jsonl", include_str!("source_backed/lifecycle.rs")),
         (
             "openclaw",
             include_str!("../../openclaw/native_path/source_backed.rs"),
@@ -92,4 +92,34 @@ fn owned_source_backed_constructors_have_no_preview_body_or_store_fallback() {
         .unwrap()
         .1
         .contains("body: event.lexical_body"));
+}
+
+#[test]
+fn direct_jsonl_family_streams_documents_and_owns_physical_work() {
+    let module = include_str!("source_backed.rs");
+    let adapter = include_str!("source_backed/adapter.rs");
+    let hydration = include_str!("source_backed/hydration.rs");
+    let lifecycle = include_str!("source_backed/lifecycle.rs");
+    let registration = include_str!("source_backed/registration.rs");
+    let projector = include_str!("reader.rs");
+    let family = include_str!("../../../source_backed/family/jsonl.rs");
+
+    for production in [module, adapter, hydration, lifecycle, registration] {
+        assert!(production.lines().count() < 1_000);
+        assert!(!production.contains("allow(dead_code)"));
+        assert!(!production.contains("DirectJsonlSourcePage"));
+        assert!(!production.contains("Vec<LexicalDocument>"));
+        assert!(!production.contains("captured_route_driver"));
+    }
+    assert!(!projector.contains("reader_source"));
+    assert!(registration.contains("sink.add_document(document)"));
+    assert!(hydration.contains("open_hydration_catalog"));
+    assert!(registration.contains(".with_batch_hydration"));
+    assert!(hydration.contains("hydrate_resident_records"));
+    assert!(!registration.contains("hydrate_legacy_single"));
+    assert!(!adapter.contains("pub(super) source_file: Arc<OpenedProviderSourceFile>"));
+    assert!(adapter.contains("open_verified"));
+    assert!(family.contains("visit_page"));
+    assert!(family.contains("visit_verified_ranges"));
+    assert!(family.contains("complete_prefix_sha256"));
 }

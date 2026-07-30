@@ -33,6 +33,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "copilot-life",
         "primary",
         true,
+        "84ea5298677720c3e32d808fec944f8ecb4a92fee68e2f851b4958a174c09c1e",
     );
 }
 

@@ -30,6 +30,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "qoder-life",
         "primary",
         true,
+        "4bd6717ce7ea0e674a7b0de6ed3bd84153ba417bc54991c4691d72ae38673b43",
     );
 }
 

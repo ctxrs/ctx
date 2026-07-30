@@ -1,5 +1,7 @@
 use std::fs;
 
+use ctx_history_core::CaptureProvider;
+
 use super::*;
 
 fn discovered_leaf() -> (
@@ -33,7 +35,7 @@ fn shared_native_jsonl_rejects_root_swap_after_discovery() {
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("session.jsonl"), b"{\"replacement\":true}\n").unwrap();
 
-    assert!(retained.source_file.revalidate().is_err());
+    assert!(retained.open_verified().is_err());
 }
 
 #[test]
@@ -44,7 +46,7 @@ fn shared_native_jsonl_rejects_ancestor_swap_after_discovery() {
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("session.jsonl"), b"{\"replacement\":true}\n").unwrap();
 
-    assert!(retained.source_file.revalidate().is_err());
+    assert!(retained.open_verified().is_err());
 }
 
 #[test]
@@ -54,5 +56,5 @@ fn shared_native_jsonl_rejects_leaf_swap_after_discovery() {
     fs::rename(&leaf, root.join("session-displaced.jsonl")).unwrap();
     fs::write(&leaf, b"{\"replacement\":true}\n").unwrap();
 
-    assert!(retained.source_file.revalidate().is_err());
+    assert!(retained.open_verified().is_err());
 }

@@ -33,6 +33,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "tabnine-life",
         "primary",
         true,
+        "8a5a2dcae3dded1b95f8c03e06611a86b1be18950728ecb7bfd7d05bcc399656",
     );
 }
 

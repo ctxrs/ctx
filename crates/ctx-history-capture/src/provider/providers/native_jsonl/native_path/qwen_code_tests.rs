@@ -29,6 +29,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "qwen-life",
         "primary",
         true,
+        "ff13570b6860d2e7b42b48d1255150490bc74d5ecff07a462742ab9d1de664ed",
     );
 }
 

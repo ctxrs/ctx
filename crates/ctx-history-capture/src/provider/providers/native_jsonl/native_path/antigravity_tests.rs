@@ -32,6 +32,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "agy-life",
         "primary",
         true,
+        "5d13599441e0003221f51f2fa833f230dac8ca8cb1a09f13e5629855d90a8182",
     );
 }
 
