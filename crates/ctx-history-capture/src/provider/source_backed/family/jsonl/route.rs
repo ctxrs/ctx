@@ -264,17 +264,19 @@ impl JsonlFamilyInventory {
 struct FamilyCheckpoint {
     version: u32,
     provider_parser_revision: String,
+    binding_digest: [u8; 32],
     physical: JsonlCheckpoint,
     represented_physical_records: u64,
     indexed_documents: u64,
 }
 
 impl FamilyCheckpoint {
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
 
     fn valid_for(&self, adapter: &dyn JsonlFamilyAdapter, leaf: &JsonlFamilyLeaf) -> bool {
         self.version == Self::VERSION
             && self.provider_parser_revision == adapter.parser_revision()
+            && binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
             && self.physical.is_internally_consistent()
             && self.physical.identity() == &physical_identity(adapter, leaf)
             && self.represented_physical_records <= self.physical.next_physical_ordinal()
@@ -499,6 +501,7 @@ fn scan_leaf(
     let checkpoint = FamilyCheckpoint {
         version: FamilyCheckpoint::VERSION,
         provider_parser_revision: adapter.parser_revision().to_owned(),
+        binding_digest: binding_digest(leaf).map_err(route_invalid)?,
         physical: outcome.checkpoint().clone(),
         represented_physical_records: represented_records,
         indexed_documents: documents,
@@ -816,6 +819,7 @@ fn inventory_observation(
             (leaf.authority_path.as_os_str().as_encoded_bytes().len() as u64).to_be_bytes(),
         );
         digest.update(leaf.authority_path.as_os_str().as_encoded_bytes());
+        digest.update(binding_digest(leaf)?);
     }
     let revision = digest.finalize().to_vec();
     SourceInventoryObservation::new(
@@ -826,6 +830,10 @@ fn inventory_observation(
         revision,
     )
     .map_err(contract_error)
+}
+
+fn binding_digest(leaf: &JsonlFamilyLeaf) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(serde_json::to_vec(leaf.binding())?).into())
 }
 
 fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamilyInventory> {
