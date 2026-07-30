@@ -67,6 +67,8 @@ pub(crate) enum KiroSourceBackedErrorV0 {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     ResolverContract(#[from] SourceResolverContractError),
+    #[error(transparent)]
+    Route(#[from] crate::provider::source_backed::SourceBackedRouteError),
     #[error("unsupported Kiro history format: {0}")]
     UnsupportedFormat(&'static str),
     #[error(
@@ -105,16 +107,11 @@ pub(crate) use hydration::KiroLocatorResolverV0;
 pub(super) struct KiroSourceBackedScan {
     pub(super) source: SourceKey,
     pub(super) certificate: CertifiedSource,
-    pub(super) terminal_fence: KiroSourceTerminalFence,
+    pub(super) terminal_fence: SqliteSourceEvidence,
     pub(super) emitted_pages: u64,
     pub(super) row_decode_passes: u64,
     pub(super) decoded_rows: u64,
     pub(super) peak_buffered_rows: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct KiroSourceTerminalFence {
-    physical_evidence: SqliteSourceEvidence,
 }
 
 #[cfg(test)]
@@ -123,7 +120,7 @@ pub(crate) struct KiroSourceBackedScanV0 {
     pub(crate) source: SourceKey,
     pub(crate) documents: Vec<LexicalDocument>,
     pub(crate) certificate: CertifiedSource,
-    pub(super) terminal_fence: KiroSourceTerminalFence,
+    pub(super) terminal_fence: SqliteSourceEvidence,
     pub(crate) emitted_pages: u64,
     pub(crate) row_decode_passes: u64,
     pub(crate) decoded_rows: u64,
@@ -160,7 +157,7 @@ pub(super) fn scan_kiro_source_backed(
     Ok(KiroSourceBackedScan {
         source,
         certificate,
-        terminal_fence: KiroSourceTerminalFence { physical_evidence },
+        terminal_fence: physical_evidence,
         emitted_pages: working.1.emitted_pages,
         row_decode_passes: working.1.row_decode_passes,
         decoded_rows: working.1.decoded_rows,
@@ -190,15 +187,16 @@ pub(crate) fn scan_kiro_source_backed_v0(
     })
 }
 
+#[cfg(test)]
 pub(super) fn terminal_fence_matches(
     source_path: &Path,
-    expected: &KiroSourceTerminalFence,
+    expected: &SqliteSourceEvidence,
 ) -> KiroSourceBackedResultV0<bool> {
     let source_path = absolute_kiro_path(source_path)?;
     require_legacy_sqlite_format(&source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
     let database = KiroSqliteDatabase::open(&source_path)?;
     let current = database.finish(&source_path)?;
-    Ok(current == expected.physical_evidence)
+    Ok(&current == expected)
 }
 
 pub(super) fn require_legacy_sqlite_format(

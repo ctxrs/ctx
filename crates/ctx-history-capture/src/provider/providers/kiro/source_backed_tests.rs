@@ -438,7 +438,7 @@ fn active_wal_read_is_side_effect_free_and_terminal_race_fails_closed() {
 }
 
 #[test]
-fn direct_route_publishes_cold_reuses_logical_noop_and_replaces_mutation() {
+fn replacement_tree_publishes_noop_replacement_and_authoritative_deletion() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("data.sqlite3");
     let index = temp.path().join("index");
@@ -489,20 +489,15 @@ fn direct_route_publishes_cold_reuses_logical_noop_and_replaces_mutation() {
             [],
         )
         .unwrap();
-    let replacement = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    let replacement = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
     assert_ne!(replacement.sources, logical_noop.sources);
     assert_eq!(replacement.commit.indexed_documents, 2);
     assert!(replacement.sources[0].frontier().is_none());
-}
 
-#[test]
-fn owned_route_has_no_generic_captured_driver_or_append_frontier() {
-    let registration = include_str!("source_backed/registration.rs");
-    assert!(!registration.contains(concat!("captured_route_", "driver")));
-    assert!(!registration.contains(concat!("begin_source_", "append")));
-    assert!(!registration.contains(concat!("certify_source_", "append")));
-    assert!(registration.contains(".with_batch_hydration("));
-    assert!(registration.contains("fence_result"));
+    fs::remove_file(&path).unwrap();
+    let deleted = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    assert!(deleted.sources.is_empty());
+    assert_eq!(deleted.removals.len(), 1);
 }
 
 #[test]

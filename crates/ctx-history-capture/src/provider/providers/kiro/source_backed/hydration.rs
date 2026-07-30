@@ -271,6 +271,7 @@ pub(super) fn hydration_failure_from_error(error: KiroSourceBackedErrorV0) -> Hy
         | KiroSourceBackedErrorV0::Io(_)
         | KiroSourceBackedErrorV0::Sqlite(_)
         | KiroSourceBackedErrorV0::Projection(_)
+        | KiroSourceBackedErrorV0::Route(_)
         | KiroSourceBackedErrorV0::CountOverflow => HydrationFailureKind::TemporarilyUnavailable,
     };
     HydrationFailure {
