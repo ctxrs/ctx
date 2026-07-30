@@ -166,6 +166,8 @@ rust_commit="${linux_build_values[4]}"
 expected_base_digest="${base_image##*@}"
 
 docker_platform="linux/amd64"
+bazel_binary_arch=x86_64
+bazel_binary_sha256=c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b
 builder_image="ctx-public-cli-bazel:linux-x64-builder-bazel-${bazel_version}"
 runtime_image="ctx-public-cli-bazel:linux-x64-runtime-ubuntu-22.04"
 inspector_image="ctx-public-cli-bazel:linux-x64-inspector-ubuntu-22.04"
@@ -192,6 +194,9 @@ docker build \
   --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
   --build-arg "GLIBC_BASELINE=${glibc_max}" \
   --build-arg "BAZEL_VERSION=${bazel_version}" \
+  --build-arg "BAZEL_ARCH=${bazel_binary_arch}" \
+  --build-arg "BAZEL_SHA256=${bazel_binary_sha256}" \
+  --build-arg "RELEASE_ARCH=x86_64" \
   --build-arg "RUST_TOOLCHAIN=${rust_toolchain}" \
   --build-arg "RUST_COMMIT=${rust_commit}" \
   -t "${builder_image}" \
@@ -203,6 +208,7 @@ docker build \
   --provenance=false \
   --build-arg "UBUNTU_IMAGE=${base_image}" \
   --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  --build-arg "RELEASE_ARCH=x86_64" \
   -t "${runtime_image}" \
   -f "${builder_recipe}" \
   scripts/release
@@ -212,6 +218,7 @@ docker build \
   --provenance=false \
   --build-arg "UBUNTU_IMAGE=${base_image}" \
   --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  --build-arg "RELEASE_ARCH=x86_64" \
   -t "${inspector_image}" \
   -f "${builder_recipe}" \
   scripts/release

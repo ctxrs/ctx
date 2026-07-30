@@ -638,6 +638,7 @@ sh_test(
         ".buildkite/pipeline.yml",
         "contracts/release-targets-v1.json",
         "scripts/release/build-linux-bazel-release.sh",
+        "scripts/release/build-linux-x64-bazel-dogfood.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
         "scripts/stage-github-release-assets.sh",
     ],
