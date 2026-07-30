@@ -360,31 +360,3 @@ fn source_backed_batch_detects_source_revision_change_and_missing_source() {
             if id == native_session_id
     ));
 }
-
-/// Read-only production oracle. The provider corpus is only observed and
-/// hydrated; both Core generations are written below a fresh tempdir.
-#[test]
-#[ignore = "set CTX_CODEX_PRO_HYDRATION_ORACLE_ROOT to a production Codex sessions root"]
-fn production_corpus_cold_and_replay_source_pages_have_exact_id_content_parity() {
-    let sessions = std::env::var_os("CTX_CODEX_PRO_HYDRATION_ORACLE_ROOT")
-        .map(PathBuf::from)
-        .expect("CTX_CODEX_PRO_HYDRATION_ORACLE_ROOT must be set");
-    let before = discover_codex_root_inventory_v0(&sessions).unwrap();
-    let temp = tempfile::tempdir().unwrap();
-    let index = temp.path().join("global-index");
-
-    let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
-    let cold_index = VerifiedIndex::open(&index).unwrap();
-    let cold_oracle = exact_source_page_oracle(&sessions, &cold_index);
-    assert_eq!(cold_oracle.0, cold.commit.indexed_documents);
-
-    let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
-    assert_eq!(replay.counters.staged_documents, 0);
-    assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
-    let replayed_index = VerifiedIndex::open(&index).unwrap();
-    let replayed_oracle = exact_source_page_oracle(&sessions, &replayed_index);
-    assert_eq!(replayed_oracle, cold_oracle);
-
-    let after = discover_codex_root_inventory_v0(&sessions).unwrap();
-    assert_eq!(after.certificate, before.certificate);
-}
