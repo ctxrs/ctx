@@ -315,5 +315,4 @@ mod tests {
             .unwrap();
         assert_eq!(distinct.registry.executable_route_count(), 2);
     }
-
 }
