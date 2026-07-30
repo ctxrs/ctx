@@ -23,25 +23,64 @@ use crate::{
 };
 
 fn registry(root: &Path) -> SourceBackedProviderRegistry {
-    let source = ProviderSource {
-        provider: CaptureProvider::Claude,
-        path: root.to_path_buf(),
-        exists: true,
-        source_format: "claude_projects_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        status: ProviderSourceStatus::Available,
-        unsupported_reason: None,
-    };
+    registry_for_roots(&[(root, SourceBackedRouteSelection::Automatic)])
+}
+
+fn registry_for_roots(
+    roots: &[(&Path, SourceBackedRouteSelection)],
+) -> SourceBackedProviderRegistry {
     let mut registry = SourceBackedProviderRegistry::new();
-    register_landed_source_backed_route(
-        &mut registry,
-        source,
-        SourceBackedRouteSelection::Automatic,
-    )
-    .unwrap();
+    for (root, selection) in roots {
+        let source = ProviderSource {
+            provider: CaptureProvider::Claude,
+            path: (*root).to_path_buf(),
+            exists: true,
+            source_format: "claude_projects_jsonl_tree",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        };
+        register_landed_source_backed_route(&mut registry, source, *selection).unwrap();
+    }
     registry
+}
+
+#[test]
+fn shared_family_empty_automatic_root_coexists_with_distinct_explicit_replay() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let automatic = temp.path().join(".claude/projects");
+    let explicit = temp.path().join("explicit/projects");
+    fs::create_dir_all(&automatic).unwrap();
+    write_lines(
+        &session_path(&explicit, "-project", "session-1"),
+        &[message("session-1", "message-1", "explicit body")],
+    );
+    let registry = registry_for_roots(&[
+        (&automatic, SourceBackedRouteSelection::Automatic),
+        (&explicit, SourceBackedRouteSelection::ExplicitManual),
+    ]);
+    let index_root = temp.path().join("index");
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.sources.len(), 1);
+    let replay =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(replay.sources, cold.sources);
+    assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
+    let source = replay.sources[0].observation().source();
+    let event = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(source, None, 1)
+        .unwrap()
+        .items
+        .remove(0);
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .unwrap();
+    assert_eq!(hydrated.provider_bytes, b"explicit body");
 }
 
 fn writer_options() -> WriterOptions {

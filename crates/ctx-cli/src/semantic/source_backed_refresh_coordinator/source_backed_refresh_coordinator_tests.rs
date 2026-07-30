@@ -422,7 +422,7 @@ fn missing_roots_are_nonblocking_but_detected_selector_gaps_block_publication() 
         ),
         reason: SourceBackedAutomaticUnavailableReason::SourceStatus(ProviderSourceStatus::Missing),
     };
-    assert!(reject_blocking_automatic_registry_issues(&[missing], &[]).is_ok());
+    assert!(reject_blocking_automatic_registry_issues(&[missing]).is_ok());
 
     let selector_gap = SourceBackedAutomaticRegistryIssue::Unavailable {
         source: source(
@@ -434,7 +434,7 @@ fn missing_roots_are_nonblocking_but_detected_selector_gaps_block_publication() 
             detail: "injected selector gap",
         },
     };
-    let error = reject_blocking_automatic_registry_issues(&[selector_gap], &[]).unwrap_err();
+    let error = reject_blocking_automatic_registry_issues(&[selector_gap]).unwrap_err();
     assert!(format!("{error:#}").contains("injected selector gap"));
 }
 
