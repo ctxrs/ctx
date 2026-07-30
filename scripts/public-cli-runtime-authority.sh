@@ -12,11 +12,60 @@ emulation="${8:-unknown}"
 hypervisor="${9:-unknown}"
 evidence_complete="${10:-0}"
 runner_id="${11:-}"
+argument_count=$#
+os_identity="${12:-unknown}"
+os_version="${13:-unknown}"
+os_product_type="${14:-unknown}"
 pinned_macos_x64_kvm_runner="ctx-mac-gui-shared-x64"
+
+os_baseline_matches() {
+  local windows_build=""
+
+  case "${platform}" in
+    linux-x64|linux-aarch64)
+      [[ "${os_identity}" == "ubuntu" && "${os_version}" == "22.04" ]]
+      ;;
+    freebsd-x64)
+      [[ "${os_identity}" == "freebsd" \
+        && "${os_version}" =~ ^14\.4-RELEASE(-p[0-9]+)?$ ]]
+      ;;
+    windows-x64)
+      if [[ ! "${os_version}" =~ ^10\.0\.([0-9]+)(\.[0-9]+)?$ ]]; then
+        return 1
+      fi
+      windows_build="${BASH_REMATCH[1]}"
+      [[ "${os_identity}" =~ ^Microsoft[[:space:]]+Windows[[:space:]]+11([[:space:]]|$) \
+        && "${os_product_type}" == "1" ]] \
+        && ((10#${windows_build} >= 22000))
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
 
 case "${runtime_status}" in
   not_run) printf 'not_run\n' ;;
   passed)
+    if [[ "${platform}" == linux-* || "${platform}" == "freebsd-x64" \
+      || "${platform}" == "windows-x64" ]]; then
+      if ((argument_count < 14)); then
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+        if [[ -x "${script_dir}/public-cli-host-runtime-evidence.sh" ]]; then
+          IFS=$'\t' read -r os_identity os_version os_product_type \
+            < <(
+              "${script_dir}/public-cli-host-runtime-evidence.sh" \
+                --host-system "${host_system}" \
+                --host-arch "${host_arch}" \
+                --os-baseline-only
+            )
+        fi
+      fi
+      if ! os_baseline_matches; then
+        printf 'non_authoritative\n'
+        exit 0
+      fi
+    fi
     case "${hardware_identity}:${emulation}:${hypervisor}:${evidence_complete}" in
       apple:none:absent:1|generic:none:absent:1|generic:none:present:1|generic:none:unknown:1) ;;
       generic:qemu-kvm:present:1)
