@@ -55,6 +55,7 @@ impl HermesSourceCandidate {
         &self.path
     }
 
+    #[cfg(test)]
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
     }

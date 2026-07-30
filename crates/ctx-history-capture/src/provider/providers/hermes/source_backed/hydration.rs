@@ -25,6 +25,7 @@ impl HermesLocatorResolver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn hydrate(
         &self,
         locator: &SourceRecordLocator,
@@ -100,6 +101,7 @@ impl HermesLocatorResolver {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn hydrate_hermes_source_backed_message(
     path: &Path,
     locator: &SourceRecordLocator,

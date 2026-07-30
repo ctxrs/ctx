@@ -69,7 +69,9 @@ mod hydration;
 mod replacement;
 
 pub(crate) use contracts::*;
-pub(crate) use hydration::{hydrate_hermes_source_backed_message, HermesLocatorResolver};
+#[cfg(test)]
+pub(crate) use hydration::hydrate_hermes_source_backed_message;
+pub(crate) use hydration::HermesLocatorResolver;
 
 #[derive(Debug)]
 pub(crate) struct HermesSourceBackedScan {
