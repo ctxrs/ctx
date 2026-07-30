@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -32,11 +34,14 @@ serde_json.workspace = true
 serde_yaml = "0.9"
 semver.workspace = true
 sha2.workspace = true
+supports-unicode.workspace = true
 tar.workspace = true
+terminal_size.workspace = true
 thiserror.workspace = true
 toml_edit = "0.22"
 ureq = { version = "2.10", default-features = true }
 url.workspace = true
+unicode-width.workspace = true
 uuid.workspace = true
 xz2.workspace = true
 zeroize = { workspace = true, features = ["derive"] }

@@ -21,7 +21,9 @@ use crate::{
         parse_native_provider_arg, parse_provider_arg, ImportFormatArg, NativeProviderArg,
         ProviderArg,
     },
-    semantic, upgrade,
+    semantic,
+    ui::ColorMode,
+    upgrade,
     value_parsers::parse_daemon_interval_seconds,
 };
 
@@ -33,6 +35,14 @@ pub(crate) const MAX_EVENT_WINDOW: usize = 50;
 pub(crate) struct Cli {
     #[arg(long, env = "CTX_DATA_ROOT", global = true)]
     pub(crate) data_root: Option<PathBuf>,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        global = true,
+        help = "Control color in human output: auto, always, or never"
+    )]
+    pub(crate) color: ColorMode,
     #[arg(
         long,
         global = true,
