@@ -244,6 +244,60 @@ fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
 }
 
 #[test]
+fn relational_record_stream_holds_only_bounded_event_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let documents = (1..=7)
+        .map(|sequence| document(&source, sequence, "assistant", &["src/lib.rs"]))
+        .collect();
+    replace_generation(temp.path(), &source, 1, documents);
+    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let mut records = RelationalRecordStream::new(&index, RelationalSourceSelection::All, 2);
+    let mut events = 0;
+    let mut sessions = 0;
+
+    while let Some(record) = records.next() {
+        match record.unwrap() {
+            RelationalProjectionRecord::Event(_) => events += 1,
+            RelationalProjectionRecord::Session(_) => sessions += 1,
+            _ => {}
+        }
+    }
+
+    assert_eq!(events, 7);
+    assert_eq!(sessions, 1);
+    assert_eq!(records.pages_loaded, 8, "metadata and event passes page");
+    assert!(
+        records.max_page_items <= 2,
+        "stream loaded {} events in one page",
+        records.max_page_items
+    );
+}
+
+#[test]
+fn relational_record_stream_closes_an_empty_certified_source_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    replace_generation(temp.path(), &source, 1, Vec::new());
+    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let mut records = RelationalRecordStream::new(&index, RelationalSourceSelection::All, 2);
+    let mut begins = 0;
+    let mut ends = 0;
+
+    while let Some(record) = records.next() {
+        match record.unwrap() {
+            RelationalProjectionRecord::BeginSource(_) => begins += 1,
+            RelationalProjectionRecord::EndSource { .. } => ends += 1,
+            _ => {}
+        }
+    }
+
+    assert_eq!((begins, ends), (1, 1));
+    assert_eq!(records.pages_loaded, 2);
+    assert_eq!(records.max_page_items, 0);
+}
+
+#[test]
 fn cold_append_rewrite_delete_and_noop_preserve_only_relational_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
@@ -550,4 +604,6 @@ fn materializer_has_no_provider_hydration_or_legacy_store_authority() {
     assert!(source.contains("VerifiedIndex::open"));
     assert!(source.contains(".source_event_page("));
     assert!(source.contains("SourceBackedRelationalProjection::open"));
+    assert!(!source.contains("Vec<EventRecord>"));
+    assert!(!source.contains("Vec<RelationalProjectionRecord>"));
 }

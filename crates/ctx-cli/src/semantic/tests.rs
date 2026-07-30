@@ -66,6 +66,7 @@ fn install_test_daemon_jobs(
     install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls,
         history_refresh,
+        relational_projection: None,
         semantic_index,
     })
 }

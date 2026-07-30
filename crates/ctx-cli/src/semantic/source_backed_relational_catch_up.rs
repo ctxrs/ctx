@@ -1,14 +1,16 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::Result;
 use ctx_history_core::{
-    AgentType, Confidence, EventRole, EventType, Fidelity, SessionStatus, StableEntityId,
+    AgentType, Confidence, EventRole, EventType, Fidelity, SessionStatus, SourceKey, StableEntityId,
 };
-use ctx_history_index::{EventRecord, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS};
+use ctx_history_index::{
+    EventRecord, SourceEventCursor, SourceEventPage, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
+};
 use ctx_history_relational::{
     CommittedCoreGeneration, RawSqlOptions, RawSqlValue, RelationalEventMetadata,
     RelationalFileTouchMetadata, RelationalProjectionError, RelationalProjectionMetadata,
@@ -177,6 +179,23 @@ pub(super) fn run_after_core_publication(
     run_with(data_root, core_generation_id, project_exact_core_generation)
 }
 
+pub(super) fn generation_needs_catch_up(data_root: &Path, core_generation_id: &str) -> bool {
+    !read_status(data_root).is_some_and(|status| status.is_completed_for(core_generation_id))
+        || ready_projection_metadata(data_root, core_generation_id).is_none()
+}
+
+pub(super) fn status_generation(data_root: &Path) -> Option<String> {
+    read_status(data_root).map(|status| status.core_generation_id)
+}
+
+pub(super) fn read_status_json(data_root: &Path) -> Option<Value> {
+    read_daemon_job_status(&status_path(data_root))
+}
+
+pub(super) fn persist_status_json(data_root: &Path, status: &Value) -> Result<()> {
+    write_daemon_job_status(&status_path(data_root), status)
+}
+
 fn run_with<Project>(
     data_root: &Path,
     core_generation_id: &str,
@@ -265,21 +284,19 @@ fn project_exact_core_generation(
     }
 
     let rebuild = reset || metadata.status == RelationalProjectionStatus::Empty;
-    let selected_sources = if rebuild {
-        index
-            .manifest()
-            .sources
-            .iter()
-            .map(|source| source.observation().source().identity().as_uuid())
-            .collect()
-    } else {
-        changed_source_ids(&projection, &index)?
-    };
-    let records = relational_records(&index, &selected_sources)?;
+    let changed_sources = (!rebuild)
+        .then(|| changed_source_ids(&projection, &index))
+        .transpose()?;
+    let selection = changed_sources
+        .as_ref()
+        .map_or(RelationalSourceSelection::All, |sources| {
+            RelationalSourceSelection::Changed(sources)
+        });
+    let records = RelationalRecordStream::new(&index, selection, MAX_SOURCE_EVENT_PAGE_ITEMS);
     let receipt = if rebuild {
-        projection.rebuild(&generation, records)
+        projection.rebuild_stream(&generation, records)
     } else {
-        projection.catch_up(&generation, records)
+        projection.catch_up_stream(&generation, records)
     }
     .map_err(SourceBackedRelationalCatchUpError::projection)?;
     if receipt.core_generation_id != core_generation_id {
@@ -471,127 +488,417 @@ fn decode_digest(
     Ok(output)
 }
 
-fn relational_records(
-    index: &VerifiedIndex,
-    selected_sources: &BTreeSet<Uuid>,
-) -> std::result::Result<Vec<RelationalProjectionRecord>, SourceBackedRelationalCatchUpError> {
-    let mut output = Vec::new();
-    for certificate in &index.manifest().sources {
-        let source = certificate.observation().source();
-        if !selected_sources.contains(&source.identity().as_uuid()) {
-            continue;
-        }
-        let events = source_events(index, source)?;
-        let first = events.first();
-        output.push(RelationalProjectionRecord::BeginSource(
-            RelationalSourceMetadata {
-                source: source.clone(),
-                source_root: first
-                    .and_then(|event| event.source_path.as_deref())
-                    .and_then(|path| Path::new(path).parent())
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .filter(|path| !path.is_empty()),
-                source_path: first.and_then(|event| event.source_path.clone()),
-                cwd: first.and_then(|event| event.cwd.clone()),
-            },
-        ));
-
-        let mut sessions = BTreeMap::<Uuid, SessionAggregate>::new();
-        for event in &events {
-            sessions
-                .entry(event.session_id.as_uuid())
-                .and_modify(|session| session.observe(event))
-                .or_insert_with(|| SessionAggregate::new(event));
-        }
-        for session in sessions.into_values() {
-            output.push(RelationalProjectionRecord::Session(
-                session.into_metadata()?,
-            ));
-        }
-        for event in events {
-            let event_type = event.event_type.parse::<EventType>().map_err(|error| {
-                SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                    "invalid event type {:?}: {error}",
-                    event.event_type
-                ))
-            })?;
-            let role = event
-                .role
-                .as_deref()
-                .map(str::parse::<EventRole>)
-                .transpose()
-                .map_err(|error| {
-                    SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                        "invalid event role for {}: {error}",
-                        event.event_id
-                    ))
-                })?;
-            output.push(RelationalProjectionRecord::Event(RelationalEventMetadata {
-                event_id: event.event_id,
-                session_id: event.session_id,
-                event_sequence: event.event_sequence,
-                event_type,
-                role,
-                occurred_at_unix_ms: event.occurred_at_unix_ms,
-                fidelity: Fidelity::Imported,
-                locator: event.locator.clone(),
-            }));
-            for (ordinal, path) in event.touched_files.iter().enumerate() {
-                output.push(RelationalProjectionRecord::FileTouch(
-                    RelationalFileTouchMetadata {
-                        file_touch_id: file_touch_id(event.event_id, ordinal, path)?,
-                        event_id: Some(event.event_id),
-                        session_id: Some(event.session_id),
-                        path: path.clone(),
-                        old_path: None,
-                        change_kind: None,
-                        line_count_delta: None,
-                        confidence: Confidence::Explicit,
-                        created_at_unix_ms: event.occurred_at_unix_ms,
-                        updated_at_unix_ms: event.occurred_at_unix_ms,
-                    },
-                ));
-            }
-        }
-        output.push(RelationalProjectionRecord::EndSource {
-            source_id: source.identity().as_uuid(),
-        });
-    }
-    Ok(output)
+#[derive(Clone, Copy)]
+enum RelationalSourceSelection<'a> {
+    All,
+    Changed(&'a BTreeSet<Uuid>),
 }
 
-fn source_events(
-    index: &VerifiedIndex,
-    source: &ctx_history_core::SourceKey,
-) -> std::result::Result<Vec<EventRecord>, SourceBackedRelationalCatchUpError> {
-    let mut output = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = index
-            .source_event_page(source, cursor.as_ref(), MAX_SOURCE_EVENT_PAGE_ITEMS)
-            .map_err(|error| {
-                SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                    "enumerate exact source {}: {error}",
-                    source.identity()
-                ))
-            })?;
-        if page.generation_id != index.generation_id() || !page.source.exact_descriptor_eq(source) {
-            return Err(SourceBackedRelationalCatchUpError::GenerationMismatch {
-                expected: index.generation_id().to_owned(),
-                actual: page.generation_id,
-            });
+impl RelationalSourceSelection<'_> {
+    fn includes(self, source_id: Uuid) -> bool {
+        match self {
+            Self::All => true,
+            Self::Changed(sources) => sources.contains(&source_id),
         }
-        output.extend(page.items);
-        if page.terminal {
-            break;
-        }
-        cursor = page.next_cursor;
     }
-    Ok(output)
+}
+
+struct RelationalRecordStream<'a> {
+    index: &'a VerifiedIndex,
+    selection: RelationalSourceSelection<'a>,
+    certificate_index: usize,
+    current: Option<SourceRecordStream>,
+    page_size: usize,
+    failed: bool,
+    #[cfg(test)]
+    pages_loaded: usize,
+    #[cfg(test)]
+    max_page_items: usize,
+}
+
+impl<'a> RelationalRecordStream<'a> {
+    fn new(
+        index: &'a VerifiedIndex,
+        selection: RelationalSourceSelection<'a>,
+        page_size: usize,
+    ) -> Self {
+        Self {
+            index,
+            selection,
+            certificate_index: 0,
+            current: None,
+            page_size,
+            failed: false,
+            #[cfg(test)]
+            pages_loaded: 0,
+            #[cfg(test)]
+            max_page_items: 0,
+        }
+    }
+
+    fn prepare_next_source(
+        &mut self,
+    ) -> std::result::Result<bool, SourceBackedRelationalCatchUpError> {
+        while let Some(certificate) = self.index.manifest().sources.get(self.certificate_index) {
+            self.certificate_index += 1;
+            let source = certificate.observation().source();
+            if !self.selection.includes(source.identity().as_uuid()) {
+                continue;
+            }
+
+            let (metadata, sessions) = self.scan_source_metadata(source)?;
+            self.current = Some(SourceRecordStream::new(source.clone(), metadata, sessions));
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn scan_source_metadata(
+        &mut self,
+        source: &SourceKey,
+    ) -> std::result::Result<
+        (RelationalSourceMetadata, BTreeMap<Uuid, SessionAggregate>),
+        SourceBackedRelationalCatchUpError,
+    > {
+        let mut first = None;
+        let mut sessions = BTreeMap::<Uuid, SessionAggregate>::new();
+        let mut cursor = None;
+        loop {
+            let page = load_source_page(self.index, source, cursor.as_ref(), self.page_size)?;
+            self.observe_page(&page);
+            for event in &page.items {
+                first.get_or_insert_with(|| SourceMetadataSeed::new(event));
+                sessions
+                    .entry(event.session_id.as_uuid())
+                    .and_modify(|session| session.observe(event))
+                    .or_insert_with(|| SessionAggregate::new(event));
+            }
+            if page.terminal {
+                break;
+            }
+            cursor = Some(next_page_cursor(&page)?);
+        }
+        let metadata = RelationalSourceMetadata {
+            source: source.clone(),
+            source_root: first
+                .as_ref()
+                .and_then(|seed| seed.source_path.as_deref())
+                .and_then(|path| Path::new(path).parent())
+                .map(|path| path.to_string_lossy().into_owned())
+                .filter(|path| !path.is_empty()),
+            source_path: first.as_ref().and_then(|seed| seed.source_path.clone()),
+            cwd: first.and_then(|seed| seed.cwd),
+        };
+        Ok((metadata, sessions))
+    }
+
+    #[cfg(test)]
+    fn observe_page(&mut self, page: &SourceEventPage) {
+        self.pages_loaded += 1;
+        self.max_page_items = self.max_page_items.max(page.items.len());
+    }
+
+    #[cfg(not(test))]
+    fn observe_page(&mut self, _page: &SourceEventPage) {}
+}
+
+impl Iterator for RelationalRecordStream<'_> {
+    type Item = std::result::Result<RelationalProjectionRecord, RelationalProjectionError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        loop {
+            if self.current.is_none() {
+                match self.prepare_next_source() {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(error) => {
+                        self.failed = true;
+                        return Some(Err(stream_error(error)));
+                    }
+                }
+            }
+
+            let result = self
+                .current
+                .as_mut()
+                .expect("prepared above")
+                .next_record(self.index, self.page_size);
+            match result {
+                Ok(Some((record, page_items))) => {
+                    if let Some(page_items) = page_items {
+                        #[cfg(test)]
+                        {
+                            self.pages_loaded += 1;
+                            self.max_page_items = self.max_page_items.max(page_items);
+                        }
+                        #[cfg(not(test))]
+                        let _ = page_items;
+                    }
+                    return Some(Ok(record));
+                }
+                Ok(None) => self.current = None,
+                Err(error) => {
+                    self.failed = true;
+                    return Some(Err(stream_error(error)));
+                }
+            }
+        }
+    }
+}
+
+fn stream_error(error: SourceBackedRelationalCatchUpError) -> RelationalProjectionError {
+    RelationalProjectionError::InvalidRecord(error.to_string())
+}
+
+struct SourceRecordStream {
+    source: SourceKey,
+    stage: SourceRecordStage,
+    metadata: Option<RelationalSourceMetadata>,
+    sessions: std::collections::btree_map::IntoValues<Uuid, SessionAggregate>,
+    events: SourceEventStream,
+}
+
+impl SourceRecordStream {
+    fn new(
+        source: SourceKey,
+        metadata: RelationalSourceMetadata,
+        sessions: BTreeMap<Uuid, SessionAggregate>,
+    ) -> Self {
+        Self {
+            source,
+            stage: SourceRecordStage::Begin,
+            metadata: Some(metadata),
+            sessions: sessions.into_values(),
+            events: SourceEventStream::default(),
+        }
+    }
+
+    fn next_record(
+        &mut self,
+        index: &VerifiedIndex,
+        page_size: usize,
+    ) -> std::result::Result<
+        Option<(RelationalProjectionRecord, Option<usize>)>,
+        SourceBackedRelationalCatchUpError,
+    > {
+        loop {
+            match self.stage {
+                SourceRecordStage::Begin => {
+                    self.stage = SourceRecordStage::Sessions;
+                    return Ok(Some((
+                        RelationalProjectionRecord::BeginSource(
+                            self.metadata.take().expect("begin metadata is present"),
+                        ),
+                        None,
+                    )));
+                }
+                SourceRecordStage::Sessions => {
+                    if let Some(session) = self.sessions.next() {
+                        return Ok(Some((
+                            RelationalProjectionRecord::Session(session.into_metadata()?),
+                            None,
+                        )));
+                    }
+                    self.stage = SourceRecordStage::Events;
+                }
+                SourceRecordStage::Events => {
+                    if let Some(record) = self.events.pending.pop_front() {
+                        return Ok(Some((record, None)));
+                    }
+                    if let Some(event) = self.events.items.next() {
+                        self.events.pending = records_for_event(event)?;
+                        continue;
+                    }
+                    if self.events.terminal {
+                        self.stage = SourceRecordStage::End;
+                        continue;
+                    }
+                    let page = load_source_page(
+                        index,
+                        &self.source,
+                        self.events.cursor.as_ref(),
+                        page_size,
+                    )?;
+                    let page_items = page.items.len();
+                    self.events.terminal = page.terminal;
+                    self.events.cursor = if page.terminal {
+                        None
+                    } else {
+                        Some(next_page_cursor(&page)?)
+                    };
+                    self.events.items = page.items.into_iter();
+                    if self.events.items.len() == 0 && !self.events.terminal {
+                        return Err(SourceBackedRelationalCatchUpError::InvalidMetadata(
+                            "non-terminal source event page is empty".to_owned(),
+                        ));
+                    }
+                    if let Some(event) = self.events.items.next() {
+                        self.events.pending = records_for_event(event)?;
+                        let record = self.events.pending.pop_front().expect("event record");
+                        return Ok(Some((record, Some(page_items))));
+                    }
+                    self.stage = SourceRecordStage::Done;
+                    return Ok(Some((
+                        RelationalProjectionRecord::EndSource {
+                            source_id: self.source.identity().as_uuid(),
+                        },
+                        Some(page_items),
+                    )));
+                }
+                SourceRecordStage::End => {
+                    self.stage = SourceRecordStage::Done;
+                    return Ok(Some((
+                        RelationalProjectionRecord::EndSource {
+                            source_id: self.source.identity().as_uuid(),
+                        },
+                        None,
+                    )));
+                }
+                SourceRecordStage::Done => return Ok(None),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SourceRecordStage {
+    Begin,
+    Sessions,
+    Events,
+    End,
+    Done,
+}
+
+struct SourceEventStream {
+    cursor: Option<SourceEventCursor>,
+    items: std::vec::IntoIter<EventRecord>,
+    terminal: bool,
+    pending: VecDeque<RelationalProjectionRecord>,
+}
+
+impl Default for SourceEventStream {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            items: Vec::new().into_iter(),
+            terminal: false,
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+fn load_source_page(
+    index: &VerifiedIndex,
+    source: &SourceKey,
+    cursor: Option<&SourceEventCursor>,
+    page_size: usize,
+) -> std::result::Result<SourceEventPage, SourceBackedRelationalCatchUpError> {
+    let page = index
+        .source_event_page(source, cursor, page_size)
+        .map_err(|error| {
+            SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
+                "enumerate exact source {}: {error}",
+                source.identity()
+            ))
+        })?;
+    if page.generation_id != index.generation_id() || !page.source.exact_descriptor_eq(source) {
+        return Err(SourceBackedRelationalCatchUpError::GenerationMismatch {
+            expected: index.generation_id().to_owned(),
+            actual: page.generation_id,
+        });
+    }
+    Ok(page)
+}
+
+fn next_page_cursor(
+    page: &SourceEventPage,
+) -> std::result::Result<SourceEventCursor, SourceBackedRelationalCatchUpError> {
+    page.next_cursor.clone().ok_or_else(|| {
+        SourceBackedRelationalCatchUpError::InvalidMetadata(
+            "non-terminal source event page has no cursor".to_owned(),
+        )
+    })
+}
+
+fn records_for_event(
+    event: EventRecord,
+) -> std::result::Result<VecDeque<RelationalProjectionRecord>, SourceBackedRelationalCatchUpError> {
+    let event_type = event.event_type.parse::<EventType>().map_err(|error| {
+        SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
+            "invalid event type {:?}: {error}",
+            event.event_type
+        ))
+    })?;
+    let role = event
+        .role
+        .as_deref()
+        .map(str::parse::<EventRole>)
+        .transpose()
+        .map_err(|error| {
+            SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
+                "invalid event role for {}: {error}",
+                event.event_id
+            ))
+        })?;
+    let mut records = VecDeque::with_capacity(event.touched_files.len().saturating_add(1));
+    records.push_back(RelationalProjectionRecord::Event(RelationalEventMetadata {
+        event_id: event.event_id,
+        session_id: event.session_id,
+        event_sequence: event.event_sequence,
+        event_type,
+        role,
+        occurred_at_unix_ms: event.occurred_at_unix_ms,
+        fidelity: Fidelity::Imported,
+        locator: event.locator,
+    }));
+    for (ordinal, path) in event.touched_files.into_iter().enumerate() {
+        records.push_back(RelationalProjectionRecord::FileTouch(
+            RelationalFileTouchMetadata {
+                file_touch_id: file_touch_id(event.event_id, ordinal, &path)?,
+                event_id: Some(event.event_id),
+                session_id: Some(event.session_id),
+                path,
+                old_path: None,
+                change_kind: None,
+                line_count_delta: None,
+                confidence: Confidence::Explicit,
+                created_at_unix_ms: event.occurred_at_unix_ms,
+                updated_at_unix_ms: event.occurred_at_unix_ms,
+            },
+        ));
+    }
+    Ok(records)
+}
+
+struct SourceMetadataSeed {
+    source_path: Option<String>,
+    cwd: Option<String>,
+}
+
+impl SourceMetadataSeed {
+    fn new(event: &EventRecord) -> Self {
+        Self {
+            source_path: event.source_path.clone(),
+            cwd: event.cwd.clone(),
+        }
+    }
 }
 
 struct SessionAggregate {
-    first: EventRecord,
+    first_event_sequence: u64,
+    session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    provider_session_id: Option<String>,
+    agent_type: String,
+    is_primary: bool,
+    branch: Option<String>,
+    workspace: Option<String>,
+    cwd: Option<String>,
+    source_path: Option<String>,
     started_at_unix_ms: Option<i64>,
     ended_at_unix_ms: Option<i64>,
 }
@@ -599,15 +906,34 @@ struct SessionAggregate {
 impl SessionAggregate {
     fn new(event: &EventRecord) -> Self {
         Self {
-            first: event.clone(),
+            first_event_sequence: event.event_sequence,
+            session_id: event.session_id,
+            parent_session_id: event.parent_session_id,
+            root_session_id: event.root_session_id,
+            provider_session_id: event.provider_session_id.clone(),
+            agent_type: event.agent_type.clone(),
+            is_primary: event.is_primary,
+            branch: event.branch.clone(),
+            workspace: event.workspace.clone(),
+            cwd: event.cwd.clone(),
+            source_path: event.source_path.clone(),
             started_at_unix_ms: event.occurred_at_unix_ms,
             ended_at_unix_ms: event.occurred_at_unix_ms,
         }
     }
 
     fn observe(&mut self, event: &EventRecord) {
-        if event.event_sequence < self.first.event_sequence {
-            self.first = event.clone();
+        if event.event_sequence < self.first_event_sequence {
+            self.first_event_sequence = event.event_sequence;
+            self.parent_session_id = event.parent_session_id;
+            self.root_session_id = event.root_session_id;
+            self.provider_session_id = event.provider_session_id.clone();
+            self.agent_type.clone_from(&event.agent_type);
+            self.is_primary = event.is_primary;
+            self.branch.clone_from(&event.branch);
+            self.workspace.clone_from(&event.workspace);
+            self.cwd.clone_from(&event.cwd);
+            self.source_path.clone_from(&event.source_path);
         }
         self.started_at_unix_ms = option_min(self.started_at_unix_ms, event.occurred_at_unix_ms);
         self.ended_at_unix_ms = option_max(self.ended_at_unix_ms, event.occurred_at_unix_ms);
@@ -616,29 +942,25 @@ impl SessionAggregate {
     fn into_metadata(
         self,
     ) -> std::result::Result<RelationalSessionMetadata, SourceBackedRelationalCatchUpError> {
-        let agent_type = self
-            .first
-            .agent_type
-            .parse::<AgentType>()
-            .map_err(|error| {
-                SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                    "invalid agent type {:?}: {error}",
-                    self.first.agent_type
-                ))
-            })?;
+        let agent_type = self.agent_type.parse::<AgentType>().map_err(|error| {
+            SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
+                "invalid agent type {:?}: {error}",
+                self.agent_type
+            ))
+        })?;
         Ok(RelationalSessionMetadata {
-            session_id: self.first.session_id,
-            parent_session_id: self.first.parent_session_id,
-            root_session_id: self.first.root_session_id,
-            provider_session_id: self.first.provider_session_id,
+            session_id: self.session_id,
+            parent_session_id: self.parent_session_id,
+            root_session_id: self.root_session_id,
+            provider_session_id: self.provider_session_id,
             external_agent_id: None,
             agent_type,
             role_hint: None,
-            is_primary: self.first.is_primary,
-            branch: self.first.branch,
-            workspace: self.first.workspace,
-            cwd: self.first.cwd,
-            source_path: self.first.source_path,
+            is_primary: self.is_primary,
+            branch: self.branch,
+            workspace: self.workspace,
+            cwd: self.cwd,
+            source_path: self.source_path,
             status: SessionStatus::Imported,
             fidelity: Fidelity::Imported,
             started_at_unix_ms: self.started_at_unix_ms,

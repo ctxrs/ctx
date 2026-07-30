@@ -5,8 +5,8 @@ use ctx_history_core::{
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 3;
-pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 3;
+pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 4;
+pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 4;
 
 pub type Result<T> = std::result::Result<T, RelationalProjectionError>;
 

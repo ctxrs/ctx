@@ -172,6 +172,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
     let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls: calls.clone(),
         history_refresh: Some(json!({"status": "completed"})),
+        relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
     });
     let mut runtime = DaemonRuntime {
@@ -383,6 +384,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
     let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls: calls.clone(),
         history_refresh: Some(json!({"status": "completed"})),
+        relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
     });
     let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
