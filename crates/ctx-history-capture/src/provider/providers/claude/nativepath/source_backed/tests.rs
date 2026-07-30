@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     provider::source_backed::{
-        family::jsonl::{jsonl_family_work, reset_jsonl_family_work, JsonlFamilyWork},
+        family::jsonl::{
+            jsonl_family_projection_bytes, jsonl_family_work, jsonl_prefix_hash_bytes,
+            reset_jsonl_family_work, reset_jsonl_prefix_hash_bytes, JsonlFamilyWork,
+        },
         refresh_source_backed_generation, register_landed_source_backed_route,
         SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
@@ -201,17 +204,53 @@ fn shared_family_claude_noop_replacement_lineage_and_hydration_oracle() {
     );
     assert_ne!(rewrite.commit.generation_id, cold.commit.generation_id);
 
-    append_record(
-        &primary,
-        &message("session-1", "message-3", "claude growth"),
-    );
+    let rewrite_primary = rewrite
+        .sources
+        .iter()
+        .find(|source| source.counts().indexed_documents == 2)
+        .unwrap();
+    let rewrite_frontier = rewrite_primary.frontier().unwrap();
+    let frozen_prefix_digest = *rewrite_frontier.certified_prefix_digest();
+    let mut appended = message("session-1", "message-3", "claude growth");
+    let appended_object = appended.as_object_mut().unwrap();
+    appended_object.remove("cwd");
+    appended_object.remove("version");
+    appended_object.remove("gitBranch");
+    append_record(&primary, &appended);
+    let replacement_payload_bytes = fs::read(&primary).unwrap().len() - 3;
     reset_jsonl_family_work();
+    reset_jsonl_prefix_hash_bytes();
     let growth =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(
         jsonl_family_work().provider_projections,
         3,
-        "Claude growth is one full replacement"
+        "Claude growth must replay prior session metadata"
+    );
+    assert_eq!(
+        jsonl_family_projection_bytes(),
+        replacement_payload_bytes,
+        "replacement-only Claude reparses every payload byte"
+    );
+    assert_eq!(
+        jsonl_prefix_hash_bytes(),
+        0,
+        "replacement-only Claude does not attempt append certification"
+    );
+    let growth_primary = growth
+        .sources
+        .iter()
+        .find(|source| source.counts().indexed_documents == 3)
+        .unwrap();
+    assert_eq!(growth_primary.counts().complete_records, 3);
+    assert_eq!(growth_primary.counts().indexed_documents, 3);
+    assert_eq!(
+        growth_primary.frontier().unwrap().certified_prefix_bytes(),
+        fs::metadata(&primary).unwrap().len()
+    );
+    assert_ne!(
+        growth_primary.frontier().unwrap().certified_prefix_digest(),
+        &frozen_prefix_digest
     );
     assert_eq!(
         growth
@@ -221,6 +260,15 @@ fn shared_family_claude_noop_replacement_lineage_and_hydration_oracle() {
             .sum::<u64>(),
         4
     );
+    let mut primary_events = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(growth_primary.observation().source(), None, 10)
+        .unwrap()
+        .items;
+    primary_events.sort_by_key(|event| event.event_sequence);
+    let appended_event = primary_events.last().unwrap();
+    assert_eq!(appended_event.branch.as_deref(), Some("main"));
+    assert_eq!(appended_event.cwd.as_deref(), Some("/workspace/project"));
 
     let subagent_event = VerifiedIndex::open(&index_root)
         .unwrap()

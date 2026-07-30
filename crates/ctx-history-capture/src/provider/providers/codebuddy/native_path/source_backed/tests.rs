@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, FileTimes},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -95,6 +95,49 @@ fn write_cli(root: &Path, cli: &[(&str, &str)]) {
     fs::write(cli_path, cli_bytes).unwrap();
 }
 
+fn write_extension_sessions(root: &Path, sessions: usize) {
+    let project = root.join("history/linear-project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("index.json"), b"{}").unwrap();
+    for session in 0..sessions {
+        let session = project.join(format!("session-{session:04}"));
+        fs::create_dir_all(session.join("messages")).unwrap();
+        fs::write(session.join("index.json"), b"{\"messages\":[]}").unwrap();
+    }
+}
+
+fn write_cli_source(
+    root: &Path,
+    project: &str,
+    session: &str,
+    native_id: &str,
+    text: &str,
+) -> PathBuf {
+    let path = root
+        .join("projects")
+        .join(project)
+        .join(format!("{session}.jsonl"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&json!({
+                "id": native_id,
+                "type": "message",
+                "role": "user",
+                "content": text,
+                "timestamp": IMPORTED_AT,
+                "sessionId": session,
+                "cwd": format!("/workspace/{project}"),
+            }))
+            .unwrap()
+        ),
+    )
+    .unwrap();
+    path
+}
+
 fn route_source(path: &Path) -> ProviderSource {
     ProviderSource {
         provider: CaptureProvider::CodeBuddy,
@@ -110,8 +153,18 @@ fn route_source(path: &Path) -> ProviderSource {
 }
 
 fn registry_with_parse_count(path: &Path) -> (SourceBackedProviderRegistry, Arc<AtomicUsize>) {
+    registry_with_execution(path, None)
+}
+
+fn registry_with_execution(
+    path: &Path,
+    execution: Option<(usize, Arc<CodeBuddyScanActivity>)>,
+) -> (SourceBackedProviderRegistry, Arc<AtomicUsize>) {
     let source = route_source(path);
     let parse_count = Arc::new(AtomicUsize::new(0));
+    let (leaf_workers, scan_activity) = execution
+        .map(|(workers, activity)| (Some(workers), Some(activity)))
+        .unwrap_or((None, None));
     let adapter = CodeBuddyDocumentAdapter {
         root: path.to_path_buf(),
         context: ProviderAdapterContext {
@@ -121,6 +174,8 @@ fn registry_with_parse_count(path: &Path) -> (SourceBackedProviderRegistry, Arc<
             imported_at: DateTime::<Utc>::UNIX_EPOCH,
         },
         parse_count: Some(Arc::clone(&parse_count)),
+        leaf_workers,
+        scan_activity,
     };
     let mut registry = SourceBackedProviderRegistry::new();
     register_replacement_document_tree_route(
@@ -140,6 +195,26 @@ fn writer_options() -> WriterOptions {
     }
 }
 
+#[test]
+fn codebuddy_production_route_declares_exact_independent_leaves() {
+    let adapter = CodeBuddyDocumentAdapter {
+        root: PathBuf::from("unused-codebuddy-policy-path"),
+        context: ProviderAdapterContext {
+            machine_id: "codebuddy-policy-test".to_owned(),
+            source_path: None,
+            source_root: None,
+            imported_at: DateTime::<Utc>::UNIX_EPOCH,
+        },
+        parse_count: None,
+        leaf_workers: None,
+        scan_activity: None,
+    };
+    assert_eq!(
+        adapter.leaf_execution_policy(),
+        DocumentLeafExecutionPolicy::Independent
+    );
+}
+
 fn source_events(index_root: &Path, source: &SourceKey) -> Vec<EventRecord> {
     let mut events = VerifiedIndex::open(index_root)
         .unwrap()
@@ -148,6 +223,21 @@ fn source_events(index_root: &Path, source: &SourceKey) -> Vec<EventRecord> {
         .items;
     events.sort_by_key(|event| event.event_sequence);
     events
+}
+
+fn all_source_events(index_root: &Path) -> Vec<EventRecord> {
+    let index = VerifiedIndex::open(index_root).unwrap();
+    index
+        .manifest()
+        .sources
+        .iter()
+        .flat_map(|source| {
+            index
+                .source_event_page(source.observation().source(), None, 16)
+                .unwrap()
+                .items
+        })
+        .collect()
 }
 
 #[test]
@@ -289,7 +379,120 @@ fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
 }
 
 #[test]
-fn replacement_replays_unchanged_certifies_deletion_and_retains_on_unavailable() {
+fn independent_codebuddy_leaves_have_one_vs_four_generation_and_event_parity() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("parallel-codebuddy");
+    write_store(
+        &root,
+        &[("shared-cli", "shared cli body")],
+        &[("shared-extension", "shared extension body")],
+    );
+    write_cli_source(
+        &root,
+        "extra-project-a",
+        "extra-session-a",
+        "extra-message-a",
+        "extra cli body a",
+    );
+    let second_extra = write_cli_source(
+        &root,
+        "extra-project-b",
+        "extra-session-b",
+        "extra-message-b",
+        "extra cli body b",
+    );
+    let serial_activity = CodeBuddyScanActivity::new(1);
+    let parallel_activity = CodeBuddyScanActivity::new(4);
+    let (serial_registry, serial_scans) =
+        registry_with_execution(&root, Some((1, Arc::clone(&serial_activity))));
+    let (parallel_registry, parallel_scans) =
+        registry_with_execution(&root, Some((4, Arc::clone(&parallel_activity))));
+    let serial_root = temp.path().join("serial-leaves-index");
+    let parallel_root = temp.path().join("parallel-leaves-index");
+
+    let serial_cold =
+        refresh_source_backed_generation(&serial_root, &serial_registry, writer_options()).unwrap();
+    let parallel_cold =
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+            .unwrap();
+    assert_eq!(
+        parallel_cold.commit.generation_id,
+        serial_cold.commit.generation_id
+    );
+    assert_eq!(parallel_cold.sources, serial_cold.sources);
+    assert_eq!(
+        all_source_events(&parallel_root),
+        all_source_events(&serial_root)
+    );
+    assert_eq!(serial_activity.peak(), 1);
+    assert_eq!(parallel_activity.peak(), 4);
+    assert_eq!(serial_scans.load(Ordering::Relaxed), 4);
+    assert_eq!(parallel_scans.load(Ordering::Relaxed), 4);
+
+    let serial_noop =
+        refresh_source_backed_generation(&serial_root, &serial_registry, writer_options()).unwrap();
+    let parallel_noop =
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+            .unwrap();
+    assert_eq!(
+        serial_noop.commit.generation_id,
+        serial_cold.commit.generation_id
+    );
+    assert_eq!(
+        parallel_noop.commit.generation_id,
+        parallel_cold.commit.generation_id
+    );
+    assert_eq!(serial_scans.load(Ordering::Relaxed), 4);
+    assert_eq!(parallel_scans.load(Ordering::Relaxed), 4);
+
+    serial_activity.disable_barrier();
+    parallel_activity.disable_barrier();
+    write_cli_source(
+        &root,
+        "extra-project-a",
+        "extra-session-a",
+        "extra-message-a",
+        "replacement cli body a",
+    );
+    let serial_changed =
+        refresh_source_backed_generation(&serial_root, &serial_registry, writer_options()).unwrap();
+    let parallel_changed =
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+            .unwrap();
+    assert_eq!(
+        parallel_changed.commit.generation_id,
+        serial_changed.commit.generation_id
+    );
+    assert_eq!(parallel_changed.sources, serial_changed.sources);
+    assert_eq!(
+        all_source_events(&parallel_root),
+        all_source_events(&serial_root)
+    );
+    assert_eq!(serial_scans.load(Ordering::Relaxed), 5);
+    assert_eq!(parallel_scans.load(Ordering::Relaxed), 5);
+
+    fs::remove_file(second_extra).unwrap();
+    let serial_deleted =
+        refresh_source_backed_generation(&serial_root, &serial_registry, writer_options()).unwrap();
+    let parallel_deleted =
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+            .unwrap();
+    assert_eq!(
+        parallel_deleted.commit.generation_id,
+        serial_deleted.commit.generation_id
+    );
+    assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+    assert_eq!(parallel_deleted.removals, serial_deleted.removals);
+    assert_eq!(
+        all_source_events(&parallel_root),
+        all_source_events(&serial_root)
+    );
+    assert_eq!(serial_scans.load(Ordering::Relaxed), 5);
+    assert_eq!(parallel_scans.load(Ordering::Relaxed), 5);
+}
+
+#[test]
+fn cold_noop_change_delete_parity_and_unavailable_retention() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("codebuddy");
     write_store(
@@ -303,6 +506,9 @@ fn replacement_replays_unchanged_certifies_deletion_and_retains_on_unavailable()
 
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(parse_count.load(Ordering::Relaxed), 2);
+    let cli_source = codebuddy_source_key_for_path(CodeBuddySourceShape::Cli, &cli_path).unwrap();
+    let cold_cli = source_events(&index_root, &cli_source);
+    assert_eq!(cold_cli.len(), 1);
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
@@ -324,6 +530,24 @@ fn replacement_replays_unchanged_certifies_deletion_and_retains_on_unavailable()
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(parse_count.load(Ordering::Relaxed), 3);
     assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
+    let changed_cli = source_events(&index_root, &cli_source);
+    assert_eq!(changed_cli.len(), 1);
+    assert_eq!(changed_cli[0].event_id, cold_cli[0].event_id);
+    assert!(changed_cli[0]
+        .locator
+        .source()
+        .exact_descriptor_eq(cold_cli[0].locator.source()));
+    let changed_request =
+        EventHydrationRequest::new(changed_cli[0].event_id, changed_cli[0].locator.clone())
+            .unwrap();
+    assert_eq!(
+        registry
+            .resolver_registry()
+            .hydrate_event(&changed_request)
+            .unwrap()
+            .provider_bytes,
+        b"after- body"
+    );
 
     fs::remove_file(&cli_path).unwrap();
     let deleted =
@@ -344,6 +568,108 @@ fn replacement_replays_unchanged_certifies_deletion_and_retains_on_unavailable()
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
+    );
+}
+
+#[test]
+fn indexed_discovery_preserves_source_identity_and_full_scan_fingerprints() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("codebuddy");
+    write_store(&root, &[("cli-1", "cli")], &[("extension-1", "extension")]);
+    let first = discover_codebuddy_tree(&root)
+        .unwrap()
+        .into_complete_tree()
+        .unwrap();
+    assert!(first
+        .authority
+        .indexed_extension_fingerprints_match_full_scan(&first.leaves));
+    for leaf in &first.leaves {
+        let shape = match leaf.provider_leaf.kind {
+            DocumentLeafKind::Cli { .. } => CodeBuddySourceShape::Cli,
+            DocumentLeafKind::Extension { .. } => CodeBuddySourceShape::Extension,
+        };
+        let expected =
+            codebuddy_source_key_for_path(shape, leaf.provider_leaf.logical_path()).unwrap();
+        assert!(expected.exact_descriptor_eq(&leaf.provider_leaf.source));
+    }
+    let first_identity = first
+        .leaves
+        .iter()
+        .map(|leaf| {
+            (
+                leaf.provider_leaf.logical_path().to_path_buf(),
+                leaf.provider_leaf.source.exact_descriptor_digest(),
+                leaf.fingerprint,
+            )
+        })
+        .collect::<Vec<_>>();
+    let second = discover_codebuddy_tree(&root)
+        .unwrap()
+        .into_complete_tree()
+        .unwrap();
+    let second_identity = second
+        .leaves
+        .iter()
+        .map(|leaf| {
+            (
+                leaf.provider_leaf.logical_path().to_path_buf(),
+                leaf.provider_leaf.source.exact_descriptor_digest(),
+                leaf.fingerprint,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(second.tree_fingerprint, first.tree_fingerprint);
+    assert_eq!(second_identity, first_identity);
+}
+
+#[test]
+fn two_thousand_extension_sessions_have_linear_deterministic_discovery() {
+    const SESSION_COUNT: usize = 2_000;
+    const MAX_ROUTE_INSPECTIONS_PER_ROUTE: usize = 7;
+    const MAX_INDEX_LOOKUPS_PER_ROUTE: usize = 4;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("codebuddy");
+    write_extension_sessions(&root, SESSION_COUNT);
+
+    reset_discovery_operations();
+    let tree = discover_codebuddy_tree(&root)
+        .unwrap()
+        .into_complete_tree()
+        .unwrap();
+    let discovery = discovery_operations();
+    let route_count = tree.authority.route_count();
+    assert_eq!(tree.leaves.len(), SESSION_COUNT);
+    assert!(
+        discovery.route_inspections <= route_count * MAX_ROUTE_INSPECTIONS_PER_ROUTE,
+        "discovery inspected routes superlinearly: {discovery:?}, routes={route_count}"
+    );
+    assert!(
+        discovery.indexed_path_lookups <= route_count * MAX_INDEX_LOOKUPS_PER_ROUTE,
+        "discovery path lookups exceeded the indexed bound: {discovery:?}, routes={route_count}"
+    );
+    assert!(
+        discovery.indexed_parent_lookups <= route_count * MAX_INDEX_LOOKUPS_PER_ROUTE,
+        "discovery parent lookups exceeded the indexed bound: {discovery:?}, routes={route_count}"
+    );
+
+    reset_discovery_operations();
+    assert_eq!(
+        revalidate_codebuddy_tree(&tree).unwrap(),
+        tree.tree_fingerprint
+    );
+    let terminal = discovery_operations();
+    assert!(
+        terminal.route_inspections <= route_count * MAX_ROUTE_INSPECTIONS_PER_ROUTE,
+        "terminal revalidation inspected routes superlinearly: {terminal:?}, routes={route_count}"
+    );
+    assert!(
+        terminal.indexed_path_lookups <= route_count * MAX_INDEX_LOOKUPS_PER_ROUTE,
+        "terminal path lookups exceeded the indexed bound: {terminal:?}, routes={route_count}"
+    );
+    assert!(
+        terminal.indexed_parent_lookups <= route_count * MAX_INDEX_LOOKUPS_PER_ROUTE,
+        "terminal parent lookups exceeded the indexed bound: {terminal:?}, routes={route_count}"
     );
 }
 
@@ -451,17 +777,29 @@ fn catalog_fences_root_leaf_symlink_and_nonregular_swaps() {
 fn production_route_is_thin_and_below_the_loc_gate() {
     let source_backed = include_str!("../source_backed.rs");
     let discovery = include_str!("../discovery.rs");
+    let discovery_catalog = include_str!("../discovery/catalog.rs");
+    let discovery_index = include_str!("../discovery/index.rs");
+    let discovery_inspection = include_str!("../discovery/inspection.rs");
     let parsing = include_str!("../parsing.rs");
     let hydration = include_str!("hydration.rs");
-    for (name, source) in [
-        ("source_backed", source_backed),
-        ("discovery", discovery),
-        ("parsing", parsing),
-        ("hydration", hydration),
+    let discovery_sources = [
+        discovery,
+        discovery_catalog,
+        discovery_index,
+        discovery_inspection,
+    ];
+    for (name, source, maximum_lines) in [
+        ("source_backed", source_backed, 1_000),
+        ("discovery", discovery, 1_000),
+        ("discovery/catalog", discovery_catalog, 1_000),
+        ("discovery/index", discovery_index, 1_000),
+        ("discovery/inspection", discovery_inspection, 1_000),
+        ("parsing", parsing, 1_000),
+        ("hydration", hydration, 1_000),
     ] {
         assert!(
-            source.lines().count() < 1_000,
-            "{name} exceeded the production LOC gate"
+            source.lines().count() < maximum_lines,
+            "{name} exceeded its production LOC gate"
         );
     }
     let forbidden_driver = ["captured_route", "_driver"].concat();
@@ -475,7 +813,9 @@ fn production_route_is_thin_and_below_the_loc_gate() {
     ] {
         assert!(
             !source_backed.contains(forbidden)
-                && !discovery.contains(forbidden)
+                && discovery_sources
+                    .iter()
+                    .all(|source| !source.contains(forbidden))
                 && !hydration.contains(forbidden),
             "CodeBuddy restored obsolete lifecycle code: {forbidden}"
         );

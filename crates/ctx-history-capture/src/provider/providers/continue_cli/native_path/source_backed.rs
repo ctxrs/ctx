@@ -37,10 +37,11 @@ use crate::{
     provider::{
         providers::continue_cli::continue_history_item_text,
         source_backed::{
+            document_leaf_execution_policy,
             family::document::{
                 register_replacement_document_tree_route, ChangedDocumentSink,
-                CompleteDocumentTree, DocumentLeafFingerprint, DocumentSourceTerminal,
-                ObservedDocumentLeaf, ReplacementDocumentTree,
+                CompleteDocumentTree, DocumentLeafExecutionPolicy, DocumentLeafFingerprint,
+                DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
             },
             route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
             SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
@@ -157,6 +158,10 @@ impl ReplacementDocumentTree for ContinueSourceBackedReader {
 
     fn owns_source(&self, source: &SourceKey) -> bool {
         owns_continue_source(source)
+    }
+
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        document_leaf_execution_policy(CaptureProvider::Continue)
     }
 
     fn discover_complete(

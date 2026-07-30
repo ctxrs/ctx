@@ -7,7 +7,7 @@ use tasks::scan_tasks;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rusqlite::{types::ValueRef, Connection, OptionalExtension, Statement};
+use rusqlite::{types::ValueRef, Connection, Statement};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -80,6 +80,10 @@ struct WarpTaskCandidate {
     task_id: WarpTaskCellMetadata,
     task: WarpTaskCellMetadata,
     last_modified_at: WarpTaskCellMetadata,
+    hydrated_conversation_id: Option<String>,
+    hydrated_task_id: Option<String>,
+    hydrated_task: Option<Vec<u8>>,
+    hydrated_last_modified_at: Option<String>,
 }
 
 pub(super) struct WarpNativeQueryResult {
@@ -318,17 +322,6 @@ fn merge_decode_counters(counters: &mut WarpNativeCounters, decoded: WarpDecodeC
     counters.malformed_output_records = counters
         .malformed_output_records
         .saturating_add(decoded.malformed_output_records);
-}
-
-fn required_text<'a>(value: ValueRef<'a>, field: &str) -> Result<&'a str> {
-    match value {
-        ValueRef::Text(value) => std::str::from_utf8(value).map_err(|error| {
-            CaptureError::InvalidPayload(format!("Warp {field} contains invalid UTF-8: {error}"))
-        }),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "Warp {field} must use SQLite TEXT storage"
-        ))),
-    }
 }
 
 fn parse_warp_timestamp(raw: &str) -> Result<DateTime<Utc>> {

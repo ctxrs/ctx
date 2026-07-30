@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn cold_scanner_worker_policy_honors_default_reservations_and_requests() {
+    assert_eq!(
+        cold_scanner_worker_count_for_parallelism(64, 8, None, 32),
+        16,
+        "default workers reserve capped indexers and runtime before applying the scanner cap"
+    );
+    assert_eq!(
+        cold_scanner_worker_count_for_parallelism(64, 4, None, 10),
+        4
+    );
+    assert_eq!(cold_scanner_worker_count_for_parallelism(64, 8, None, 4), 1);
+    assert_eq!(
+        cold_scanner_worker_count_for_parallelism(64, 1, Some(4), 1),
+        4,
+        "an explicit test/requested worker count is independent of host parallelism"
+    );
+    assert_eq!(
+        cold_scanner_worker_count_for_parallelism(2, 1, Some(4), 32),
+        2
+    );
+    assert_eq!(
+        cold_scanner_worker_count_for_parallelism(64, 1, Some(0), 32),
+        1
+    );
+    assert_eq!(
+        cold_scanner_worker_count_for_parallelism(64, 1, Some(usize::MAX), 32),
+        MAX_CODEX_SCANNER_WORKERS
+    );
+}
+
+#[test]
 fn malformed_session_owner_quarantines_only_that_source() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -66,7 +97,7 @@ fn malformed_session_owner_quarantines_only_that_source() {
 }
 
 #[test]
-fn source_backed_cold_parallel_matches_single_lane_semantics() {
+fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let single_index = temp.path().join("single-index");
@@ -77,22 +108,36 @@ fn source_backed_cold_parallel_matches_single_lane_semantics() {
         "019fa000-0000-7000-8000-000000000012",
         "019fa000-0000-7000-8000-000000000013",
         "019fa000-0000-7000-8000-000000000014",
+        "019fa000-0000-7000-8000-000000000015",
+        "019fa000-0000-7000-8000-000000000016",
+        "019fa000-0000-7000-8000-000000000017",
+        "019fa000-0000-7000-8000-000000000018",
+        "019fa000-0000-7000-8000-000000000019",
+        "019fa000-0000-7000-8000-000000000020",
+        "019fa000-0000-7000-8000-000000000021",
+        "019fa000-0000-7000-8000-000000000022",
+        "019fa000-0000-7000-8000-000000000023",
+        "019fa000-0000-7000-8000-000000000024",
+        "019fa000-0000-7000-8000-000000000025",
+        "019fa000-0000-7000-8000-000000000026",
     ];
     for (index, native_session_id) in native_session_ids.iter().enumerate() {
-        write_session(
-            &sessions,
-            native_session_id,
-            &[
+        let events = (0..65)
+            .map(|event_index| {
                 message(
-                    "user",
-                    &format!("parallel semantic sentinel source {index}"),
-                ),
-                message(
-                    "assistant",
-                    &format!("ordered locator sentinel source {index}"),
-                ),
-            ],
-        );
+                    if event_index % 2 == 0 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!(
+                        "parallel semantic sentinel source {index}; \
+                         ordered locator sentinel event {event_index}"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        write_session(&sessions, native_session_id, &events);
     }
 
     let single = ingest_codex_source_backed_inner_v0(
@@ -109,18 +154,29 @@ fn source_backed_cold_parallel_matches_single_lane_semantics() {
         &parallel_index,
         ColdParallelOptionsV0 {
             scanner_workers: Some(4),
+            scanner_rendezvous: Some(4),
             ..ColdParallelOptionsV0::default()
         },
     )
     .unwrap();
     assert_eq!(single.counters.scanner_workers, 1);
+    assert_eq!(single.counters.scanner_sources_started, 16);
+    assert_eq!(single.counters.scanner_sources_completed, 16);
+    assert_eq!(single.counters.peak_active_scanners, 1);
+    assert_eq!(single.counters.emitted_pages, 32);
     assert_eq!(parallel.counters.scanner_workers, 4);
-    assert_eq!(single.commit.indexed_documents, 8);
-    assert_eq!(parallel.commit.indexed_documents, 8);
+    assert_eq!(parallel.counters.scanner_sources_started, 16);
+    assert_eq!(parallel.counters.scanner_sources_completed, 16);
+    assert_eq!(parallel.counters.peak_active_scanners, 4);
+    assert_eq!(parallel.counters.emitted_pages, 32);
+    assert_eq!(single.commit.indexed_documents, 1_040);
+    assert_eq!(parallel.commit.indexed_documents, 1_040);
     let mut single_counters = single.counters;
     let mut parallel_counters = parallel.counters;
     single_counters.scanner_workers = 0;
     parallel_counters.scanner_workers = 0;
+    single_counters.peak_active_scanners = 0;
+    parallel_counters.peak_active_scanners = 0;
     assert_eq!(single_counters, parallel_counters);
 
     let single_verified = VerifiedIndex::open(&single_index).unwrap();
@@ -157,9 +213,91 @@ fn source_backed_cold_parallel_matches_single_lane_semantics() {
         search_event_ids(&single_verified, "ordered locator sentinel"),
         search_event_ids(&parallel_verified, "ordered locator sentinel")
     );
+    drop(single_verified);
+    drop(parallel_verified);
+
+    for (index, native_session_id) in native_session_ids[..4].iter().enumerate() {
+        OpenOptions::new()
+            .append(true)
+            .open(session_path(&sessions, native_session_id))
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}\n",
+                    message(
+                        "assistant",
+                        &format!("mixed parallel append sentinel {index}")
+                    )
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    for (index, native_session_id) in native_session_ids[4..8].iter().enumerate() {
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message(
+                "assistant",
+                &format!("mixed parallel replacement sentinel {index}"),
+            )],
+        );
+    }
+
+    let single_mixed = ingest_codex_source_backed_inner_v0(
+        &sessions,
+        &single_index,
+        ColdParallelOptionsV0 {
+            scanner_workers: Some(1),
+            ..ColdParallelOptionsV0::default()
+        },
+    )
+    .unwrap();
+    let parallel_mixed = ingest_codex_source_backed_inner_v0(
+        &sessions,
+        &parallel_index,
+        ColdParallelOptionsV0 {
+            scanner_workers: Some(8),
+            ..ColdParallelOptionsV0::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(single_mixed.counters.scanner_workers, 1);
+    assert_eq!(single_mixed.counters.peak_active_scanners, 1);
+    assert_eq!(parallel_mixed.counters.scanner_workers, 8);
+    assert!(parallel_mixed.counters.peak_active_scanners >= 2);
+    assert!(parallel_mixed.counters.peak_active_scanners <= 8);
+    assert_eq!(parallel_mixed.counters.scanner_sources_started, 8);
+    assert_eq!(parallel_mixed.counters.scanner_sources_completed, 8);
+    assert_eq!(parallel_mixed.counters.appended_sources, 4);
+    assert_eq!(parallel_mixed.counters.replaced_sources, 4);
+    assert_eq!(parallel_mixed.counters.replayed_sources, 8);
+    assert_eq!(parallel_mixed.counters.catalog_source_body_reads, 8);
+    assert_eq!(parallel_mixed.counters.catalog_session_meta_parses, 8);
+    let mut normalized_single_mixed = single_mixed.counters;
+    let mut normalized_parallel_mixed = parallel_mixed.counters;
+    normalized_single_mixed.scanner_workers = 0;
+    normalized_parallel_mixed.scanner_workers = 0;
+    normalized_single_mixed.peak_active_scanners = 0;
+    normalized_parallel_mixed.peak_active_scanners = 0;
+    assert_eq!(normalized_single_mixed, normalized_parallel_mixed);
+    assert_eq!(
+        single_mixed.commit.generation_id,
+        parallel_mixed.commit.generation_id
+    );
+    let single_verified = VerifiedIndex::open(&single_index).unwrap();
+    let parallel_verified = VerifiedIndex::open(&parallel_index).unwrap();
+    assert_eq!(
+        single_verified.manifest().sources,
+        parallel_verified.manifest().sources
+    );
+    assert_eq!(
+        search_event_ids(&single_verified, "mixed parallel"),
+        search_event_ids(&parallel_verified, "mixed parallel")
+    );
 }
 #[test]
-fn source_backed_incremental_mixed_run_stays_serial() {
+fn source_backed_incremental_mixed_run_parallelizes_changed_leaves() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -207,7 +345,10 @@ fn source_backed_incremental_mixed_run_stays_serial() {
         },
     )
     .unwrap();
-    assert_eq!(mixed.counters.scanner_workers, 1);
+    assert_eq!(mixed.counters.scanner_workers, 2);
+    assert_eq!(mixed.counters.scanner_sources_started, 2);
+    assert_eq!(mixed.counters.scanner_sources_completed, 2);
+    assert!(mixed.counters.peak_active_scanners >= 2);
     assert_eq!(mixed.counters.appended_sources, 1);
     assert_eq!(mixed.counters.replayed_sources, 1);
     assert_eq!(mixed.counters.cold_sources, 1);
@@ -258,6 +399,14 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
             "019fa000-0000-7000-8000-000000000033",
             "uncommittedfailuremarker two",
         ),
+        (
+            "019fa000-0000-7000-8000-000000000034",
+            "uncommittedfailuremarker three",
+        ),
+        (
+            "019fa000-0000-7000-8000-000000000035",
+            "uncommittedfailuremarker four",
+        ),
     ] {
         write_session(
             &failing_sessions,
@@ -265,20 +414,27 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
             &[message("assistant", sentinel)],
         );
     }
+    let _ = take_cold_scanner_activity_v0();
     let error = ingest_codex_source_backed_inner_v0(
         &failing_sessions,
         &index,
         ColdParallelOptionsV0 {
             scanner_workers: Some(2),
-            fail_source_index: Some(0),
+            fail_source_index: Some(2),
             ..ColdParallelOptionsV0::default()
         },
     )
     .unwrap_err();
     assert!(matches!(
         error,
-        CodexSourceBackedErrorV0::InjectedColdWorkerFailure { source_index: 0 }
+        CodexSourceBackedErrorV0::InjectedColdWorkerFailure { source_index: 2 }
     ));
+    let (started, completed, peak) = take_cold_scanner_activity_v0().unwrap();
+    assert!(started >= 1);
+    assert!(started < 4);
+    assert!(completed >= 1);
+    assert!(completed <= started);
+    assert!(peak <= 2);
 
     let after = VerifiedIndex::open(&index).unwrap();
     assert_eq!(after.generation_id(), before_generation);
@@ -343,6 +499,12 @@ fn source_backed_cold_append_and_replay_keep_cumulative_counts() {
 
     let append = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
     assert_no_legacy_operations(append.counters);
+    assert_eq!(append.counters.inventory_walks, 2);
+    assert_eq!(append.counters.inventory_source_observations, 2);
+    assert_eq!(append.counters.catalog_source_body_reads, 1);
+    assert_eq!(append.counters.catalog_session_meta_parses, 1);
+    assert_eq!(append.counters.writer_exact_replay_sources, 0);
+    assert_eq!(append.counters.writer_mutated_sources, 1);
     assert_eq!(append.counters.scanner_workers, 1);
     assert_eq!(append.counters.appended_sources, 1);
     assert_eq!(append.counters.staged_documents, 1);
@@ -377,6 +539,12 @@ fn source_backed_cold_append_and_replay_keep_cumulative_counts() {
 
     let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
     assert_no_legacy_operations(replay.counters);
+    assert_eq!(replay.counters.inventory_walks, 2);
+    assert_eq!(replay.counters.inventory_source_observations, 2);
+    assert_eq!(replay.counters.catalog_source_body_reads, 0);
+    assert_eq!(replay.counters.catalog_session_meta_parses, 0);
+    assert_eq!(replay.counters.writer_exact_replay_sources, 1);
+    assert_eq!(replay.counters.writer_mutated_sources, 0);
     assert_eq!(replay.counters.scanner_workers, 0);
     assert_eq!(replay.counters.replayed_sources, 1);
     assert_eq!(replay.counters.staged_documents, 0);
@@ -615,6 +783,44 @@ fn source_backed_unavailable_root_preserves_the_prior_generation() {
         search_event_ids(&after, "unavailable root sentinel").len(),
         1
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn source_backed_symlink_leaf_and_root_preserve_the_prior_generation() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000050";
+    let source_path = session_path(&sessions, native_session_id);
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "symlink rejection sentinel")],
+    );
+    let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+    let outside_source = temp.path().join("outside.jsonl");
+    fs::rename(&source_path, &outside_source).unwrap();
+    symlink(&outside_source, &source_path).unwrap();
+    assert!(ingest_codex_source_backed_v0(&sessions, &index).is_err());
+    let after_leaf = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(after_leaf.generation_id(), cold.commit.generation_id);
+    assert_eq!(after_leaf.document_count(), 1);
+    drop(after_leaf);
+
+    fs::remove_file(&source_path).unwrap();
+    fs::rename(&outside_source, &source_path).unwrap();
+    let real_sessions = temp.path().join("real-sessions");
+    fs::rename(&sessions, &real_sessions).unwrap();
+    symlink(&real_sessions, &sessions).unwrap();
+    assert!(ingest_codex_source_backed_v0(&sessions, &index).is_err());
+    let after_root = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(after_root.generation_id(), cold.commit.generation_id);
+    assert_eq!(after_root.document_count(), 1);
 }
 
 #[test]

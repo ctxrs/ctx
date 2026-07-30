@@ -1,5 +1,7 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use ctx_history_core::{EventRole, EventType};
-use rusqlite::{Connection, Row};
+use rusqlite::{params_from_iter, types::Value as SqlValue, Connection, Row};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -544,69 +546,129 @@ pub(crate) fn shelley_stable_event_index(
     message: &ShelleyMessageRow,
     has_sequence_id: bool,
 ) -> Result<u64> {
-    let released = shelley_event_index(message);
+    shelley_stable_event_indices(conn, std::slice::from_ref(message), has_sequence_id)?
+        .remove(&message.rowid)
+        .ok_or(CaptureError::SystemInvariant(
+            "Shelley event-index set omitted its requested row",
+        ))
+}
+
+/// Resolves collision-safe event indexes for one bounded message set.
+///
+/// Every collision domain is joined through one VALUES table, avoiding a
+/// separate messages-table query for every projected row.
+pub(crate) fn shelley_stable_event_indices(
+    conn: &Connection,
+    messages: &[ShelleyMessageRow],
+    has_sequence_id: bool,
+) -> Result<BTreeMap<i64, u64>> {
+    let mut resolved = messages
+        .iter()
+        .map(|message| (message.rowid, shelley_event_index(message)))
+        .collect::<BTreeMap<_, _>>();
     if !has_sequence_id {
-        return Ok(released);
+        return Ok(resolved);
+    }
+    if messages.is_empty() {
+        return Ok(resolved);
     }
 
-    let normalized_sequence = message.sequence_id.max(0) as u64;
     let saturation_threshold = u64::MAX / 4_096;
-    let (predicate, bound) = if message.sequence_id <= 0 {
-        ("sequence_id <= ?2", 0_i64)
-    } else if normalized_sequence >= saturation_threshold {
-        (
-            "sequence_id >= ?2",
-            i64::try_from(saturation_threshold).unwrap_or(i64::MAX),
-        )
-    } else {
-        ("sequence_id = ?2", message.sequence_id)
-    };
+    let saturation_bound = i64::try_from(saturation_threshold).unwrap_or(i64::MAX);
+    let values = std::iter::repeat_n("(?, ?, ?, ?)", messages.len())
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
-        "select sequence_id, cast(message_id as blob)
-         from messages
-         where typeof(conversation_id) = 'text'
-           and conversation_id = ?1
-           and typeof(sequence_id) = 'integer'
-           and typeof(message_id) = 'text'
-           and {predicate}
-         order by sequence_id, cast(message_id as blob), rowid"
+        "with targets(target_rowid, conversation_id, category, sequence_bound) as
+             (values {values})
+         select targets.target_rowid, messages.sequence_id, cast(messages.message_id as blob)
+           from targets
+           join messages
+             on typeof(messages.conversation_id) = 'text'
+            and messages.conversation_id = targets.conversation_id
+            and typeof(messages.sequence_id) = 'integer'
+            and typeof(messages.message_id) = 'text'
+            and (
+                 (targets.category = 0 and messages.sequence_id = targets.sequence_bound)
+              or (targets.category = 1 and messages.sequence_id <= 0)
+              or (targets.category = 2 and messages.sequence_id >= targets.sequence_bound)
+            )
+          order by targets.target_rowid, messages.sequence_id,
+                   cast(messages.message_id as blob), messages.rowid"
     );
+    let parameters = messages.iter().flat_map(|message| {
+        let normalized_sequence = message.sequence_id.max(0) as u64;
+        let (category, bound) = if message.sequence_id <= 0 {
+            (1_i64, 0_i64)
+        } else if normalized_sequence >= saturation_threshold {
+            (2_i64, saturation_bound)
+        } else {
+            (0_i64, message.sequence_id)
+        };
+        [
+            SqlValue::Integer(message.rowid),
+            SqlValue::Text(message.conversation_id.clone()),
+            SqlValue::Integer(category),
+            SqlValue::Integer(bound),
+        ]
+    });
     let mut statement = conn.prepare(&sql)?;
-    let candidates = statement
-        .query_map(rusqlite::params![message.conversation_id, bound], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-    let mut colliders = std::collections::BTreeSet::new();
+    let candidates = statement.query_map(params_from_iter(parameters), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let by_rowid = messages
+        .iter()
+        .map(|message| (message.rowid, message))
+        .collect::<BTreeMap<_, _>>();
+    let mut colliders = BTreeMap::<i64, BTreeSet<Vec<u8>>>::new();
     for candidate in candidates {
-        let (sequence_id, message_id) = candidate?;
+        let (target_rowid, sequence_id, message_id) = candidate?;
         let Ok(message_id) = std::str::from_utf8(&message_id) else {
             // The scanner rejects this independently addressable row locally.
             // It cannot claim a valid native identity in another row's group.
             continue;
         };
+        let message = by_rowid
+            .get(&target_rowid)
+            .ok_or(CaptureError::SystemInvariant(
+                "Shelley collision query returned an unknown target row",
+            ))?;
+        let released = resolved[&target_rowid];
         if shelley_released_event_index(&message.conversation_id, sequence_id, message_id)
             == released
         {
-            colliders.insert(shelley_native_identity_bytes(
-                &message.conversation_id,
-                sequence_id,
-                message_id,
-            ));
+            colliders
+                .entry(target_rowid)
+                .or_default()
+                .insert(shelley_native_identity_bytes(
+                    &message.conversation_id,
+                    sequence_id,
+                    message_id,
+                ));
         }
     }
-    if colliders.len() <= 1 {
-        return Ok(released);
+    for message in messages {
+        let Some(colliders) = colliders.get(&message.rowid) else {
+            continue;
+        };
+        let released = resolved[&message.rowid];
+        let current = shelley_native_identity_bytes(
+            &message.conversation_id,
+            message.sequence_id,
+            &message.message_id,
+        );
+        if colliders.len() > 1 && colliders.first() != Some(&current) {
+            resolved.insert(
+                message.rowid,
+                shelley_collision_event_index(message, released),
+            );
+        }
     }
-    let current = shelley_native_identity_bytes(
-        &message.conversation_id,
-        message.sequence_id,
-        &message.message_id,
-    );
-    if colliders.first() == Some(&current) {
-        Ok(released)
-    } else {
-        Ok(shelley_collision_event_index(message, released))
-    }
+    Ok(resolved)
 }
 
 pub(crate) fn shelley_collision_event_index(message: &ShelleyMessageRow, released: u64) -> u64 {

@@ -1,4 +1,8 @@
-use std::{ffi::OsString, fs};
+use std::{
+    ffi::OsString,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use ctx_history_core::{
     BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
@@ -528,7 +532,7 @@ fn active_wal_read_only_provider_directory_is_byte_and_name_unchanged() {
 }
 
 #[test]
-fn logical_same_route_replacement_preserves_the_certificate_without_append() {
+fn production_routes_use_one_snapshot_and_skip_projection_for_checkpoint_and_vacuum_replays() {
     for registration in opencode_family_source_backed_registrations() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp
@@ -539,33 +543,100 @@ fn logical_same_route_replacement_preserves_the_certificate_without_append() {
         let source = provider_source_for_path(registration.provider(), path.clone());
         assert_eq!(source.status, ProviderSourceStatus::Available);
         let mut registry = SourceBackedProviderRegistry::new();
-        register_source_backed_route(
+        let work = Arc::new(Mutex::new(Vec::new()));
+        adapter::register_with_work_observer(
             &mut registry,
             source,
             SourceBackedRouteSelection::ExplicitManual,
             crate::test_provider_sqlite_data_root(),
+            Arc::clone(&work),
         )
         .unwrap();
         let options = WriterOptions {
             indexer_threads: 1,
             memory_bytes: 15_000_000,
         };
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "journal_mode", "wal").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
         let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
-        let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("vacuum").unwrap();
-        drop(connection);
-        let replay = refresh_source_backed_generation(&index, &registry, options).unwrap();
+        let cold_work = work.lock().unwrap()[0];
+        assert_one_snapshot(cold_work);
+        assert_eq!(cold_work.logical_observation_passes, 1);
+        assert_eq!(cold_work.logical_rows_observed, 2);
+        assert_eq!(cold_work.projection_passes, 1);
+        assert_eq!(cold_work.logical_rows_projected, 2);
+        assert_eq!(cold_work.documents_staged, 2);
+        assert_eq!(cold_work.max_buffered_documents, 1);
+        assert_eq!(cold_work.exact_replays, 0);
 
-        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
-        assert_eq!(replay.commit.opstamp, cold.commit.opstamp);
-        assert_eq!(replay.commit.indexed_documents, 2);
-        assert_eq!(replay.sources, cold.sources);
+        writer
+            .execute_batch("pragma wal_checkpoint(truncate)")
+            .unwrap();
+        let checkpoint =
+            refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+        let checkpoint_work = work.lock().unwrap()[1];
+        assert_one_snapshot(checkpoint_work);
+        assert_zero_projection_replay(checkpoint_work, 2);
+        assert_eq!(checkpoint.commit.generation_id, cold.commit.generation_id);
+        assert_eq!(checkpoint.commit.opstamp, cold.commit.opstamp);
+
+        writer
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
+        drop(writer);
+        let vacuum = Connection::open(&path).unwrap();
+        vacuum.execute_batch("vacuum").unwrap();
+        drop(vacuum);
+        let vacuum_replay =
+            refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+        let vacuum_work = work.lock().unwrap()[2];
+        assert_one_snapshot(vacuum_work);
+        assert_zero_projection_replay(vacuum_work, 2);
+        assert_eq!(
+            vacuum_replay.commit.generation_id,
+            cold.commit.generation_id
+        );
+        assert_eq!(vacuum_replay.commit.opstamp, cold.commit.opstamp);
+
+        let replacement = Connection::open(&path).unwrap();
+        replacement
+            .execute(
+                "update session_message
+                 set data = ?1, time_updated = time_updated + 1
+                 where id = 'message-0'",
+                [r#"{"role":"user","text":"logical replacement"}"#],
+            )
+            .unwrap();
+        drop(replacement);
+        let replaced = refresh_source_backed_generation(&index, &registry, options).unwrap();
+        let replacement_work = work.lock().unwrap()[3];
+        assert_one_snapshot(replacement_work);
+        assert_eq!(replacement_work.logical_observation_passes, 1);
+        assert_eq!(replacement_work.logical_rows_observed, 2);
+        assert_eq!(replacement_work.projection_passes, 1);
+        assert_eq!(replacement_work.logical_rows_projected, 2);
+        assert_eq!(replacement_work.documents_staged, 2);
+        assert_eq!(replacement_work.max_buffered_documents, 1);
+        assert_eq!(replacement_work.exact_replays, 0);
+        assert_ne!(replaced.commit.generation_id, cold.commit.generation_id);
+
+        assert_eq!(checkpoint.commit.indexed_documents, 2);
+        assert_eq!(checkpoint.sources, cold.sources);
         assert!(cold.removals.is_empty());
-        assert!(replay.removals.is_empty());
-        assert!(replay
+        assert!(checkpoint.removals.is_empty());
+        assert!(cold
             .sources
             .iter()
-            .all(|certificate| certificate.frontier().is_none()));
+            .all(|certificate| certificate.frontier().is_some()));
+        assert_eq!(
+            cold.sources[0].observation().source().provider(),
+            registration.provider().as_str()
+        );
+        assert_eq!(
+            cold.sources[0].observation().source().source_format(),
+            registration.source_format()
+        );
     }
 }
 
@@ -804,4 +875,31 @@ fn sqlite_directory_state(path: &Path) -> Vec<(OsString, Vec<u8>)> {
         .collect::<Vec<_>>();
     state.sort_by(|left, right| left.0.cmp(&right.0));
     state
+}
+
+fn assert_one_snapshot(counters: adapter::OpenCodeSqliteWorkCounters) {
+    assert_eq!(counters.snapshot_opens, 1);
+    assert_eq!(
+        counters.immutable_snapshot_opens + counters.copied_snapshot_opens,
+        1
+    );
+    if counters.copied_snapshot_opens == 0 {
+        assert_eq!(counters.source_bytes_copied, 0);
+    } else {
+        assert!(counters.source_bytes_copied > 0);
+    }
+    assert_eq!(counters.terminal_fences, 1);
+    assert!(counters.terminal_revalidations >= 2);
+    assert_eq!(counters.active_snapshots, 0);
+    assert_eq!(counters.max_active_snapshots, 1);
+}
+
+fn assert_zero_projection_replay(counters: adapter::OpenCodeSqliteWorkCounters, logical_rows: u64) {
+    assert_eq!(counters.logical_observation_passes, 1);
+    assert_eq!(counters.logical_rows_observed, logical_rows);
+    assert_eq!(counters.projection_passes, 0);
+    assert_eq!(counters.logical_rows_projected, 0);
+    assert_eq!(counters.documents_staged, 0);
+    assert_eq!(counters.max_buffered_documents, 0);
+    assert_eq!(counters.exact_replays, 1);
 }

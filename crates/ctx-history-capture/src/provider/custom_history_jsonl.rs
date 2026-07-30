@@ -1,15 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use ctx_history_core::{
-    CtxHistoryJsonlEdgeRecord, CtxHistoryJsonlEventRecord, CtxHistoryJsonlFileTouchRecord,
-    CtxHistoryJsonlSessionRecord, CtxHistoryJsonlSourceRecord, SessionEdgeType,
-    CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
-};
+use ctx_history_core::{CtxHistoryJsonlSourceRecord, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION};
 use serde_json::{json, Value};
 
 use crate::stable_capture_uuid;
 
 use crate::{CaptureError, ProviderImportFailure, ProviderImportSummary, Result};
+
+pub(crate) const CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES: usize = 512;
 
 mod nativepath;
 
@@ -75,8 +71,10 @@ pub(crate) fn validate_custom_history_identifier(
 ) {
     let error = if value.trim().is_empty() {
         Some(format!("{field} must not be empty"))
-    } else if value.len() > 512 {
-        Some(format!("{field} must be at most 512 bytes"))
+    } else if value.len() > CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES {
+        Some(format!(
+            "{field} must be at most {CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES} bytes"
+        ))
     } else if value.chars().any(char::is_control) {
         Some(format!("{field} must not contain control characters"))
     } else {
@@ -85,202 +83,6 @@ pub(crate) fn validate_custom_history_identifier(
     if let Some(error) = error {
         push_provider_import_failure(summary, line_number, error);
     }
-}
-
-pub(crate) fn reject_invalid_custom_history_references(
-    summary: &mut ProviderImportSummary,
-    sources: &BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
-    sessions: &mut BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
-    events: &mut Vec<(usize, CtxHistoryJsonlEventRecord)>,
-    event_keys: &mut BTreeSet<(String, String, u64)>,
-    file_touches: &mut Vec<(usize, CtxHistoryJsonlFileTouchRecord)>,
-    edges: &mut Vec<(usize, CtxHistoryJsonlEdgeRecord)>,
-) {
-    loop {
-        let invalid = sessions
-            .iter()
-            .filter_map(|(key, (line_number, session))| {
-                custom_history_session_reference_error(sources, sessions, session)
-                    .map(|error| (key.clone(), *line_number, error))
-            })
-            .collect::<Vec<_>>();
-        if invalid.is_empty() {
-            break;
-        }
-        for (key, line_number, error) in invalid {
-            sessions.remove(&key);
-            push_provider_import_failure(summary, line_number, error);
-        }
-    }
-
-    let mut valid_events = Vec::with_capacity(events.len());
-    for (line_number, event) in events.drain(..) {
-        if sessions.contains_key(&(event.source_id.clone(), event.session_id.clone())) {
-            valid_events.push((line_number, event));
-        } else {
-            push_provider_import_failure(
-                summary,
-                line_number,
-                format!(
-                    "event references unknown session `{}` in source `{}`",
-                    event.session_id, event.source_id
-                ),
-            );
-        }
-    }
-    *events = valid_events;
-    *event_keys = events
-        .iter()
-        .map(|(_, event)| {
-            (
-                event.source_id.clone(),
-                event.session_id.clone(),
-                event.event_index,
-            )
-        })
-        .collect();
-
-    let mut valid_file_touches = Vec::with_capacity(file_touches.len());
-    for (line_number, file_touch) in file_touches.drain(..) {
-        let session_key = (file_touch.source_id.clone(), file_touch.session_id.clone());
-        let error = if !sessions.contains_key(&session_key) {
-            Some(format!(
-                "file_touch references unknown session `{}` in source `{}`",
-                file_touch.session_id, file_touch.source_id
-            ))
-        } else if let Some(event_index) = file_touch.event_index {
-            let key = (
-                file_touch.source_id.clone(),
-                file_touch.session_id.clone(),
-                event_index,
-            );
-            (!event_keys.contains(&key))
-                .then(|| format!("file_touch references unknown event_index `{event_index}`"))
-        } else {
-            None
-        };
-        if let Some(error) = error {
-            push_provider_import_failure(summary, line_number, error);
-        } else {
-            valid_file_touches.push((line_number, file_touch));
-        }
-    }
-    *file_touches = valid_file_touches;
-
-    let mut valid_edges = Vec::with_capacity(edges.len());
-    for (line_number, edge) in edges.drain(..) {
-        let from_key = (edge.source_id.clone(), edge.from_session_id.clone());
-        let to_key = (edge.source_id.clone(), edge.to_session_id.clone());
-        let error = if !sessions.contains_key(&from_key) {
-            Some(format!(
-                "edge references unknown from_session_id `{}`",
-                edge.from_session_id
-            ))
-        } else if !sessions.contains_key(&to_key) {
-            Some(format!(
-                "edge references unknown to_session_id `{}`",
-                edge.to_session_id
-            ))
-        } else if edge.edge_type == SessionEdgeType::ParentChild {
-            sessions.get(&to_key).and_then(|(_, child)| {
-                child.parent_session_id.as_ref().and_then(|parent| {
-                    (parent != &edge.from_session_id).then(|| {
-                        format!(
-                            "parent_child edge from_session_id `{}` conflicts with session parent_session_id `{parent}`",
-                            edge.from_session_id
-                        )
-                    })
-                })
-            })
-        } else {
-            None
-        };
-        if let Some(error) = error {
-            push_provider_import_failure(summary, line_number, error);
-        } else {
-            valid_edges.push((line_number, edge));
-        }
-    }
-    *edges = valid_edges;
-}
-
-fn custom_history_session_reference_error(
-    sources: &BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
-    sessions: &BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
-    session: &CtxHistoryJsonlSessionRecord,
-) -> Option<String> {
-    if !sources.contains_key(&session.source_id) {
-        return Some(format!(
-            "session references unknown source_id `{}`",
-            session.source_id
-        ));
-    }
-    if let Some(parent) = &session.parent_session_id {
-        let key = (session.source_id.clone(), parent.clone());
-        if !sessions.contains_key(&key) {
-            return Some(format!(
-                "session references unknown parent_session_id `{parent}`"
-            ));
-        }
-    }
-    if let Some(root) = &session.root_session_id {
-        let key = (session.source_id.clone(), root.clone());
-        if root != &session.session_id && !sessions.contains_key(&key) {
-            return Some(format!(
-                "session references unknown root_session_id `{root}`"
-            ));
-        }
-    }
-    None
-}
-
-pub(crate) fn retain_custom_history_content_sessions(
-    sessions: &mut BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
-    events: &[(usize, CtxHistoryJsonlEventRecord)],
-    file_touches: &[(usize, CtxHistoryJsonlFileTouchRecord)],
-    edges: &[(usize, CtxHistoryJsonlEdgeRecord)],
-) {
-    let mut required = events
-        .iter()
-        .map(|(_, event)| (event.source_id.clone(), event.session_id.clone()))
-        .chain(
-            file_touches
-                .iter()
-                .map(|(_, touch)| (touch.source_id.clone(), touch.session_id.clone())),
-        )
-        .chain(edges.iter().flat_map(|(_, edge)| {
-            [
-                (edge.source_id.clone(), edge.from_session_id.clone()),
-                (edge.source_id.clone(), edge.to_session_id.clone()),
-            ]
-        }))
-        .collect::<BTreeSet<_>>();
-
-    loop {
-        let dependencies = required
-            .iter()
-            .filter_map(|key| sessions.get(key).map(|(_, session)| session))
-            .flat_map(|session| {
-                [
-                    session
-                        .parent_session_id
-                        .as_ref()
-                        .map(|id| (session.source_id.clone(), id.clone())),
-                    session
-                        .root_session_id
-                        .as_ref()
-                        .map(|id| (session.source_id.clone(), id.clone())),
-                ]
-            })
-            .flatten()
-            .collect::<Vec<_>>();
-        let before = required.len();
-        required.extend(dependencies);
-        if required.len() == before {
-            break;
-        }
-    }
-    sessions.retain(|key, _| required.contains(key));
 }
 
 pub(crate) fn custom_history_internal_session_id(

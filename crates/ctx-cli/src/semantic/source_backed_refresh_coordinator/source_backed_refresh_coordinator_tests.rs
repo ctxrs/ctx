@@ -859,6 +859,9 @@ fn verified_publication_atomically_installs_generation_bound_resolver() {
                     .map_err(|error| anyhow!(error.message))?,
             );
             publication.resolver = Some(Arc::clone(&executor_resolver));
+            publication.certified_source_count = 0;
+            publication.certified_source_bytes = 0;
+            publication.current = SourceBackedRefreshCurrent::default();
             Ok(publication)
         },
     ));
@@ -894,6 +897,107 @@ fn verified_publication_atomically_installs_generation_bound_resolver() {
         }
     );
     assert!(coordinator.has_pending_request());
+}
+
+#[test]
+fn one_post_commit_open_pins_probe_retirement_and_relational_catch_up() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    let old_store = ctx_history_core::database_path(data_root.clone());
+    fs::write(&old_store, b"obsolete-store").unwrap();
+
+    let resolver = test_resolver();
+    let executor_resolver = Arc::clone(&resolver);
+    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let receipt = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            let mut publication = test_publication(receipt.generation_id.clone());
+            publication.source_manifest = Some(
+                SourceManifest::new(receipt.generation_id, Vec::new(), Vec::new())
+                    .map_err(|error| anyhow!(error.message))?,
+            );
+            publication.resolver = Some(Arc::clone(&executor_resolver));
+            publication.certified_source_count = 0;
+            publication.certified_source_bytes = 0;
+            publication.current = SourceBackedRefreshCurrent::default();
+            Ok(publication)
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+
+    let ((run, relational), verified_opens) = count_verified_index_opens(|| {
+        let run = coordinator.run_next(&data_root).expect("queued refresh");
+        let generation = run.job["published_generation"]
+            .as_str()
+            .expect("published generation")
+            .to_owned();
+        let relational =
+            crate::semantic::source_backed_relational_catch_up::run_after_core_publication(
+                &data_root,
+                &generation,
+            )
+            .unwrap();
+        (run, relational)
+    });
+
+    assert_eq!(
+        verified_opens, 1,
+        "the post-commit probe must supply retirement and relational catch-up"
+    );
+    assert!(!run.failed);
+    assert!(!old_store.exists());
+    assert_eq!(relational.status["status"], "completed");
+    assert!(run.job["timings_us"]["publication_probe"]
+        .as_u64()
+        .is_some_and(|duration| duration > 0));
+    assert!(run.job["timings_us"]["retirement"]
+        .as_u64()
+        .is_some_and(|duration| duration > 0));
+    assert!(relational.status["last_attempt_duration_us"]
+        .as_u64()
+        .is_some_and(|duration| duration > 0));
+
+    let retained = coordinator
+        .retained_published_generation()
+        .expect("retained generation authority");
+    assert_eq!(
+        retained
+            .verified_index()
+            .expect("generation-bound verified pin")
+            .generation_id(),
+        retained.generation_id()
+    );
+}
+
+#[test]
+fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(TestExecutor {
+        calls: Arc::new(AtomicUsize::new(0)),
+        generation_id: "claimed-generation".to_owned(),
+        failure: None,
+    }));
+    coordinator.enqueue(None);
+
+    let (run, verified_opens) = count_verified_index_opens(|| {
+        coordinator
+            .run_next(temp.path())
+            .expect("queued refresh must run")
+    });
+
+    assert_eq!(
+        verified_opens, 1,
+        "a failed post-commit probe must not trigger an immediate second open"
+    );
+    assert!(run.failed);
+    assert!(run.job["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("already failed in this refresh cycle")));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 mod storage;
 
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -12,7 +13,7 @@ use ctx_history_capture::{
     register_forgecode_explicit_source_backed_route, register_goose_source_backed_route,
     register_hermes_explicit_source_backed_route,
     register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
-    register_nanoclaw_source_backed_route, register_warp_source_backed_route,
+    register_nanoclaw_source_backed_route_with_base_sources, register_warp_source_backed_route,
     source_backed_route_constructor, source_backed_route_inventory,
     validate_provider_source_roots_outside_data_root, DiscoveryReport, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
@@ -22,9 +23,9 @@ use ctx_history_capture::{
     SourceBackedSelectorAuthority,
 };
 use ctx_history_core::{
-    platform_security::establish_private_data_root, CaptureProvider, CertifiedSourceDeletion,
-    CertifiedSourceInventory, HydrationFailure, HydrationFailureKind, SourceAnchor,
-    SourceInventoryObservation, SourceKey, TypedKey,
+    platform_security::establish_private_data_root, CaptureProvider, CertifiedSource,
+    CertifiedSourceDeletion, CertifiedSourceInventory, HydrationFailure, HydrationFailureKind,
+    SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use fs2::FileExt;
@@ -498,28 +499,57 @@ fn register_explicit_source_catalog_snapshot_routes(
     }
 
     let needs_base_sources = snapshot.entries.iter().any(|entry| !entry.enabled);
-    let base_sources = if needs_base_sources && index_root.join("meta.json").is_file() {
+    let mut nanoclaw_lineages = HashSet::new();
+    for entry in snapshot.entries.iter().filter(|entry| entry.enabled) {
+        if entry.provider()? == CaptureProvider::NanoClaw {
+            nanoclaw_lineages.insert(entry.lineage()?);
+        }
+    }
+    let needs_nanoclaw_checkpoint = !nanoclaw_lineages.is_empty();
+    let (base_certificates, base_sources) = if (needs_base_sources || needs_nanoclaw_checkpoint)
+        && index_root.join("meta.json").is_file()
+    {
         let index = VerifiedIndex::open(index_root).with_context(|| {
             format!(
                 "open source-backed generation for catalog reconciliation {}",
                 index_root.display()
             )
         })?;
-        index
+        let certificates = index
             .manifest()
             .sources
             .iter()
-            .map(|source| source.observation().source().clone())
-            .chain(
-                index
-                    .manifest()
-                    .removals
-                    .iter()
-                    .map(|removal| removal.source().clone()),
-            )
-            .collect::<Vec<_>>()
+            .filter(|certificate| {
+                let source = certificate.observation().source();
+                source.provider() == CaptureProvider::NanoClaw.as_str()
+                    && matches!(
+                        source.anchor(),
+                        SourceAnchor::CatalogLineage(lineage)
+                            if nanoclaw_lineages.contains(lineage)
+                    )
+            })
+            .cloned()
+            .collect();
+        let sources = if needs_base_sources {
+            index
+                .manifest()
+                .sources
+                .iter()
+                .map(|source| source.observation().source().clone())
+                .chain(
+                    index
+                        .manifest()
+                        .removals
+                        .iter()
+                        .map(|removal| removal.source().clone()),
+                )
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (certificates, sources)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     for entry in &snapshot.entries {
@@ -531,6 +561,7 @@ fn register_explicit_source_catalog_snapshot_routes(
                 &mut build.registry,
                 source,
                 entry.lineage()?,
+                &base_certificates,
             )
             .with_context(|| {
                 format!(
@@ -557,6 +588,7 @@ fn register_enabled_catalog_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     lineage: [u8; 32],
+    base_certificates: &[CertifiedSource],
 ) -> Result<()> {
     let constructor = source_backed_route_constructor(source.provider).ok_or_else(|| {
         anyhow!(
@@ -570,7 +602,13 @@ fn register_enabled_catalog_route(
                 register_custom_history_source_backed_route(registry, source, lineage)?
             }
             CaptureProvider::NanoClaw => {
-                register_nanoclaw_source_backed_route(registry, source, data_root, lineage)?
+                register_nanoclaw_source_backed_route_with_base_sources(
+                    registry,
+                    source,
+                    data_root,
+                    lineage,
+                    base_certificates,
+                )?
             }
             provider => bail!(
                 "{} has an unknown catalog-lineage registration",

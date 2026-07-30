@@ -29,8 +29,8 @@ use crate::{
     provider::source_backed::{
         executable_route,
         family::jsonl::{
-            jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+            jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
         },
         SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
         SourceBackedSelectorAuthority,
@@ -142,6 +142,10 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         GEMINI_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
     }
 
     fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {

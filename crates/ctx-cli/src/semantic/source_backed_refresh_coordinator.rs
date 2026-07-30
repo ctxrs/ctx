@@ -1,8 +1,9 @@
 use std::{
+    cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     fmt, fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant as StdInstant},
 };
 
@@ -80,6 +81,75 @@ const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unava
 // Covers a search/show generation pin crossing the daemon IPC boundary; an
 // acquired Arc lease keeps its exact resolver alive beyond this grace.
 const SOURCE_RESOLVER_RETIREMENT_GRACE: StdDuration = StdDuration::from_secs(5 * 60);
+
+thread_local! {
+    /// Weak, exact-generation handoff for the synchronous daemon publication
+    /// cycle. The coordinator's generation authority owns the strong pin; this
+    /// slot neither prolongs its lifetime nor serves another generation.
+    static DAEMON_CYCLE_VERIFIED_INDEX: RefCell<
+        Option<(PathBuf, String, Weak<VerifiedIndex>)>,
+    > = const { RefCell::new(None) };
+
+    #[cfg(test)]
+    static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+pub(super) fn open_verified_index(
+    index_root: &Path,
+) -> std::result::Result<VerifiedIndex, IndexError> {
+    #[cfg(test)]
+    VERIFIED_INDEX_OPEN_COUNT.with(|count| {
+        if let Some(current) = count.get() {
+            count.set(Some(current.saturating_add(1)));
+        }
+    });
+    VerifiedIndex::open_pinned(index_root)
+}
+
+#[cfg(test)]
+pub(super) fn count_verified_index_opens<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    VERIFIED_INDEX_OPEN_COUNT.with(|count| {
+        let previous = count.replace(Some(0));
+        assert!(
+            previous.is_none(),
+            "verified-index open counters must not be nested"
+        );
+        let output = operation();
+        let observed = count.replace(None).unwrap_or(0);
+        (output, observed)
+    })
+}
+
+fn retain_daemon_cycle_verified_index(index_root: &Path, index: &Arc<VerifiedIndex>) {
+    let generation_id = index.generation_id().to_owned();
+    let index = Arc::downgrade(index);
+    DAEMON_CYCLE_VERIFIED_INDEX.with(|retained| {
+        retained.replace(Some((index_root.to_path_buf(), generation_id, index)));
+    });
+}
+
+pub(super) fn daemon_cycle_verified_index(
+    data_root: &Path,
+    generation_id: &str,
+) -> Option<Arc<VerifiedIndex>> {
+    let index_root = source_backed_index_root(data_root);
+    DAEMON_CYCLE_VERIFIED_INDEX.with(|retained| {
+        let retained = retained.borrow();
+        let (retained_root, retained_generation, retained_index) = retained.as_ref()?;
+        if retained_root != &index_root || retained_generation != generation_id {
+            return None;
+        }
+        retained_index
+            .upgrade()
+            .filter(|index| index.generation_id() == generation_id)
+    })
+}
+
+pub(super) fn nonzero_duration_micros(duration: StdDuration) -> u64 {
+    u64::try_from(duration.as_micros())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SourceBackedRefreshMode {
@@ -238,7 +308,7 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
         }
         return Ok(None);
     }
-    match VerifiedIndex::open_pinned(&index_root) {
+    match open_verified_index(&index_root) {
         Ok(index) => Ok(Some(index)),
         // Tantivy creates schema-only meta.json before the first ctx commit.
         // It is replaceable only while no durable publication receipt proves
@@ -257,6 +327,34 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
             )
         }),
     }
+}
+
+fn verify_source_backed_publication(
+    publication: &SourceBackedRefreshPublication,
+    verified: &VerifiedIndex,
+) -> Result<()> {
+    if verified.generation_id() != publication.generation_id {
+        bail!(
+            "source-backed refresh returned generation {}, but its verified pin carries {}",
+            publication.generation_id,
+            verified.generation_id()
+        );
+    }
+    if publication.source_manifest.is_some() && publication.resolver.is_some() {
+        let manifest = verified.manifest();
+        let verified_current =
+            SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+        if verified_current != publication.current
+            || publication.certified_source_count != verified_current.source_count
+            || publication.certified_source_bytes != verified_current.certified_source_bytes
+            || manifest.indexed_documents != verified_current.indexed_documents
+        {
+            bail!(
+                "source-backed refresh publication facts do not match its exact verified generation"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(in crate::semantic) fn source_backed_lexical_artifact_is_uncommitted_schema_only(
@@ -342,12 +440,21 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
     Ok(Some(meta_generation.to_owned()))
 }
 
+#[cfg(test)]
 fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
     if !old_store_retirement::is_required(data_root)? {
         return Ok(());
     }
-    let verified = VerifiedIndex::open_pinned(source_backed_index_root(data_root))
+    let verified = open_verified_index(&source_backed_index_root(data_root))
         .context("reopen source-backed generation before retiring the old Store family")?;
+    complete_verified_source_epoch_with(data_root, generation_id, &verified)
+}
+
+fn complete_verified_source_epoch_with(
+    data_root: &Path,
+    generation_id: &str,
+    verified: &VerifiedIndex,
+) -> Result<()> {
     if verified.generation_id() != generation_id {
         bail!(
             "active source-backed generation {} changed before retiring old Store state for {generation_id}",
@@ -365,7 +472,8 @@ pub(in crate::semantic) fn reconcile_verified_source_epoch(data_root: &Path) -> 
     let Some(verified) = open_published_generation(data_root)? else {
         return Ok(());
     };
-    complete_verified_source_epoch(data_root, verified.generation_id())
+    let generation_id = verified.generation_id().to_owned();
+    complete_verified_source_epoch_with(data_root, &generation_id, &verified)
 }
 
 fn remove_old_store_family(data_root: &Path) -> Result<()> {

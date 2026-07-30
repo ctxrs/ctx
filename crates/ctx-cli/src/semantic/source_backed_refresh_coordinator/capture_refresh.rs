@@ -236,14 +236,6 @@ fn refresh_without_executable_routes(
             .commit(|_| false)?
             .generation_id
     };
-    let verified = VerifiedIndex::open(index_root)
-        .context("verify empty source-backed generation publication")?;
-    if verified.generation_id() != generation
-        || !verified.manifest().sources.is_empty()
-        || !verified.manifest().removals.is_empty()
-    {
-        bail!("empty source-backed publication did not verify as an empty generation");
-    }
     let commit_duration = commit_started.elapsed();
     report_progress(CaptureSourceBackedRefreshProgress {
         phase: "committed",
@@ -275,12 +267,6 @@ fn refresh_without_executable_routes(
             commit_us: nonzero_duration_micros(commit_duration),
         },
     })
-}
-
-fn nonzero_duration_micros(duration: StdDuration) -> u64 {
-    u64::try_from(duration.as_micros())
-        .unwrap_or(u64::MAX)
-        .max(1)
 }
 
 fn source_backed_discovery_context() -> Result<DiscoveryContext> {

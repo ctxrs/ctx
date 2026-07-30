@@ -4,11 +4,10 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
 
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -47,8 +46,58 @@ pub(crate) enum ZedNativePathError {
 
 pub(super) type ZedNativeResult<T> = std::result::Result<T, ZedNativePathError>;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ZedSourceBackedWork {
+    pub(crate) logical_observation_passes: u64,
+    pub(crate) projection_passes: u64,
+    pub(crate) projected_documents: u64,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ZED_SOURCE_BACKED_WORK: std::cell::RefCell<ZedSourceBackedWork> =
+        std::cell::RefCell::new(ZedSourceBackedWork::default());
+}
+
+#[cfg(test)]
+pub(crate) fn reset_source_backed_work() {
+    ZED_SOURCE_BACKED_WORK.with(|work| *work.borrow_mut() = ZedSourceBackedWork::default());
+}
+
+#[cfg(test)]
+pub(crate) fn source_backed_work() -> ZedSourceBackedWork {
+    ZED_SOURCE_BACKED_WORK.with(|work| *work.borrow())
+}
+
+#[cfg(test)]
+fn record_zed_work(update: impl FnOnce(&mut ZedSourceBackedWork)) {
+    ZED_SOURCE_BACKED_WORK.with(|work| update(&mut work.borrow_mut()));
+}
+
+#[cfg(test)]
+fn record_zed_logical_observation() {
+    record_zed_work(|work| {
+        work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
+    });
+}
+
+#[cfg(test)]
+fn record_zed_projection_pass() {
+    record_zed_work(|work| {
+        work.projection_passes = work.projection_passes.saturating_add(1);
+    });
+}
+
+#[cfg(test)]
+fn record_zed_projected_document() {
+    record_zed_work(|work| {
+        work.projected_documents = work.projected_documents.saturating_add(1);
+    });
+}
+
 pub(crate) struct ZedImmutableSqliteSnapshot {
-    observed: ZedAdmittedSqliteFamily,
+    observed: Arc<ZedAdmittedSqliteFamily>,
     connection: Option<SqliteSourceReadSnapshot>,
     pub(crate) physical_locator: String,
     pub(crate) snapshot_revision: String,
@@ -70,6 +119,25 @@ impl ZedImmutableSqliteSnapshot {
             })?
             .connection()
             .map_err(Into::into)
+    }
+
+    pub(crate) fn terminal_revalidator(
+        &self,
+    ) -> ZedNativeResult<Box<dyn Fn() -> ZedNativeResult<()> + Send + Sync + 'static>> {
+        let revalidate_snapshot = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| {
+                ZedNativePathError::Capture(CaptureError::SystemInvariant(
+                    "Zed SQLite snapshot was queried after finish",
+                ))
+            })?
+            .terminal_revalidator();
+        let observed = Arc::clone(&self.observed);
+        Ok(Box::new(move || {
+            revalidate_snapshot().map_err(ZedNativePathError::from)?;
+            observed.revalidate()
+        }))
     }
 
     /// Ends SQLite's pinned transaction and then certifies every retained
@@ -110,170 +178,6 @@ struct ZedAdmittedSqliteFamily {
 #[derive(Debug)]
 struct ZedAdmittedSqliteComponent {
     file: OpenedProviderSourceFile,
-    evidence: ZedComponentEvidence,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ZedComponentEvidence {
-    length: u64,
-    modified: SystemTime,
-    readonly: bool,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    change_token: [u8; 32],
-}
-
-impl ZedComponentEvidence {
-    fn read(file: &OpenedProviderSourceFile, is_wal: bool) -> ZedNativeResult<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-
-        let metadata = file.metadata();
-        let change_token = zed_component_change_token(file, is_wal)?;
-        Ok(Self {
-            length: metadata.len(),
-            modified: metadata.modified()?,
-            readonly: metadata.permissions().readonly(),
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            change_token,
-        })
-    }
-
-    fn revision_component(&self) -> String {
-        let (sign, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        format!(
-            "length={};modified={sign}{seconds}.{nanos:09};readonly={};device={};inode={};change={}",
-            self.length,
-            self.readonly,
-            zed_optional_device(self),
-            zed_optional_inode(self),
-            zed_hex_digest(&self.change_token),
-        )
-    }
-}
-
-const ZED_ORDINARY_FILE_TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-observation-v2\0";
-const ZED_SQLITE_COMPONENT_TOKEN_DOMAIN: &[u8] = b"ctx-provider-sqlite-component-v1\0";
-const ZED_SQLITE_HEADER_BYTES: usize = 100;
-const ZED_SQLITE_WAL_HEADER_BYTES: usize = 32;
-const ZED_SQLITE_WAL_FRAME_HEADER_BYTES: usize = 24;
-
-fn zed_component_change_token(
-    file: &OpenedProviderSourceFile,
-    is_wal: bool,
-) -> ZedNativeResult<[u8; 32]> {
-    let prefix_len = usize::try_from(file.len().min(ZED_SQLITE_HEADER_BYTES as u64))
-        .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
-    let prefix = file.read_exact_range(0, prefix_len, ZED_SQLITE_HEADER_BYTES)?;
-    let mut hasher = Sha256::new();
-    hasher.update(ZED_SQLITE_COMPONENT_TOKEN_DOMAIN);
-    hasher.update(file.len().to_le_bytes());
-    hasher.update(zed_ordinary_file_token(file));
-    hasher.update(&prefix);
-    if is_wal {
-        if let Some(frame_header) = zed_wal_last_frame_header(file, &prefix)? {
-            hasher.update(frame_header);
-        }
-    }
-    file.revalidate()?;
-    Ok(hasher.finalize().into())
-}
-
-#[cfg(unix)]
-fn zed_ordinary_file_token(file: &OpenedProviderSourceFile) -> [u8; 32] {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = file.metadata();
-    let mut platform = Sha256::new();
-    platform.update(ZED_ORDINARY_FILE_TOKEN_DOMAIN);
-    platform.update(b"unix\0");
-    platform.update(metadata.dev().to_le_bytes());
-    platform.update(metadata.ino().to_le_bytes());
-    platform.update(metadata.ctime().to_le_bytes());
-    platform.update(metadata.ctime_nsec().to_le_bytes());
-    let platform: [u8; 32] = platform.finalize().into();
-
-    let mut combined = Sha256::new();
-    combined.update(ZED_ORDINARY_FILE_TOKEN_DOMAIN);
-    combined.update(b"platform\0");
-    combined.update(platform);
-    combined.finalize().into()
-}
-
-#[cfg(not(unix))]
-fn zed_ordinary_file_token(file: &OpenedProviderSourceFile) -> [u8; 32] {
-    let mut combined = Sha256::new();
-    combined.update(ZED_ORDINARY_FILE_TOKEN_DOMAIN);
-    combined.update(b"portable\0");
-    combined.update(file.len().to_le_bytes());
-    combined.finalize().into()
-}
-
-fn zed_wal_last_frame_header(
-    file: &OpenedProviderSourceFile,
-    prefix: &[u8],
-) -> ZedNativeResult<Option<Vec<u8>>> {
-    if prefix.len() < ZED_SQLITE_WAL_HEADER_BYTES {
-        return Ok(None);
-    }
-    let raw_page_size = u32::from_be_bytes(prefix[8..12].try_into().map_err(|_| {
-        CaptureError::InvalidPayload("invalid SQLite WAL page-size header".to_owned())
-    })?);
-    let page_size = match raw_page_size {
-        1 => 65_536_u64,
-        512..=65_536 if raw_page_size.is_power_of_two() => u64::from(raw_page_size),
-        _ => return Ok(None),
-    };
-    let frame_size = page_size.saturating_add(ZED_SQLITE_WAL_FRAME_HEADER_BYTES as u64);
-    let frames_bytes = file
-        .len()
-        .saturating_sub(ZED_SQLITE_WAL_HEADER_BYTES as u64);
-    if frames_bytes < frame_size || !frames_bytes.is_multiple_of(frame_size) {
-        return Ok(None);
-    }
-    let offset = file.len().saturating_sub(frame_size);
-    file.read_exact_range(
-        offset,
-        ZED_SQLITE_WAL_FRAME_HEADER_BYTES,
-        ZED_SQLITE_WAL_FRAME_HEADER_BYTES,
-    )
-    .map(Some)
-    .map_err(Into::into)
-}
-
-#[cfg(unix)]
-fn zed_optional_device(evidence: &ZedComponentEvidence) -> String {
-    evidence.device.to_string()
-}
-
-#[cfg(not(unix))]
-fn zed_optional_device(_evidence: &ZedComponentEvidence) -> String {
-    "none".to_owned()
-}
-
-#[cfg(unix)]
-fn zed_optional_inode(evidence: &ZedComponentEvidence) -> String {
-    evidence.inode.to_string()
-}
-
-#[cfg(not(unix))]
-fn zed_optional_inode(_evidence: &ZedComponentEvidence) -> String {
-    "none".to_owned()
-}
-
-fn zed_hex_digest(digest: &[u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(super) fn decode_complete_message(
@@ -383,25 +287,21 @@ impl ZedAdmittedSqliteFamily {
             &root,
             Path::new(filename),
             ZED_SOURCE_INVALID_REASON,
-            false,
         )?;
         let wal = ZedAdmittedSqliteComponent::open_optional(
             &root,
             &zed_sidecar_relative_path(filename, "-wal"),
             ZED_SIDECAR_INVALID_REASON,
-            true,
         )?;
         let shared_memory = ZedAdmittedSqliteComponent::open_optional(
             &root,
             &zed_sidecar_relative_path(filename, "-shm"),
             ZED_SIDECAR_INVALID_REASON,
-            false,
         )?;
         let rollback_journal = ZedAdmittedSqliteComponent::open_optional(
             &root,
             &zed_sidecar_relative_path(filename, "-journal"),
             ZED_SIDECAR_INVALID_REASON,
-            false,
         )?;
         let family = Self {
             data_root: data_root.to_path_buf(),
@@ -417,16 +317,6 @@ impl ZedAdmittedSqliteFamily {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
         Ok(family)
-    }
-
-    fn revision_component(&self) -> String {
-        format!(
-            "database={};wal={};shm={};journal={}",
-            self.database.evidence.revision_component(),
-            zed_optional_revision_component(self.wal.as_ref()),
-            zed_optional_revision_component(self.shared_memory.as_ref()),
-            zed_optional_revision_component(self.rollback_journal.as_ref()),
-        )
     }
 
     fn connection(&self) -> ZedNativeResult<SqliteSourceReadSnapshot> {
@@ -485,7 +375,6 @@ impl ZedAdmittedSqliteComponent {
         root: &ProviderSourceRoot,
         relative_path: &Path,
         invalid_reason: &'static str,
-        is_wal: bool,
     ) -> ZedNativeResult<Self> {
         let file = root.open_file(relative_path).map_err(|error| match error {
             CaptureError::InvalidProviderTranscriptPath { path, .. } => {
@@ -496,17 +385,15 @@ impl ZedAdmittedSqliteComponent {
             }
             error => error,
         })?;
-        let evidence = ZedComponentEvidence::read(&file, is_wal)?;
-        Ok(Self { file, evidence })
+        Ok(Self { file })
     }
 
     fn open_optional(
         root: &ProviderSourceRoot,
         relative_path: &Path,
         invalid_reason: &'static str,
-        is_wal: bool,
     ) -> ZedNativeResult<Option<Self>> {
-        match Self::open(root, relative_path, invalid_reason, is_wal) {
+        match Self::open(root, relative_path, invalid_reason) {
             Ok(component) => Ok(Some(component)),
             Err(ZedNativePathError::Capture(CaptureError::Io(error)))
                 if error.kind() == io::ErrorKind::NotFound =>
@@ -516,13 +403,6 @@ impl ZedAdmittedSqliteComponent {
             Err(error) => Err(error),
         }
     }
-}
-
-fn zed_optional_revision_component(component: Option<&ZedAdmittedSqliteComponent>) -> String {
-    component.map_or_else(
-        || "absent".to_owned(),
-        |component| component.evidence.revision_component(),
-    )
 }
 
 fn zed_sidecar_relative_path(filename: &std::ffi::OsStr, suffix: &str) -> PathBuf {
@@ -559,10 +439,26 @@ pub(super) fn acquire_immutable_snapshot(
         if !observed.revalidate_bool()? {
             continue;
         }
-        let snapshot_revision = observed.revision_component();
+        let snapshot_revision = query::observe_zed_logical_snapshot(
+            connection
+                .connection()
+                .map_err(ZedNativePathError::SqliteSourceAccess)?,
+        )?;
+        match connection.revalidate() {
+            Ok(()) => {}
+            Err(
+                SqliteSourceAccessError::SourceChanged
+                | SqliteSourceAccessError::ConnectionIdentityMismatch,
+            ) => continue,
+            Err(_) if !observed.revalidate_bool()? => continue,
+            Err(error) => return Err(error.into()),
+        }
+        if !observed.revalidate_bool()? {
+            continue;
+        }
         return Ok(ZedSnapshotAcquisition::Acquired(Box::new(
             ZedImmutableSqliteSnapshot {
-                observed,
+                observed: Arc::new(observed),
                 connection: Some(connection),
                 physical_locator: fallback_locator.clone(),
                 snapshot_revision,

@@ -1,14 +1,16 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, SessionHydrationRequest,
-    SessionIdentityInput, SourceAnchor, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
+    ProjectionContractError, SessionHydrationRequest, SessionIdentityInput, SourceAnchor,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, IndexError, LexicalDocument};
+#[cfg(test)]
+use ctx_history_index::GenerationWriter;
+use ctx_history_index::{IndexError, LexicalDocument};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -18,8 +20,15 @@ use super::{
     dto::{
         ZedNativeEvent, ZedNativeMessageIdentity, ZedNativePage, ZedNativeSession, ZedNativeSink,
     },
-    query::{hydrate_zed_thread_row, ZedThreadLineage, ZedThreadLineageResolver},
+    query::{
+        hydrate_zed_thread_row, hydrate_zed_thread_rows, ZedThreadLineage, ZedThreadLineageResolver,
+    },
     ZedNativePathError, ZedNativeResult, ZedSnapshotAcquisition,
+};
+#[cfg(test)]
+use super::{
+    record_zed_projected_document, reset_source_backed_work, source_backed_work,
+    ZedSourceBackedWork,
 };
 use crate::{
     complete_content::CompleteContentBodyDigest, CaptureError, ZED_THREADS_SQLITE_SOURCE_FORMAT,
@@ -33,7 +42,7 @@ const ZED_NATIVE_EVENT_POSITION_KIND: &str = "zed.thread-message-ordinal";
 const ZED_LOGICAL_SESSION_KIND: &str = "zed-thread";
 const ZED_LOGICAL_EVENT_KIND: &str = "zed-thread-event";
 const ZED_SOURCE_SCHEMA_VARIANT: &str = "zed-nativepath-sqlite-v0";
-const ZED_SOURCE_REVISION_KIND: &str = "zed-provider-sqlite-snapshot-v0";
+const ZED_SOURCE_REVISION_KIND: &str = "zed-logical-rows-v1";
 const ZED_SQLITE_RELATION: &str = "threads";
 
 #[derive(Debug, Error)]
@@ -193,11 +202,69 @@ impl ContentSourceResolver for ZedLocatorResolverV0 {
             .map_err(hydration_failure)?;
         Ok(hydrated)
     }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let mut coordinates = Vec::with_capacity(request.events().len());
+        for event in request.events() {
+            coordinates.push(
+                validate_zed_locator(&self.source, event.locator()).map_err(hydration_failure)?,
+            );
+        }
+        let mut snapshot = acquire_snapshot(&self.data_root, &self.selected_database_path)
+            .map_err(hydration_failure)?;
+        for coordinate in &coordinates {
+            verify_snapshot_revision(&snapshot.snapshot_revision, coordinate)
+                .map_err(hydration_failure)?;
+        }
+        let mut thread_ids = coordinates
+            .iter()
+            .map(|coordinate| coordinate.thread_id.clone())
+            .collect::<Vec<_>>();
+        thread_ids.sort_unstable();
+        thread_ids.dedup();
+        let rows = hydrate_zed_thread_rows(
+            snapshot
+                .connection()
+                .map_err(ZedSourceBackedErrorV0::from)
+                .map_err(hydration_failure)?,
+            &thread_ids,
+        )
+        .map_err(ZedSourceBackedErrorV0::from)
+        .map_err(hydration_failure)?;
+        let mut hydrated = Vec::with_capacity(request.events().len());
+        for (event, coordinate) in request.events().iter().zip(&coordinates) {
+            let (row, row_digest) = rows
+                .get(&coordinate.thread_id)
+                .ok_or_else(|| hydration_failure(ZedSourceBackedErrorV0::LocatorRecordMissing))?;
+            if digest_bytes(row_digest).map_err(hydration_failure)? != coordinate.record_digest {
+                return Err(hydration_failure(
+                    ZedSourceBackedErrorV0::LocatorRecordDigestMismatch,
+                ));
+            }
+            let record = hydrate_decoded_row(row, row_digest.clone(), coordinate)
+                .map_err(hydration_failure)?;
+            hydrated.push(HydratedProviderRecord {
+                event_id: event.event_id(),
+                provider_bytes: record.provider_bytes,
+            });
+        }
+        snapshot
+            .finish()
+            .map_err(ZedSourceBackedErrorV0::from)
+            .map_err(hydration_failure)?;
+        BatchHydrationResult::new(hydrated).map_err(|error| HydrationFailure {
+            kind: HydrationFailureKind::InvalidLocator,
+            detail: error.to_string(),
+        })
+    }
 }
 
-pub(crate) struct ZedSourceBackedSinkV0<'writer, 'connection> {
-    writer: &'writer mut GenerationWriter,
-    lineage: ZedThreadLineageResolver<'connection>,
+pub(crate) struct ZedSourceBackedSinkV0<'writer> {
+    emit_document: Box<dyn FnMut(LexicalDocument) -> ZedSourceBackedResultV0<()> + 'writer>,
+    lineage: ZedThreadLineageResolver,
     source: ctx_history_core::SourceKey,
     revision_digest: [u8; 32],
     source_path: String,
@@ -214,16 +281,33 @@ struct ZedSessionProjectionContextV0 {
     root_session_id: StableEntityId,
 }
 
-impl<'writer, 'connection> ZedSourceBackedSinkV0<'writer, 'connection> {
+impl<'writer> ZedSourceBackedSinkV0<'writer> {
+    #[cfg(test)]
     pub(crate) fn new(
         writer: &'writer mut GenerationWriter,
-        connection: &'connection rusqlite::Connection,
+        connection: &rusqlite::Connection,
         source: ctx_history_core::SourceKey,
         revision_digest: [u8; 32],
         source_path: String,
     ) -> ZedSourceBackedResultV0<Self> {
+        Self::with_emitter(
+            connection,
+            source,
+            revision_digest,
+            source_path,
+            move |document| writer.add_document(document).map_err(Into::into),
+        )
+    }
+
+    pub(crate) fn with_emitter(
+        connection: &rusqlite::Connection,
+        source: ctx_history_core::SourceKey,
+        revision_digest: [u8; 32],
+        source_path: String,
+        emit_document: impl FnMut(LexicalDocument) -> ZedSourceBackedResultV0<()> + 'writer,
+    ) -> ZedSourceBackedResultV0<Self> {
         Ok(Self {
-            writer,
+            emit_document: Box::new(emit_document),
             lineage: ZedThreadLineageResolver::new(connection)?,
             source,
             revision_digest,
@@ -288,7 +372,9 @@ impl<'writer, 'connection> ZedSourceBackedSinkV0<'writer, 'connection> {
                 session,
                 event,
             )?;
-            self.writer.add_document(document)?;
+            (self.emit_document)(document)?;
+            #[cfg(test)]
+            record_zed_projected_document();
             self.staged_documents = self
                 .staged_documents
                 .checked_add(1)
@@ -301,7 +387,7 @@ impl<'writer, 'connection> ZedSourceBackedSinkV0<'writer, 'connection> {
     }
 }
 
-impl ZedNativeSink for ZedSourceBackedSinkV0<'_, '_> {
+impl ZedNativeSink for ZedSourceBackedSinkV0<'_> {
     fn push_page(&mut self, page: ZedNativePage) -> ZedNativeResult<()> {
         if let Err(error) = self.push_page_inner(page) {
             self.failure = Some(error);
@@ -652,15 +738,11 @@ mod two_thread_tests;
 mod tests {
     use std::fs;
 
-    use ctx_history_core::{CaptureProvider, NativeRecordCoordinate};
+    use ctx_history_core::NativeRecordCoordinate;
     use rusqlite::{params, Connection};
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryIssueKind,
-        DiscoveryPlatform, DiscoveryPlatformDirs,
-    };
 
     #[test]
     fn source_backed_zed_cold_exact_and_replacement_preserve_stable_ids() {
@@ -735,63 +817,6 @@ mod tests {
         assert_eq!(child.root_thread_id, "thread-1");
     }
 
-    #[test]
-    fn source_backed_zed_preserves_selected_flatpak_platform_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let flatpak = temp.path().join("flatpak-data");
-        let xdg = temp.path().join("xdg-data");
-        let selected = flatpak.join("zed/threads/threads.db");
-        let suppressed = xdg.join("zed/threads/threads.db");
-        fs::create_dir_all(selected.parent().unwrap()).unwrap();
-        fs::create_dir_all(suppressed.parent().unwrap()).unwrap();
-        create_database(&selected, "selected flatpak sentinel");
-        create_database(&suppressed, "suppressed xdg sentinel");
-        let context = discovery_context(temp.path())
-            .with_env("FLATPAK_XDG_DATA_HOME", flatpak.as_os_str())
-            .with_env("XDG_DATA_HOME", xdg.as_os_str());
-        let report =
-            discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Zed);
-        assert_eq!(report.sources.len(), 1);
-        assert_eq!(report.sources[0].path, selected);
-
-        let document = project_root_document(&report.sources[0].path);
-        assert_eq!(document.body, "selected flatpak sentinel");
-    }
-
-    #[test]
-    fn source_backed_zed_unsafe_relative_flatpak_root_is_suppressed() {
-        let temp = tempfile::tempdir().unwrap();
-        let xdg = temp.path().join("xdg-data");
-        let fallback = xdg.join("zed/threads/threads.db");
-        fs::create_dir_all(fallback.parent().unwrap()).unwrap();
-        create_database(&fallback, "must not be imported");
-        let context = discovery_context(temp.path())
-            .with_env("FLATPAK_XDG_DATA_HOME", "relative-flatpak-data")
-            .with_env("XDG_DATA_HOME", xdg.as_os_str());
-        let report =
-            discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Zed);
-        assert!(report.sources.is_empty());
-        assert_eq!(report.issues.len(), 1);
-        assert_eq!(
-            report.issues[0].kind,
-            DiscoveryIssueKind::SelectorUnreconstructible
-        );
-    }
-
-    fn discovery_context(root: &Path) -> DiscoveryContext {
-        DiscoveryContext::new(
-            root.join("home"),
-            root.join("cwd"),
-            DiscoveryPlatform::Linux,
-            DiscoveryPlatformDirs {
-                data: Some(root.join("platform-data")),
-                config: Some(root.join("platform-config")),
-                state: Some(root.join("platform-state")),
-                local_data: Some(root.join("platform-local-data")),
-            },
-        )
-    }
-
     #[derive(Default)]
     struct CollectingSink {
         pages: Vec<ZedNativePage>,
@@ -804,7 +829,7 @@ mod tests {
         }
     }
 
-    fn project_root_document(path: &Path) -> LexicalDocument {
+    pub(super) fn project_root_document(path: &Path) -> LexicalDocument {
         let mut snapshot = acquire_snapshot(crate::test_provider_sqlite_data_root(), path).unwrap();
         let revision = snapshot.snapshot_revision.clone();
         let physical_locator = snapshot.physical_locator.clone();
@@ -851,7 +876,7 @@ mod tests {
         .unwrap()
     }
 
-    fn create_database(path: &Path, text: &str) {
+    pub(super) fn create_database(path: &Path, text: &str) {
         let connection = Connection::open(path).unwrap();
         connection
             .execute_batch(
@@ -900,7 +925,7 @@ mod tests {
             .unwrap();
     }
 
-    fn replace_thread(path: &Path, text: &str) {
+    pub(super) fn replace_thread(path: &Path, text: &str) {
         let connection = Connection::open(path).unwrap();
         let payload = serde_json::to_vec(&json!({
             "version": "0.3.0",

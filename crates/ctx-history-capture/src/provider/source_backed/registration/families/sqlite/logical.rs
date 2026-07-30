@@ -1,8 +1,15 @@
+use std::sync::Mutex;
+
 use super::*;
 use crate::provider::{
     providers::trae::nativepath::TraeReplacementTree,
-    source_backed::family::document::register_replacement_document_tree_route_with_authority,
+    source_backed::family::document::{
+        register_replacement_document_tree_route_with_authority, ChangedDocumentSink,
+        CompleteDocumentTree, DocumentLeafFingerprint, DocumentSourceTerminal,
+        ObservedDocumentLeaf, ReplacementDocumentTree,
+    },
 };
+use crate::ZED_THREADS_SQLITE_SOURCE_FORMAT;
 
 pub(super) fn register_forgecode_route(
     registry: &mut SourceBackedProviderRegistry,
@@ -107,114 +114,187 @@ pub(super) fn register_zed_route(
     selection: SourceBackedRouteSelection,
     data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
-    let path = source.path.clone();
-    let capture_path = path.clone();
-    let revalidation_path = path.clone();
-    let hydration_path = path;
-    let capture_data_root = data_root.to_path_buf();
-    let revalidation_data_root = data_root.to_path_buf();
-    let hydration_data_root = data_root.to_path_buf();
-    let driver = SourceBackedRouteDriver::new(
-        move |sink| {
-            let source_key = zed_source_key().map_err(route_error)?;
-            let mut snapshot =
-                acquire_zed_snapshot(&capture_data_root, &capture_path).map_err(route_error)?;
-            let snapshot_revision = snapshot.snapshot_revision.clone();
-            let physical_locator = snapshot.physical_locator.clone();
-            let revision_digest = zed_snapshot_revision_digest(&snapshot_revision);
-            sink.begin_source(source_key.clone())
-                .map_err(route_coordinator_error)?;
-            let connection = snapshot.connection().map_err(route_error)?;
-            let mut zed_sink = ZedSourceBackedSinkV0::new(
-                sink.writer,
-                connection,
-                source_key.clone(),
-                revision_digest,
-                capture_path.to_string_lossy().into_owned(),
-            )
-            .map_err(route_error)?;
-            let scan = scan_zed_native_snapshot(
-                connection,
-                &physical_locator,
-                &snapshot_revision,
-                &mut zed_sink,
-            )
-            .map_err(route_error)?;
-            if let Some(error) = zed_sink.take_failure() {
-                return Err(route_error(error));
-            }
-            let staged_documents = zed_sink.staged_documents();
-            drop(zed_sink);
-            snapshot.finish().map_err(route_error)?;
-            if staged_documents != scan.counters.retained_events {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Zed source-backed counts do not reconcile",
-                ));
-            }
-            let complete_records = scan
-                .counters
-                .retained_events
-                .checked_add(scan.counters.rejected_threads)
-                .ok_or_else(|| {
-                    SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "Zed source-backed counts overflowed",
-                    )
-                })?;
-            let counts = ScannedSourceCounts {
-                complete_records,
-                retained_records: scan.counters.retained_events,
-                rejected_records: scan.counters.rejected_threads,
-                ignored_records: 0,
-                indexed_documents: staged_documents,
-                certified_bytes: scan.counters.certified_logical_bytes,
-            };
-            let observation =
-                zed_source_observation(&source_key, &snapshot_revision).map_err(route_error)?;
-            let certificate = CertifiedSource::certify(
-                observation.clone(),
-                observation,
-                "zed-nativepath-source-backed-v0",
-                decode_zed_digest(&scan.source_integrity_digest).map_err(route_error)?,
-                counts,
-            )
-            .map_err(route_error)?;
-            sink.certify_source(certificate)
-                .map_err(route_coordinator_error)
-        },
-        provider_format_scope(CaptureProvider::Zed, "zed_threads_sqlite"),
-        move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected) => {
-                let Ok(source_key) = zed_source_key() else {
-                    return false;
-                };
-                let Ok(mut snapshot) =
-                    acquire_zed_snapshot(&revalidation_data_root, &revalidation_path)
-                else {
-                    return false;
-                };
-                let observation = zed_source_observation(&source_key, &snapshot.snapshot_revision);
-                observation.is_ok_and(|observation| observation == *expected.observation())
-                    && snapshot.finish().is_ok()
-            }
-            SourceBackedRevalidationTarget::Deletion(_) => false,
-        },
-        move |request| {
-            ZedLocatorResolverV0::new(&hydration_data_root, &hydration_path)
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                })?
-                .hydrate_event(request)
-        },
-    );
-    registry.register(executable_route(
+    let adapter = ZedReplacementTree::new(data_root, source.path.clone());
+    register_replacement_document_tree_route_with_authority(
+        registry,
         source,
         selection,
         SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+        adapter,
+    )
+}
+
+const ZED_REPLACEMENT_PARSER_REVISION: &str = "zed-nativepath-source-backed-v0";
+
+#[derive(Debug, Clone)]
+struct ZedReplacementTree {
+    data_root: PathBuf,
+    path: PathBuf,
+}
+
+impl ZedReplacementTree {
+    fn new(data_root: &Path, path: PathBuf) -> Self {
+        Self {
+            data_root: data_root.to_path_buf(),
+            path,
+        }
+    }
+}
+
+struct ZedTreeAuthority {
+    snapshot:
+        Mutex<Option<crate::provider::providers::zed::native_path::ZedImmutableSqliteSnapshot>>,
+    terminal_revalidate: Box<
+        dyn Fn() -> std::result::Result<
+                (),
+                crate::provider::providers::zed::native_path::ZedNativePathError,
+            > + Send
+            + Sync
+            + 'static,
+    >,
+}
+
+impl ReplacementDocumentTree for ZedReplacementTree {
+    type Leaf = SourceKey;
+    type TreeAuthority = ZedTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        ZED_REPLACEMENT_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        source.provider() == CaptureProvider::Zed.as_str()
+            && source.source_format() == ZED_THREADS_SQLITE_SOURCE_FORMAT
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let snapshot = acquire_zed_snapshot(&self.data_root, &self.path).map_err(route_error)?;
+        let fingerprint =
+            DocumentLeafFingerprint::new(zed_snapshot_revision_digest(&snapshot.snapshot_revision));
+        let terminal_revalidate = snapshot.terminal_revalidator().map_err(route_error)?;
+        let source = zed_source_key().map_err(route_error)?;
+        Ok(CompleteDocumentTree::new(
+            fingerprint.as_bytes(),
+            vec![ObservedDocumentLeaf::new(fingerprint, source)],
+            ZedTreeAuthority {
+                snapshot: Mutex::new(Some(snapshot)),
+                terminal_revalidate,
+            },
+        ))
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        source: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let mut snapshot = authority
+            .snapshot
+            .lock()
+            .map_err(|_| zed_internal("Zed snapshot lock was poisoned"))?
+            .take()
+            .ok_or_else(|| zed_internal("Zed snapshot was consumed twice"))?;
+        let snapshot_revision = snapshot.snapshot_revision.clone();
+        let physical_locator = snapshot.physical_locator.clone();
+        sink.begin_source(source.clone())?;
+        let connection = snapshot.connection().map_err(route_error)?;
+        let mut projection = ZedSourceBackedSinkV0::with_emitter(
+            connection,
+            source.clone(),
+            zed_snapshot_revision_digest(&snapshot_revision),
+            self.path.to_string_lossy().into_owned(),
+            |document| {
+                sink.emit_document(document)
+                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
+            },
+        )
+        .map_err(route_error)?;
+        let scan = scan_zed_native_snapshot(
+            connection,
+            &physical_locator,
+            &snapshot_revision,
+            &mut projection,
+        )
+        .map_err(route_error)?;
+        if let Some(error) = projection.take_failure() {
+            return Err(route_error(error));
+        }
+        let staged_documents = projection.staged_documents();
+        drop(projection);
+        snapshot.finish().map_err(route_error)?;
+        if staged_documents != scan.counters.retained_events {
+            return Err(zed_internal("Zed source-backed counts do not reconcile"));
+        }
+        let complete_records = scan
+            .counters
+            .retained_events
+            .checked_add(scan.counters.rejected_threads)
+            .ok_or_else(|| zed_internal("Zed source-backed counts overflowed"))?;
+        let counts = ScannedSourceCounts {
+            complete_records,
+            retained_records: scan.counters.retained_events,
+            rejected_records: scan.counters.rejected_threads,
+            ignored_records: 0,
+            indexed_documents: staged_documents,
+            certified_bytes: scan.counters.certified_logical_bytes,
+        };
+        let observation =
+            zed_source_observation(source, &snapshot_revision).map_err(route_error)?;
+        let certificate = CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            ZED_REPLACEMENT_PARSER_REVISION,
+            decode_zed_digest(&scan.source_integrity_digest).map_err(route_error)?,
+            counts,
+        )
+        .map_err(route_error)?;
+        Ok(zed_document_terminal(certificate))
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        if let Some(mut snapshot) = tree
+            .authority
+            .snapshot
+            .lock()
+            .map_err(|_| zed_internal("Zed snapshot lock was poisoned"))?
+            .take()
+        {
+            snapshot.finish().map_err(route_error)?;
+        }
+        (tree.authority.terminal_revalidate)().map_err(route_error)?;
+        Ok(tree.tree_fingerprint)
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let resolver = ZedLocatorResolverV0::new(&self.data_root, &self.path).map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        resolver.hydrate_batch(request)
+    }
+}
+
+fn zed_document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
+    DocumentSourceTerminal {
+        source: certificate.observation().source().clone(),
+        opening: certificate.observation().clone(),
+        closing: certificate.observation().clone(),
+        parser_revision: ZED_REPLACEMENT_PARSER_REVISION,
+        content_digest: *certificate.content_digest(),
+        counts: certificate.counts(),
+    }
+}
+
+fn zed_internal(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
 }
 pub(super) fn register_forgecode_selected_route(
     registry: &mut SourceBackedProviderRegistry,

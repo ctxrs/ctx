@@ -11,12 +11,14 @@ use ctx_history_core::{
 use super::{
     decode_locator_coordinate,
     direct::{firebender_database_path_and_source, open_database_leaf, OpenDatabaseLeaf},
-    load_exact_row,
+    load_exact_rows,
 };
 use crate::provider::providers::firebender::firebender_message_text;
 use crate::provider::providers::firebender::native_path::{
     firebender_raw_row_digest, validate_schema,
 };
+
+const FIREBENDER_HYDRATION_NATIVE_KEY_BATCH: usize = 256;
 
 #[derive(Debug)]
 pub(crate) struct FirebenderExactResolver {
@@ -25,7 +27,9 @@ pub(crate) struct FirebenderExactResolver {
     #[cfg(test)]
     snapshot_opens: Cell<u64>,
     #[cfg(test)]
-    native_row_reads: Cell<u64>,
+    native_row_batches: Cell<u64>,
+    #[cfg(test)]
+    native_rows_read: Cell<u64>,
 }
 
 impl FirebenderExactResolver {
@@ -36,7 +40,9 @@ impl FirebenderExactResolver {
             #[cfg(test)]
             snapshot_opens: Cell::new(0),
             #[cfg(test)]
-            native_row_reads: Cell::new(0),
+            native_row_batches: Cell::new(0),
+            #[cfg(test)]
+            native_rows_read: Cell::new(0),
         }
     }
 
@@ -56,8 +62,12 @@ impl FirebenderExactResolver {
     }
 
     #[cfg(test)]
-    pub(crate) fn counters(&self) -> (u64, u64) {
-        (self.snapshot_opens.get(), self.native_row_reads.get())
+    pub(crate) fn counters(&self) -> (u64, u64, u64) {
+        (
+            self.snapshot_opens.get(),
+            self.native_row_batches.get(),
+            self.native_rows_read.get(),
+        )
     }
 }
 
@@ -136,18 +146,29 @@ impl ContentSourceResolver for FirebenderExactResolver {
             let mut provider_bytes = (0..request.len())
                 .map(|_| None)
                 .collect::<Vec<Option<Vec<u8>>>>();
-            for (rowid, positions) in positions_by_row {
+            let requested_rowids = positions_by_row.keys().copied().collect::<Vec<_>>();
+            let mut rows = BTreeMap::new();
+            for rowid_batch in requested_rowids.chunks(FIREBENDER_HYDRATION_NATIVE_KEY_BATCH) {
                 #[cfg(test)]
-                self.native_row_reads
-                    .set(self.native_row_reads.get().saturating_add(1));
-                let row = load_exact_row(connection, rowid)
-                    .map_err(|error| unavailable(error.to_string()))?
-                    .ok_or_else(|| {
-                        hydration_failure(
-                            HydrationFailureKind::MissingRecord,
-                            "Firebender chat-session row no longer exists",
-                        )
-                    })?;
+                self.native_row_batches
+                    .set(self.native_row_batches.get().saturating_add(1));
+                let batch = load_exact_rows(connection, rowid_batch)
+                    .map_err(|error| unavailable(error.to_string()))?;
+                #[cfg(test)]
+                self.native_rows_read.set(
+                    self.native_rows_read
+                        .get()
+                        .saturating_add(batch.len() as u64),
+                );
+                rows.extend(batch);
+            }
+            for (rowid, positions) in positions_by_row {
+                let row = rows.get(&rowid).ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::MissingRecord,
+                        "Firebender chat-session row no longer exists",
+                    )
+                })?;
                 let row_digest = firebender_raw_row_digest(&row.logical_values());
                 for (position, expected_session, expected_updated_at, message_index) in positions {
                     let locator = request.events()[position].locator();

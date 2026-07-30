@@ -4,6 +4,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
+
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceDeletion,
@@ -43,6 +49,50 @@ const _: fn(
 std::thread_local! {
     static DIRECT_JSONL_INVENTORY_TRAVERSALS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+static DIRECT_JSONL_SCAN_WORK: LazyLock<Mutex<HashMap<PathBuf, DirectJsonlScanWork>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn reset_scan_work(root: &Path) {
+    DIRECT_JSONL_SCAN_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(root.to_path_buf(), DirectJsonlScanWork::default());
+}
+
+#[cfg(test)]
+pub(super) fn scan_work(root: &Path) -> DirectJsonlScanWork {
+    DIRECT_JSONL_SCAN_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(root)
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn record_scan_work(path: &Path, leaf_opens: usize, identity_projections: usize) {
+    let mut work = DIRECT_JSONL_SCAN_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (root, entry) in work.iter_mut() {
+        if path.starts_with(root) {
+            entry.leaf_opens = entry.leaf_opens.saturating_add(leaf_opens);
+            entry.identity_projections = entry
+                .identity_projections
+                .saturating_add(identity_projections);
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DirectJsonlScanWork {
+    pub(crate) leaf_opens: usize,
+    pub(crate) identity_projections: usize,
 }
 
 #[cfg(test)]
@@ -359,7 +409,16 @@ impl DirectJsonlSourceAdapter {
         if leaf.provider != self.provider || leaf.source_format != self.source_format {
             return Err(DirectJsonlSourceBackedError::InvalidLocator);
         }
-        let (mut current_leaf, source_file) = leaf.open_for_scan()?;
+        let (current_leaf, source_file) = leaf.open_for_worker_scan()?;
+        self.select_opened_leaf(current_leaf, source_file, imported_at)
+    }
+
+    fn select_opened_leaf(
+        self,
+        mut current_leaf: DirectJsonlInventoryLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+    ) -> DirectJsonlSourceBackedResult<DirectJsonlSelectedLeaf> {
         let mut projector = DirectJsonlProjector::new(
             self.provider,
             self.source_format,
@@ -368,7 +427,9 @@ impl DirectJsonlSourceAdapter {
             imported_at,
             None,
         )?;
-        let (projected, probe) = probe_first_record(&leaf.path, &source_file, |record| {
+        let (projected, probe) = probe_first_record(&current_leaf.path, &source_file, |record| {
+            #[cfg(test)]
+            record_scan_work(&current_leaf.path, 0, 1);
             let projected = projector.project_record(record)?;
             if !projected.rejections.is_empty() {
                 return Err(DirectJsonlSourceBackedError::RejectedSource {
@@ -499,7 +560,7 @@ impl DirectJsonlSourceAdapter {
                 checkpoint.physical.identity().source_path().as_path() == leaf.path
             })
         {
-            let (current_leaf, source_file) = leaf.open_for_scan()?;
+            let (current_leaf, source_file) = leaf.open_for_worker_scan()?;
             let session = checkpoint
                 .session
                 .clone()
@@ -519,12 +580,13 @@ impl DirectJsonlSourceAdapter {
             };
             let mut reader = JsonlReader::open(
                 self.physical_identity(&selected.source, &selected.leaf.path),
-                source_file,
+                Arc::clone(&source_file),
                 Some(&checkpoint.physical),
                 None,
             )?;
             if reader.source_change() == JsonlSourceChange::Replace {
-                let mut replacement = self.select_leaf(leaf, imported_at)?;
+                let mut replacement =
+                    self.select_opened_leaf(selected.leaf.clone(), source_file, imported_at)?;
                 let probe = replacement
                     .probe
                     .as_ref()
@@ -625,30 +687,6 @@ impl DirectJsonlSourceAdapter {
             indexed_documents,
             pending_projected,
             exhausted: false,
-        })
-    }
-
-    pub(super) fn certificate_belongs_to_leaf(
-        self,
-        leaf: &DirectJsonlInventoryLeaf,
-        certificate: &CertifiedSource,
-    ) -> bool {
-        decode_certificate(self, certificate).is_ok_and(|checkpoint| {
-            checkpoint.physical.identity().source_path().as_path() == leaf.path
-        })
-    }
-
-    pub(super) fn certificate_belongs_to_root(
-        self,
-        root: &Path,
-        certificate: &CertifiedSource,
-    ) -> bool {
-        decode_certificate(self, certificate).is_ok_and(|checkpoint| {
-            checkpoint
-                .physical
-                .identity()
-                .source_path()
-                .starts_with(root)
         })
     }
 
@@ -793,6 +831,14 @@ pub(crate) struct DirectJsonlInventoryLeaf {
 }
 
 impl DirectJsonlInventoryLeaf {
+    fn open_for_worker_scan(
+        &self,
+    ) -> DirectJsonlSourceBackedResult<(Self, Arc<OpenedProviderSourceFile>)> {
+        #[cfg(test)]
+        record_scan_work(&self.path, 1, 0);
+        self.open_for_scan()
+    }
+
     #[cfg(test)]
     pub(super) fn open_verified(
         &self,
