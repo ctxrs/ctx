@@ -9,6 +9,8 @@ use crate::{
 
 const PROGRAM: &str =
     "Ordinary customer referrals earn $10/month for 12 paid months, up to $120 per referral.";
+const CTA_LEAD: &str = "Refer a developer. Earn $10/month toward your agent bill.";
+const CTA_SECONDARY: &str = "Up to $120 per friend.";
 
 pub(super) fn cta(context: &RenderContext) -> Document {
     let mut document = Document::new();
@@ -17,8 +19,8 @@ pub(super) fn cta(context: &RenderContext) -> Document {
         context,
         UiOutcome {
             state: OutcomeState::Neutral,
-            title: "Refer a new ctx Pro customer",
-            detail: Some(PROGRAM),
+            title: CTA_LEAD,
+            detail: Some(CTA_SECONDARY),
         },
     ));
     document.push_blank();

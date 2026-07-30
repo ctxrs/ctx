@@ -1,9 +1,11 @@
 use std::io;
 
 use anyhow::{bail, Result};
+use serde_json::Value;
 
 use super::{LocalProDataOutcome, ProManagePlan, UninstallDataDisposition, UNINSTALL_DATA_PROMPT};
 use crate::{
+    local_usage::UsageReport,
     pro::PRO_MONTHLY_PRICE_DISPLAY,
     ui::{
         fields, hint, outcome, section, Action, Document, Field, Hint, Outcome as UiOutcome,
@@ -99,6 +101,8 @@ pub(super) fn setup(context: &RenderContext, account_state: &str) -> Document {
 pub(super) fn manage(
     context: &RenderContext,
     plan: &ProManagePlan,
+    usage: &UsageReport,
+    conversion: Option<&Value>,
     browser_opened: bool,
 ) -> Document {
     let product = if plan.access_state == "trial" {
@@ -132,6 +136,12 @@ pub(super) fn manage(
     document.push_blank();
     document.append(section("Pro", fields(context, &field_values)));
     document.push_blank();
+    document.append(local_usage(context, usage));
+    if let Some(conversion) = conversion {
+        document.push_blank();
+        document.append(conversion_facts(context, conversion));
+    }
+    document.push_blank();
     let next = if browser_opened {
         None
     } else {
@@ -151,6 +161,188 @@ pub(super) fn manage(
         next,
     ));
     document
+}
+
+fn local_usage(context: &RenderContext, report: &UsageReport) -> Document {
+    let state = match report.state {
+        "ready" => "Ready",
+        "empty" => "Enabled; no aggregate facts recorded yet",
+        "disabled" => "Disabled",
+        "error" => "Unavailable",
+        state => state,
+    };
+    let retention = format!("{} UTC days", report.retention_days);
+    let mut values = vec![
+        Field::new("Status", state),
+        Field::new("Retention", &retention),
+    ];
+    let error = report
+        .error
+        .as_ref()
+        .map(|error| format!("{}: {}", error.code, error.message));
+    if let Some(error) = error.as_deref() {
+        values.push(Field::new("Issue", error));
+    }
+
+    let definitions = report.definitions.as_deref().unwrap_or_default();
+    let definition_count = definitions.len().to_string();
+    if !definitions.is_empty() {
+        values.push(Field::new("Measurement definitions", &definition_count));
+    }
+    let mut document = section("Local usage", fields(context, &values));
+    for definition in definitions {
+        let heading = format!(
+            "Measured local facts · definition {}",
+            definition.definition_version
+        );
+        let period = format!(
+            "{} active UTC {} · {} through {}",
+            definition.active_days,
+            if definition.active_days == 1 {
+                "day"
+            } else {
+                "days"
+            },
+            definition.first_day_utc,
+            definition.last_day_utc
+        );
+        let versions = definition.ctx_versions.join(", ");
+        let calls = format!(
+            "{} total · {} succeeded · {} failed",
+            definition.summary.calls,
+            definition.summary.successful_calls,
+            definition.summary.failed_calls
+        );
+        let result_sets = format!(
+            "{} nonempty · {} empty",
+            definition.summary.result_bearing_calls, definition.summary.empty_calls
+        );
+        let unclassified = format!("{} calls", definition.summary.not_applicable_calls);
+        let results = format!(
+            "{} results · {} unique blame citations",
+            definition.summary.result_count, definition.summary.citation_count
+        );
+        let output = format!("{} bytes", definition.summary.delivered_output_bytes);
+        let covered = format!("{} bytes", definition.summary.delivered_context_bytes);
+        let matched = format!(
+            "{} bytes",
+            definition.summary.matched_normalized_session_bytes
+        );
+        let coverage = format!(
+            "{} complete · {} unavailable",
+            definition.summary.complete_context_eligible_calls,
+            definition.summary.unavailable_context_eligible_calls
+        );
+        let mut facts = vec![
+            Field::new("Period", &period),
+            Field::new("ctx versions", &versions),
+            Field::new("Calls", &calls),
+            Field::new("Classified result sets", &result_sets),
+            Field::new("No result-set classification", &unclassified),
+            Field::new("Results", &results),
+            Field::new("Delivered output", &output),
+            Field::new("Covered context", &covered),
+            Field::new("Matched history", &matched),
+            Field::new("Search coverage", &coverage),
+        ];
+        let blame = &definition.summary.pro_blame;
+        let blame_outcomes = (blame.requests > 0).then(|| {
+            format!(
+                "{} produced-attribution · {} possible-only · {} none · {} error",
+                blame.produced_attribution_requests,
+                blame.possible_only_requests,
+                blame.none_requests,
+                blame.error_requests
+            )
+        });
+        if let Some(blame_outcomes) = blame_outcomes.as_deref() {
+            facts.push(Field::new("Blame outcomes", blame_outcomes));
+        }
+        document.push_blank();
+        document.append(section(&heading, fields(context, &facts)));
+    }
+    if let Some(estimates) = &report.estimates {
+        let tokens = estimates.approximate_context_tokens;
+        let covered = format!("{} bytes", tokens.delivered_context_bytes);
+        let range = format!(
+            "{} low · {} central · {} high",
+            tokens.token_equivalents.low,
+            tokens.token_equivalents.central,
+            tokens.token_equivalents.high
+        );
+        document.push_blank();
+        document.append(section(
+            "Approximate token-equivalents",
+            fields(
+                context,
+                &[
+                    Field::new("Covered context", &covered),
+                    Field::new("Range", &range),
+                    Field::new("Coefficient", tokens.coefficient_version),
+                ],
+            ),
+        ));
+
+        let reduction = estimates.estimated_context_reduction;
+        let bytes = format!(
+            "{} baseline · {} observed · {} estimated reduction",
+            reduction.comparison_baseline_bytes,
+            reduction.observed_delivered_context_bytes,
+            reduction.estimated_avoided_context_bytes
+        );
+        let token_range = format!(
+            "{} low · {} central · {} high",
+            reduction.approximate_token_equivalents.low,
+            reduction.approximate_token_equivalents.central,
+            reduction.approximate_token_equivalents.high
+        );
+        let coverage = format!(
+            "{} covered · {} unavailable",
+            reduction.covered_calls, reduction.unavailable_calls
+        );
+        document.push_blank();
+        document.append(section(
+            "Estimated context reduction",
+            fields(
+                context,
+                &[
+                    Field::new("Bytes", &bytes),
+                    Field::new("Token-equivalents", &token_range),
+                    Field::new("Coverage", &coverage),
+                    Field::new("Model", reduction.estimate_model_version),
+                    Field::new("Coefficient", reduction.coefficient_version),
+                ],
+            ),
+        ));
+    }
+    document
+}
+
+fn conversion_facts(context: &RenderContext, action: &Value) -> Document {
+    let command = action
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("ctx pro manage");
+    let (label, value) = if action.get("kind").and_then(Value::as_str) == Some("pro_restore_access")
+    {
+        (
+            "Recovery",
+            "Restore ctx Pro access; the local graph is preserved.".to_owned(),
+        )
+    } else {
+        let price = action
+            .get("price")
+            .and_then(Value::as_str)
+            .unwrap_or(PRO_MONTHLY_PRICE_DISPLAY);
+        ("Offer", format!("Continue with ctx Pro for {price}."))
+    };
+    section(
+        "Access",
+        fields(
+            context,
+            &[Field::new(label, &value), Field::new("Command", command)],
+        ),
+    )
 }
 
 pub(super) fn browser_notice(
@@ -295,15 +487,22 @@ mod tests {
             access_deadline_unix: None,
             grace_deadline_unix: None,
         };
-        let rendered = manage(&context(120), &plan, false).render_plain();
+        let usage = UsageReport::config_error();
+        let conversion = crate::local_usage::pro_conversion_action(Some("locked"));
+        let rendered =
+            manage(&context(120), &plan, &usage, conversion.as_ref(), false).render_plain();
         assert!(rendered.starts_with("! ctx Pro account management is ready\n"));
         assert!(rendered.contains("Management link"));
         assert!(rendered.contains("\\x1b"));
         assert!(!rendered.contains('\u{1b}'));
         assert!(rendered.contains("Preserved locally; access is locked"));
+        assert!(rendered.contains("Local usage"));
+        assert!(rendered.contains("local_usage_config_unavailable"));
+        assert!(rendered.contains("Restore ctx Pro access; the local graph is preserved."));
+        assert!(rendered.contains("ctx pro manage"));
         assert!(rendered.contains("\nNext\n  https://billing.example.test/session\\x1b[2J\n"));
 
-        let opened = manage(&context(120), &plan, true).render_plain();
+        let opened = manage(&context(120), &plan, &usage, conversion.as_ref(), true).render_plain();
         assert!(opened.contains("Finish account or billing changes in the browser."));
         assert!(!opened.contains("\nNext\n"));
 
@@ -329,11 +528,13 @@ mod tests {
             access_deadline_unix: Some(200),
             grace_deadline_unix: None,
         };
+        let usage = UsageReport::config_error();
+        let conversion = crate::local_usage::pro_conversion_action(Some("trial"));
         for width in [32, 48, 80, 120] {
             let context = context(width);
             for document in [
                 setup(&context, "trial"),
-                manage(&context, &plan, false),
+                manage(&context, &plan, &usage, conversion.as_ref(), false),
                 uninstall(&context, true, LocalProDataOutcome::Deleted),
                 uninstall_prompt(&context),
             ] {
