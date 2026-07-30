@@ -1,10 +1,15 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
+    TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
@@ -15,13 +20,21 @@ use crate::{
     native_source::{NativeLocator, NativeSourceError},
     provider::{
         providers::nanoclaw::{
-            complete_content::{resolve_source_backed_exact, NanoClawCompleteRecord},
+            complete_content::resolve_source_backed_exact,
             position::decode_nanoclaw_message_locator,
             project::NanoClawSourceBackedProject,
             projection::nanoclaw_core_event,
             rows::{nanoclaw_logical_record_digest_bytes, nanoclaw_message_digest_values},
             source::{NanoClawNativeScanner, NanoClawNativeUnit},
             NANOCLAW_MESSAGE_LOCATOR_KIND,
+        },
+        source_backed::{
+            family::document::{
+                ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
+                DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+            },
+            hydration_failure, SourceBackedRouteError, SourceBackedRouteErrorKind,
+            SourceBackedRouteResult,
         },
         sqlite::sqlite_schema_fingerprint,
     },
@@ -64,17 +77,34 @@ pub(crate) enum NanoClawSourceBackedError {
 
 pub(crate) type NanoClawSourceBackedResult<T> = Result<T, NanoClawSourceBackedError>;
 
-#[derive(Debug)]
-pub(crate) struct NanoClawSourceBackedPage {
-    pub(crate) documents: Vec<LexicalDocument>,
+#[derive(Debug, Clone)]
+pub(crate) struct NanoClawDocumentLeaf {
+    source: SourceKey,
 }
 
-#[derive(Debug)]
-pub(crate) struct NanoClawSourceBackedReceipt {
-    pub(crate) source: CertifiedSource,
-    // Emitted-page accounting remains part of the release scan receipt.
-    #[allow(dead_code)]
-    pub(crate) emitted_pages: u64,
+pub(crate) struct NanoClawDocumentTreeAuthority {
+    project: Mutex<NanoClawSourceBackedProject>,
+}
+
+type NanoClawDocumentTree =
+    CompleteDocumentTree<NanoClawDocumentLeaf, NanoClawDocumentTreeAuthority>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct NanoClawDocumentTreeAdapter {
+    path: PathBuf,
+    source: SourceKey,
+}
+
+impl NanoClawDocumentTreeAdapter {
+    pub(crate) fn new(
+        path: PathBuf,
+        catalog_lineage: [u8; 32],
+    ) -> NanoClawSourceBackedResult<Self> {
+        Ok(Self {
+            path,
+            source: nanoclaw_source_key(catalog_lineage)?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -117,52 +147,132 @@ fn run_before_source_backed_finish_hook() {
 #[cfg(not(test))]
 fn run_before_source_backed_finish_hook() {}
 
-/// Scans exactly one caller-selected NanoClaw project.
-///
-/// `catalog_lineage` is persisted shared-catalog authority. It deliberately
-/// keeps canonical identity independent from the current project path.
-pub(crate) fn scan_nanoclaw_source_backed<F>(
-    path: &Path,
-    catalog_lineage: [u8; 32],
-    mut emit: F,
-) -> NanoClawSourceBackedResult<NanoClawSourceBackedReceipt>
-where
-    F: FnMut(NanoClawSourceBackedPage) -> NanoClawSourceBackedResult<()>,
-{
-    let project = NanoClawSourceBackedProject::open(path)?;
-    let central = project.connection()?;
+impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
+    type Leaf = NanoClawDocumentLeaf;
+    type TreeAuthority = NanoClawDocumentTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        NANOCLAW_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        self.source.exact_descriptor_eq(source)
+    }
+
+    fn discover_complete(&self) -> SourceBackedRouteResult<NanoClawDocumentTree> {
+        let project =
+            NanoClawSourceBackedProject::open(&self.path).map_err(nanoclaw_route_capture_error)?;
+        let physical_fingerprint = project.physical_fingerprint();
+        let tree_fingerprint = nanoclaw_tree_fingerprint(physical_fingerprint, &self.source);
+        Ok(CompleteDocumentTree::new(
+            tree_fingerprint,
+            vec![ObservedDocumentLeaf::always_scan(
+                DocumentLeafFingerprint::new(physical_fingerprint),
+                NanoClawDocumentLeaf {
+                    source: self.source.clone(),
+                },
+            )],
+            NanoClawDocumentTreeAuthority {
+                project: Mutex::new(project),
+            },
+        ))
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        if !leaf.source.exact_descriptor_eq(&self.source) {
+            return Err(nanoclaw_changed(
+                "NanoClaw document leaf changed catalog lineage",
+            ));
+        }
+        let mut project = authority
+            .project
+            .lock()
+            .map_err(|_| nanoclaw_internal("NanoClaw document authority lock was poisoned"))?;
+        scan_nanoclaw_project(&mut project, &leaf.source, sink)
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &NanoClawDocumentTree,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        let project = tree
+            .authority
+            .project
+            .lock()
+            .map_err(|_| nanoclaw_internal("NanoClaw document authority lock was poisoned"))?;
+        let snapshot = project.snapshot();
+        if !snapshot
+            .revalidate()
+            .map_err(nanoclaw_route_capture_error)?
+        {
+            return Err(nanoclaw_changed(
+                "NanoClaw compound project changed before publication",
+            ));
+        }
+        Ok(nanoclaw_tree_fingerprint(
+            snapshot.physical_fingerprint(),
+            &self.source,
+        ))
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let records = hydrate_nanoclaw_group(&self.path, &self.source, request)
+            .map_err(nanoclaw_hydration_failure)?;
+        BatchHydrationResult::new(records)
+            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))
+    }
+}
+
+fn scan_nanoclaw_project(
+    project: &mut NanoClawSourceBackedProject,
+    source: &SourceKey,
+    sink: &mut ChangedDocumentSink<'_, '_>,
+) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+    let central = project.connection().map_err(nanoclaw_route_capture_error)?;
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))
-        .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(central)?;
+        .map_err(CaptureError::from)
+        .map_err(nanoclaw_route_capture_error)?;
+    let schema_fingerprint =
+        sqlite_schema_fingerprint(central).map_err(nanoclaw_route_capture_error)?;
     let revision = project
         .snapshot()
-        .source_backed_revision_evidence(user_version, &schema_fingerprint)?;
-    let source = nanoclaw_source_key(catalog_lineage)?;
+        .source_backed_revision_evidence(user_version, &schema_fingerprint)
+        .map_err(nanoclaw_route_capture_error)?;
     let opening = SourceObservation::new(
         source.clone(),
         NANOCLAW_SOURCE_REVISION_KIND,
         revision.clone(),
-    )?;
+    )
+    .map_err(nanoclaw_route_contract_error)?;
     let source_revision_digest = Sha256::digest(&revision).into();
     let source_path = project.root_path().display().to_string();
 
-    let mut scanner = NanoClawNativeScanner::new(central, project.snapshot())?;
+    let mut scanner = NanoClawNativeScanner::new(central, project.snapshot())
+        .map_err(nanoclaw_route_capture_error)?;
+    sink.begin_source(source.clone())?;
     let mut complete_records = 0_u64;
     let mut retained_records = 0_u64;
     let mut rejected_records = 0_u64;
     let mut ignored_records = 0_u64;
     let mut indexed_documents = 0_u64;
-    let mut pending_pages = Vec::new();
     loop {
-        let page = scanner.next_page()?;
+        let page = scanner.next_page().map_err(nanoclaw_route_capture_error)?;
         let terminal = page.terminal;
-        let mut documents = Vec::with_capacity(page.units.len());
         for unit in page.units {
-            complete_records = checked_add(complete_records, 1)?;
+            complete_records = checked_add(complete_records, 1).map_err(nanoclaw_route_error)?;
             match unit {
                 NanoClawNativeUnit::Session { .. } => {
-                    ignored_records = checked_add(ignored_records, 1)?;
+                    ignored_records =
+                        checked_add(ignored_records, 1).map_err(nanoclaw_route_error)?;
                 }
                 NanoClawNativeUnit::Message {
                     ordinal,
@@ -181,18 +291,19 @@ where
                         &session,
                         &message,
                         locator,
-                    )?;
-                    documents.push(document);
-                    retained_records = checked_add(retained_records, 1)?;
-                    indexed_documents = checked_add(indexed_documents, 1)?;
+                    )
+                    .map_err(nanoclaw_route_error)?;
+                    sink.emit_document(document)?;
+                    retained_records =
+                        checked_add(retained_records, 1).map_err(nanoclaw_route_error)?;
+                    indexed_documents =
+                        checked_add(indexed_documents, 1).map_err(nanoclaw_route_error)?;
                 }
                 NanoClawNativeUnit::Rejection { .. } => {
-                    rejected_records = checked_add(rejected_records, 1)?;
+                    rejected_records =
+                        checked_add(rejected_records, 1).map_err(nanoclaw_route_error)?;
                 }
             }
-        }
-        if !documents.is_empty() {
-            pending_pages.push(NanoClawSourceBackedPage { documents });
         }
         if terminal {
             break;
@@ -201,27 +312,34 @@ where
 
     let prefix_digest = scanner.prefix_digest_bytes();
     let certified_bytes = scanner.prefix_bytes();
-    scanner.finish()?;
+    scanner.finish().map_err(nanoclaw_route_capture_error)?;
     run_before_source_backed_finish_hook();
-    let snapshot = project.finish()?;
+    project.finish().map_err(nanoclaw_route_capture_error)?;
     let classified = retained_records
         .checked_add(rejected_records)
         .and_then(|value| value.checked_add(ignored_records))
-        .ok_or(NanoClawSourceBackedError::CountOverflow)?;
+        .ok_or_else(|| nanoclaw_route_error(NanoClawSourceBackedError::CountOverflow))?;
     if classified != complete_records || indexed_documents != retained_records {
-        return Err(NanoClawSourceBackedError::CountMismatch);
+        return Err(nanoclaw_route_error(
+            NanoClawSourceBackedError::CountMismatch,
+        ));
     }
     let closing = SourceObservation::new(
-        source,
+        source.clone(),
         NANOCLAW_SOURCE_REVISION_KIND,
-        snapshot.source_backed_revision_evidence(user_version, &schema_fingerprint)?,
-    )?;
-    let certificate = CertifiedSource::certify(
+        project
+            .snapshot()
+            .source_backed_revision_evidence(user_version, &schema_fingerprint)
+            .map_err(nanoclaw_route_capture_error)?,
+    )
+    .map_err(nanoclaw_route_contract_error)?;
+    Ok(DocumentSourceTerminal {
+        source: source.clone(),
         opening,
         closing,
-        NANOCLAW_SOURCE_BACKED_PARSER_REVISION,
-        prefix_digest,
-        ScannedSourceCounts {
+        parser_revision: NANOCLAW_SOURCE_BACKED_PARSER_REVISION,
+        content_digest: prefix_digest,
+        counts: ScannedSourceCounts {
             complete_records,
             retained_records,
             rejected_records,
@@ -229,28 +347,21 @@ where
             indexed_documents,
             certified_bytes,
         },
-    )?;
-    let mut emitted_pages = 0_u64;
-    for page in pending_pages {
-        emit(page)?;
-        emitted_pages = checked_add(emitted_pages, 1)?;
-    }
-    Ok(NanoClawSourceBackedReceipt {
-        source: certificate,
-        emitted_pages,
     })
 }
 
-/// Resolves one source-backed project-message locator through NanoClaw's
-/// existing exact compound-project route.
-pub(crate) fn hydrate_nanoclaw_source_backed_exact(
+fn hydrate_nanoclaw_group(
     path: &Path,
-    catalog_lineage: [u8; 32],
-    locator: &SourceRecordLocator,
-) -> NanoClawSourceBackedResult<NanoClawCompleteRecord> {
-    let source = nanoclaw_source_key(catalog_lineage)?;
-    let native_locator = project_message_locator(&source, locator)?;
-    let project = NanoClawSourceBackedProject::open(path)?;
+    source: &SourceKey,
+    request: &BatchHydrationRequest,
+) -> NanoClawSourceBackedResult<Vec<HydratedProviderRecord>> {
+    if request.events().iter().any(|event| {
+        event.locator().validate_contract().is_err()
+            || !source.exact_descriptor_eq(event.locator().source())
+    }) {
+        return Err(NanoClawSourceBackedError::InvalidProjectMessageLocator);
+    }
+    let mut project = NanoClawSourceBackedProject::open(path)?;
     let central = project.connection()?;
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))
@@ -260,23 +371,105 @@ pub(crate) fn hydrate_nanoclaw_source_backed_exact(
         .snapshot()
         .source_backed_revision_evidence(user_version, &schema_fingerprint)?;
     let current_revision_digest: [u8; 32] = Sha256::digest(&revision).into();
-    if locator.certified_source_revision_digest() != Some(&current_revision_digest) {
-        return Err(NanoClawSourceBackedError::StaleCompoundSourceEvidence);
-    }
-
-    let record = resolve_source_backed_exact(
-        central,
-        project.snapshot(),
-        &native_locator,
-        CompleteContentSqliteQueryBudget::new(),
-    )
-    .map_err(map_exact_route_error)?
-    .ok_or(NanoClawSourceBackedError::MissingProjectMessage)?;
-    if nanoclaw_logical_record_digest_bytes(&record.values) != *locator.record_digest() {
-        return Err(NanoClawSourceBackedError::StaleProjectMessageEvidence);
+    let mut records = Vec::with_capacity(request.events().len());
+    for event in request.events() {
+        let locator = event.locator();
+        let native_locator = project_message_locator(source, locator)?;
+        if locator.certified_source_revision_digest() != Some(&current_revision_digest) {
+            return Err(NanoClawSourceBackedError::StaleCompoundSourceEvidence);
+        }
+        let record = resolve_source_backed_exact(
+            central,
+            project.snapshot(),
+            &native_locator,
+            CompleteContentSqliteQueryBudget::new(),
+        )
+        .map_err(map_exact_route_error)?
+        .ok_or(NanoClawSourceBackedError::MissingProjectMessage)?;
+        if nanoclaw_logical_record_digest_bytes(&record.values) != *locator.record_digest() {
+            return Err(NanoClawSourceBackedError::StaleProjectMessageEvidence);
+        }
+        records.push(HydratedProviderRecord {
+            event_id: event.event_id(),
+            provider_bytes: record.text.into_bytes(),
+        });
     }
     project.finish()?;
-    Ok(record)
+    Ok(records)
+}
+
+fn nanoclaw_tree_fingerprint(physical: [u8; 32], source: &SourceKey) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-nanoclaw-document-tree-v1\0");
+    digest.update(physical);
+    digest.update(source.identity().digest());
+    digest.finalize().into()
+}
+
+fn nanoclaw_route_error(error: NanoClawSourceBackedError) -> SourceBackedRouteError {
+    let kind = match &error {
+        NanoClawSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture) => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        NanoClawSourceBackedError::Capture(CaptureError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
+fn nanoclaw_route_capture_error(error: CaptureError) -> SourceBackedRouteError {
+    nanoclaw_route_error(error.into())
+}
+
+fn nanoclaw_route_contract_error(error: impl std::fmt::Display) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
+}
+
+fn nanoclaw_changed(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
+}
+
+fn nanoclaw_internal(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
+}
+
+fn nanoclaw_hydration_failure(error: NanoClawSourceBackedError) -> HydrationFailure {
+    let kind = match &error {
+        NanoClawSourceBackedError::InvalidProjectMessageLocator
+        | NanoClawSourceBackedError::Resolver(_)
+        | NanoClawSourceBackedError::NativeSource(_)
+        | NanoClawSourceBackedError::ExactQueryBoundExceeded => {
+            HydrationFailureKind::InvalidLocator
+        }
+        NanoClawSourceBackedError::StaleCompoundSourceEvidence
+        | NanoClawSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture)
+        | NanoClawSourceBackedError::Capture(CaptureError::InvalidProviderTranscriptPath {
+            ..
+        }) => HydrationFailureKind::StaleSourceEvidence,
+        NanoClawSourceBackedError::MissingProjectMessage => HydrationFailureKind::MissingRecord,
+        NanoClawSourceBackedError::StaleProjectMessageEvidence => {
+            HydrationFailureKind::StaleRecordEvidence
+        }
+        NanoClawSourceBackedError::Capture(CaptureError::Io(_))
+        | NanoClawSourceBackedError::Capture(CaptureError::ProviderSource { .. }) => {
+            HydrationFailureKind::TemporarilyUnavailable
+        }
+        NanoClawSourceBackedError::Projection(_)
+        | NanoClawSourceBackedError::CountOverflow
+        | NanoClawSourceBackedError::CountMismatch
+        | NanoClawSourceBackedError::Capture(_) => HydrationFailureKind::StaleSourceEvidence,
+    };
+    HydrationFailure {
+        kind,
+        detail: error.to_string(),
+    }
 }
 
 pub(crate) fn nanoclaw_source_key(

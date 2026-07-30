@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -35,46 +34,6 @@ use helpers::*;
 const NANOCLAW_INVENTORY_PAGE_ENTRIES: usize = 64;
 const NANOCLAW_INVENTORY_MIN_INTERVAL: Duration = Duration::from_millis(5);
 const NANOCLAW_INVENTORY_HASH_DOMAIN: &[u8] = b"ctx-nanoclaw-inventory-sha256-v1\0";
-
-#[cfg(test)]
-std::thread_local! {
-    static BEFORE_CENTRAL_GUARD_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) struct NanoClawCentralGuardOpenHook;
-
-#[cfg(test)]
-impl Drop for NanoClawCentralGuardOpenHook {
-    fn drop(&mut self) {
-        BEFORE_CENTRAL_GUARD_OPEN.with(|installed| {
-            installed.borrow_mut().take();
-        });
-    }
-}
-
-#[cfg(test)]
-pub(super) fn set_before_central_guard_open_hook(
-    hook: impl FnOnce() + 'static,
-) -> NanoClawCentralGuardOpenHook {
-    BEFORE_CENTRAL_GUARD_OPEN.with(|installed| {
-        *installed.borrow_mut() = Some(Box::new(hook));
-    });
-    NanoClawCentralGuardOpenHook
-}
-
-#[cfg(test)]
-fn run_before_central_guard_open_hook() {
-    BEFORE_CENTRAL_GUARD_OPEN.with(|installed| {
-        if let Some(hook) = installed.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
-#[cfg(not(test))]
-fn run_before_central_guard_open_hook() {}
 
 #[derive(Clone, PartialEq, Eq)]
 struct NanoClawFrozenFileMetadata {
@@ -333,43 +292,23 @@ impl NanoClawSqliteSnapshot {
 pub(super) struct NanoClawRootBoundDatabase {
     root: ProviderSourceRoot,
     relative_path: PathBuf,
-    parent: Arc<NanoClawRetainedSqliteParent>,
-}
-
-#[derive(Debug)]
-struct NanoClawRetainedSqliteParent {
-    directory: ProviderSourceDirectory,
-    sqlite: SqliteSourceDirectoryAuthority,
 }
 
 impl NanoClawRootBoundDatabase {
     fn bind(root: &ProviderSourceRoot, relative_path: PathBuf) -> Result<Self> {
         let display_path = root.named_path().join(&relative_path);
-        let parent_path =
-            relative_path
-                .parent()
-                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                    path: display_path.clone(),
-                    reason: "NanoClaw SQLite database has no authority parent",
-                })?;
         if relative_path.file_name().is_none() {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: display_path,
                 reason: "NanoClaw SQLite database has no leaf name",
             });
         }
-        let directory = root.open_directory(parent_path)?;
-        let authority_handle = directory.try_clone_authority_handle()?;
-        let approved_parent = root.named_path().join(parent_path);
-        let sqlite = retain_sqlite_source_directory_authority(&authority_handle, &approved_parent)
-            .map_err(|error| nanoclaw_sqlite_access_error(&display_path, error))?;
-        directory.revalidate()?;
-        root.revalidate()?;
-        Ok(Self {
+        let route = Self {
             root: root.clone(),
             relative_path,
-            parent: Arc::new(NanoClawRetainedSqliteParent { directory, sqlite }),
-        })
+        };
+        route.sqlite_authority()?;
+        Ok(route)
     }
 
     fn display_path(&self) -> PathBuf {
@@ -385,13 +324,31 @@ impl NanoClawRootBoundDatabase {
             })
     }
 
+    fn sqlite_authority(&self) -> Result<SqliteSourceDirectoryAuthority> {
+        let display_path = self.display_path();
+        let parent_path = self.relative_path.parent().ok_or_else(|| {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: display_path.clone(),
+                reason: "NanoClaw SQLite database has no authority parent",
+            }
+        })?;
+        let directory = self.root.open_directory(parent_path)?;
+        let authority_handle = directory.try_clone_authority_handle()?;
+        let approved_parent = self.root.named_path().join(parent_path);
+        let sqlite = retain_sqlite_source_directory_authority(&authority_handle, &approved_parent)
+            .map_err(|error| nanoclaw_sqlite_access_error(&display_path, error))?;
+        directory.revalidate()?;
+        self.root.revalidate()?;
+        Ok(sqlite)
+    }
+
     fn open_snapshot(&self) -> Result<SqliteSourceReadSnapshot> {
-        open_root_handle_sqlite_source_snapshot(&self.parent.sqlite, self.database_name()?)
+        let authority = self.sqlite_authority()?;
+        open_root_handle_sqlite_source_snapshot(&authority, self.database_name()?)
             .map_err(|error| nanoclaw_sqlite_access_error(&self.display_path(), error))
     }
 
     fn revalidate_authority(&self) -> Result<()> {
-        self.parent.directory.revalidate()?;
         self.root.revalidate()
     }
 
@@ -606,6 +563,8 @@ pub(super) struct NanoClawProjectSnapshot {
     central: NanoClawSqliteSnapshot,
     central_root_bound: Option<NanoClawRootBoundDatabase>,
     inventory: NanoClawProjectInventory,
+    root_authority_fingerprint: [u8; 32],
+    sessions_authority_fingerprint: [u8; 32],
 }
 
 pub(super) struct NanoClawSourceBackedProject {
@@ -630,7 +589,6 @@ impl NanoClawSourceBackedProject {
         let central_path = central_route.display_path();
         let central_opened = NanoClawOpenedSqliteFamily::open(&root, &central_relative)?;
         let central_snapshot = central_opened.snapshot()?;
-        run_before_central_guard_open_hook();
         let central_guard = central_route.open_snapshot()?;
         let inventory = nanoclaw_stream_inventory(
             root.named_path(),
@@ -644,6 +602,8 @@ impl NanoClawSourceBackedProject {
             central: central_snapshot,
             central_root_bound: Some(central_route.clone()),
             inventory,
+            root_authority_fingerprint: root.authority_fingerprint(),
+            sessions_authority_fingerprint: sessions.authority_fingerprint(),
         };
         if !snapshot.revalidate_frozen_inventory()? {
             return Err(CaptureError::SourceChangedDuringCapture);
@@ -669,6 +629,10 @@ impl NanoClawSourceBackedProject {
         &self.snapshot
     }
 
+    pub(super) fn physical_fingerprint(&self) -> [u8; 32] {
+        self.snapshot.physical_fingerprint()
+    }
+
     pub(super) fn connection(&self) -> Result<&Connection> {
         self.central_guard
             .as_ref()
@@ -681,7 +645,7 @@ impl NanoClawSourceBackedProject {
 
     /// Ends the central read transaction and revalidates the complete central
     /// DB family, frozen session-tree inventory, and selected root route.
-    pub(super) fn finish(mut self) -> Result<NanoClawProjectSnapshot> {
+    pub(super) fn finish(&mut self) -> Result<()> {
         self.sessions.revalidate()?;
         if !self.snapshot.revalidate_frozen_inventory()? {
             return Err(CaptureError::SourceChangedDuringCapture);
@@ -699,11 +663,22 @@ impl NanoClawSourceBackedProject {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         self.root.revalidate()?;
-        Ok(self.snapshot)
+        Ok(())
     }
 }
 
 impl NanoClawProjectSnapshot {
+    pub(super) fn physical_fingerprint(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ctx-nanoclaw-compound-physical-inventory-v1\0");
+        hasher.update(self.root_authority_fingerprint);
+        hasher.update(self.sessions_authority_fingerprint);
+        self.central.update_hash(&mut hasher);
+        hasher.update(self.inventory.digest);
+        hasher.update(self.inventory.session_count.to_be_bytes());
+        hasher.finalize().into()
+    }
+
     pub(super) fn source_backed_revision_evidence(
         &self,
         user_version: i64,

@@ -92,9 +92,7 @@ use super::providers::{
         discover_mux_source_backed_sources, scan_mux_source_backed, MuxSourceBackedDisposition,
         MuxSourceBackedResolverV0,
     },
-    nanoclaw::native_path::source_backed::{
-        hydrate_nanoclaw_source_backed_exact, nanoclaw_source_key, scan_nanoclaw_source_backed,
-    },
+    nanoclaw::native_path::source_backed::NanoClawDocumentTreeAdapter,
     openclaw::openclaw_source_backed_adapter_v0,
     openhands::nativepath::{
         openhands_owns_source, openhands_route_error, OpenHandsEventFileAdapterV2,
