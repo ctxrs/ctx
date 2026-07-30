@@ -169,6 +169,42 @@ fn source_backed_batch_opens_once_reads_by_offset_and_restores_caller_order() {
 }
 
 #[test]
+fn active_source_family_contract_codex_hydration_remains_exact_during_append() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000085";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "hydratewhileactive")],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let event = VerifiedIndex::open(&index)
+        .unwrap()
+        .source_event_page(&codex_source_key(native_session_id).unwrap(), None, 8)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+
+    OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap()
+        .write_all(format!("{}\n", message("assistant", "newagentbytes")).as_bytes())
+        .unwrap();
+
+    let hydrated = resolver.hydrate_event_request(&request).unwrap();
+    assert_eq!(hydrated.event_id, request.event_id());
+    assert_eq!(hydrated.provider_bytes, b"hydratewhileactive");
+}
+
+#[test]
 fn source_backed_batch_rejects_duplicate_cross_source_invalid_ordinal_and_digest() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

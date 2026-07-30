@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 use super::{
-    observe_opened_file, JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlReader,
-    JsonlRecordRef, JsonlSourceChange, JsonlSourceIdentity,
+    observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
+    JsonlProbe, JsonlReader, JsonlRecordRef, JsonlSourceChange, JsonlSourceIdentity,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -44,6 +44,11 @@ mod hydration;
 use hydration::{hydrate_batch, hydrate_single};
 mod ownership;
 use ownership::base_sources_for_root;
+mod revalidation;
+use revalidation::{
+    binding_digest, inventory_observation, reset_terminal, revalidate_complete_inventory,
+    revalidate_target,
+};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -193,13 +198,20 @@ impl JsonlFamilyLeaf {
         authority: Arc<ProviderSourceRoot>,
         authority_path: PathBuf,
         binding: TypedKey,
-        identity_probe: JsonlProbe,
+        mut identity_probe: JsonlProbe,
         identity_probe_rejected_records: u64,
     ) -> Result<Self> {
         let opened = authority.open_file(&authority_path)?;
         let observation = observe_opened_file(&source_path, &opened)?;
         if observation != identity_probe.observation {
-            return Err(CaptureError::SourceChangedDuringCapture);
+            revalidate_frozen_prefix(
+                &source_path,
+                &opened,
+                &identity_probe.observation,
+                identity_probe.complete_prefix_end,
+                super::prefix_digest(&identity_probe.prefix_hasher),
+            )?;
+            identity_probe.observation = observation.clone();
         }
         drop(opened);
         Ok(Self {
@@ -267,6 +279,56 @@ impl JsonlFamilyLeaf {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         Ok(Arc::new(opened))
+    }
+
+    fn open_for_hydration(&self) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
+        #[cfg(test)]
+        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+        let opened = self.authority.open_file(&self.authority_path)?;
+        let current = observe_opened_file(&self.source_path, &opened)?;
+        if current != self.observation
+            && (self.whole_record || !self.observation.admits_frozen_prefix_in(&current))
+        {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok((Arc::new(opened), current))
+    }
+
+    fn accepts_hydration_closing(
+        &self,
+        opening: &JsonlFileObservation,
+        closing: &JsonlFileObservation,
+    ) -> bool {
+        opening == closing || (!self.whole_record && opening.admits_frozen_prefix_in(closing))
+    }
+
+    fn open_for_scan(&self) -> Result<(Self, Arc<OpenedProviderSourceFile>)> {
+        #[cfg(test)]
+        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+        let opened = self.authority.open_file(&self.authority_path)?;
+        let current = observe_opened_file(&self.source_path, &opened)?;
+        if current == self.observation {
+            return Ok((self.clone(), Arc::new(opened)));
+        }
+        if self.whole_record
+            || current.length <= self.observation.length
+            || !self.observation.admits_frozen_prefix_in(&current)
+        {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let mut leaf = self.clone();
+        leaf.observation = current.clone();
+        if let Some(probe) = leaf.identity_probe.as_mut() {
+            revalidate_frozen_prefix(
+                &leaf.source_path,
+                &opened,
+                &probe.observation,
+                probe.complete_prefix_end,
+                super::prefix_digest(&probe.prefix_hasher),
+            )?;
+            probe.observation = current;
+        }
+        Ok((leaf, Arc::new(opened)))
     }
 }
 
@@ -374,6 +436,7 @@ impl FamilyCheckpoint {
 #[derive(Debug, Clone)]
 struct TerminalSourceEvidence {
     certificate: CertifiedSource,
+    checkpoint: Option<JsonlCheckpoint>,
 }
 
 #[derive(Default)]
@@ -537,25 +600,25 @@ fn scan_leaf(
     base: Option<&CertifiedSource>,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<TerminalSourceEvidence> {
-    let previous = base.and_then(|base| decode_checkpoint(adapter, leaf, base).ok());
+    let (leaf, opened) = leaf.open_for_scan().map_err(route_invalid)?;
+    let previous = base.and_then(|base| decode_checkpoint(adapter, &leaf, base).ok());
     let exact_terminal = previous.as_ref().is_some_and(|checkpoint| {
         checkpoint.physical.terminal()
             && checkpoint.physical.source_observation() == leaf.observation()
     });
-    let opened = leaf.open_verified().map_err(route_invalid)?;
     let previous_physical = exact_terminal
         .then_some(previous.as_ref())
         .flatten()
         .map(|checkpoint| &checkpoint.physical);
     let mut reader = if leaf.whole_record {
         JsonlReader::open_whole_record(
-            physical_identity(adapter, leaf),
+            physical_identity(adapter, &leaf),
             Arc::clone(&opened),
             previous_physical,
         )
     } else {
         JsonlReader::open(
-            physical_identity(adapter, leaf),
+            physical_identity(adapter, &leaf),
             Arc::clone(&opened),
             previous_physical,
             leaf.identity_probe.clone(),
@@ -596,13 +659,14 @@ fn scan_leaf(
         sink.certify_source_append(append).map_err(route_internal)?;
         return Ok(TerminalSourceEvidence {
             certificate: base.clone(),
+            checkpoint: Some(decoded.physical),
         });
     }
 
     sink.begin_source(leaf.source.clone())
         .map_err(route_internal)?;
     let mut projector = adapter
-        .projector(leaf, opened, DateTime::<Utc>::UNIX_EPOCH)
+        .projector(&leaf, opened, DateTime::<Utc>::UNIX_EPOCH)
         .map_err(route_invalid)?;
     let mut physical_records = leaf
         .identity_probe
@@ -668,16 +732,19 @@ fn scan_leaf(
     let checkpoint = FamilyCheckpoint {
         version: FamilyCheckpoint::VERSION,
         provider_parser_revision: adapter.parser_revision().to_owned(),
-        binding_digest: binding_digest(leaf).map_err(route_invalid)?,
+        binding_digest: binding_digest(&leaf).map_err(route_invalid)?,
         physical: outcome.checkpoint().clone(),
         represented_physical_records: represented_records,
         rejected_records,
         indexed_documents: documents,
     };
-    let certificate = certify(adapter, leaf, checkpoint)?;
+    let certificate = certify(adapter, &leaf, checkpoint)?;
     sink.certify_source(certificate.clone())
         .map_err(route_internal)?;
-    Ok(TerminalSourceEvidence { certificate })
+    Ok(TerminalSourceEvidence {
+        certificate,
+        checkpoint: Some(outcome.checkpoint().clone()),
+    })
 }
 
 fn certify(
@@ -813,132 +880,6 @@ fn source_observation(
         serde_json::to_vec(observation)?,
     )
     .map_err(contract_error)
-}
-
-fn reset_terminal(resident: &Mutex<FamilyResident>) -> SourceBackedRouteResult<()> {
-    let mut resident = resident
-        .lock()
-        .map_err(|_| route_internal("JSONL resident catalog lock was poisoned"))?;
-    resident.terminal_sources.clear();
-    resident.certified_inventory = None;
-    Ok(())
-}
-
-fn revalidate_target(
-    resident: &Mutex<FamilyResident>,
-    target: SourceBackedRevalidationTarget<'_>,
-) -> bool {
-    let Ok(resident) = resident.lock() else {
-        return false;
-    };
-    match target {
-        SourceBackedRevalidationTarget::Source(expected) => {
-            let Some(evidence) = resident
-                .terminal_sources
-                .get(&expected.observation().source().exact_descriptor_digest())
-            else {
-                return false;
-            };
-            evidence.certificate == *expected
-        }
-        SourceBackedRevalidationTarget::Deletion(deletion) => resident
-            .certified_inventory
-            .as_ref()
-            .is_some_and(|inventory| {
-                deletion.verifies(inventory)
-                    && !resident
-                        .terminal_sources
-                        .contains_key(&deletion.source().exact_descriptor_digest())
-            }),
-    }
-}
-
-fn revalidate_complete_inventory(
-    adapter: &dyn JsonlFamilyAdapter,
-    root: &Path,
-    resident: &Mutex<FamilyResident>,
-    expected_inventory: &CertifiedSourceInventory,
-) -> Result<bool> {
-    let (expected_sources, certified_inventory) = {
-        let resident = resident.lock().map_err(|_| {
-            CaptureError::InvalidPayload("JSONL resident catalog lock was poisoned".to_owned())
-        })?;
-        (
-            resident.terminal_sources.clone(),
-            resident.certified_inventory.clone(),
-        )
-    };
-    if certified_inventory.as_ref() != Some(expected_inventory) {
-        return Ok(false);
-    }
-
-    // This is the single terminal filesystem witness for the route. Earlier
-    // source/deletion callbacks only bind writer targets to `expected_sources`;
-    // this final callback rediscovers membership and then reopens every leaf,
-    // so a new leaf, reappearance, deletion, or mutation between callbacks
-    // invalidates the candidate before publication.
-    let current = discover(adapter, root)?;
-    if current.root_missing() || current.leaves().len() != expected_sources.len() {
-        return Ok(false);
-    }
-    let current_inventory = current.certify_against(&current)?;
-    if current_inventory != *expected_inventory {
-        return Ok(false);
-    }
-    for leaf in current.leaves() {
-        let Some(evidence) = expected_sources.get(&leaf.source().exact_descriptor_digest()) else {
-            return Ok(false);
-        };
-        if !leaf
-            .source()
-            .exact_descriptor_eq(evidence.certificate.observation().source())
-            || source_observation(leaf.source(), leaf.observation())?
-                != *evidence.certificate.observation()
-        {
-            return Ok(false);
-        }
-        drop(leaf.open_verified()?);
-    }
-    current.revalidate_root()?;
-    Ok(true)
-}
-
-fn inventory_observation(
-    provider: CaptureProvider,
-    root: &Path,
-    missing: bool,
-    authority: Option<&ProviderSourceRoot>,
-    leaves: &[JsonlFamilyLeaf],
-) -> Result<SourceInventoryObservation> {
-    let mut digest = Sha256::new();
-    digest.update(FAMILY_INVENTORY_DOMAIN);
-    digest.update([u8::from(missing)]);
-    digest.update((leaves.len() as u64).to_be_bytes());
-    if let Some(authority) = authority {
-        digest.update(authority.authority_fingerprint());
-    }
-    for leaf in leaves {
-        digest.update(leaf.source.exact_descriptor_digest());
-        digest.update([u8::from(leaf.whole_record)]);
-        digest.update(
-            (leaf.authority_path.as_os_str().as_encoded_bytes().len() as u64).to_be_bytes(),
-        );
-        digest.update(leaf.authority_path.as_os_str().as_encoded_bytes());
-        digest.update(binding_digest(leaf)?);
-    }
-    let revision = digest.finalize().to_vec();
-    SourceInventoryObservation::new(
-        provider.as_str(),
-        FAMILY_INVENTORY_AUTHORITY,
-        TypedKey::bytes(root.as_os_str().as_encoded_bytes().to_vec()).map_err(contract_error)?,
-        FAMILY_INVENTORY_REVISION,
-        revision,
-    )
-    .map_err(contract_error)
-}
-
-fn binding_digest(leaf: &JsonlFamilyLeaf) -> Result<[u8; 32]> {
-    Ok(Sha256::digest(serde_json::to_vec(leaf.binding())?).into())
 }
 
 fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamilyInventory> {

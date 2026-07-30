@@ -1,4 +1,9 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+};
 
 use ctx_history_core::{
     BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
@@ -222,6 +227,69 @@ fn metadata_only_same_content_churn_is_a_logical_noop() {
     assert_eq!(unchanged.sources, cold.sources);
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+}
+
+#[test]
+fn active_source_family_contract_direct_jsonl_freezes_discovery_and_terminal_boundaries() {
+    let (_temp, provider_root, transcript, _registry) = qwen_route_fixture();
+    let adapter = super::super::qwen_code_source_backed_adapter();
+    let inventory = adapter.discover(&provider_root).unwrap();
+    let leaf = inventory.leaves()[0].clone();
+    OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap()
+        .write_all(
+            concat!(
+                "{\"uuid\":\"qwen-event-3\",\"sessionId\":\"qwen-life\",",
+                "\"timestamp\":\"2026-07-25T12:00:03Z\",\"type\":\"assistant\",",
+                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"active append\"}]},",
+                "\"model\":\"qwen3-coder\"}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+    let mut reader = adapter
+        .open_leaf(&leaf, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH, None)
+        .unwrap();
+    let mut documents = Vec::new();
+    reader
+        .visit_documents(&mut |document| {
+            documents.push(document);
+            Ok(())
+        })
+        .unwrap();
+    let receipt = reader.finish().unwrap();
+    assert_eq!(documents.len(), 3);
+
+    let evidence = DirectJsonlTerminalEvidenceSet::default();
+    evidence.record(receipt.terminal_evidence()).unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap()
+        .write_all(
+            concat!(
+                "{\"uuid\":\"qwen-event-4\",\"sessionId\":\"qwen-life\",",
+                "\"timestamp\":\"2026-07-25T12:00:04Z\",\"type\":\"assistant\",",
+                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"next refresh\"}]},",
+                "\"model\":\"qwen3-coder\"}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    assert!(adapter
+        .revalidate_certificate(&evidence, receipt.certificate())
+        .unwrap());
+
+    let current = adapter.discover(&provider_root).unwrap();
+    assert_eq!(
+        inventory.observation, current.observation,
+        "append-log inventory identity must describe membership, not mutable length"
+    );
 }
 
 #[test]

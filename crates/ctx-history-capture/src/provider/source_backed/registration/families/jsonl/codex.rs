@@ -398,13 +398,10 @@ pub fn register_codex_prompt_history_source_backed_route(
     let scan_terminal_evidence = Arc::clone(&terminal_evidence);
     let source_terminal_evidence = Arc::clone(&terminal_evidence);
     let inventory_terminal_evidence = terminal_evidence;
-    let terminal_capture: Arc<CodexPromptTerminalCapture> = Arc::new(move || {
-        let scan =
-            scan_codex_prompt_history_source_backed_v0(terminal_source.clone(), None, |_| Ok(()))
-                .map_err(route_error)?;
-        let inventory =
-            certify_source_inventory(&terminal_route, std::slice::from_ref(&scan.certificate))?;
-        Ok((scan.certificate, inventory))
+    let terminal_capture: Arc<CodexPromptTerminalCapture> = Arc::new(move |expected| {
+        revalidate_codex_prompt_history_source_backed_v0(&terminal_source, expected)
+            .map_err(route_error)?;
+        certify_source_inventory(&terminal_route, std::slice::from_ref(expected))
     });
     let inventory_terminal_capture = terminal_capture;
     let driver = SourceBackedRouteDriver::new(
@@ -597,7 +594,7 @@ pub fn register_codex_prompt_history_source_backed_route(
     Ok(())
 }
 
-type CodexPromptTerminalCapture = dyn Fn() -> Result<(CertifiedSource, CertifiedSourceInventory), SourceBackedRouteError>
+type CodexPromptTerminalCapture = dyn Fn(&CertifiedSource) -> Result<CertifiedSourceInventory, SourceBackedRouteError>
     + Send
     + Sync;
 
@@ -661,9 +658,7 @@ fn revalidate_codex_prompt_inventory(
     if expected.inventory != *expected_inventory {
         return false;
     }
-    capture().is_ok_and(|(certificate, inventory)| {
-        certificate == expected.certificate && inventory == expected.inventory
-    })
+    capture(&expected.certificate).is_ok_and(|inventory| inventory == expected.inventory)
 }
 
 #[cfg(test)]
@@ -677,7 +672,7 @@ mod tests {
     use crate::ProviderCatalogSupport;
 
     #[test]
-    fn prompt_history_terminal_inventory_rejects_mutation_after_source_binding() {
+    fn active_source_family_contract_prompt_history_terminal_inventory_accepts_deferred_append() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let history = temp.path().join("history.jsonl");
         let first = serde_json::json!({
@@ -725,14 +720,22 @@ mod tests {
             "{second}"
         )
         .unwrap();
-        let capture = move || {
-            let current =
-                scan_codex_prompt_history_source_backed_v0(retained.clone(), None, |_| Ok(()))
-                    .map_err(route_error)?;
-            let inventory =
-                certify_source_inventory(&route, std::slice::from_ref(&current.certificate))?;
-            Ok((current.certificate, inventory))
+        let capture = move |expected: &CertifiedSource| {
+            revalidate_codex_prompt_history_source_backed_v0(&retained, expected)
+                .map_err(route_error)?;
+            certify_source_inventory(&route, std::slice::from_ref(expected))
         };
+        assert!(revalidate_codex_prompt_inventory(
+            &state, &capture, &inventory,
+        ));
+
+        let mut rewritten = fs::read(&history).unwrap();
+        let offset = rewritten
+            .windows(b"before terminal callback".len())
+            .position(|window| window == b"before terminal callback")
+            .unwrap();
+        rewritten[offset] = b'B';
+        fs::write(&history, rewritten).unwrap();
         assert!(!revalidate_codex_prompt_inventory(
             &state, &capture, &inventory,
         ));

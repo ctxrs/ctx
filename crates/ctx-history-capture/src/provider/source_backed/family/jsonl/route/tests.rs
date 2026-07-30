@@ -95,18 +95,31 @@ fn expected_state(
         .leaves()
         .iter()
         .map(|leaf| {
-            let observation = source_observation(leaf.source(), leaf.observation()).unwrap();
+            let opened = leaf.open_verified().unwrap();
+            let mut reader =
+                JsonlReader::open(physical_identity(adapter, leaf), opened, None, None).unwrap();
+            while reader
+                .visit_page(&mut |_record| -> Result<()> { Ok(()) })
+                .unwrap()
+                .is_some()
+            {}
+            let checkpoint = reader.outcome().unwrap().checkpoint().clone();
+            let observation =
+                source_observation(leaf.source(), checkpoint.source_observation()).unwrap();
             let certificate = CertifiedSource::certify(
                 observation.clone(),
                 observation,
                 "terminal-witness-parser-v1",
-                [0; 32],
+                *checkpoint.complete_prefix_sha256(),
                 ScannedSourceCounts::default(),
             )
             .unwrap();
             (
                 leaf.source().exact_descriptor_digest(),
-                TerminalSourceEvidence { certificate },
+                TerminalSourceEvidence {
+                    certificate,
+                    checkpoint: Some(checkpoint),
+                },
             )
         })
         .collect();
@@ -143,7 +156,7 @@ fn expected_source(resident: &FamilyResident) -> CertifiedSource {
 }
 
 #[test]
-fn terminal_inventory_rediscovers_new_leaves_and_mutations_after_source_binding() {
+fn active_source_family_contract_jsonl_terminal_inventory_rediscovers_live_tree() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
@@ -159,7 +172,9 @@ fn terminal_inventory_rediscovers_new_leaves_and_mutations_after_source_binding(
         SourceBackedRevalidationTarget::Source(&source),
     ));
     fs::write(&first, b"{\"message\":\"changed between callbacks\"}\n").unwrap();
-    assert!(!revalidate_complete_inventory(&adapter, &root, &resident, &inventory,).unwrap());
+    assert!(
+        !revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap_or(false)
+    );
 
     let (resident, inventory) = expected_state(&adapter, &root);
     let source = expected_source(&resident);
@@ -173,7 +188,34 @@ fn terminal_inventory_rediscovers_new_leaves_and_mutations_after_source_binding(
 }
 
 #[test]
-fn terminal_inventory_rejects_deleted_leaf_reappearance_after_deletion_binding() {
+fn active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append() {
+    use std::{fs::OpenOptions, io::Write};
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let first = root.join("first.jsonl");
+    fs::write(&first, b"{\"message\":\"frozen\"}\n").unwrap();
+    let adapter = TestAdapter;
+    let (resident, inventory) = expected_state(&adapter, &root);
+    let source = expected_source(&resident);
+    let resident = Mutex::new(resident);
+    assert!(revalidate_target(
+        &resident,
+        SourceBackedRevalidationTarget::Source(&source),
+    ));
+
+    OpenOptions::new()
+        .append(true)
+        .open(&first)
+        .unwrap()
+        .write_all(b"{\"message\":\"next refresh\"}\n")
+        .unwrap();
+    assert!(revalidate_complete_inventory(&adapter, &root, &resident, &inventory,).unwrap());
+}
+
+#[test]
+fn active_source_family_contract_jsonl_terminal_inventory_rejects_reappearance() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();

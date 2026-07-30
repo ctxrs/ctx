@@ -359,12 +359,12 @@ impl DirectJsonlSourceAdapter {
         if leaf.provider != self.provider || leaf.source_format != self.source_format {
             return Err(DirectJsonlSourceBackedError::InvalidLocator);
         }
-        let source_file = leaf.open_verified()?;
+        let (mut current_leaf, source_file) = leaf.open_for_scan()?;
         let mut projector = DirectJsonlProjector::new(
             self.provider,
             self.source_format,
-            &leaf.path,
-            Some(leaf.source_root.clone()),
+            &current_leaf.path,
+            Some(current_leaf.source_root.clone()),
             imported_at,
             None,
         )?;
@@ -372,21 +372,21 @@ impl DirectJsonlSourceAdapter {
             let projected = projector.project_record(record)?;
             if !projected.rejections.is_empty() {
                 return Err(DirectJsonlSourceBackedError::RejectedSource {
-                    path: leaf.path.clone(),
+                    path: current_leaf.path.clone(),
                     rejections: projected.rejections,
                 });
             }
             Ok(projected)
         })?;
-        let session = projector
-            .session()
-            .cloned()
-            .ok_or_else(|| DirectJsonlSourceBackedError::MissingNativeSession(leaf.path.clone()))?;
+        let session = projector.session().cloned().ok_or_else(|| {
+            DirectJsonlSourceBackedError::MissingNativeSession(current_leaf.path.clone())
+        })?;
         let (source, session_id) = direct_jsonl_session_identity(self, &session.native_session_id)?;
-        source_file.revalidate()?;
+        current_leaf.observation = probe.observation().clone();
+        source_file.revalidate_same_object()?;
         Ok(DirectJsonlSelectedLeaf {
             adapter: self,
-            leaf: leaf.clone(),
+            leaf: current_leaf,
             source,
             session_id,
             session,
@@ -440,7 +440,7 @@ impl DirectJsonlSourceAdapter {
                 checkpoint.physical.identity().source_path().as_path() == leaf.path
             })
         {
-            let source_file = leaf.open_verified()?;
+            let (current_leaf, source_file) = leaf.open_for_scan()?;
             let session = checkpoint
                 .session
                 .clone()
@@ -450,7 +450,7 @@ impl DirectJsonlSourceAdapter {
             source.validate_exact_descriptor(base.observation().source())?;
             let mut selected = DirectJsonlSelectedLeaf {
                 adapter: self,
-                leaf: leaf.clone(),
+                leaf: current_leaf,
                 source,
                 session_id,
                 session,
@@ -742,6 +742,21 @@ impl DirectJsonlInventoryLeaf {
         self.authority.revalidate()?;
         Ok(Arc::new(opened))
     }
+
+    pub(super) fn open_for_scan(
+        &self,
+    ) -> DirectJsonlSourceBackedResult<(Self, Arc<OpenedProviderSourceFile>)> {
+        self.authority.revalidate()?;
+        let opened = self.authority.root.open_file(&self.authority_path)?;
+        let current = observe_opened_file(&self.path, &opened)?;
+        if current != self.observation && !self.observation.is_same_file_growth_to(&current) {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        self.authority.revalidate()?;
+        let mut leaf = self.clone();
+        leaf.observation = current;
+        Ok((leaf, Arc::new(opened)))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -801,9 +816,6 @@ fn inventory_observation(
     for leaf in leaves {
         digest.update((leaf.route_key.len() as u64).to_be_bytes());
         digest.update(&leaf.route_key);
-        let observation = serde_json::to_vec(&leaf.observation)?;
-        digest.update((observation.len() as u64).to_be_bytes());
-        digest.update(observation);
     }
     digest.update((failures.len() as u64).to_be_bytes());
     for failure in failures {

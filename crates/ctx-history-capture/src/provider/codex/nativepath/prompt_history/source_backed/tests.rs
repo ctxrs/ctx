@@ -155,6 +155,51 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
 }
 
 #[test]
+fn active_source_family_contract_prompt_history_freezes_eof_and_defers_append() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let first = prompt_line("active-session", 1_785_139_200, "first prompt");
+    let second = prompt_line("active-session", 1_785_139_201, "second prompt");
+    fs::write(&path, &first).unwrap();
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [46; 32]);
+    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
+    let mut documents = Vec::new();
+    let mut appended = false;
+    let first_scan = scan_codex_prompt_history_source_backed_v0(source, None, |page| {
+        documents.extend(page.documents);
+        if !appended {
+            append(&path, &second);
+            appended = true;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(appended);
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].body, "first prompt");
+    revalidate_codex_prompt_history_source_backed_v0(&first_scan.source, &first_scan.certificate)
+        .unwrap();
+
+    let resolver =
+        CodexPromptHistorySourceBackedResolverV0::new([first_scan.source.clone()]).unwrap();
+    let request =
+        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
+    assert_eq!(
+        resolver.hydrate_event(&request).unwrap().provider_bytes,
+        b"first prompt"
+    );
+
+    let (catch_up, catch_up_documents, _) = collect(&input, Some(&first_scan.certificate));
+    assert!(matches!(
+        catch_up.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Append
+    ));
+    assert_eq!(catch_up_documents.len(), 1);
+    assert_eq!(catch_up_documents[0].body, "second prompt");
+}
+
+#[test]
 fn source_backed_prompt_adapter_has_no_preview_or_store_body_fallback() {
     let source = include_str!("../source_backed.rs");
     assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));

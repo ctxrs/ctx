@@ -51,6 +51,8 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-sdk:unit_tests",
 ]
 
+# Provider correctness is ordinary executable CI. This focused capture target
+# owns active-writer lifecycle contracts across source families.
 _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:native_provider_real_shapes_tests",
     "//crates/ctx-cli:native_provider_rejections_tests",
@@ -58,6 +60,7 @@ _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:search_refresh_tests",
     "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:source_backed_content_tests",
+    "//crates/ctx-history-capture:active_source_family_contract_tests",
     "//crates/ctx-history-capture:complete_content_tests",
 ]
 

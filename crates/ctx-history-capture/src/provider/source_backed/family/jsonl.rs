@@ -1,5 +1,5 @@
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,9 +14,11 @@ use crate::{
 };
 
 mod hydration;
+mod identity;
 mod route;
 
 pub(crate) use hydration::{visit_verified_ranges, JsonlHydrationRange};
+use identity::observe_metadata;
 pub(crate) use route::{
     jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
     JsonlFamilyLeaf, JsonlFamilyProjector,
@@ -125,6 +127,22 @@ impl JsonlFileObservation {
     pub(crate) fn supports_exact_revalidation(&self) -> bool {
         self.stable_identity.is_some() && self.change_identity.is_some()
     }
+
+    /// Whether `current` can still contain the exact frozen bytes represented
+    /// by this observation. Content is not trusted until the caller separately
+    /// verifies its certified prefix digest.
+    pub(crate) fn admits_frozen_prefix_in(&self, current: &Self) -> bool {
+        self == current
+            || (current.length >= self.length
+                && self.supports_exact_revalidation()
+                && self.same_stable_file(current))
+    }
+
+    pub(crate) fn is_same_file_growth_to(&self, current: &Self) -> bool {
+        current.length > self.length
+            && self.supports_exact_revalidation()
+            && self.same_stable_file(current)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +156,10 @@ pub(crate) struct JsonlProbe {
 impl JsonlProbe {
     pub(crate) fn next_physical_ordinal(&self) -> u64 {
         self.next_physical_ordinal
+    }
+
+    pub(crate) fn observation(&self) -> &JsonlFileObservation {
+        &self.observation
     }
 }
 
@@ -280,6 +302,7 @@ pub(crate) struct JsonlReader {
     outcome: Option<JsonlScanOutcome>,
     record_buffer: Vec<u8>,
     whole_record: bool,
+    append_log: bool,
 }
 
 impl JsonlReader {
@@ -307,11 +330,12 @@ impl JsonlReader {
         probe: Option<JsonlProbe>,
         whole_record: bool,
     ) -> Result<Self> {
-        source_file.revalidate()?;
+        source_file.revalidate_same_object()?;
+        let current_metadata = source_file.file().metadata()?;
         let observation = observe_metadata(
             identity.source_path(),
             source_file.file(),
-            source_file.metadata(),
+            &current_metadata,
         )?;
         let mut file = source_file.file().try_clone()?;
         if observe_metadata(identity.source_path(), &file, &file.metadata()?)? != observation {
@@ -369,7 +393,16 @@ impl JsonlReader {
         ) {
             if let Some(probe) = probe {
                 if probe.observation != observation {
-                    return Err(CaptureError::SourceChangedDuringCapture);
+                    if !probe.observation.admits_frozen_prefix_in(&observation) {
+                        return Err(CaptureError::SourceChangedDuringCapture);
+                    }
+                    revalidate_frozen_prefix(
+                        identity.source_path(),
+                        source_file.as_ref(),
+                        &probe.observation,
+                        probe.complete_prefix_end,
+                        prefix_digest(&probe.prefix_hasher),
+                    )?;
                 }
                 prefix_hasher = probe.prefix_hasher;
                 complete_prefix_end = probe.complete_prefix_end;
@@ -392,6 +425,7 @@ impl JsonlReader {
             outcome: None,
             record_buffer: Vec::new(),
             whole_record,
+            append_log: !whole_record,
         })
     }
 
@@ -412,10 +446,18 @@ impl JsonlReader {
         identity: JsonlSourceIdentity,
         probe: JsonlProbe,
     ) -> Result<()> {
-        if self.source_change != JsonlSourceChange::Replace || probe.observation != self.observation
+        if self.source_change != JsonlSourceChange::Replace
+            || !probe.observation.admits_frozen_prefix_in(&self.observation)
         {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
+        revalidate_frozen_prefix(
+            self.identity.source_path(),
+            self.source_file.as_ref(),
+            &probe.observation,
+            probe.complete_prefix_end,
+            prefix_digest(&probe.prefix_hasher),
+        )?;
         self.identity = identity;
         self.prefix_hasher = probe.prefix_hasher;
         self.complete_prefix_end = probe.complete_prefix_end;
@@ -594,15 +636,34 @@ impl JsonlReader {
     }
 
     fn finish(&mut self, terminal: bool) -> Result<()> {
-        if observe_metadata(
+        let current = observe_metadata(
             self.identity.source_path(),
             self.reader.get_ref(),
             &self.reader.get_ref().metadata()?,
-        )? != self.observation
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
+        )?;
+        if current == self.observation {
+            if self.append_log {
+                // The retained authority may have been opened before an
+                // identity probe observed a legitimate append. The scan is
+                // bound to `self.observation`, so require that exact
+                // observation plus same-object routing rather than the
+                // authority handle's older, metadata-sensitive stamp.
+                self.source_file.revalidate_same_object()?;
+            } else {
+                self.source_file.revalidate()?;
+            }
+        } else {
+            if !self.append_log {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            revalidate_frozen_prefix(
+                self.identity.source_path(),
+                self.source_file.as_ref(),
+                &self.observation,
+                self.complete_prefix_end,
+                prefix_digest(&self.prefix_hasher),
+            )?;
         }
-        self.source_file.revalidate()?;
         self.outcome = Some(JsonlScanOutcome {
             checkpoint: self
                 .unchanged_checkpoint
@@ -657,9 +718,17 @@ where
             "provider identity probe record bound is invalid",
         )));
     }
-    source_file.revalidate().map_err(E::from)?;
-    let observation = observe_metadata(source_path, source_file.file(), source_file.metadata())
-        .map_err(E::from)?;
+    source_file.revalidate_same_object().map_err(E::from)?;
+    let observation = observe_metadata(
+        source_path,
+        source_file.file(),
+        &source_file
+            .file()
+            .metadata()
+            .map_err(CaptureError::from)
+            .map_err(E::from)?,
+    )
+    .map_err(E::from)?;
     let mut file = source_file
         .file()
         .try_clone()
@@ -717,23 +786,18 @@ where
                 record_digest,
             },
         })? {
-            if observe_metadata(
+            let closing = revalidate_frozen_prefix(
                 source_path,
-                reader.get_ref(),
-                &reader
-                    .get_ref()
-                    .metadata()
-                    .map_err(CaptureError::from)
-                    .map_err(E::from)?,
-            )? != observation
-            {
-                return Err(E::from(CaptureError::SourceChangedDuringCapture));
-            }
-            source_file.revalidate().map_err(E::from)?;
+                source_file.as_ref(),
+                &observation,
+                end,
+                prefix_digest(&hasher),
+            )
+            .map_err(E::from)?;
             return Ok(Some((
                 value,
                 JsonlProbe {
-                    observation,
+                    observation: closing,
                     prefix_hasher: hasher,
                     complete_prefix_end: end,
                     next_physical_ordinal: physical_ordinal.saturating_add(1),
@@ -742,19 +806,14 @@ where
         }
         start = end;
     }
-    if observe_metadata(
+    revalidate_frozen_prefix(
         source_path,
-        reader.get_ref(),
-        &reader
-            .get_ref()
-            .metadata()
-            .map_err(CaptureError::from)
-            .map_err(E::from)?,
-    )? != observation
-    {
-        return Err(E::from(CaptureError::SourceChangedDuringCapture));
-    }
-    source_file.revalidate().map_err(E::from)?;
+        source_file.as_ref(),
+        &observation,
+        start,
+        prefix_digest(&hasher),
+    )
+    .map_err(E::from)?;
     Ok(None)
 }
 
@@ -768,99 +827,43 @@ pub(crate) fn observe_opened_file(
     Ok(observation)
 }
 
-fn observe_metadata(path: &Path, file: &File, metadata: &Metadata) -> Result<JsonlFileObservation> {
-    let identity = retained_file_identity(path, file, metadata)?;
-
-    Ok(JsonlFileObservation {
-        length: metadata.len(),
-        modified: JsonlObservedTime::from_system_time(metadata.modified()?),
-        readonly: metadata.permissions().readonly(),
-        stable_identity: identity.as_ref().map(|identity| identity.0),
-        change_identity: identity.map(|identity| identity.1),
-    })
-}
-
-#[cfg(unix)]
-fn retained_file_identity(
-    _path: &Path,
-    _file: &File,
-    metadata: &Metadata,
-) -> Result<Option<([u8; 32], [u8; 32])>> {
-    use std::os::unix::fs::MetadataExt;
-
-    let mut stable = Sha256::new();
-    stable.update(b"ctx-jsonl-retained-file-identity-v1\0unix-stable\0");
-    stable.update(metadata.dev().to_le_bytes());
-    stable.update(metadata.ino().to_le_bytes());
-    let mut change = Sha256::new();
-    change.update(b"ctx-jsonl-retained-file-identity-v1\0unix-change\0");
-    change.update(metadata.ctime().to_le_bytes());
-    change.update(metadata.ctime_nsec().to_le_bytes());
-    Ok(Some((stable.finalize().into(), change.finalize().into())))
-}
-
-#[cfg(target_os = "windows")]
-fn retained_file_identity(
-    path: &Path,
-    file: &File,
-    _metadata: &Metadata,
-) -> Result<Option<([u8; 32], [u8; 32])>> {
-    use std::{mem::size_of, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_BASIC_INFO, FILE_ID_INFO,
-    };
-
-    let handle = file.as_raw_handle();
-    let mut basic_info = FILE_BASIC_INFO::default();
-    let basic_result = unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileBasicInfo,
-            &mut basic_info as *mut FILE_BASIC_INFO as *mut std::ffi::c_void,
-            size_of::<FILE_BASIC_INFO>() as u32,
-        )
-    };
-    if basic_result == 0 {
-        return Err(std::io::Error::last_os_error().into());
+pub(crate) fn revalidate_frozen_prefix(
+    source_path: &Path,
+    source_file: &OpenedProviderSourceFile,
+    frozen: &JsonlFileObservation,
+    prefix_length: u64,
+    expected_prefix_digest: [u8; 32],
+) -> Result<JsonlFileObservation> {
+    if prefix_length > frozen.length {
+        return Err(CaptureError::SourceChangedDuringCapture);
     }
-    if basic_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "reparse-point provider transcript files are rejected",
-        });
+    let before = observe_metadata(
+        source_path,
+        source_file.file(),
+        &source_file.file().metadata()?,
+    )?;
+    if !frozen.admits_frozen_prefix_in(&before) {
+        return Err(CaptureError::SourceChangedDuringCapture);
     }
-    let mut id_info = FILE_ID_INFO::default();
-    let id_result = unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileIdInfo,
-            &mut id_info as *mut FILE_ID_INFO as *mut std::ffi::c_void,
-            size_of::<FILE_ID_INFO>() as u32,
-        )
-    };
-    if id_result == 0 {
-        return Err(std::io::Error::last_os_error().into());
+    source_file.revalidate_same_object()?;
+    let observed = hash_prefix(
+        &mut source_file.file().try_clone()?,
+        prefix_length,
+        new_prefix_hasher(),
+    )?;
+    if prefix_digest(&observed) != expected_prefix_digest {
+        return Err(CaptureError::SourceChangedDuringCapture);
     }
-    let mut stable = Sha256::new();
-    stable.update(b"ctx-jsonl-retained-file-identity-v1\0windows-stable\0");
-    stable.update(id_info.VolumeSerialNumber.to_le_bytes());
-    stable.update(id_info.FileId.Identifier);
-    let mut change = Sha256::new();
-    change.update(b"ctx-jsonl-retained-file-identity-v1\0windows-change\0");
-    change.update(basic_info.ChangeTime.to_le_bytes());
-    change.update(basic_info.LastWriteTime.to_le_bytes());
-    change.update(basic_info.FileAttributes.to_le_bytes());
-    Ok(Some((stable.finalize().into(), change.finalize().into())))
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn retained_file_identity(
-    _path: &Path,
-    _file: &File,
-    _metadata: &Metadata,
-) -> Result<Option<([u8; 32], [u8; 32])>> {
-    Ok(None)
+    let after = observe_metadata(
+        source_path,
+        source_file.file(),
+        &source_file.file().metadata()?,
+    )?;
+    if !frozen.admits_frozen_prefix_in(&after) {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    source_file.revalidate_same_object()?;
+    Ok(after)
 }
 
 enum RawLine {
