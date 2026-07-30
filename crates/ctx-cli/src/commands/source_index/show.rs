@@ -12,8 +12,7 @@ use uuid::Uuid;
 use crate::{
     analytics::{count_bucket, ShowTelemetry},
     complete_content::{
-        enforce_complete_content_output_limit, ContentPolicy,
-        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        enforce_complete_content_output_limit, ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, OutputFormat},

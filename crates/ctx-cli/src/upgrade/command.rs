@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
-use ctx_history_core::platform_security::{create_private_directory_all, verify_private_directory};
+use ctx_history_core::platform_security::{establish_private_data_root, verify_private_directory};
 use serde_json::{json, Value};
 
 use crate::{
@@ -340,8 +340,12 @@ fn upgrade_failure_kind(error: &anyhow::Error) -> UpgradeFailureKind {
 }
 
 fn prepare_upgrade_data_root(data_root: &Path) -> Result<()> {
-    create_private_directory_all(data_root)
-        .with_context(|| format!("create private upgrade data root {}", data_root.display()))?;
+    establish_private_data_root(data_root).with_context(|| {
+        format!(
+            "establish private upgrade data root {}",
+            data_root.display()
+        )
+    })?;
     verify_private_directory(data_root)
         .with_context(|| format!("verify private upgrade data root {}", data_root.display()))
 }

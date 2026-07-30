@@ -7,13 +7,6 @@ use std::{
 use clap::ValueEnum;
 use serde_json::json;
 
-#[allow(dead_code)]
-mod render;
-#[allow(unused_imports)]
-pub(crate) use render::{
-    render_progress_snapshot, ProgressFrame, ProgressFrameKind, ProgressSnapshot,
-};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressArg {
     Auto,

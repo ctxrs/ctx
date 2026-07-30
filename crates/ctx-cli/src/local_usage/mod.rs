@@ -18,7 +18,7 @@ mod tests;
 
 pub(crate) use correlation::McpUsageRecorder;
 pub(crate) use estimate::{estimate_usage, EstimateFacts, UsageEstimates};
-pub(crate) use report::{pro_conversion_action, read_report, render_human_summary, UsageReport};
+pub(crate) use report::{pro_conversion_action, read_report, UsageReport};
 pub(crate) use store::{reset, UsageStoreError};
 
 pub(crate) const DEFINITION_VERSION: i64 = 2;

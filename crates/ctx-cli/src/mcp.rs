@@ -624,9 +624,7 @@ fn recover_enabled_daemon_before_search(data_root: &Path) {
     let Ok(config) = config::AppConfig::load(data_root) else {
         return;
     };
-    if !config.daemon.enabled
-        || crate::semantic::daemon_autostart_suppression_reason().is_some()
-    {
+    if !config.daemon.enabled || crate::semantic::daemon_autostart_suppression_reason().is_some() {
         return;
     }
     // Search continues against the last verified generation when recovery is

@@ -13,7 +13,7 @@ use crate::{
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     output::{compact_json, OutputFormat},
-    transcript::{shell_quote_arg, write_output},
+    transcript::write_output,
 };
 
 use super::{
@@ -21,20 +21,13 @@ use super::{
     shared::source_path_exists,
 };
 
-#[allow(dead_code)]
 mod human;
-#[allow(dead_code)]
 mod locate;
-#[allow(dead_code)]
 mod search;
-#[allow(dead_code)]
 mod show;
 
-#[allow(unused_imports)]
 pub(super) use locate::render_locate_document;
-#[allow(unused_imports)]
 pub(super) use search::render_search_document;
-#[allow(unused_imports)]
 pub(super) use show::render_show_document;
 
 /// Returns the canonical byte count for structured human output.
@@ -42,7 +35,6 @@ pub(super) use show::render_show_document;
 /// Callers must measure the plain document before `Ui` applies terminal
 /// styling so color capability never changes usage accounting.
 #[must_use]
-#[allow(dead_code)]
 pub(super) fn canonical_human_output_bytes(document: &crate::ui::Document) -> usize {
     document.render_plain().len()
 }
@@ -54,101 +46,6 @@ pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
 pub(super) fn stdout_body_bytes(body: &str) -> usize {
     body.len()
         .saturating_add(usize::from(!body.ends_with('\n')))
-}
-
-pub(super) fn locate_session_text_output_bytes(value: &Value) -> usize {
-    let mut bytes = format!(
-        "ctx_session_id: {}\n",
-        value["ctx_session_id"].as_str().unwrap_or("")
-    )
-    .len();
-    bytes = bytes
-        .saturating_add(optional_json_text_line_bytes(value, "provider"))
-        .saturating_add(optional_json_text_line_bytes(value, "provider_session_id"));
-    if let Some(source) = value.get("source") {
-        bytes = bytes
-            .saturating_add(optional_json_text_line_bytes(source, "path"))
-            .saturating_add(optional_json_text_line_bytes(source, "source_format"));
-        if let Some(exists) = source.get("exists").and_then(Value::as_bool) {
-            bytes = bytes.saturating_add(format!("source_exists: {exists}\n").len());
-        }
-    }
-    if let Some(command) = value
-        .get("resume")
-        .and_then(|resume| resume.get("command"))
-        .and_then(Value::as_str)
-    {
-        bytes = bytes.saturating_add(format!("resume_command: {command}\n").len());
-    }
-    bytes
-}
-
-pub(super) fn locate_event_text_output_bytes(value: &Value) -> usize {
-    let mut bytes = format!(
-        "ctx_event_id: {}\n",
-        value["ctx_event_id"].as_str().unwrap_or("")
-    )
-    .len();
-    for key in [
-        "ctx_session_id",
-        "provider",
-        "provider_session_id",
-        "event_type",
-        "role",
-        "cursor",
-    ] {
-        bytes = bytes.saturating_add(optional_json_text_line_bytes(value, key));
-    }
-    if let Some(source) = value.get("source") {
-        bytes = bytes.saturating_add(optional_json_text_line_bytes(source, "path"));
-    }
-    if let Some(source_record) = value.get("source_record") {
-        if let Some(ordinal) = source_record.get("ordinal").and_then(Value::as_u64) {
-            bytes = bytes.saturating_add(format!("source_record_ordinal: {ordinal}\n").len());
-        }
-        if let Some(index) = source_record.get("subrecord_index").and_then(Value::as_u64) {
-            bytes = bytes.saturating_add(format!("source_record_subrecord_index: {index}\n").len());
-        }
-    }
-    bytes.saturating_add(render_locate_event_availability_text(value).len())
-}
-
-pub(super) fn render_locate_event_availability_text(value: &Value) -> String {
-    let mut output = String::new();
-    if let Some(source) = value.get("source") {
-        push_optional_json_text_line(&mut output, source, "source_format");
-        if let Some(exists) = source.get("exists").and_then(Value::as_bool) {
-            output.push_str(&format!("source_exists: {exists}\n"));
-        }
-    }
-    if let Some(complete_content) = value.get("complete_content") {
-        if let Some(locator_available) = complete_content
-            .get("locator_available")
-            .and_then(Value::as_bool)
-        {
-            output.push_str(&format!(
-                "complete_content_locator_available: {locator_available}\n"
-            ));
-        }
-        if let Some(available) = complete_content.get("available").and_then(Value::as_bool) {
-            output.push_str(&format!("complete_content_available: {available}\n"));
-        }
-    }
-    output
-}
-
-fn push_optional_json_text_line(output: &mut String, value: &Value, key: &str) {
-    if let Some(text) = value.get(key).and_then(Value::as_str) {
-        output.push_str(&format!("{key}: {text}\n"));
-    }
-}
-
-fn optional_json_text_line_bytes(value: &Value, key: &str) -> usize {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(|text| format!("{key}: {text}\n").len())
-        .unwrap_or_default()
 }
 
 struct SearchJsonInput<'a> {
@@ -359,81 +256,6 @@ fn search_result_json(
         }],
         "visibility": "local",
     }))
-}
-
-pub(super) fn render_search_text(value: &Value, verbose: bool) -> String {
-    let mut output = String::new();
-    let results = value["results"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if results.is_empty() {
-        let query = value["query"].as_str().unwrap_or_default();
-        output.push_str(&format!("no results for {}\n", shell_quote_arg(query)));
-        return output;
-    }
-    for (position, result) in results.iter().enumerate() {
-        let title = result["title"].as_str().unwrap_or("indexed event");
-        if verbose {
-            output.push_str(title);
-            output.push('\n');
-            for key in [
-                "ctx_event_id",
-                "ctx_session_id",
-                "provider_session_id",
-                "source_format",
-            ] {
-                if let Some(value) = result[key].as_str() {
-                    output.push_str(&format!("  {key}: {value}\n"));
-                }
-            }
-            if let Some(snippet) = result["snippet"].as_str() {
-                output.push_str(&format!("  {snippet}\n"));
-            }
-            if let Some(rank) = result["rank"].as_f64() {
-                output.push_str(&format!("  rank: {rank:.2}\n"));
-            }
-            if let Some(importance) = result["session_importance"].as_f64() {
-                output.push_str(&format!("  session_importance: {importance:.2}\n"));
-            }
-            if let Some(commands) = result["suggested_next_commands"].as_array() {
-                for command in commands.iter().filter_map(Value::as_str).take(3) {
-                    output.push_str(&format!("  next: {command}\n"));
-                }
-            }
-            if let Some(event_id) = result["ctx_event_id"].as_str() {
-                output.push_str(&format!("  citation: event {event_id}\n"));
-            }
-        } else {
-            output.push_str(&format!("{}. {title}\n", position + 1));
-            let provider = result["provider"].as_str().unwrap_or("unknown");
-            let scope = result["result_scope"].as_str().unwrap_or("event");
-            let score = result["session_importance"]
-                .as_f64()
-                .or_else(|| result["rank"].as_f64())
-                .unwrap_or_default();
-            output.push_str(&format!("   {provider} | {scope} {score:.2}\n"));
-            if let Some(snippet) = result["snippet"].as_str() {
-                output.push_str(&format!("   {snippet}\n"));
-            }
-            if let Some(command) = result["suggested_next_commands"]
-                .as_array()
-                .and_then(|commands| commands.first())
-                .and_then(Value::as_str)
-            {
-                output.push_str(&format!("   inspect: {command}\n"));
-            }
-        }
-    }
-    if value["truncation"]["candidate_pool_truncated"] == true {
-        output.push_str(
-            "warning: source-backed session diversity was bounded by the current index query API\n",
-        );
-    }
-    if value["result_window"]["more_available"] == true {
-        output.push_str("More results available.\n");
-    }
-    output
 }
 
 pub(super) fn write_show_value(

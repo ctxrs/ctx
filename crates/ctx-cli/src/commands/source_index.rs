@@ -28,10 +28,7 @@ use crate::{
 };
 
 #[cfg(test)]
-use render::{
-    enforce_json_output_limit, locate_event_text_output_bytes, locate_session_text_output_bytes,
-    pretty_json_stdout_bytes, stdout_body_bytes,
-};
+use render::{enforce_json_output_limit, pretty_json_stdout_bytes, stdout_body_bytes};
 #[cfg(test)]
 use search::{
     collect_search_hits_with_backend, collect_search_hits_with_backend_using, index_search_filters,
