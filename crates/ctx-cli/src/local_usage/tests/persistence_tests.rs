@@ -31,10 +31,16 @@ fn stats_read_is_byte_for_byte_self_excluding() {
 fn reset_removes_aggregates_without_recreating_usage() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();
+    let path = store::usage_path(root.path());
     assert!(reset(root.path()).unwrap());
     let report = read_report(root.path(), true, true);
     assert_eq!(report.state, "empty");
     assert!(report.definitions.unwrap().is_empty());
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let maintenance_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM maintenance", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(maintenance_rows, 0);
 }
 
 #[test]

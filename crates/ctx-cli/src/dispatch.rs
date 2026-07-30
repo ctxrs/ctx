@@ -272,6 +272,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("docs has a telemetry draft")
                 .docs_mut(),
+            &mut local_usage_draft,
         ),
         CommandRoot::Integrations(args) => integrations::run(
             args,

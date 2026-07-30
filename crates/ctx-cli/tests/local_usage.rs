@@ -59,6 +59,29 @@ fn default_on_usage_is_independent_of_commercial_telemetry_and_reports_definitio
 }
 
 #[test]
+fn docs_records_the_exact_rendered_stdout_bytes() {
+    let temp = tempdir();
+    let stdout = enabled(ctx(&temp).args(["docs", "list", "--format=json"]))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let delivered_output_bytes: i64 = connection
+        .query_row(
+            "SELECT delivered_output_bytes FROM daily_usage \
+             WHERE surface = 'cli' AND operation = 'docs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(delivered_output_bytes, i64::try_from(stdout.len()).unwrap());
+    assert!(delivered_output_bytes > 0);
+}
+
+#[test]
 fn report_is_content_free_and_stats_emit_no_commercial_analytics() {
     let temp = tempdir();
     let path_marker = "PRIVATE_USAGE_PATH_7d31";
