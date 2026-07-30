@@ -1,4 +1,5 @@
 mod codex;
+mod codex_active_contracts;
 mod inventory;
 mod registry;
 
