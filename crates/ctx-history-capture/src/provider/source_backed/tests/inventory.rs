@@ -1,4 +1,5 @@
 use super::*;
+use std::str::FromStr;
 
 #[test]
 fn importable_provider_inventory_covers_default_and_explicit_formats() {
@@ -224,6 +225,48 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
         assert_eq!(route.certified_source_format, certified);
         assert_eq!(route.automatic, automatic);
         assert_eq!(route.explicit_manual, explicit);
+    }
+}
+
+#[test]
+fn public_supported_formats_have_one_exact_hydratable_landed_route() {
+    let matrix: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../../docs/provider-support-matrix.json"
+    ))
+    .unwrap();
+
+    for provider in matrix["providers"].as_array().unwrap() {
+        let capture_provider =
+            CaptureProvider::from_str(provider["capture_provider"].as_str().unwrap()).unwrap();
+        for path in provider["implemented_paths"].as_array().unwrap() {
+            let source_format = path["source_format"].as_str().unwrap();
+            let routes = LANDED_SOURCE_BACKED_ROUTES
+                .iter()
+                .filter(|route| {
+                    route.provider == capture_provider && route.source_format == source_format
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                routes.len(),
+                1,
+                "{} {} must have exactly one landed source-backed route",
+                capture_provider.as_str(),
+                source_format
+            );
+            assert_eq!(
+                routes[0].exact_hydration,
+                SourceBackedHydrationSupport::Full,
+                "{} {} must hydrate exact provider-owned content",
+                capture_provider.as_str(),
+                source_format
+            );
+            assert!(
+                routes[0].unsupported_reason.is_none(),
+                "{} {} is publicly supported but its landed route is unsupported",
+                capture_provider.as_str(),
+                source_format
+            );
+        }
     }
 }
 

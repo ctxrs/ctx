@@ -14,6 +14,7 @@ load(
 load(
     "//tools/bazel:test_tiers.bzl",
     "NATIVE_RUST_TESTS",
+    "PROVIDER_CONTRACT_TESTS",
     "RELEASE_QUALIFICATION_TESTS",
     "RUST_FORMAT_TARGETS",
 )
@@ -847,6 +848,20 @@ test_suite(
 test_suite(name = "native_rust", tests = NATIVE_RUST_TESTS)
 
 test_suite(
+    name = "provider_contracts",
+    tests = PROVIDER_CONTRACT_TESTS,
+)
+
+test_suite(
+    name = "native_platform_contracts",
+    tests = [
+        ":provider_contracts",
+        "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
+    ],
+    tags = ["release-gate"],
+)
+
+test_suite(
     name = "release_qualification",
     tests = RELEASE_QUALIFICATION_TESTS,
     tags = ["release-gate"],
@@ -916,7 +931,14 @@ test_suite(
 # Serialized upgrade acceptance, daemon soak, and injected process/filesystem
 # faults remain explicit release qualification rather than running after every
 # ordinary source or BUILD-file change.
-test_suite(name = "presubmit", tests = [":fast", ":native_rust"])
+test_suite(
+    name = "presubmit",
+    tests = [
+        ":fast",
+        ":native_rust",
+        ":provider_contracts",
+    ],
+)
 
 test_suite(
     name = "ci",
