@@ -1,10 +1,10 @@
 use super::*;
 
-/// Retained DB/WAL authority for a bounded physical-revision comparison.
+/// Retained DB/WAL authority for an exact bounded physical-revision comparison.
 ///
 /// SHM is intentionally neither opened nor represented: its reader marks are
-/// volatile lock coordination. Revalidation relies on exact retained/named
-/// DB and WAL metadata, so the bounded content tokens are read only once.
+/// volatile lock coordination. Revalidation hashes bounded DB and WAL
+/// components in full so timestamp restoration cannot hide an in-place rewrite.
 #[derive(Debug)]
 pub(super) struct SqlitePhysicalRevisionFamily {
     authority: SqliteSourceDirectoryAuthority,
@@ -65,7 +65,8 @@ impl SqlitePhysicalRevisionFamily {
         &self,
     ) -> SqliteSourceAccessResult<(SqliteFamilyEvidence, u64, u64)> {
         let database = self.database.capture_state()?;
-        let (database_token, database_bytes_read) = self.database.bounded_token_with_bytes()?;
+        let (database_token, database_bytes_read) =
+            self.database.exact_content_digest_with_bytes()?;
         let wal = self
             .wal
             .as_ref()
@@ -73,7 +74,7 @@ impl SqlitePhysicalRevisionFamily {
             .transpose()?;
         let (wal_token, wal_bytes_read) = match self.wal.as_ref() {
             Some(wal) => {
-                let (token, bytes_read) = wal.bounded_token_with_bytes()?;
+                let (token, bytes_read) = wal.exact_content_digest_with_bytes()?;
                 (Some(token), bytes_read)
             }
             None => (None, 0),
@@ -116,13 +117,14 @@ impl SqlitePhysicalRevisionFamily {
             &self.wal_name,
             &self.wal_path,
         )?;
-        let (database_token, database_bytes_read) = self.database.bounded_token_with_bytes()?;
+        let (database_token, database_bytes_read) =
+            self.database.exact_content_digest_with_bytes()?;
         if database_token != expected.database_token {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
         let wal_bytes_read = match (self.wal.as_ref(), expected.wal_token.as_ref()) {
             (Some(wal), Some(expected_token)) => {
-                let (token, bytes_read) = wal.bounded_token_with_bytes()?;
+                let (token, bytes_read) = wal.exact_content_digest_with_bytes()?;
                 if token != *expected_token {
                     return Err(SqliteSourceAccessError::SourceChanged);
                 }
