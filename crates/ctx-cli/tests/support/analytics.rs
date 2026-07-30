@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{copied_ctx_binary, ctx, ctx_from_binary, TempDir};
+use super::{bind_test_ctx_binary, ctx, TempDir};
 
 pub(crate) struct SourceRefreshDaemon {
     child: Option<Child>,
@@ -40,8 +40,8 @@ pub(crate) fn start_source_refresh_daemon(
         "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
-    let binary = copied_ctx_binary(temp);
-    let prepared = ctx_from_binary(temp, &binary);
+    bind_test_ctx_binary(temp);
+    let prepared = ctx(temp);
     let mut command = StdCommand::new(prepared.get_program());
     for (name, value) in prepared.get_envs() {
         match value {
@@ -103,6 +103,21 @@ pub(crate) fn start_source_refresh_daemon(
             status["daemon"]["running"] == true
                 && status["daemon"]["source_refresh_endpoint"]["available"] == true
         }) {
+            ctx(temp)
+                .args([
+                    "import",
+                    "--all",
+                    "--no-daemon",
+                    "--format=json",
+                    "--progress",
+                    "none",
+                ])
+                .env("CTX_DATA_ROOT", data_root)
+                .env("HOME", home)
+                .env("XDG_STATE_HOME", state)
+                .env("LOCALAPPDATA", state)
+                .assert()
+                .success();
             return daemon;
         }
         assert!(

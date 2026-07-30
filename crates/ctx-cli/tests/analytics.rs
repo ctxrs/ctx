@@ -743,7 +743,7 @@ fn search_analytics_reports_existing_indexed_content() {
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["zero_result"], true);
+    assert_eq!(properties["zero_result"], false);
     assert_eq!(properties["has_indexed_content_after_search"], true);
     for retired_store_property in [
         "had_existing_store_before_search",
@@ -1081,7 +1081,10 @@ fn setup_analytics_emits_one_terminal_event() {
     let events = read_analytics_events(&events_path);
     let setup_events = events
         .iter()
-        .filter(|event| event["surface"] == "cli" && event["operation"] == "setup")
+        .filter(|event| {
+            let event = analytics_cli_event(event);
+            event["surface"] == "cli" && event["operation"] == "setup"
+        })
         .collect::<Vec<_>>();
     assert_eq!(setup_events.len(), 1, "{events:#?}");
     assert_operation_event(setup_events[0], "setup", "success");
@@ -1173,27 +1176,61 @@ fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
 
     let payloads = read_analytics_events(&events_path);
     assert_eq!(payloads.len(), 2, "each invocation must send one batch");
-    for payload in &payloads {
+    for (payload, expected_change) in payloads.iter().zip(["changed", "no_op"]) {
+        let expected_core_result = if expected_change == "changed" {
+            "complete"
+        } else {
+            "no_op"
+        };
         let events = payload["events"].as_array().unwrap();
-        assert_eq!(events.len(), 2, "records and files must not emit events");
-        assert_eq!(events[0]["event_name"], "provider_refresh_completed");
-        assert_eq!(events[1]["event_name"], "operation_completed");
-        assert_eq!(events[1]["operation"], "import");
+        assert_eq!(
+            events.len(),
+            3,
+            "each import must emit one provider receipt, one global publication receipt, and one operation receipt"
+        );
+        let provider_events = events
+            .iter()
+            .filter(|event| {
+                event["event_name"] == "provider_refresh_completed"
+                    && event["properties"].get("provider").is_some()
+            })
+            .collect::<Vec<_>>();
+        let global_events = events
+            .iter()
+            .filter(|event| {
+                event["event_name"] == "provider_refresh_completed"
+                    && event["properties"].get("provider").is_none()
+            })
+            .collect::<Vec<_>>();
+        let operation_events = events
+            .iter()
+            .filter(|event| {
+                event["event_name"] == "operation_completed" && event["operation"] == "import"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(provider_events.len(), 1, "{events:#?}");
+        assert_eq!(global_events.len(), 1, "{events:#?}");
+        assert_eq!(operation_events.len(), 1, "{events:#?}");
 
-        let refresh = events[0]["properties"].as_object().unwrap();
+        let refresh = provider_events[0]["properties"].as_object().unwrap();
         assert_eq!(refresh["provider"], "codex");
         assert_eq!(refresh["trigger"], "import");
         assert_eq!(refresh["source_mode"], "explicit_path");
-        assert_eq!(refresh["change"], "changed");
+        assert_eq!(refresh["change"], expected_change);
         assert_eq!(refresh["content_evidence"], "none");
         assert_eq!(refresh["refresh_result"], "complete");
-        assert_eq!(refresh["core_result"], "complete");
+        assert_eq!(refresh["core_result"], expected_core_result);
         assert_eq!(refresh["canonical_pro_result"], "unknown");
         assert_eq!(refresh["output_pro_result"], "unknown");
         assert_eq!(refresh["failure_scope"], "none");
         assert_eq!(refresh["failure_type"], "none");
-        assert!(refresh.get("work_kind").is_none());
-        assert!(refresh.get("retired_records_bucket").is_none());
+        if expected_change == "changed" {
+            assert!(refresh.get("work_kind").is_none());
+            assert!(refresh.get("retired_records_bucket").is_none());
+        } else {
+            assert_eq!(refresh["work_kind"], "no_op");
+            assert_eq!(refresh["retired_records_bucket"], "0");
+        }
         assert_eq!(refresh["work_remaining"], false);
         for bucket in [
             "sources_bucket",
@@ -1238,6 +1275,42 @@ fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
             assert!(
                 !refresh.contains_key(forbidden),
                 "provider refresh exposed {forbidden}: {refresh:#?}"
+            );
+        }
+
+        let global = global_events[0]["properties"].as_object().unwrap();
+        assert_eq!(global["trigger"], "import");
+        assert_eq!(global["change"], expected_change);
+        assert_eq!(global["content_evidence"], "unknown");
+        assert_eq!(global["refresh_result"], "complete");
+        assert_eq!(global["core_result"], expected_core_result);
+        assert_eq!(global["canonical_pro_result"], "unknown");
+        assert_eq!(global["output_pro_result"], "unknown");
+        assert_eq!(global["failure_scope"], "none");
+        assert_eq!(global["failure_type"], "none");
+        assert_eq!(global["work_remaining"], false);
+        if expected_change == "changed" {
+            assert!(global.get("work_kind").is_none());
+        } else {
+            assert_eq!(global["work_kind"], "no_op");
+        }
+        for provider_only in [
+            "provider",
+            "source_mode",
+            "sources_bucket",
+            "source_files_bucket",
+            "sessions_bucket",
+            "events_bucket",
+            "edges_bucket",
+            "skips_bucket",
+            "rejections_bucket",
+            "failures_bucket",
+            "bytes_bucket",
+            "retired_records_bucket",
+        ] {
+            assert!(
+                !global.contains_key(provider_only),
+                "global publication receipt exposed provider detail {provider_only}: {global:#?}"
             );
         }
         assert_no_json_string_contains(payload, &[fixture.as_str(), home.to_str().unwrap()]);

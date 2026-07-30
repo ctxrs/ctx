@@ -8,8 +8,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use super::{
-    assert_explicit_source_publication, copied_ctx_binary, ctx, ctx_from_binary, data_root,
-    json_output, terminate_and_reap_test_child,
+    assert_explicit_source_publication, bind_test_ctx_binary, ctx, data_root, json_output,
+    terminate_and_reap_test_child,
 };
 
 pub(crate) struct McpSourceRefreshDaemon {
@@ -46,8 +46,8 @@ pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefres
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
-    let binary = copied_ctx_binary(temp);
-    let prepared = ctx_from_binary(temp, &binary);
+    bind_test_ctx_binary(temp);
+    let prepared = ctx(temp);
     let mut command = StdCommand::new(prepared.get_program());
     for (name, value) in prepared.get_envs() {
         match value {
@@ -102,6 +102,17 @@ pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefres
             status["daemon"]["running"] == true
                 && status["daemon"]["source_refresh_endpoint"]["available"] == true
         }) {
+            ctx(temp)
+                .args([
+                    "import",
+                    "--all",
+                    "--no-daemon",
+                    "--format=json",
+                    "--progress",
+                    "none",
+                ])
+                .assert()
+                .success();
             return daemon;
         }
         assert!(
@@ -128,11 +139,14 @@ pub(crate) fn import_codex_fixture_through_daemon(
         "--progress",
         "none",
     ]));
-    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
-    assert!(
-        imported["totals"]["current_source_count"]
-            .as_u64()
-            .is_some_and(|count| count > 0),
+    let source =
+        assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
+    let current_source_count = imported["totals"]["current_source_count"]
+        .as_u64()
+        .expect("import totals must report the current source count");
+    assert!(current_source_count > 0, "{imported:#}");
+    assert_eq!(
+        source["current_source_count"], current_source_count,
         "{imported:#}"
     );
     assert!(
@@ -221,6 +235,21 @@ pub(crate) fn assert_cli_mcp_status_parity(
     temp: &TempDir,
     envs: &[(&str, &str)],
 ) -> (Value, Value) {
+    fn without_observation_time(mut status: Value) -> Value {
+        let snapshot = status
+            .pointer_mut("/daemon/supervisor/environment_snapshot")
+            .and_then(Value::as_object_mut)
+            .expect("status must include the daemon environment snapshot");
+        let observed_at_ms = snapshot
+            .remove("current_observed_at_ms")
+            .expect("environment snapshot must include its observation time");
+        assert!(
+            observed_at_ms.as_u64().is_some(),
+            "environment snapshot observation time must be an unsigned integer: {observed_at_ms:#}"
+        );
+        status
+    }
+
     let mut command = ctx(temp);
     command
         .args(["status", "--format=json"])
@@ -257,7 +286,11 @@ pub(crate) fn assert_cli_mcp_status_parity(
     assert_eq!(responses.len(), 2, "{responses:#?}");
     let result = responses[1]["result"].clone();
     assert!(result["isError"].is_null(), "{result:#}");
-    assert_eq!(result["structuredContent"], cli, "{result:#}");
+    assert_eq!(
+        without_observation_time(result["structuredContent"].clone()),
+        without_observation_time(cli.clone()),
+        "{result:#}"
+    );
     (cli, result)
 }
 
