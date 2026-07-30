@@ -591,6 +591,7 @@ fn tool_search(
         since.as_deref(),
         event_type.as_deref(),
     )?;
+    recover_enabled_daemon_before_search(data_root);
     crate::commands::source_index::mcp_search(
         crate::commands::source_index::SourceSearchRequest {
             query,
@@ -617,6 +618,26 @@ fn tool_search(
         },
         data_root,
     )
+}
+
+fn recover_enabled_daemon_before_search(data_root: &Path) {
+    let Ok(config) = config::AppConfig::load(data_root) else {
+        return;
+    };
+    if !config.daemon.enabled
+        || crate::semantic::daemon_autostart_suppression_reason().is_some()
+    {
+        return;
+    }
+    // Search continues against the last verified generation when recovery is
+    // unavailable. The attempt is nevertheless made for every search so a
+    // long-lived MCP process cannot retain the startup health decision after
+    // the daemon later crashes.
+    let _ = crate::semantic::autostart_daemon_and_wait(
+        data_root,
+        &config,
+        crate::DaemonTriggerCommandArg::Search,
+    );
 }
 
 fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
