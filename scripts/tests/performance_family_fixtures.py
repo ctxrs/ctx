@@ -16,6 +16,9 @@ import unittest
 
 FAMILY_LEAF_COUNT = 48
 FAMILY_TEXT_BYTES = 384 * 1024
+DOCUMENT_LEAF_COUNT = 32
+CLINE_ITEM_TEXT_BYTES = 48 * 1024
+CLINE_ITEMS_PER_LEAF = 12
 FAMILY_MIN_FIXTURE_BYTES = 16 * 1024 * 1024
 FAMILY_MAX_FIXTURE_BYTES = 32 * 1024 * 1024
 
@@ -229,12 +232,12 @@ def compact_json(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-def fixed_family_text(query: str) -> str:
+def fixed_family_text(query: str, target_bytes: int = FAMILY_TEXT_BYTES) -> str:
     prefix = f"{query} "
-    if len(prefix) >= FAMILY_TEXT_BYTES:
+    if len(prefix) >= target_bytes:
         raise ValueError("family fixture query exceeds its fixed body size")
-    body = prefix + "x" * (FAMILY_TEXT_BYTES - len(prefix))
-    if len(body.encode("ascii")) != FAMILY_TEXT_BYTES:
+    body = prefix + "x" * (target_bytes - len(prefix))
+    if len(body.encode("ascii")) != target_bytes:
         raise AssertionError("family fixture body has the wrong byte count")
     return body
 
@@ -290,7 +293,7 @@ def write_lingma_sqlite_wal_corpus(home: Path) -> FamilyCorpus:
         )
         write_bytes(
             settings_path,
-            compact_json({"Lingma.LocalMachineStoragePath": str(selected_root)}),
+            compact_json({"QoderCN.LocalMachineStoragePath": str(selected_root)}),
         )
         connection = sqlite3.connect(database_path)
         connection.execute(
@@ -381,8 +384,26 @@ def write_lingma_sqlite_wal_corpus(home: Path) -> FamilyCorpus:
     )
 
 
-def cline_api_messages(message_id: str, body: str) -> bytes:
-    return compact_json([{"content": body, "id": message_id, "role": "user"}])
+def cline_api_messages(leaf: int, first_body: str) -> bytes:
+    messages = []
+    for item in range(CLINE_ITEMS_PER_LEAF):
+        body = (
+            first_body
+            if item == 0
+            else fixed_family_text(
+                f"{family_query(DOCUMENT_TREE_FAMILY, leaf)}item{item:02d}",
+                CLINE_ITEM_TEXT_BYTES,
+            )
+        )
+        message = {
+            "content": body,
+            "id": f"family-message-{leaf:03d}-{item:02d}",
+            "role": "user",
+        }
+        if len(compact_json(message)) >= 64 * 1024:
+            raise RuntimeError("Cline family item exceeds its retained-item bound")
+        messages.append(message)
+    return compact_json(messages)
 
 
 def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
@@ -390,11 +411,13 @@ def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
     certified_source_bytes = 0
     cold_query = family_query(DOCUMENT_TREE_FAMILY, 0)
     replacement_query = family_query(DOCUMENT_TREE_FAMILY, 0, "repl")
-    cold_body = fixed_family_text(cold_query)
-    replacement_body = fixed_family_text(replacement_query)
+    cold_body = fixed_family_text(cold_query, CLINE_ITEM_TEXT_BYTES)
+    replacement_body = fixed_family_text(
+        replacement_query, CLINE_ITEM_TEXT_BYTES
+    )
     first_api: Path | None = None
 
-    for leaf in range(FAMILY_LEAF_COUNT):
+    for leaf in range(DOCUMENT_LEAF_COUNT):
         task_id = f"family-task-{leaf:03d}"
         task = root / "tasks" / task_id
         metadata = compact_json(
@@ -408,9 +431,12 @@ def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
         body = (
             cold_body
             if leaf == 0
-            else fixed_family_text(family_query(DOCUMENT_TREE_FAMILY, leaf))
+            else fixed_family_text(
+                family_query(DOCUMENT_TREE_FAMILY, leaf),
+                CLINE_ITEM_TEXT_BYTES,
+            )
         )
-        api = cline_api_messages(f"family-message-{leaf:03d}", body)
+        api = cline_api_messages(leaf, body)
         certified_source_bytes += write_bytes(task / "task_metadata.json", metadata)
         certified_source_bytes += write_bytes(
             task / "api_conversation_history.json", api
@@ -424,7 +450,7 @@ def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
     def replace_leaf() -> None:
         replace_bytes(
             first_api,
-            cline_api_messages("family-message-000", replacement_body),
+            cline_api_messages(0, replacement_body),
         )
 
     return FamilyCorpus(
@@ -437,12 +463,12 @@ def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
         replacement_query=replacement_query,
         cold_body=cold_body,
         replacement_body=replacement_body,
-        source_count=FAMILY_LEAF_COUNT,
-        complete_records=FAMILY_LEAF_COUNT,
-        retained_records=FAMILY_LEAF_COUNT,
+        source_count=DOCUMENT_LEAF_COUNT,
+        complete_records=DOCUMENT_LEAF_COUNT * CLINE_ITEMS_PER_LEAF,
+        retained_records=DOCUMENT_LEAF_COUNT * CLINE_ITEMS_PER_LEAF,
         ignored_records=0,
         rejected_records=0,
-        indexed_documents=FAMILY_LEAF_COUNT,
+        indexed_documents=DOCUMENT_LEAF_COUNT * CLINE_ITEMS_PER_LEAF,
         certified_source_bytes=certified_source_bytes,
         fixture_bytes=directory_file_bytes(root),
         independent_leaves=True,
