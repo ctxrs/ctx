@@ -37,7 +37,6 @@ pub(crate) use publication::{
 pub(crate) use schema::{
     fields_from_schema, lexical_schema, required_field, validate_schema, Fields,
 };
-
 pub use policy::{
     current_source_generation_policy, current_source_generation_policy_hash,
     EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
