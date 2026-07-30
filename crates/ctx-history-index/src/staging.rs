@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) struct PendingSource {
+    pub(super) source: SourceKey,
+    pub(super) mode: PendingSourceMode,
+    pub(super) staged_documents: u64,
+    pub(super) certificate: Option<CertifiedSource>,
+}
+
+// Keep the append base inline to avoid allocation and indirection.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum PendingSourceMode {
+    Replace,
+    Append { base: CertifiedSource },
+}
+
 /// Discards a completed one-pass staging run when it reproduced the full
 /// verified base manifest exactly.
 ///
