@@ -460,7 +460,7 @@ fn stale_locator_hydration_fails_closed_for_both_policy_tokens() {
             policy,
             "--format=json",
         ]));
-        assert!(stderr.contains("stale_record_evidence"), "{stderr}");
+        assert!(stderr.contains("stale_source_evidence"), "{stderr}");
         assert!(!stderr.contains(END_SENTINEL));
 
         let response = mcp_show_event(&fixture, policy);
@@ -468,7 +468,7 @@ fn stale_locator_hydration_fails_closed_for_both_policy_tokens() {
         let error = response["result"]["structuredContent"]["error"]
             .as_str()
             .unwrap();
-        assert!(error.contains("stale_record_evidence"), "{error}");
+        assert!(error.contains("stale_source_evidence"), "{error}");
         assert!(!error.contains(END_SENTINEL));
     }
     assert_no_legacy_store(&fixture);

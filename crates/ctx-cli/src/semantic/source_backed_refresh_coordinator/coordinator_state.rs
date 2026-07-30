@@ -1,5 +1,6 @@
 use super::*;
 
+mod generation_observation;
 mod runtime_metadata;
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
@@ -440,20 +441,6 @@ impl SourceBackedRefreshCoordinator {
         }));
     }
 
-    fn observed_published_generation(&self, data_root: &Path) -> Result<Option<String>> {
-        let retained = {
-            let state = self.lock_state();
-            state.current_published_generation.clone()
-        };
-        if retained.is_some() {
-            return Ok(retained);
-        }
-        if let Some(generation_id) = retained_generation_hint(data_root)? {
-            return Ok(Some(generation_id));
-        }
-        published_generation_id(data_root)
-    }
-
     pub(in crate::semantic) fn retained_published_generation(
         &self,
     ) -> Option<Arc<GenerationBoundSourceBackedResolver>> {
@@ -552,6 +539,7 @@ impl SourceBackedRefreshCoordinator {
                     previous_generation,
                     metadata,
                     requested_catalog,
+                    mode == "wait",
                 )?;
                 let request_id = response
                     .get("request_id")
@@ -607,6 +595,7 @@ impl SourceBackedRefreshCoordinator {
             observed_generation,
             SourceRefreshRuntimeMetadata::periodic(),
             Some(catalog),
+            false,
         )
     }
 
@@ -628,7 +617,7 @@ impl SourceBackedRefreshCoordinator {
         observed_generation: Option<String>,
         metadata: SourceRefreshRuntimeMetadata,
     ) -> Value {
-        self.enqueue_with_catalog_metadata(observed_generation, metadata, None)
+        self.enqueue_with_catalog_metadata(observed_generation, metadata, None, false)
             .expect("requests without catalog authority always coalesce")
     }
 
@@ -637,11 +626,14 @@ impl SourceBackedRefreshCoordinator {
         observed_generation: Option<String>,
         metadata: SourceRefreshRuntimeMetadata,
         requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+        fresh_after_running: bool,
     ) -> Result<Value> {
         let mut state = self.lock_state();
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                if active.state.is_active() {
+                if active.state.is_active()
+                    && !(fresh_after_running && active.state == SourceBackedRefreshState::Running)
+                {
                     if requested_catalog.is_none() {
                         return Ok(coalesce_attempt(active, metadata));
                     }
@@ -665,13 +657,13 @@ impl SourceBackedRefreshCoordinator {
             }
         }
 
-        if let Some(requested_catalog) = requested_catalog.as_ref() {
+        if fresh_after_running || requested_catalog.is_some() {
             let coalesced_request_id = state.pending_request_ids.iter().find_map(|request_id| {
                 find_attempt(&state, request_id)
                     .filter(|attempt| {
                         attempt.state.is_active()
                             && attempt.requested_explicit_source_catalog.as_ref()
-                                == Some(requested_catalog)
+                                == requested_catalog.as_ref()
                     })
                     .map(|attempt| attempt.request_id.clone())
             });
