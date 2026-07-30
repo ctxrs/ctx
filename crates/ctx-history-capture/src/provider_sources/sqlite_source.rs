@@ -48,8 +48,9 @@ const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v2\0";
 const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
 const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const SQLITE_COPY_BUFFER_BYTES: usize = 64 * 1024;
-const SQLITE_WAL_TOKEN_BYTES: usize = 64;
 const SQLITE_SHM_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const SQLITE_PHYSICAL_REVISION_MAX_COMPONENT_BYTES: u64 =
+    SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceComponent {
@@ -539,9 +540,10 @@ struct SqliteSourcePhysicalRevisionInner {
 
 /// Retained DB/WAL physical authority for a certified exact replay.
 ///
-/// Opening this fence performs no SQLite call and reads at most the first and
-/// last 64 bytes of each retained content component. Terminal revalidation
-/// rereads those bounded tokens and deliberately ignores volatile SHM state.
+/// Opening this fence performs no SQLite call. It hashes each bounded retained
+/// DB/WAL component so same-size rewrites with restored timestamps cannot be
+/// mistaken for an exact replay. Terminal revalidation repeats those hashes
+/// and deliberately ignores volatile SHM state.
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSourcePhysicalRevision {
     inner: Arc<SqliteSourcePhysicalRevisionInner>,
