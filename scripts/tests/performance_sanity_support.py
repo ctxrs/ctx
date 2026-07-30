@@ -144,22 +144,35 @@ def refresh_snapshot(
     search: dict[str, object], root: Path, env: dict[str, str]
 ) -> RefreshSnapshot:
     retrieval = search["retrieval"]
-    status = run_json(["status", "--format=json"], env, root)
-    daemon = status["daemon"]
-    job = daemon["jobs"]["source_backed_refresh"]
-    receipt = job["receipt"]
-    current = receipt["current"]
     generation_id = retrieval["generation_id"]
     indexed_documents = retrieval["indexed_documents"]
-    if (
-        daemon["mode"] != "source-refresh-only"
-        or job["owner"] != "daemon"
-        or job["status"] != "completed"
-        or job["request_state"] != "published"
-    ):
-        raise RuntimeError(
-            f"refresh did not use the ready daemon product seam: {job!r}"
-        )
+    deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+    while True:
+        status = run_json(["status", "--format=json"], env, root)
+        daemon = status["daemon"]
+        job = daemon["jobs"]["source_backed_refresh"]
+        if (
+            daemon["mode"] == "source-refresh-only"
+            and job["owner"] == "daemon"
+            and job["status"] == "completed"
+            and job["request_state"] == "published"
+            and job["published_generation"] == generation_id
+        ):
+            break
+        if job["status"] in {"failed", "retry_backoff"}:
+            raise RuntimeError(
+                f"refresh failed before publishing the queried generation: {job!r}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "refresh did not settle on the queried generation through the "
+                f"ready daemon product seam: {job!r}"
+            )
+        time.sleep(0.025)
+    receipt = job.get("receipt")
+    if not isinstance(receipt, dict):
+        raise RuntimeError(f"completed refresh omitted its receipt: {job!r}")
+    current = receipt["current"]
     if (
         job["published_generation"] != generation_id
         or receipt["published_generation"] != generation_id
