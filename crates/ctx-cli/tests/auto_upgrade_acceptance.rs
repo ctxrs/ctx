@@ -101,14 +101,7 @@ mod unix {
         fs::create_dir_all(candidate.parent().unwrap()).unwrap();
         fs::copy(configured_hook_fixture(), &candidate).unwrap();
         fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
-        if fs::metadata(&candidate).unwrap().len() > 128 * 1024 * 1024 {
-            let stripped = StdCommand::new("strip")
-                .arg("-S")
-                .arg(&candidate)
-                .status()
-                .unwrap();
-            assert!(stripped.success(), "strip v1 legacy-upgrade candidate");
-        }
+        ensure_managed_test_binary_is_bounded(&candidate);
         make_file_executable(&candidate);
         candidate
     }
