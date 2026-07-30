@@ -96,7 +96,7 @@ impl SyntheticAdapter {
                 if state.durable_replay {
                     ObservedDocumentLeaf::new(fingerprint, leaf)
                 } else {
-                    ObservedDocumentLeaf::always_scan(fingerprint, leaf)
+                    ObservedDocumentLeaf::with_durable_replay(fingerprint, leaf, false)
                 }
             })
             .collect::<Vec<_>>();
