@@ -182,66 +182,7 @@ pub(super) fn register_continue_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let discovery = discover_continue_root(&capture_root).map_err(route_error)?;
-            let mut reader = ContinueSourceBackedReader::new(&discovery).map_err(route_error)?;
-            let mut begun = HashSet::new();
-            while let Some(outcome) = reader.next_outcome().map_err(route_error)? {
-                match outcome {
-                    ContinueSourceBackedOutcome::Page(page) => {
-                        if let Some(document) = page.documents.first() {
-                            if begun.insert(document.source.identity().digest()) {
-                                sink.begin(document.source.clone())?;
-                            }
-                        }
-                        for document in page.documents {
-                            sink.document(document)?;
-                        }
-                        if let Some(terminal) = page.terminal {
-                            if begun.insert(terminal.source.identity().digest()) {
-                                sink.begin(terminal.source)?;
-                            }
-                            sink.certify(terminal.certificate)?;
-                        }
-                    }
-                    ContinueSourceBackedOutcome::Incomplete(_) => {
-                        return Err(SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Unavailable,
-                            "Continue selected source was incomplete",
-                        ));
-                    }
-                    ContinueSourceBackedOutcome::Failed(_) => {
-                        return Err(SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Unavailable,
-                            "Continue selected source failed during bounded discovery",
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::Continue, "continue_cli_sessions_json"),
-        move |request| {
-            let hydrated =
-                hydrate_continue_source_backed_record(&hydration_root, request.locator()).map_err(
-                    |error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error),
-                )?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    let outcome: ContinueSourceBackedOutcome =
+        ContinueSourceBackedReader::register(registry, source, selection);
+    outcome
 }

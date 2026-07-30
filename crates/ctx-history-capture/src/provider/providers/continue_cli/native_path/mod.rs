@@ -4,7 +4,6 @@
 //! source-backed reader projects bounded lexical pages and exact locators.
 
 mod decode;
-mod lifecycle;
 mod normalize;
 mod parse;
 mod source;
@@ -12,11 +11,8 @@ mod source_backed;
 
 pub(crate) use normalize::{
     ContinueEventKind, ContinueEventRole, ContinueEventRow, ContinueGenerationAuthority,
-    ContinueSessionRow,
 };
-pub(crate) use source::{
-    discover_continue_root, ContinueIndexObservation, ContinueSourceObservation,
-};
+pub(crate) use source::discover_continue_root;
 pub(crate) use source_backed::{
     hydrate_continue_source_backed_record, ContinueSourceBackedOutcome, ContinueSourceBackedReader,
 };
@@ -42,14 +38,6 @@ pub(crate) enum ContinueNativePathError {
         raw_os_error: Option<i32>,
         message: String,
     },
-    #[error("system I/O failed during {operation}: {source}")]
-    SystemIo {
-        operation: &'static str,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Continue NativePath invariant failed: {message}")]
-    Invariant { message: &'static str },
     #[error("Continue source `{path}` exceeds the {limit} byte limit ({observed} bytes)")]
     SourceTooLarge {
         path: PathBuf,

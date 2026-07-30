@@ -13,7 +13,6 @@ pub(super) fn observe_continue_index(
                 path,
                 ContinueIndexState::Missing,
                 b"missing",
-                false,
             )
         }
         Err(error) => {
@@ -24,12 +23,11 @@ pub(super) fn observe_continue_index(
                 path,
                 ContinueIndexState::Unavailable,
                 evidence.as_bytes(),
-                false,
             )
         }
         Ok(opened) => match read_opened_exact_file(
             &path,
-            Arc::new(opened),
+            opened,
             MAX_CONTINUE_INDEX_BYTES,
             INDEX_REVISION_DOMAIN,
         ) {
@@ -42,11 +40,7 @@ pub(super) fn observe_continue_index(
                     },
                     authority: authority.clone(),
                     relative_path,
-                    #[cfg(test)]
-                    entry_count: metadata_entries.len(),
                     metadata_entries,
-                    #[cfg(test)]
-                    content_read: true,
                 },
                 Err(_) => ContinueIndexSnapshot {
                     observation: ContinueIndexObservation {
@@ -57,10 +51,6 @@ pub(super) fn observe_continue_index(
                     metadata_entries: Vec::new(),
                     authority: authority.clone(),
                     relative_path,
-                    #[cfg(test)]
-                    entry_count: 0,
-                    #[cfg(test)]
-                    content_read: true,
                 },
             },
             Err(error) => {
@@ -71,7 +61,6 @@ pub(super) fn observe_continue_index(
                     path,
                     ContinueIndexState::Unavailable,
                     evidence.as_bytes(),
-                    false,
                 )
             }
         },
@@ -159,7 +148,6 @@ pub(super) fn index_without_entries(
     path: PathBuf,
     state: ContinueIndexState,
     revision_evidence: &[u8],
-    _content_read: bool,
 ) -> ContinueIndexSnapshot {
     ContinueIndexSnapshot {
         observation: ContinueIndexObservation {
@@ -170,16 +158,12 @@ pub(super) fn index_without_entries(
         metadata_entries: Vec::new(),
         authority: authority.clone(),
         relative_path,
-        #[cfg(test)]
-        entry_count: 0,
-        #[cfg(test)]
-        content_read: _content_read,
     }
 }
 
 pub(super) fn read_opened_exact_file(
     path: &Path,
-    opened: Arc<OpenedProviderSourceFile>,
+    opened: OpenedProviderSourceFile,
     max_bytes: usize,
     revision_domain: &[u8],
 ) -> Result<ExactFileSnapshot, ContinueNativePathError> {
@@ -190,7 +174,6 @@ pub(super) fn read_opened_exact_file(
             observed: opened.len(),
         });
     }
-    let file_token = opened_file_token(&opened, path)?;
     let length =
         usize::try_from(opened.len()).map_err(|_| ContinueNativePathError::SourceTooLarge {
             path: path.to_path_buf(),
@@ -208,9 +191,8 @@ pub(super) fn read_opened_exact_file(
     Ok(ExactFileSnapshot {
         path: path.to_path_buf(),
         canonical_path: path.to_path_buf(),
-        file_token,
+        file_token: opened.ordinary_file_token(),
         revision: sha256_hex(revision_domain, &bytes),
         bytes: bytes.into_boxed_slice(),
-        opened,
     })
 }
