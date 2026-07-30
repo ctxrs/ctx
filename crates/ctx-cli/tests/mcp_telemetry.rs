@@ -17,6 +17,8 @@ fn telemetry_roundtrip(
         .env("CTX_DATA_ROOT", data_root)
         .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(events_path))
+        .env("CTX_DAEMON_ENABLED", "false")
+        .env("CTX_UPGRADE_AUTO", "off")
         .write_stdin(stdin)
         .assert()
         .success()
