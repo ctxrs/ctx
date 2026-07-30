@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 1;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 5;
-pub const LEXICAL_TOKENIZER_REVISION: u32 = 1;
+pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 1;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
@@ -194,7 +194,7 @@ mod tests {
         );
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "255eb2b901f1dfb1c9c521c1d177dbe7a416491b5c0b8532494135bcb8b42ede"
+            "a17e860b6d719dfde065256ec070970b3d12e4d76ff0e59f16aabbc1666b71b9"
         );
     }
 

@@ -2,7 +2,7 @@ use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
 };
 
-use crate::{IndexError, Result, LEXICAL_SCHEMA_VERSION};
+use crate::{analyzer::BODY_ANALYZER, IndexError, Result, LEXICAL_SCHEMA_VERSION};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Fields {
@@ -74,7 +74,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("event_type", STRING | STORED);
     builder.add_text_field("role", STRING | STORED);
     let body_indexing = TextFieldIndexing::default()
-        .set_tokenizer("default")
+        .set_tokenizer(BODY_ANALYZER)
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     builder.add_text_field(
         "body_search",

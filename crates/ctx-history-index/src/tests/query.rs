@@ -82,6 +82,83 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 }
 
 #[test]
+fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
+    let temp = tempdir().unwrap();
+    let source = source("script-aware.jsonl");
+    let cjk = document(&source, 1, "完成数据库迁移并验证索引");
+    let long_component = "CtxSourceBackedGenerationIdentifier".repeat(8);
+    let technical_identifier =
+        format!("crate::provider::{long_component}::<Result<Vec<ProjectionRecord>>>");
+    let identifier = document(
+        &source,
+        2,
+        &format!("failed while resolving {technical_identifier}"),
+    );
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_document(cjk.clone()).unwrap();
+    writer.add_document(identifier.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(
+        index
+            .search_event_candidates("数据库迁移", 10)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![cjk.event_id]
+    );
+    assert_eq!(
+        index
+            .search_event_candidates(&long_component, 10)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![identifier.event_id]
+    );
+}
+
+#[test]
+fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
+    let temp = tempdir().unwrap();
+    let source = source("coverage-ranking.jsonl");
+    let exact = document(&source, 1, "coveragealpha coveragebeta");
+    let partial = document(&source, 2, &"coveragealpha ".repeat(64));
+    let unrelated = document(&source, 3, "coveragegamma");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_document(partial.clone()).unwrap();
+    writer.add_document(unrelated).unwrap();
+    writer.add_document(exact.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let candidates = index
+        .search_event_candidates("coveragealpha coveragebeta", 10)
+        .unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![exact.event_id, partial.event_id]
+    );
+    assert_eq!(
+        index
+            .search_event_candidates("coveragealpha coveragebeta", 1)
+            .unwrap()[0]
+            .event
+            .event_id,
+        exact.event_id
+    );
+}
+
+#[test]
 fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     let temp = tempdir().unwrap();
     let target = source("paged-source.jsonl");
