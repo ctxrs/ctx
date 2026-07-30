@@ -174,8 +174,20 @@ fn openhands_entry_type(value: &Value) -> String {
 }
 
 fn openhands_event_type(value: &Value, entry_type: &str) -> EventType {
-    if value.get("llm_message").is_some() || entry_type == "MessageEvent" {
-        return EventType::Message;
+    // Some OpenHands records carry an llm_message/action alongside the
+    // resulting observation. The observation is the authoritative event in
+    // that combined shape; classifying it as a message or tool call can leak
+    // successful command output into the lexical body.
+    if value.get("observation").is_some() || entry_type == "ObservationEvent" {
+        return match value.pointer("/observation/kind").and_then(Value::as_str) {
+            Some(
+                "FileEditorObservation"
+                | "StrReplaceEditorObservation"
+                | "PlanningFileEditorObservation",
+            ) => EventType::FileTouched,
+            Some("ExecuteBashObservation" | "TerminalObservation") => EventType::CommandOutput,
+            _ => EventType::ToolOutput,
+        };
     }
     if value.get("action").is_some() || entry_type == "ActionEvent" {
         return match value.pointer("/action/kind").and_then(Value::as_str) {
@@ -187,16 +199,8 @@ fn openhands_event_type(value: &Value, entry_type: &str) -> EventType {
             _ => EventType::ToolCall,
         };
     }
-    if value.get("observation").is_some() || entry_type == "ObservationEvent" {
-        return match value.pointer("/observation/kind").and_then(Value::as_str) {
-            Some(
-                "FileEditorObservation"
-                | "StrReplaceEditorObservation"
-                | "PlanningFileEditorObservation",
-            ) => EventType::FileTouched,
-            Some("ExecuteBashObservation" | "TerminalObservation") => EventType::CommandOutput,
-            _ => EventType::ToolOutput,
-        };
+    if value.get("llm_message").is_some() || entry_type == "MessageEvent" {
+        return EventType::Message;
     }
     match entry_type {
         "StreamingDeltaEvent" => EventType::Message,
@@ -222,6 +226,27 @@ fn openhands_role(value: &Value, entry_type: &str) -> EventRole {
 }
 
 fn openhands_event_text(value: &Value, entry_type: &str, event_type: EventType) -> String {
+    if matches!(
+        event_type,
+        EventType::ToolOutput | EventType::CommandOutput | EventType::FileTouched
+    ) {
+        if let Some(content) = value
+            .pointer("/observation/content")
+            .and_then(provider_value_text)
+        {
+            return content;
+        }
+        if let Some(output) = value.pointer("/observation/output").and_then(Value::as_str) {
+            return output.to_owned();
+        }
+        if let Some(error) = value
+            .pointer("/observation/error")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("error").and_then(Value::as_str))
+        {
+            return error.to_owned();
+        }
+    }
     if let Some(text) = value
         .pointer("/llm_message/content")
         .and_then(provider_explicit_result_value_text)
@@ -246,22 +271,6 @@ fn openhands_event_text(value: &Value, entry_type: &str, event_type: EventType) 
             .and_then(Value::as_str)
             .unwrap_or("file");
         return format!("{command} {path}");
-    }
-    if let Some(content) = value
-        .pointer("/observation/content")
-        .and_then(provider_value_text)
-    {
-        return content;
-    }
-    if let Some(output) = value.pointer("/observation/output").and_then(Value::as_str) {
-        return output.to_owned();
-    }
-    if let Some(error) = value
-        .pointer("/observation/error")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("error").and_then(Value::as_str))
-    {
-        return error.to_owned();
     }
     if let Some(prompt) = value.pointer("/action/prompt").and_then(Value::as_str) {
         return prompt.to_owned();

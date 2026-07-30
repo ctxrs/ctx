@@ -75,23 +75,39 @@ fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
         "0004-timeout.json",
         output("event-timeout", "", None, true),
     );
+    let mut combined_success = output(
+        "event-combined-success",
+        "combined private successful output",
+        Some(0),
+        false,
+    );
+    combined_success["llm_message"] = json!({
+        "role": "assistant",
+        "content": "combined private successful output",
+    });
+    write_event(
+        &root,
+        "conversation-cold",
+        "0005-combined-success.json",
+        combined_success,
+    );
     let malformed = root
         .join("v1_conversations")
         .join("conversation-cold")
-        .join("0005-malformed.json");
+        .join("0006-malformed.json");
     fs::write(&malformed, b"{not-json").unwrap();
 
     let (projection, io) = count_event_file_io(|| project(&root).unwrap());
     let projection = &projection[0];
     assert_eq!(io.inventory_opens, 1);
-    assert_eq!(io.body_reads, 5);
+    assert_eq!(io.body_reads, 6);
     assert_eq!(io.peak_transient_leaf_handles, 1);
     assert!(io.peak_transient_directory_handles <= 4);
     assert_eq!(io.active_transient_leaf_handles, 0);
     assert_eq!(io.active_transient_directory_handles, 0);
-    assert_eq!(projection.source.counts().complete_records, 5);
+    assert_eq!(projection.source.counts().complete_records, 6);
     assert_eq!(projection.source.counts().retained_records, 3);
-    assert_eq!(projection.source.counts().ignored_records, 1);
+    assert_eq!(projection.source.counts().ignored_records, 2);
     assert_eq!(projection.source.counts().rejected_records, 1);
     assert_eq!(projection.source.counts().indexed_documents, 3);
     assert_eq!(projection.documents[0].body, full_body);

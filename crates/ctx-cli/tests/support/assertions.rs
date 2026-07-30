@@ -33,9 +33,6 @@ pub(crate) fn assert_explicit_source_publication<'a>(
     assert_eq!(packet["outcome"], "success", "{packet:#}");
     assert_eq!(packet["failure_scope"], "none", "{packet:#}");
     assert_eq!(packet["failure_type"], "none", "{packet:#}");
-    assert_eq!(packet["totals"]["imported_sources"], 1, "{packet:#}");
-    assert_eq!(packet["totals"]["imported_sessions"], 0, "{packet:#}");
-    assert_eq!(packet["totals"]["imported_events"], 0, "{packet:#}");
     let sources = packet["sources"]
         .as_array()
         .unwrap_or_else(|| panic!("missing explicit source receipts in {packet:#}"));
@@ -45,6 +42,34 @@ pub(crate) fn assert_explicit_source_publication<'a>(
     assert_eq!(source["source_format"], source_format, "{packet:#}");
     assert_eq!(source["status"], "published", "{packet:#}");
     assert!(source["published_generation"].is_string(), "{packet:#}");
+    for key in [
+        "current_source_count",
+        "current_indexed_documents",
+        "current_complete_records",
+        "current_retained_records",
+        "current_rejected_records",
+        "current_ignored_records",
+        "current_certified_source_bytes",
+        "current_sources_with_rejections",
+        "removed_source_count",
+    ] {
+        assert!(
+            packet["totals"][key].is_number(),
+            "missing {key} in {packet:#}"
+        );
+        assert_eq!(packet["totals"][key], source[key], "{packet:#}");
+    }
+    assert_omits_keys(
+        packet,
+        &[
+            "failed_sources",
+            "imported_sessions",
+            "imported_events",
+            "skipped_events",
+            "rejected_records",
+            "rejections",
+        ],
+    );
     source
 }
 
