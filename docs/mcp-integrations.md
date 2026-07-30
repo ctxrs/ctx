@@ -25,14 +25,15 @@ Invalid configs are reported and left untouched.
 
 ## Test Coverage
 
-The Bazel target `//:mcp_integration_e2e` runs hermetic fake-harness tests for
-the stable local configuration surfaces. Those tests run the real ctx installer
-with temporary `HOME`, `XDG_CONFIG_HOME`, `CTX_DATA_ROOT`, and provider-specific
-home variables, then parse the generated provider configs with host-like
-readers. They also model project trust or approval gates for Codex, Claude Code,
-and Qwen Code, and exercise the real `ctx mcp serve` stdio JSON-RPC path. Live
-third-party CLI smoke tests remain optional because they require installed
-harness binaries, auth state, or interactive approval.
+The Bazel target `//crates/ctx-cli:mcp_integration_e2e_tests` runs hermetic
+fake-harness tests for the stable local configuration surfaces. Those tests run
+the real ctx installer with temporary `HOME`, `XDG_CONFIG_HOME`,
+`CTX_DATA_ROOT`, and provider-specific home variables, then parse the generated
+provider configs with host-like readers. They also model project trust or
+approval gates for Codex, Claude Code, and Qwen Code, and exercise the real
+`ctx mcp serve` stdio JSON-RPC path. Live third-party CLI smoke tests remain
+optional because they require installed harness binaries, auth state, or
+interactive approval.
 
 ```bash
 ctx integrations install mcp

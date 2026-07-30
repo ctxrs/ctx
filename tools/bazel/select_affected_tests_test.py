@@ -9,6 +9,9 @@ from select_affected_tests import FULL_SUITE, select
 
 
 class SelectionMutationTests(unittest.TestCase):
+    def test_full_suite_is_canonical_ci(self) -> None:
+        self.assertEqual(FULL_SUITE, "//:ci")
+
     def mutate(self, relative: str) -> str:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory, relative)

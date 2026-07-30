@@ -2,6 +2,7 @@
 target/
 /.bazel/
 /bazel-*
+/.buildkite-cache/bazel-repository/
 __pycache__/
 *.py[cod]
 *.db

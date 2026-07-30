@@ -8,10 +8,10 @@ source "${repo_root}/scripts/ci-common.sh"
 
 base_ref="${1:-origin/main}"
 if ! base_sha="$(git rev-parse --verify "${base_ref}^{commit}")"; then
-  printf 'could not resolve affected-test base %s; selecting //:presubmit\n' "${base_ref}" >&2
-  printf '//:presubmit\n'
+  printf 'could not resolve affected-test base %s; selecting //:ci\n' "${base_ref}" >&2
+  printf '//:ci\n'
   if [[ "${CTX_AFFECTED_DRY_RUN:-0}" != "1" ]]; then
-    scripts/bazelw test //:presubmit --config=test
+    scripts/bazelw test //:ci --config=test
   fi
   exit 0
 fi
@@ -99,8 +99,8 @@ generate_selection() {
 }
 
 fail_closed() {
-  printf '//:presubmit\n' >"${selected}"
-  printf 'bazel-diff failed; selecting //:presubmit\n' >&2
+  printf '//:ci\n' >"${selected}"
+  printf 'bazel-diff failed; selecting //:ci\n' >&2
 }
 
 if ! generate_selection; then
