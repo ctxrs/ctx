@@ -1,60 +1,25 @@
 use std::fmt;
 
 use ctx_history_core::{ContentRef, EventRole, EventType};
-use serde::{
-    de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor},
-    Deserialize, Serialize,
+use serde::de::{
+    self, Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::provider::normalization::provider_policy_event_text;
+use crate::{provider::normalization::provider_policy_event_text, Result};
 
 const MAX_CURSOR_ATOM_CHARS: usize = 512;
 const MAX_CURSOR_PATH_CHARS: usize = 4_096;
 const MAX_CURSOR_INPUT_PATHS: usize = 32;
-pub(super) const CURSOR_REJECTION_SAMPLE_LIMIT: usize = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CursorRejectionKind {
     MalformedJson,
-    Oversized,
     UnsupportedShape,
 }
 
-impl CursorRejectionKind {
-    pub(super) fn proof_marker(self) -> &'static [u8] {
-        match self {
-            Self::MalformedJson => b"malformed-json",
-            Self::Oversized => b"oversized",
-            Self::UnsupportedShape => b"unsupported-shape",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CursorRecordRejection {
-    pub(crate) physical_line: u64,
-    pub(crate) kind: CursorRejectionKind,
-    pub(crate) observed_bytes: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct CursorRejectionSummary {
-    pub(super) total: u64,
-    pub(super) samples: Vec<CursorRecordRejection>,
-}
-
-impl CursorRejectionSummary {
-    fn record(&mut self, rejection: CursorRecordRejection) {
-        self.total = self.total.saturating_add(1);
-        if self.samples.len() < CURSOR_REJECTION_SAMPLE_LIMIT {
-            self.samples.push(rejection);
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CursorSafePart {
     BodyFree {
         event_type: EventType,
@@ -64,7 +29,6 @@ pub(super) enum CursorSafePart {
         event_type: EventType,
         role: EventRole,
         text: String,
-        #[serde(skip)]
         complete_content_ref: Option<ContentRef>,
     },
     ToolUse {
@@ -75,34 +39,51 @@ pub(super) enum CursorSafePart {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CursorSanitizedRecord {
     pub(super) semantic_ordinal: u64,
-    #[serde(skip)]
     pub(super) physical_ordinal: u64,
-    #[serde(skip)]
     pub(super) byte_start: u64,
-    #[serde(skip)]
     pub(super) byte_end_exclusive: u64,
-    #[serde(skip)]
     pub(super) record_sha256: [u8; 32],
     pub(super) timestamp: Option<String>,
-    pub(super) role: EventRole,
-    pub(super) event: Option<String>,
-    pub(super) record_type: Option<String>,
-    pub(super) status: Option<String>,
-    pub(super) result_blocks: u32,
     pub(super) parts: Vec<CursorSafePart>,
 }
 
 mod classification;
-mod stream;
 
 use classification::{
     classify_cursor_line, CursorBlockKind, CursorContentLocation, CursorLineClassification,
     CursorRecordAdmission,
 };
-pub(super) use stream::{scan_cursor_reader, CursorParserStats};
+
+pub(super) fn project_cursor_jsonl_record(
+    bytes: &[u8],
+    semantic_ordinal: u64,
+    physical_ordinal: u64,
+    byte_start: u64,
+    byte_end_exclusive: u64,
+) -> Result<Option<Vec<super::projection::CursorNativeEvent>>> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let classification = match classify_cursor_line(bytes) {
+        Ok(classification) => classification,
+        Err(_) => return Ok(None),
+    };
+    let sanitized = match decode_sanitized_record(
+        bytes,
+        semantic_ordinal,
+        physical_ordinal,
+        byte_start,
+        byte_end_exclusive,
+        &classification,
+    ) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(super::projection::project_cursor_record(sanitized)?))
+}
 
 fn decode_sanitized_record(
     bytes: &[u8],
@@ -121,11 +102,6 @@ fn decode_sanitized_record(
             byte_end_exclusive,
             record_sha256,
             timestamp: classification.timestamp.clone(),
-            role: EventRole::Unknown,
-            event: classification.event.clone(),
-            record_type: classification.record_type.clone(),
-            status: classification.status.clone(),
-            result_blocks: classification.result_blocks,
             parts: Vec::new(),
         });
     }
@@ -155,11 +131,6 @@ fn decode_sanitized_record(
         byte_end_exclusive,
         record_sha256,
         timestamp: classification.timestamp.clone(),
-        role,
-        event: classification.event.clone(),
-        record_type: classification.record_type.clone(),
-        status: classification.status.clone(),
-        result_blocks: classification.result_blocks,
         parts,
     })
 }

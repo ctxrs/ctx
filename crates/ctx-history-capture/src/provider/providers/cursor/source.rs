@@ -1,31 +1,15 @@
 use std::{
-    fs::{File, Metadata},
-    io::{BufReader, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    fs::Metadata,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use crate::Result;
 
-use crate::common::io::OpenedProviderSourceFile;
-use crate::{provider::provider_path_identity, CaptureError, Result};
-
-use super::{
-    checkpoint::CursorCheckpoint,
-    layout::CursorTranscriptPath,
-    parser::{
-        scan_cursor_reader, CursorParserStats, CursorRecordRejection, CursorRejectionKind,
-        CursorRejectionSummary,
-    },
-    projection::{CursorNativeEvent, CursorNativeSession},
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CursorObservedTime {
-    pub(crate) before_epoch: bool,
-    pub(crate) seconds: u64,
-    pub(crate) nanos: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorObservedTime {
+    before_epoch: bool,
+    seconds: u64,
+    nanos: u32,
 }
 
 impl CursorObservedTime {
@@ -48,108 +32,10 @@ impl CursorObservedTime {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CursorFileIdentity {
-    pub(crate) device: u64,
-    pub(crate) inode: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CursorSourceObservation {
-    pub(crate) path: PathBuf,
-    pub(crate) locator_identity: String,
-    pub(crate) proposed_source_identity: String,
-    pub(crate) native_session_id: String,
-    pub(crate) length: u64,
-    /// Private control-plane proof; never published as an event or result hash.
-    pub(crate) content_sha256: [u8; 32],
-    pub(crate) modified: CursorObservedTime,
-    pub(crate) changed: Option<CursorObservedTime>,
-    pub(crate) readonly: bool,
-    pub(crate) file_identity: Option<CursorFileIdentity>,
-}
-
-#[derive(Debug)]
-pub(crate) struct CursorFrozenSource {
-    transcript: CursorTranscriptPath,
-    observation: CursorSourceObservation,
-    source_file: OpenedProviderSourceFile,
-}
-
-impl CursorFrozenSource {
-    pub(crate) fn observation(&self) -> &CursorSourceObservation {
-        &self.observation
-    }
-
-    fn open(&self) -> Result<File> {
-        Ok(self.source_file.file().try_clone()?)
-    }
-
-    pub(crate) fn revalidate(&self) -> Result<()> {
-        self.transcript.revalidate(&self.source_file)
-    }
-}
-
-pub(crate) fn freeze_cursor_source(
-    transcript: &CursorTranscriptPath,
-) -> Result<CursorFrozenSource> {
-    let source_file = transcript.open()?;
-    let (_, observation) = open_observed_cursor_file(
-        &source_file,
-        transcript.path(),
-        transcript.native_session_id(),
-    )?;
-    Ok(CursorFrozenSource {
-        transcript: transcript.clone(),
-        observation,
-        source_file,
-    })
-}
-
-fn observation_from_metadata(
-    path: &Path,
-    native_session_id: &str,
-    metadata: &Metadata,
-    content_sha256: [u8; 32],
-) -> Result<CursorSourceObservation> {
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-
-    let locator_identity = provider_path_identity(path)?;
-    #[cfg(unix)]
-    let (file_identity, changed) = (
-        Some(CursorFileIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }),
-        unix_changed_time(metadata),
-    );
-    #[cfg(not(unix))]
-    let (file_identity, changed) = (None, None);
-    Ok(CursorSourceObservation {
-        path: path.to_path_buf(),
-        proposed_source_identity: format!("cursor-native-path-v1:{locator_identity}"),
-        locator_identity,
-        native_session_id: native_session_id.to_owned(),
-        length: metadata.len(),
-        content_sha256,
-        modified: CursorObservedTime::from_system_time(metadata.modified()?),
-        changed,
-        readonly: metadata.permissions().readonly(),
-        file_identity,
-    })
-}
-
-pub(crate) fn cursor_complete_content_source_revision(
-    observation: &CursorSourceObservation,
-) -> String {
-    cursor_complete_content_revision(
-        observation.length,
-        observation.modified,
-        observation.changed,
-        observation.readonly,
-        observation.file_identity,
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorFileIdentity {
+    device: u64,
+    inode: u64,
 }
 
 pub(crate) fn cursor_complete_content_source_from_admitted(
@@ -206,43 +92,6 @@ fn cursor_observed_time_stamp(time: CursorObservedTime) -> String {
     )
 }
 
-fn open_observed_cursor_file(
-    opened: &crate::common::io::OpenedProviderSourceFile,
-    path: &Path,
-    native_session_id: &str,
-) -> Result<(File, CursorSourceObservation)> {
-    let mut file = opened.file().try_clone()?;
-    file.seek(SeekFrom::Start(0))?;
-    let before = file.metadata()?;
-    let content_sha256 = hash_cursor_file(&mut file)?;
-    let after = file.metadata()?;
-    let before_observation =
-        observation_from_metadata(path, native_session_id, &before, content_sha256)?;
-    let after_observation =
-        observation_from_metadata(path, native_session_id, &after, content_sha256)?;
-    if before_observation != after_observation {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    opened
-        .revalidate_leaf()
-        .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok((file, after_observation))
-}
-
-fn hash_cursor_file(file: &mut File) -> Result<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().into())
-}
-
 #[cfg(unix)]
 fn unix_changed_time(metadata: &Metadata) -> Option<CursorObservedTime> {
     use std::os::unix::fs::MetadataExt;
@@ -265,76 +114,4 @@ fn unix_changed_time(metadata: &Metadata) -> Option<CursorObservedTime> {
             nanos: nanos as u32,
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorSourceRejection {
-    pub(crate) physical_line: u64,
-    pub(crate) kind: CursorRejectionKind,
-    pub(crate) observed_bytes: u64,
-}
-
-impl From<CursorRecordRejection> for CursorSourceRejection {
-    fn from(value: CursorRecordRejection) -> Self {
-        Self {
-            physical_line: value.physical_line,
-            kind: value.kind,
-            observed_bytes: value.observed_bytes,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct CursorSourceRejections {
-    pub(crate) total: u64,
-    pub(crate) samples: Vec<CursorSourceRejection>,
-}
-
-impl From<CursorRejectionSummary> for CursorSourceRejections {
-    fn from(value: CursorRejectionSummary) -> Self {
-        Self {
-            total: value.total,
-            samples: value.samples.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorSourceGeneration {
-    pub(crate) observation: CursorSourceObservation,
-    pub(crate) session: Option<CursorNativeSession>,
-    pub(crate) rejections: CursorSourceRejections,
-    pub(crate) checkpoint: CursorCheckpoint,
-    pub(crate) stats: CursorParserStats,
-}
-
-pub(crate) fn scan_cursor_source(
-    frozen: &CursorFrozenSource,
-    emit: &mut dyn FnMut(CursorNativeEvent) -> Result<()>,
-) -> Result<CursorSourceGeneration> {
-    let file = frozen.open()?;
-    let mut reader = BufReader::new(file);
-    let parsed = scan_cursor_reader(&mut reader, emit)?;
-    frozen.revalidate()?;
-    let has_retained_events = parsed.stats.retained_messages > 0
-        || parsed.stats.retained_summaries > 0
-        || parsed.stats.retained_notices > 0
-        || parsed.stats.retained_tool_calls > 0;
-    let session = (has_retained_events
-        || parsed.checkpoint.session.started_at.is_some()
-        || parsed.checkpoint.session.title.is_some())
-    .then(|| CursorNativeSession {
-        native_session_id: frozen.observation.native_session_id.clone(),
-        project: frozen.transcript.project().to_path_buf(),
-        started_at: parsed.checkpoint.session.started_at,
-        ended_at: parsed.checkpoint.session.ended_at,
-        title: parsed.checkpoint.session.title.clone(),
-    });
-    Ok(CursorSourceGeneration {
-        observation: frozen.observation.clone(),
-        session,
-        rejections: parsed.rejections.into(),
-        checkpoint: parsed.checkpoint,
-        stats: parsed.stats,
-    })
 }

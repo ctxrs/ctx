@@ -33,9 +33,6 @@ pub(super) enum CursorBlockKind {
 pub(super) struct CursorLineClassification {
     pub(super) timestamp: Option<String>,
     pub(super) role: Option<String>,
-    pub(super) event: Option<String>,
-    pub(super) record_type: Option<String>,
-    pub(super) status: Option<String>,
     pub(super) location: CursorContentLocation,
     pub(super) admission: CursorRecordAdmission,
     pub(super) block_kinds: Vec<CursorBlockKind>,
@@ -188,9 +185,6 @@ impl<'de> Visitor<'de> for CursorClassificationVisitor {
         Ok(Some(CursorLineClassification {
             timestamp,
             role,
-            event,
-            record_type,
-            status,
             location,
             admission,
             block_kinds,

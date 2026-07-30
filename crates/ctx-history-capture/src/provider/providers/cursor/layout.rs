@@ -73,14 +73,6 @@ impl CursorTranscriptPath {
         })
     }
 
-    pub(crate) fn projects_root(&self) -> &Path {
-        &self.projects_root
-    }
-
-    pub(crate) fn project(&self) -> &Path {
-        &self.project
-    }
-
     pub(crate) fn native_session_id(&self) -> &str {
         &self.session_id
     }
@@ -89,21 +81,16 @@ impl CursorTranscriptPath {
         &self.path
     }
 
-    pub(crate) fn open(&self) -> crate::Result<OpenedProviderSourceFile> {
-        let opened = self.authority.open_file(&self.authority_relative_path)?;
-        if opened.ordinary_file_token() != self.ordinary_file_token {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        Ok(opened)
+    pub(crate) fn authority_relative_path(&self) -> &Path {
+        &self.authority_relative_path
     }
 
-    pub(crate) fn revalidate(&self, opened: &OpenedProviderSourceFile) -> crate::Result<()> {
-        if opened.ordinary_file_token() != self.ordinary_file_token {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        opened
-            .revalidate()
-            .map_err(|_| CaptureError::SourceChangedDuringCapture)
+    pub(crate) fn ordinary_file_token(&self) -> [u8; 32] {
+        self.ordinary_file_token
+    }
+
+    pub(crate) fn authority(&self) -> &ProviderSourceRoot {
+        &self.authority
     }
 }
 
@@ -211,6 +198,10 @@ impl CursorRootInventory {
                 reason: "Cursor discovery has no retained source authority",
             }),
         }
+    }
+
+    pub(crate) fn authority(&self) -> Option<&ProviderSourceRoot> {
+        self.authority.as_ref()
     }
 }
 

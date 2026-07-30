@@ -1,960 +1,581 @@
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-};
+//! Thin Cursor adapter for the shared replacement-only JSONL family.
+
+use std::{collections::BTreeSet, fs, io, path::Path, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    EventHydrationRequest, EventIdentityInput, EventRole, EventType, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey,
-    SourceObservation, SourceRecordLocator, StableEntityId, SubrecordSelector, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
+    EventIdentityInput, EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
+    StableEntityId, SubrecordSelector, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{
-    complete_content::{
-        jsonl::EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND, verified_content_address_supported,
-        verified_content_profile, AuthorizedSourceRoute, CompleteContentBodyDigest,
-        CompleteContentError, CompleteContentErrorKind, CompleteContentSourceFamily,
-        SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorV1, VerifiedContentRole,
-    },
-    CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-};
-
 use super::{
-    cursor_complete_content_source_revision, discover_cursor_transcripts, freeze_cursor_source,
-    projection::{CursorEventBody, CursorNativeEvent, CursorNativeOrder},
-    source::CursorSourceGeneration,
-    CursorNativeSession, CursorSourceObservation, CursorTranscriptPath,
+    cursor_complete_content_message_record, discover_cursor_transcripts,
+    parser::project_cursor_jsonl_record,
+    projection::{CursorEventBody, CursorNativeEvent},
+};
+use crate::{
+    common::io::OpenedProviderSourceFile,
+    provider::source_backed::family::jsonl::{
+        JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory, JsonlFamilyLeaf,
+        JsonlFamilyProjector, JsonlFileObservation, JsonlRecordRef,
+    },
+    CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
-mod locator;
+const SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
+const NATIVE_SESSION_NAMESPACE: &str = "cursor.session";
+const NATIVE_EVENT_POSITION_KIND: &str = "cursor.semantic-ordinal";
+const NATIVE_SUBRECORD_POSITION_KIND: &str = "cursor.part-ordinal";
+const LOGICAL_SESSION_KIND: &str = "cursor-session";
+const LOGICAL_EVENT_KIND: &str = "cursor-event";
+const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v1";
+const SOURCE_REVISION_DOMAIN: &[u8] = b"ctx.cursor.shared-jsonl.source-revision.v1\0";
+const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 
-use locator::{unique_transcript, validate_locator};
-
-const CURSOR_SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
-const CURSOR_NATIVE_SESSION_NAMESPACE: &str = "cursor.session";
-const CURSOR_NATIVE_EVENT_POSITION_KIND: &str = "cursor.semantic-ordinal";
-const CURSOR_NATIVE_SUBRECORD_POSITION_KIND: &str = "cursor.part-ordinal";
-const CURSOR_LOGICAL_SESSION_KIND: &str = "cursor-session";
-const CURSOR_LOGICAL_EVENT_KIND: &str = "cursor-event";
-const CURSOR_SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const CURSOR_SOURCE_REVISION_KIND: &str = "cursor-exact-jsonl-source-v1";
-const CURSOR_FRONTIER_KIND: &str = "cursor-nativepath-checkpoint-v1";
-const CURSOR_PARSER_REVISION: &str = "cursor-nativepath-source-backed-v1";
-const CURSOR_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] =
-    b"ctx.cursor.source-backed.source-revision.v1\0";
-const CURSOR_EXACT_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] =
-    b"ctx-complete-content-source-revision-v1\0";
-const CURSOR_EXACT_PATH_IDENTITY_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-path-identity-v1\0";
-const CURSOR_SOURCE_BACKED_PAGE_ENVELOPE_BYTES: usize = 1_024;
-const CURSOR_SOURCE_BACKED_RECORD_ENVELOPE_BYTES: usize = 8_192;
-pub(crate) const CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS: usize = 64;
-pub(crate) const CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const CURSOR_EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorSourceBackedRecord {
-    pub(crate) event_id: StableEntityId,
-    pub(crate) session_id: StableEntityId,
-    pub(crate) locator: SourceRecordLocator,
-    pub(crate) native_order: CursorNativeOrder,
-    pub(crate) event_sequence: u64,
-    pub(crate) occurred_at: Option<DateTime<Utc>>,
-    pub(crate) event_type: EventType,
-    pub(crate) role: EventRole,
-    pub(crate) lexical_body: Option<String>,
-    pub(crate) touched_files: Vec<String>,
-    pub(crate) provider_event_hash: String,
-    pub(crate) provider_session_id: String,
-    pub(crate) source_path: String,
-    pub(crate) verified_content_locator: Option<VerifiedContentLocatorV1>,
-    pub(crate) verified_content_indexed_text: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorBinding {
+    native_session_id: String,
+    ordinary_file_token: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CursorExactDisplayContent<'a> {
-    indexed_text: &'a str,
-    locator: &'a VerifiedContentLocatorV1,
+struct CursorJsonlAdapter;
+
+pub(crate) fn cursor_jsonl_adapter() -> Arc<dyn JsonlFamilyAdapter> {
+    Arc::new(CursorJsonlAdapter)
 }
 
-impl CursorSourceBackedRecord {
-    fn exact_display_content(&self) -> Option<CursorExactDisplayContent<'_>> {
-        if self.event_type != EventType::Message {
-            return None;
-        }
-        let lexical_body = self.lexical_body.as_deref()?;
-        let indexed_text = self.verified_content_indexed_text.as_deref()?;
-        if lexical_body != indexed_text {
-            return None;
-        }
-        Some(CursorExactDisplayContent {
-            indexed_text,
-            locator: self.verified_content_locator.as_ref()?,
-        })
+impl JsonlFamilyAdapter for CursorJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Cursor
     }
 
-    pub(crate) fn lexical_document(&self) -> Option<LexicalDocument> {
-        let display = self.exact_display_content()?;
-        Some(LexicalDocument {
-            event_id: self.event_id,
-            session_id: self.session_id,
-            parent_session_id: None,
-            root_session_id: self.session_id,
-            source: self.locator.source().clone(),
-            locator: self.locator.clone(),
-            provider_session_id: Some(self.provider_session_id.clone()),
-            branch: None,
-            source_path: Some(self.source_path.clone()),
-            agent_type: AgentType::Primary.as_str().to_owned(),
-            is_primary: true,
-            event_sequence: self.event_sequence,
-            occurred_at_unix_ms: self.occurred_at.map(|value| value.timestamp_millis()),
-            event_type: self.event_type.as_str().to_owned(),
-            role: Some(self.role.as_str().to_owned()),
-            body: display.indexed_text.to_owned(),
-            workspace: None,
-            cwd: None,
-            touched_files: self.touched_files.clone(),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorSourceBackedPage {
-    pub(crate) source_id: StableEntityId,
-    pub(crate) page_ordinal: u64,
-    pub(crate) records: Vec<CursorSourceBackedRecord>,
-    pub(crate) estimated_bytes: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorSourceBackedSourcePlan {
-    pub(crate) projects_root: PathBuf,
-    pub(crate) source_path: PathBuf,
-    pub(crate) project: PathBuf,
-    pub(crate) native_session_id: String,
-    pub(crate) source: SourceKey,
-    pub(crate) session_id: StableEntityId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorSourceBackedTerminal {
-    pub(crate) plan: CursorSourceBackedSourcePlan,
-    pub(crate) session: Option<CursorNativeSession>,
-    pub(crate) certified_source: CertifiedSource,
-    pub(crate) terminal: bool,
-    pub(crate) physical_records: u64,
-    pub(crate) projected_records: u64,
-    pub(crate) indexed_documents: u64,
-    pub(crate) rejected_records: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct CursorSourceBackedSummary {
-    pub(crate) projects_root: PathBuf,
-    pub(crate) discovered_sources: u64,
-    pub(crate) projected_records: u64,
-    pub(crate) indexed_documents: u64,
-    pub(crate) rejected_records: u64,
-    pub(crate) certified_bytes: u64,
-}
-
-/// Provider-local acquisition sink. Implementations stage these pages into the
-/// shared generation transaction; this adapter deliberately owns no lifecycle
-/// state machine or publication commit.
-pub(crate) trait CursorSourceBackedSink {
-    fn begin_cursor_source(&mut self, plan: &CursorSourceBackedSourcePlan) -> Result<()>;
-
-    fn stage_cursor_source_page(&mut self, page: CursorSourceBackedPage) -> Result<()>;
-
-    fn finish_cursor_source(&mut self, terminal: CursorSourceBackedTerminal) -> Result<()>;
-
-    fn abort_cursor_source(&mut self);
-}
-
-pub(crate) fn extract_cursor_source_backed_cold(
-    selected_root: &Path,
-    sink: &mut dyn CursorSourceBackedSink,
-) -> Result<CursorSourceBackedSummary> {
-    let inventory = discover_cursor_transcripts(selected_root);
-    if !inventory.completed {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: selected_root.to_path_buf(),
-            reason: "Cursor source-backed transcript inventory could not be completed",
-        });
-    }
-    let projects_root = inventory
-        .projects_roots
-        .first()
-        .cloned()
-        .unwrap_or_else(|| inventory.input.clone());
-    if inventory.projects_roots.len() > 1
-        || inventory
-            .transcripts
-            .iter()
-            .any(|transcript| transcript.projects_root() != projects_root)
-    {
-        return Err(CaptureError::InvalidPayload(
-            "Cursor source-backed discovery escaped the selected projects root".to_owned(),
-        ));
+    fn source_format(&self) -> &'static str {
+        CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT
     }
 
-    let mut native_session_ids = BTreeSet::new();
-    let mut plans = Vec::with_capacity(inventory.transcripts.len());
-    for transcript in inventory.transcripts {
-        let native_session_id = transcript.native_session_id().to_owned();
-        if !native_session_ids.insert(native_session_id.clone()) {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Cursor native session ID {native_session_id:?} resolves to more than one transcript in the selected projects root"
-            )));
-        }
-        plans.push(source_plan(&projects_root, transcript)?);
+    fn schema_variant(&self) -> &'static str {
+        SOURCE_SCHEMA_VARIANT
     }
 
-    let mut summary = CursorSourceBackedSummary {
-        projects_root: projects_root.clone(),
-        discovered_sources: u64::try_from(plans.len()).map_err(|_| {
-            CaptureError::InvalidPayload(
-                "Cursor source-backed source count is not representable".to_owned(),
-            )
-        })?,
-        ..CursorSourceBackedSummary::default()
-    };
-    for (transcript, mut plan) in plans {
-        let frozen = freeze_cursor_source(&transcript)?;
-        plan.source_path = frozen.observation().path.clone();
-        let revision_digest = source_revision_digest(frozen.observation())?;
-        sink.begin_cursor_source(&plan)?;
-        let mut projection =
-            CursorSourceBackedProjection::new(sink, &plan, frozen.observation(), revision_digest);
-        let generation = {
-            let mut emit = |event| projection.push(event);
-            super::scan_cursor_source(&frozen, &mut emit)
-        };
-        let generation = match generation {
-            Ok(generation) => generation,
-            Err(error) => {
-                drop(projection);
-                sink.abort_cursor_source();
-                return Err(error);
+    fn parser_revision(&self) -> &'static str {
+        PARSER_REVISION
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        match fs::symlink_metadata(root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return JsonlFamilyInventory::missing(self.provider(), root);
             }
-        };
-        if let Err(error) = projection.flush() {
-            drop(projection);
-            sink.abort_cursor_source();
-            return Err(error);
+            Err(error) => return Err(error.into()),
         }
-        let projection_counts = projection.counts();
-        drop(projection);
-        let terminal = match source_terminal(plan, generation, projection_counts) {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                sink.abort_cursor_source();
-                return Err(error);
+        let inventory = discover_cursor_transcripts(root);
+        if !inventory.completed {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: root.to_path_buf(),
+                reason: "Cursor transcript inventory could not be completed",
+            });
+        }
+        let authority = Arc::new(
+            inventory
+                .authority()
+                .ok_or(CaptureError::InvalidProviderTranscriptPath {
+                    path: root.to_path_buf(),
+                    reason: "Cursor discovery has no retained source authority",
+                })?
+                .clone(),
+        );
+        let mut native_sessions = BTreeSet::new();
+        let mut leaves = Vec::with_capacity(inventory.transcripts.len());
+        for transcript in inventory.transcripts {
+            if transcript.authority().named_path() != authority.named_path()
+                || transcript.authority().authority_fingerprint()
+                    != authority.authority_fingerprint()
+            {
+                return Err(CaptureError::SourceChangedDuringCapture);
             }
+            let native_session_id = transcript.native_session_id().to_owned();
+            if !native_sessions.insert(native_session_id.clone()) {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "Cursor native session ID {native_session_id:?} resolves more than once"
+                )));
+            }
+            let source = source_key(&native_session_id)?;
+            let binding = CursorBinding {
+                native_session_id,
+                ordinary_file_token: transcript.ordinary_file_token(),
+            };
+            leaves.push(JsonlFamilyLeaf::observe(
+                source,
+                transcript.path().to_path_buf(),
+                Arc::clone(&authority),
+                transcript.authority_relative_path().to_path_buf(),
+                TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?,
+            )?);
+        }
+        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+    }
+
+    fn projector(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        let binding = decode_binding(leaf)?;
+        validate_binding(leaf, &binding, source_file.as_ref())?;
+        let session_id = session_id(leaf.source(), &binding.native_session_id)?;
+        let source_path = leaf
+            .source_path()
+            .to_str()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: leaf.source_path().to_path_buf(),
+                reason: "Cursor transcript path is not UTF-8",
+            })?
+            .to_owned();
+        Ok(Box::new(CursorProjector {
+            source: leaf.source().clone(),
+            source_path,
+            native_session_id: binding.native_session_id,
+            session_id,
+            source_revision_digest: source_revision_digest(leaf.observation())?,
+            next_semantic_ordinal: 0,
+        }))
+    }
+
+    fn hydrator(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
+        let binding = decode_binding(leaf).map_err(unavailable)?;
+        validate_binding(leaf, &binding, source_file.as_ref()).map_err(stale)?;
+        Ok(Box::new(CursorHydrator {
+            source: leaf.source().clone(),
+            session_id: session_id(leaf.source(), &binding.native_session_id)
+                .map_err(unavailable)?,
+            native_session_id: binding.native_session_id,
+            source_revision_digest: source_revision_digest(leaf.observation())
+                .map_err(unavailable)?,
+            source_file,
+        }))
+    }
+}
+
+struct CursorProjector {
+    source: SourceKey,
+    source_path: String,
+    native_session_id: String,
+    session_id: StableEntityId,
+    source_revision_digest: [u8; 32],
+    next_semantic_ordinal: u64,
+}
+
+impl JsonlFamilyProjector for CursorProjector {
+    fn project(
+        &mut self,
+        record: JsonlRecordRef<'_>,
+        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+    ) -> Result<()> {
+        let evidence = record.evidence();
+        let Some(events) = project_cursor_jsonl_record(
+            record.bytes(),
+            self.next_semantic_ordinal,
+            evidence.physical_ordinal(),
+            evidence.byte_start(),
+            evidence.byte_end_exclusive(),
+        )?
+        else {
+            return Ok(());
         };
-        summary.projected_records = checked_add(
-            summary.projected_records,
-            terminal.projected_records,
-            "Cursor projected-record count overflowed",
-        )?;
-        summary.indexed_documents = checked_add(
-            summary.indexed_documents,
-            terminal.indexed_documents,
-            "Cursor indexed-document count overflowed",
-        )?;
-        summary.rejected_records = checked_add(
-            summary.rejected_records,
-            terminal.rejected_records,
-            "Cursor rejected-record count overflowed",
-        )?;
-        summary.certified_bytes = checked_add(
-            summary.certified_bytes,
-            terminal.certified_source.counts().certified_bytes,
-            "Cursor certified-byte count overflowed",
-        )?;
-        if let Err(error) = sink.finish_cursor_source(terminal) {
-            sink.abort_cursor_source();
-            return Err(error);
+        self.next_semantic_ordinal =
+            self.next_semantic_ordinal
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Cursor semantic ordinal overflowed",
+                ))?;
+        for event in events {
+            if let Some(document) = lexical_document(
+                &self.source,
+                self.session_id,
+                &self.native_session_id,
+                &self.source_path,
+                self.source_revision_digest,
+                event,
+            )? {
+                emit(document)?;
+            }
         }
+        Ok(())
     }
-    Ok(summary)
 }
 
-pub(crate) fn hydrate_cursor_source_backed_message(
-    selected_root: &Path,
-    record: &CursorSourceBackedRecord,
-) -> Result<String> {
-    if record.event_type != EventType::Message {
-        return Err(CaptureError::InvalidPayload(
-            "Cursor source-backed message hydration received a non-message event".to_owned(),
-        ));
-    }
-    let display = record.exact_display_content().ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "Cursor source-backed message is not eligible for exact display hydration".to_owned(),
-        )
-    })?;
-    let verified_locator = display.locator;
-    let indexed_text = display.indexed_text;
-    EventHydrationRequest::new(record.event_id, record.locator.clone())
-        .map_err(|error| contract_error("event hydration request", error))?;
-    let (native_session_id, byte_offset, byte_length, physical_ordinal, part_ordinal) =
-        validate_locator(record)?;
-    let transcript = unique_transcript(selected_root, &native_session_id)?;
-    let projects_root = transcript.projects_root().to_path_buf();
-    let expected_source = cursor_source_key(&native_session_id)?;
-    if !expected_source.exact_descriptor_eq(record.locator.source()) {
-        return Err(CaptureError::InvalidPayload(
-            "Cursor source-backed locator source descriptor no longer matches discovery".to_owned(),
-        ));
-    }
-    let frozen = freeze_cursor_source(&transcript)?;
-    let current_revision_digest = source_revision_digest(frozen.observation())?;
-    if record.locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || record.locator.certified_source_revision_digest() != Some(&current_revision_digest)
-    {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let current_source_path = frozen.observation().path.to_str().ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: frozen.observation().path.clone(),
-            reason: "Cursor source-backed transcript path is not UTF-8",
+struct CursorHydrator {
+    source: SourceKey,
+    session_id: StableEntityId,
+    native_session_id: String,
+    source_revision_digest: [u8; 32],
+    source_file: Arc<OpenedProviderSourceFile>,
+}
+
+impl JsonlFamilyHydrator for CursorHydrator {
+    fn hydrate(
+        &mut self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+        let coordinate = validate_locator(
+            request.locator(),
+            &self.source,
+            &self.native_session_id,
+            self.source_revision_digest,
+        )?;
+        let byte_length = usize::try_from(coordinate.byte_length)
+            .map_err(|_| invalid("Cursor locator byte range exceeds platform limits"))?;
+        if byte_length == 0 || byte_length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) {
+            return Err(invalid("Cursor locator byte range is invalid"));
         }
-    })?;
-    if current_source_path != record.source_path
-        || record.provider_session_id != native_session_id
-        || verified_locator.record_sha256().as_str() != hex_digest(record.locator.record_digest())
-    {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let expected_native_record_id = format!("cursor-line-v1:{physical_ordinal}:{part_ordinal}");
-    let source_locator = verified_locator.source_locator().ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "Cursor source-backed verified-content locator is malformed".to_owned(),
-        )
-    })?;
-    let expected_byte_end = byte_offset.checked_add(byte_length).ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "Cursor source-backed JSONL locator range overflowed".to_owned(),
-        )
-    })?;
-    if verified_locator.role() != VerifiedContentRole::MessageBody
-        || verified_locator.family() != CompleteContentSourceFamily::Jsonl
-        || verified_locator.kind() != EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND
-        || verified_locator.native_record_id() != expected_native_record_id
-        || source_locator.value().len() != 80
-        || source_locator.value()[..8] != byte_offset.to_be_bytes()
-        || source_locator.value()[8..16] != expected_byte_end.to_be_bytes()
-    {
-        return Err(CaptureError::InvalidPayload(
-            "Cursor source-backed verified-content locator does not match its event locator"
-                .to_owned(),
-        ));
-    }
-    if source_locator.value()[16..48]
-        != complete_content_digest(
-            CURSOR_EXACT_SOURCE_REVISION_DIGEST_DOMAIN,
-            &cursor_complete_content_source_revision(frozen.observation()),
-        )
-        || source_locator.value()[48..]
-            != complete_content_digest(
-                CURSOR_EXACT_PATH_IDENTITY_DIGEST_DOMAIN,
-                &frozen.observation().locator_identity,
+        let wire = self
+            .source_file
+            .read_exact_range(
+                coordinate.byte_offset,
+                byte_length,
+                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
             )
-    {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let event_id = record.event_id.as_uuid();
-    let route = AuthorizedSourceRoute {
-        source_id: record.locator.source().identity().as_uuid(),
-        provider: CaptureProvider::Cursor,
-        source_format: CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned(),
-        family: CompleteContentSourceFamily::Jsonl,
-        raw_source_path: frozen.observation().path.clone(),
-        source_root: Some(projects_root),
-        source_identity: Some(frozen.observation().proposed_source_identity.clone()),
-        source_snapshot: SourceSnapshot::default(),
-    };
-    let source_access = SourceAccessBroker::new()
-        .admit_for_source_locators(route, std::slice::from_ref(&source_locator), event_id)
-        .map_err(complete_content_error)?;
-    if source_access.exact_jsonl_binding().is_none() {
-        return Err(CaptureError::InvalidPayload(
-            "Cursor source-backed message has no exact JSONL source binding".to_owned(),
-        ));
-    }
-    let record_bytes = source_access
-        .read_jsonl_record(
-            byte_offset,
-            expected_byte_end,
-            verified_locator.record_sha256(),
-            event_id,
-        )
-        .map_err(complete_content_error)?;
-    let value = serde_json::from_slice(&record_bytes)
-        .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
-    let (text, resolved_native_record_id, resolved_provider_event_hash) =
-        super::cursor_complete_content_message_record(
-            &value,
-            physical_ordinal,
-            part_ordinal,
-            indexed_text,
-        )
-        .ok_or(CaptureError::SourceChangedDuringCapture)?;
-    if resolved_native_record_id != expected_native_record_id
-        || resolved_provider_event_hash != record.provider_event_hash
-        || !verified_locator.content_ref().verifies(text.as_bytes())
-    {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    source_access
-        .revalidate_jsonl(event_id)
-        .map_err(complete_content_error)?;
-    Ok(text)
-}
-
-fn source_plan(
-    projects_root: &Path,
-    transcript: CursorTranscriptPath,
-) -> Result<(CursorTranscriptPath, CursorSourceBackedSourcePlan)> {
-    let native_session_id = transcript.native_session_id().to_owned();
-    let source = cursor_source_key(&native_session_id)?;
-    let native_session_key = NativeSessionKey::native_id(
-        CURSOR_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(native_session_id.clone())
-            .map_err(|error| contract_error("native session key", error))?,
-    )
-    .map_err(|error| contract_error("native session key", error))?;
-    let session_id = derive_session_id(SessionIdentityInput {
-        source: &source,
-        logical_session_kind: CURSOR_LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })
-    .map_err(|error| contract_error("session identity", error))?;
-    let plan = CursorSourceBackedSourcePlan {
-        projects_root: projects_root.to_path_buf(),
-        source_path: transcript.path().to_path_buf(),
-        project: transcript.project().to_path_buf(),
-        native_session_id,
-        source,
-        session_id,
-    };
-    Ok((transcript, plan))
-}
-
-fn cursor_source_key(native_session_id: &str) -> Result<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        CURSOR_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(native_session_id.to_owned())
-            .map_err(|error| contract_error("source anchor", error))?,
-    )
-    .map_err(|error| contract_error("source anchor", error))?;
-    SourceKey::derive(
-        CaptureProvider::Cursor.as_str(),
-        CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-        CURSOR_SOURCE_SCHEMA_VARIANT,
-        1,
-        anchor,
-    )
-    .map_err(|error| contract_error("source identity", error))
-}
-
-#[derive(Serialize)]
-struct CursorExactSourceRevision<'a> {
-    version: u32,
-    complete_content_revision: String,
-    locator_identity: &'a str,
-    content_sha256: [u8; 32],
-}
-
-fn source_revision_bytes(observation: &CursorSourceObservation) -> Result<Vec<u8>> {
-    serde_json::to_vec(&CursorExactSourceRevision {
-        version: 1,
-        complete_content_revision: cursor_complete_content_source_revision(observation),
-        locator_identity: &observation.locator_identity,
-        content_sha256: observation.content_sha256,
-    })
-    .map_err(Into::into)
-}
-
-fn source_revision_digest(observation: &CursorSourceObservation) -> Result<[u8; 32]> {
-    let revision = source_revision_bytes(observation)?;
-    let mut digest = Sha256::new();
-    digest.update(CURSOR_SOURCE_REVISION_DIGEST_DOMAIN);
-    digest.update((revision.len() as u64).to_be_bytes());
-    digest.update(revision);
-    Ok(digest.finalize().into())
-}
-
-fn source_observation(
-    source: &SourceKey,
-    observation: &CursorSourceObservation,
-) -> Result<SourceObservation> {
-    SourceObservation::new(
-        source.clone(),
-        CURSOR_SOURCE_REVISION_KIND,
-        source_revision_bytes(observation)?,
-    )
-    .map_err(|error| contract_error("source observation", error))
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ProjectionCounts {
-    projected_records: u64,
-    projected_native_records: u64,
-    indexed_documents: u64,
-}
-
-struct CursorSourceBackedProjection<'a> {
-    sink: &'a mut dyn CursorSourceBackedSink,
-    plan: &'a CursorSourceBackedSourcePlan,
-    observation: &'a CursorSourceObservation,
-    revision_digest: [u8; 32],
-    records: Vec<CursorSourceBackedRecord>,
-    estimated_bytes: usize,
-    page_ordinal: u64,
-    counts: ProjectionCounts,
-}
-
-impl<'a> CursorSourceBackedProjection<'a> {
-    fn new(
-        sink: &'a mut dyn CursorSourceBackedSink,
-        plan: &'a CursorSourceBackedSourcePlan,
-        observation: &'a CursorSourceObservation,
-        revision_digest: [u8; 32],
-    ) -> Self {
-        Self {
-            sink,
-            plan,
-            observation,
-            revision_digest,
-            records: Vec::new(),
-            estimated_bytes: CURSOR_SOURCE_BACKED_PAGE_ENVELOPE_BYTES,
-            page_ordinal: 0,
-            counts: ProjectionCounts::default(),
+            .map_err(stale)?;
+        if !wire.ends_with(b"\n") {
+            return Err(stale("Cursor JSONL record boundary changed"));
         }
-    }
-
-    fn counts(&self) -> ProjectionCounts {
-        self.counts
-    }
-
-    fn push(&mut self, event: CursorNativeEvent) -> Result<()> {
-        let first_native_part = event.native_order.part_ordinal == 0;
-        let record =
-            source_backed_record(self.plan, self.observation, self.revision_digest, event)?;
-        let record_bytes = source_backed_record_upper_bound(&record);
-        let separator_bytes = usize::from(!self.records.is_empty());
-        if !self.records.is_empty()
-            && (self.records.len() >= CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS
-                || self
-                    .estimated_bytes
-                    .saturating_add(separator_bytes)
-                    .saturating_add(record_bytes)
-                    > CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES)
-        {
-            self.flush()?;
+        let bytes = strip_jsonl_terminator(&wire);
+        if Sha256::digest(bytes).as_slice() != request.locator().record_digest() {
+            return Err(stale("Cursor JSONL record digest changed"));
         }
-        if self.records.is_empty()
-            && self.estimated_bytes.saturating_add(record_bytes)
-                > CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES
+        let byte_end_exclusive = coordinate
+            .byte_offset
+            .checked_add(coordinate.byte_length)
+            .ok_or_else(|| invalid("Cursor locator byte range overflows"))?;
+        let events = project_cursor_jsonl_record(
+            bytes,
+            coordinate.semantic_ordinal,
+            coordinate.physical_ordinal,
+            coordinate.byte_offset,
+            byte_end_exclusive,
+        )
+        .map_err(stale)?
+        .ok_or_else(|| stale("Cursor locator record is no longer projectable"))?;
+        let event = events
+            .into_iter()
+            .find(|event| event.native_order.part_ordinal == coordinate.part_ordinal)
+            .ok_or_else(|| stale("Cursor locator subrecord no longer exists"))?;
+        let expected_event_id = event_id(
+            &self.source,
+            self.session_id,
+            coordinate.semantic_ordinal,
+            coordinate.part_ordinal,
+        )
+        .map_err(unavailable)?;
+        if expected_event_id != request.event_id()
+            || event.event_type != EventType::Message
+            || event.native_order.physical_ordinal != coordinate.physical_ordinal
         {
-            return Err(CaptureError::SystemInvariant(
-                "Cursor source-backed record exceeds the bounded projection page",
+            return Err(invalid(
+                "Cursor locator identity does not match the requested event",
             ));
         }
-        self.estimated_bytes = self
-            .estimated_bytes
-            .saturating_add(usize::from(!self.records.is_empty()))
-            .saturating_add(record_bytes);
-        self.counts.projected_records = checked_add(
-            self.counts.projected_records,
-            1,
-            "Cursor source-backed projected-record count overflowed",
-        )?;
-        if first_native_part {
-            self.counts.projected_native_records = checked_add(
-                self.counts.projected_native_records,
-                1,
-                "Cursor source-backed native-record count overflowed",
-            )?;
-        }
-        if record.exact_display_content().is_some() {
-            self.counts.indexed_documents = checked_add(
-                self.counts.indexed_documents,
-                1,
-                "Cursor source-backed indexed-document count overflowed",
-            )?;
-        }
-        self.records.push(record);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        if self.records.is_empty() {
-            return Ok(());
-        }
-        let page = CursorSourceBackedPage {
-            source_id: self.plan.source.identity(),
-            page_ordinal: self.page_ordinal,
-            records: std::mem::take(&mut self.records),
-            estimated_bytes: std::mem::replace(
-                &mut self.estimated_bytes,
-                CURSOR_SOURCE_BACKED_PAGE_ENVELOPE_BYTES,
-            ),
+        let CursorEventBody::Text { text: indexed_text } = &event.body else {
+            return Err(stale("Cursor locator no longer addresses a message"));
         };
-        self.sink.stage_cursor_source_page(page)?;
-        self.page_ordinal = checked_add(
-            self.page_ordinal,
-            1,
-            "Cursor source-backed page count overflowed",
-        )?;
-        Ok(())
+        let content_ref = event
+            .complete_content_ref
+            .as_ref()
+            .ok_or_else(|| stale("Cursor message has no exact content reference"))?;
+        let value: Value =
+            serde_json::from_slice(bytes).map_err(|_| stale("Cursor record JSON changed"))?;
+        let (text, native_record_id, provider_event_hash) = cursor_complete_content_message_record(
+            &value,
+            coordinate.physical_ordinal,
+            coordinate.part_ordinal,
+            indexed_text,
+        )
+        .ok_or_else(|| stale("Cursor message display content changed"))?;
+        let expected_native_record_id = format!(
+            "cursor-line-v1:{}:{}",
+            coordinate.physical_ordinal, coordinate.part_ordinal
+        );
+        if native_record_id != expected_native_record_id
+            || provider_event_hash != event.provider_event_hash
+            || !content_ref.verifies(text.as_bytes())
+        {
+            return Err(stale("Cursor message content evidence changed"));
+        }
+        Ok(HydratedProviderRecord {
+            event_id: request.event_id(),
+            provider_bytes: text.into_bytes(),
+        })
     }
 }
 
-fn source_backed_record(
-    plan: &CursorSourceBackedSourcePlan,
-    observation: &CursorSourceObservation,
-    revision_digest: [u8; 32],
+fn lexical_document(
+    source: &SourceKey,
+    session_id: StableEntityId,
+    native_session_id: &str,
+    source_path: &str,
+    source_revision_digest: [u8; 32],
     event: CursorNativeEvent,
-) -> Result<CursorSourceBackedRecord> {
-    let verified_content = cursor_verified_content_locator(observation, &event)?;
-    let CursorNativeEvent {
-        native_order,
-        event_type,
-        role,
-        occurred_at,
-        body,
-        record_byte_start,
-        record_byte_end_exclusive,
-        record_sha256,
-        provider_event_hash,
-        ..
-    } = event;
-    let native_item_key = NativeItemKey::certified_position(
-        CURSOR_NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(native_order.semantic_ordinal),
-        PositionStability::AppendStable,
-    )
-    .map_err(|error| contract_error("native event position", error))?;
-    let subrecord = SubrecordSelector::certified_position(
-        CURSOR_NATIVE_SUBRECORD_POSITION_KIND,
-        TypedKey::U64(u64::from(native_order.part_ordinal)),
-        PositionStability::StableSlot,
-    )
-    .map_err(|error| contract_error("native subrecord position", error))?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source: &plan.source,
-        session_id: plan.session_id,
-        logical_item_kind: CURSOR_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: Some(&subrecord),
-    })
-    .map_err(|error| contract_error("event identity", error))?;
-    let byte_length = record_byte_end_exclusive
-        .checked_sub(record_byte_start)
-        .filter(|length| *length > 0)
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "Cursor source-backed event has an invalid JSONL byte range".to_owned(),
-            )
-        })?;
-    let native_event_key = TypedKey::composite(vec![
-        TypedKey::U64(native_order.semantic_ordinal),
-        TypedKey::U64(u64::from(native_order.part_ordinal)),
-    ])
-    .map_err(|error| contract_error("native locator event key", error))?;
-    if native_order.part_ordinal > u32::from(u16::MAX) {
+) -> Result<Option<LexicalDocument>> {
+    if event.event_type != EventType::Message || event.complete_content_ref.is_none() {
+        return Ok(None);
+    }
+    let CursorEventBody::Text { text } = event.body else {
+        return Ok(None);
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let part_ordinal = event.native_order.part_ordinal;
+    if part_ordinal > u32::from(u16::MAX) {
         return Err(CaptureError::InvalidPayload(
-            "Cursor source-backed record exceeds the stable event-sequence part bound".to_owned(),
+            "Cursor record exceeds the stable event-sequence part bound".to_owned(),
         ));
     }
+    let event_id = event_id(
+        source,
+        session_id,
+        event.native_order.semantic_ordinal,
+        part_ordinal,
+    )?;
+    let byte_length = event
+        .record_byte_end_exclusive
+        .checked_sub(event.record_byte_start)
+        .filter(|length| *length > 0)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Cursor JSONL byte range is invalid".to_owned())
+        })?;
+    let native_event_key = TypedKey::composite(vec![
+        TypedKey::U64(event.native_order.semantic_ordinal),
+        TypedKey::U64(u64::from(part_ordinal)),
+    ])
+    .map_err(contract)?;
     let locator = SourceRecordLocator::new(
-        plan.source.clone(),
+        source.clone(),
         NativeRecordCoordinate::Jsonl {
-            byte_offset: record_byte_start,
+            byte_offset: event.record_byte_start,
             byte_length,
-            physical_ordinal: native_order.physical_ordinal,
-            native_session_key: Some(
-                TypedKey::utf8(plan.native_session_id.clone())
-                    .map_err(|error| contract_error("native locator session key", error))?,
-            ),
+            physical_ordinal: event.native_order.physical_ordinal,
+            native_session_key: Some(TypedKey::utf8(native_session_id).map_err(contract)?),
             native_event_key: Some(native_event_key),
         },
         LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
-        record_sha256,
+        Some(source_revision_digest),
+        event.record_sha256,
     )
-    .map_err(|error| contract_error("exact JSONL locator", error))?;
-    let event_sequence = native_order
+    .map_err(contract)?;
+    let event_sequence = event
+        .native_order
         .semantic_ordinal
-        .checked_mul(CURSOR_EVENT_SEQUENCE_PARTS)
-        .and_then(|base| base.checked_add(u64::from(native_order.part_ordinal)))
+        .checked_mul(EVENT_SEQUENCE_PARTS)
+        .and_then(|base| base.checked_add(u64::from(part_ordinal)))
         .ok_or(CaptureError::SystemInvariant(
-            "Cursor source-backed event sequence overflowed",
+            "Cursor event sequence overflowed",
         ))?;
-    let (lexical_body, touched_files) = lexical_projection(body);
-    let source_path = plan
-        .source_path
-        .to_str()
-        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-            path: plan.source_path.clone(),
-            reason: "Cursor source-backed transcript path is not UTF-8",
-        })?
-        .to_owned();
-    let (verified_content_locator, verified_content_indexed_text) = verified_content
-        .map(|(locator, indexed_text)| (Some(locator), Some(indexed_text)))
-        .unwrap_or((None, None));
-    Ok(CursorSourceBackedRecord {
+    Ok(Some(LexicalDocument {
         event_id,
-        session_id: plan.session_id,
+        session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
+        source: source.clone(),
         locator,
-        native_order,
+        provider_session_id: Some(native_session_id.to_owned()),
+        branch: None,
+        source_path: Some(source_path.to_owned()),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence,
-        occurred_at,
-        event_type,
-        role,
-        lexical_body,
-        touched_files,
-        provider_event_hash,
-        provider_session_id: plan.native_session_id.clone(),
-        source_path,
-        verified_content_locator,
-        verified_content_indexed_text,
+        occurred_at_unix_ms: event
+            .occurred_at
+            .map(|occurred_at| occurred_at.timestamp_millis()),
+        event_type: event.event_type.as_str().to_owned(),
+        role: Some(event.role.as_str().to_owned()),
+        body: text,
+        workspace: None,
+        cwd: None,
+        touched_files: Vec::new(),
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CursorCoordinate {
+    byte_offset: u64,
+    byte_length: u64,
+    physical_ordinal: u64,
+    semantic_ordinal: u64,
+    part_ordinal: u32,
+}
+
+fn validate_locator(
+    locator: &SourceRecordLocator,
+    source: &SourceKey,
+    native_session_id: &str,
+    source_revision_digest: [u8; 32],
+) -> std::result::Result<CursorCoordinate, HydrationFailure> {
+    locator.validate_contract().map_err(invalid)?;
+    if !locator.source().exact_descriptor_eq(source)
+        || source.provider() != CaptureProvider::Cursor.as_str()
+        || source.source_format() != CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT
+        || source.schema_variant() != SOURCE_SCHEMA_VARIANT
+        || source.provider_identity_version() != 1
+        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
+        || locator.certified_source_revision_digest() != Some(&source_revision_digest)
+    {
+        return Err(invalid("locator is not an exact Cursor JSONL record"));
+    }
+    let NativeRecordCoordinate::Jsonl {
+        byte_offset,
+        byte_length,
+        physical_ordinal,
+        native_session_key,
+        native_event_key,
+    } = locator.coordinate()
+    else {
+        return Err(invalid("Cursor locator is not a JSONL byte range"));
+    };
+    if native_session_key.as_ref() != Some(&TypedKey::Utf8(native_session_id.to_owned())) {
+        return Err(invalid("Cursor locator session key is invalid"));
+    }
+    let Some(TypedKey::Composite(event_key)) = native_event_key.as_ref() else {
+        return Err(invalid("Cursor locator event key is malformed"));
+    };
+    let [TypedKey::U64(semantic_ordinal), TypedKey::U64(part_ordinal)] = event_key.as_slice()
+    else {
+        return Err(invalid("Cursor locator event key is malformed"));
+    };
+    let part_ordinal =
+        u32::try_from(*part_ordinal).map_err(|_| invalid("Cursor locator part is invalid"))?;
+    Ok(CursorCoordinate {
+        byte_offset: *byte_offset,
+        byte_length: *byte_length,
+        physical_ordinal: *physical_ordinal,
+        semantic_ordinal: *semantic_ordinal,
+        part_ordinal,
     })
 }
 
-fn cursor_verified_content_locator(
-    observation: &CursorSourceObservation,
-    event: &CursorNativeEvent,
-) -> Result<Option<(VerifiedContentLocatorV1, String)>> {
-    let Some(content_ref) = event.complete_content_ref.clone() else {
-        return Ok(None);
-    };
-    let CursorEventBody::Text { text: indexed_text } = &event.body else {
-        return Err(CaptureError::SystemInvariant(
-            "Cursor complete-message reference is attached to a non-text event",
-        ));
-    };
-    if event.event_type != EventType::Message {
-        return Err(CaptureError::SystemInvariant(
-            "Cursor complete-message reference is attached to a non-message event",
-        ));
-    }
-    if !verified_content_address_supported(
-        CaptureProvider::Cursor,
+fn source_key(native_session_id: &str) -> Result<SourceKey> {
+    let anchor = SourceAnchor::provider_native(
+        SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8(native_session_id).map_err(contract)?,
+    )
+    .map_err(contract)?;
+    SourceKey::derive(
+        CaptureProvider::Cursor.as_str(),
         CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::MessageBody,
-        EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-    ) {
-        return Err(CaptureError::SystemInvariant(
-            "Cursor complete messages require the verified exact JSONL route",
-        ));
-    }
-    let profile = verified_content_profile(
-        CaptureProvider::Cursor,
-        CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::MessageBody,
+        SOURCE_SCHEMA_VARIANT,
+        1,
+        anchor,
     )
-    .ok_or(CaptureError::SystemInvariant(
-        "Cursor exact JSONL route has no verified-content profile",
-    ))?;
-    let mut range = [0_u8; 80];
-    range[..8].copy_from_slice(&event.record_byte_start.to_be_bytes());
-    range[8..16].copy_from_slice(&event.record_byte_end_exclusive.to_be_bytes());
-    range[16..48].copy_from_slice(&complete_content_digest(
-        CURSOR_EXACT_SOURCE_REVISION_DIGEST_DOMAIN,
-        &cursor_complete_content_source_revision(observation),
-    ));
-    range[48..].copy_from_slice(&complete_content_digest(
-        CURSOR_EXACT_PATH_IDENTITY_DIGEST_DOMAIN,
-        &observation.locator_identity,
-    ));
-    let native_record_id = format!(
-        "cursor-line-v1:{}:{}",
-        event.native_order.physical_ordinal, event.native_order.part_ordinal
-    );
-    let record_digest = CompleteContentBodyDigest::parse(hex_digest(&event.record_sha256)).ok_or(
-        CaptureError::SystemInvariant("Cursor source-backed record digest is malformed"),
-    )?;
-    let locator = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Jsonl,
-        EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        &range,
-        native_record_id,
-        record_digest,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "Cursor source-backed exact JSONL locator exceeds its bounded schema",
-    ))?;
-    Ok(Some((locator, indexed_text.clone())))
+    .map_err(contract)
 }
 
-fn lexical_projection(body: CursorEventBody) -> (Option<String>, Vec<String>) {
-    match body {
-        CursorEventBody::None => (None, Vec::new()),
-        CursorEventBody::Text { text } => ((!text.is_empty()).then_some(text), Vec::new()),
-        CursorEventBody::ToolCall {
-            call_id,
-            tool_name,
-            input_paths,
-        } => {
-            let mut body = String::new();
-            if let Some(tool_name) = tool_name.as_deref() {
-                append_body_component(&mut body, tool_name);
-            }
-            if let Some(call_id) = call_id.as_deref() {
-                append_body_component(&mut body, call_id);
-            }
-            for path in &input_paths {
-                append_body_component(&mut body, path);
-            }
-            ((!body.is_empty()).then_some(body), input_paths)
-        }
-    }
-}
-
-fn append_body_component(body: &mut String, value: &str) {
-    if value.is_empty() {
-        return;
-    }
-    if !body.is_empty() {
-        body.push(' ');
-    }
-    body.push_str(value);
-}
-
-fn source_backed_record_upper_bound(record: &CursorSourceBackedRecord) -> usize {
-    let string_bytes = record
-        .provider_event_hash
-        .len()
-        .saturating_add(record.provider_session_id.len())
-        .saturating_add(record.source_path.len())
-        .saturating_add(record.lexical_body.as_deref().map_or(0, str::len))
-        .saturating_add(
-            record
-                .verified_content_indexed_text
-                .as_deref()
-                .map_or(0, str::len),
-        )
-        .saturating_add(record.touched_files.iter().map(String::len).sum::<usize>());
-    CURSOR_SOURCE_BACKED_RECORD_ENVELOPE_BYTES.saturating_add(string_bytes.saturating_mul(6))
-}
-
-fn source_terminal(
-    plan: CursorSourceBackedSourcePlan,
-    generation: CursorSourceGeneration,
-    projection: ProjectionCounts,
-) -> Result<CursorSourceBackedTerminal> {
-    if projection.projected_records != generation.stats.projected_records {
-        return Err(CaptureError::SystemInvariant(
-            "Cursor source-backed page rows do not reconcile with the parser",
-        ));
-    }
-    let rejected_records = generation.rejections.total;
-    let ignored_records = generation
-        .stats
-        .complete_records
-        .checked_sub(rejected_records)
-        .and_then(|value| value.checked_sub(projection.projected_native_records))
-        .ok_or(CaptureError::SystemInvariant(
-            "Cursor source-backed physical record counts do not reconcile",
-        ))?;
-    let complete_records = projection
-        .projected_records
-        .checked_add(rejected_records)
-        .and_then(|value| value.checked_add(ignored_records))
-        .ok_or(CaptureError::SystemInvariant(
-            "Cursor source-backed certified record count overflowed",
-        ))?;
-    let counts = ScannedSourceCounts {
-        complete_records,
-        retained_records: projection.projected_records,
-        rejected_records,
-        ignored_records,
-        indexed_documents: projection.indexed_documents,
-        certified_bytes: generation.checkpoint.next_byte_offset,
-    };
-    let observation = source_observation(&plan.source, &generation.observation)?;
-    let checkpoint_bytes = serde_json::to_vec(&generation.checkpoint)?;
-    let frontier = SourceFrontier::new(
-        CURSOR_FRONTIER_KIND,
-        TypedKey::bytes(checkpoint_bytes)
-            .map_err(|error| contract_error("source checkpoint", error))?,
-        generation.checkpoint.next_byte_offset,
-        generation.checkpoint.prefix.content_sha256,
+fn session_id(source: &SourceKey, native_session_id: &str) -> Result<StableEntityId> {
+    let native_session_key = NativeSessionKey::native_id(
+        NATIVE_SESSION_NAMESPACE,
+        TypedKey::utf8(native_session_id).map_err(contract)?,
     )
-    .map_err(|error| contract_error("source frontier", error))?;
-    let certified_source = CertifiedSource::certify_with_frontier(
-        observation.clone(),
-        observation,
-        CURSOR_PARSER_REVISION,
-        generation.checkpoint.prefix.content_sha256,
-        counts,
-        Some(frontier),
-    )
-    .map_err(|error| contract_error("source certification", error))?;
-    Ok(CursorSourceBackedTerminal {
-        plan,
-        session: generation.session,
-        certified_source,
-        terminal: generation.checkpoint.terminal,
-        physical_records: generation.stats.complete_records,
-        projected_records: projection.projected_records,
-        indexed_documents: projection.indexed_documents,
-        rejected_records,
+    .map_err(contract)?;
+    derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: LOGICAL_SESSION_KIND,
+        native_session_key: &native_session_key,
     })
+    .map_err(contract)
 }
 
-fn checked_add(left: u64, right: u64, message: &'static str) -> Result<u64> {
-    left.checked_add(right)
-        .ok_or(CaptureError::SystemInvariant(message))
+fn event_id(
+    source: &SourceKey,
+    session_id: StableEntityId,
+    semantic_ordinal: u64,
+    part_ordinal: u32,
+) -> Result<StableEntityId> {
+    let native_item_key = NativeItemKey::certified_position(
+        NATIVE_EVENT_POSITION_KIND,
+        TypedKey::U64(semantic_ordinal),
+        PositionStability::AppendStable,
+    )
+    .map_err(contract)?;
+    let subrecord = SubrecordSelector::certified_position(
+        NATIVE_SUBRECORD_POSITION_KIND,
+        TypedKey::U64(u64::from(part_ordinal)),
+        PositionStability::StableSlot,
+    )
+    .map_err(contract)?;
+    derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: Some(&subrecord),
+    })
+    .map_err(contract)
 }
 
-fn complete_content_digest(domain: &[u8], value: &str) -> [u8; 32] {
+fn validate_binding(
+    leaf: &JsonlFamilyLeaf,
+    binding: &CursorBinding,
+    source_file: &OpenedProviderSourceFile,
+) -> Result<()> {
+    if source_file.ordinary_file_token() != binding.ordinary_file_token
+        || !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source())
+    {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(())
+}
+
+fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<CursorBinding> {
+    let TypedKey::Bytes(bytes) = leaf.binding() else {
+        return Err(contract("Cursor family binding is malformed"));
+    };
+    Ok(serde_json::from_slice(bytes)?)
+}
+
+fn source_revision_digest(observation: &JsonlFileObservation) -> Result<[u8; 32]> {
+    let encoded = serde_json::to_vec(observation)?;
     let mut digest = Sha256::new();
-    digest.update(domain);
-    digest.update((value.len() as u64).to_be_bytes());
-    digest.update(value.as_bytes());
-    digest.finalize().into()
+    digest.update(SOURCE_REVISION_DOMAIN);
+    digest.update((encoded.len() as u64).to_be_bytes());
+    digest.update(encoded);
+    Ok(digest.finalize().into())
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+fn strip_jsonl_terminator(record: &[u8]) -> &[u8] {
+    let record = record.strip_suffix(b"\n").unwrap_or(record);
+    record.strip_suffix(b"\r").unwrap_or(record)
 }
 
-fn complete_content_error(error: CompleteContentError) -> CaptureError {
-    match error.kind {
-        CompleteContentErrorKind::SourceMissing
-        | CompleteContentErrorKind::SourceUnreadable
-        | CompleteContentErrorKind::SourceChanged
-        | CompleteContentErrorKind::SourceRecordMissing
-        | CompleteContentErrorKind::ContentVerificationFailed => {
-            CaptureError::SourceChangedDuringCapture
-        }
-        CompleteContentErrorKind::HydrationUnsupported => CaptureError::SystemInvariant(
-            "Cursor exact JSONL hydration became unsupported after route admission",
-        ),
-        CompleteContentErrorKind::ContentTooLarge => CaptureError::InvalidPayload(
-            "Cursor source-backed complete message exceeds the hydration bound".to_owned(),
-        ),
-    }
+fn contract(error: impl std::fmt::Display) -> CaptureError {
+    CaptureError::InvalidPayload(format!("Cursor source-backed contract is invalid: {error}"))
 }
 
-fn contract_error(context: &'static str, error: impl std::fmt::Display) -> CaptureError {
-    CaptureError::InvalidPayload(format!(
-        "Cursor source-backed {context} is invalid: {error}"
-    ))
+fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
+    HydrationFailure::new(HydrationFailureKind::InvalidLocator, error.to_string())
+}
+
+fn stale(error: impl std::fmt::Display) -> HydrationFailure {
+    HydrationFailure::new(HydrationFailureKind::StaleRecordEvidence, error.to_string())
+}
+
+fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
+    HydrationFailure::new(
+        HydrationFailureKind::TemporarilyUnavailable,
+        error.to_string(),
+    )
 }
