@@ -52,6 +52,22 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-sdk:unit_tests",
 ]
 
+# Provider correctness is ordinary executable CI, not a second evidence system.
+#
+# The capture unit target owns the landed-route inventory and the JSONL,
+# SQLite-WAL, document/tree, and event-file lifecycle contracts. The CLI
+# targets prove real-shape admission/rejection, discovery, refresh, exact
+# hydration, and user-facing source-backed behavior.
+PROVIDER_CONTRACT_TESTS = [
+    "//crates/ctx-cli:native_provider_real_shapes_tests",
+    "//crates/ctx-cli:native_provider_rejections_tests",
+    "//crates/ctx-cli:native_providers_tests",
+    "//crates/ctx-cli:search_refresh_tests",
+    "//crates/ctx-cli:setup_sources_import_tests",
+    "//crates/ctx-cli:source_backed_content_tests",
+    "//crates/ctx-history-capture:complete_content_tests",
+]
+
 NATIVE_RUST_TESTS = [
     ":native_ctx_binary_smoke",
     "//crates/ctx-cli:analytics_identity_tests",
@@ -71,29 +87,21 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-cli:mcp_local_usage_v2_tests",
     "//crates/ctx-cli:mcp_telemetry_tests",
     "//crates/ctx-cli:mcp_tests",
-    "//crates/ctx-cli:native_provider_real_shapes_tests",
-    "//crates/ctx-cli:native_provider_rejections_tests",
-    "//crates/ctx-cli:native_providers_tests",
     "//crates/ctx-cli:offline_default_tests",
     "//crates/ctx-cli:pro_host_tests",
     "//crates/ctx-cli:pro_lifecycle_tests",
     "//crates/ctx-cli:pro_mcp_tests",
     "//crates/ctx-cli:pro_release_helper_tests",
     "//crates/ctx-cli:pro_test_support_tests",
-    "//crates/ctx-cli:search_refresh_tests",
     "//crates/ctx-cli:search_show_locate_sql_tests",
-    "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:skill_tests",
     "//crates/ctx-cli:slash_command_e2e_tests",
-    "//crates/ctx-cli:source_backed_content_tests",
     "//crates/ctx-cli:status_store_cutover_tests",
     "//crates/ctx-cli:stats_tests",
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
     "//crates/ctx-history-capture:codex_nativepath_qualification_tests",
-    "//crates/ctx-history-capture:complete_content_sqlite_tests",
-    "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
