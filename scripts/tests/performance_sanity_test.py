@@ -37,6 +37,7 @@ TOP_PROVIDER_COUNT = 3
 # This speed-independent margin rejects serialization while tolerating ordinary
 # scheduler/accounting noise over the complete multi-second cold refresh.
 MIN_COLD_CPU_PER_WALL = 1.10
+MIN_COLD_SPEEDUP_OVER_SERIAL = 1.20
 FORCE_SINGLE_CPU_ENV = "CTX_PERFORMANCE_FORCE_SINGLE_CPU"
 TASK_BINARY_ENV = "CTX_PERFORMANCE_TASK_BINARY"
 
@@ -1112,10 +1113,56 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
             "nightly parallelism gate requires at least two available CPUs",
         )
         forced_single_cpu = os.environ.get(FORCE_SINGLE_CPU_ENV) == "1"
-        daemon_affinity = (
-            {min(available_cpus)} if forced_single_cpu else None
+        cold, snapshot, corpus = self.run_representative_top_provider_refresh(
+            available_cpus,
+            force_single_cpu=forced_single_cpu,
+            verify_hydration=True,
         )
 
+        self.assertGreaterEqual(
+            cold.cpu_per_wall,
+            MIN_COLD_CPU_PER_WALL,
+            "cold refresh did not use more than one CPU; "
+            f"set {FORCE_SINGLE_CPU_ENV}=1 to exercise the serialization control",
+        )
+        serial_seconds = None
+        speedup = None
+        if not forced_single_cpu:
+            serial, _, _ = self.run_representative_top_provider_refresh(
+                available_cpus,
+                force_single_cpu=True,
+                verify_hydration=False,
+            )
+            serial_seconds = serial.elapsed_seconds
+            speedup = serial.elapsed_seconds / cold.elapsed_seconds
+            self.assertGreaterEqual(
+                speedup,
+                MIN_COLD_SPEEDUP_OVER_SERIAL,
+                "parallel cold refresh did not improve wall time over the "
+                "same workload pinned to one CPU",
+            )
+        print(
+            "top-provider performance:"
+            f" fixture_files={corpus.source_count}"
+            f" fixture_events={corpus.retained_records}"
+            f" fixture_bytes={corpus.fixture_bytes}"
+            f" generation={snapshot.generation_id}"
+            f" refresh_seconds={cold.elapsed_seconds:.3f}"
+            f" serial_seconds={serial_seconds}"
+            f" speedup_over_serial={speedup}"
+            f" daemon_cpu_seconds={cold.cpu_seconds:.3f}"
+            f" cpu_per_wall={cold.cpu_per_wall:.3f}"
+            f" forced_single_cpu={forced_single_cpu}"
+        )
+
+    def run_representative_top_provider_refresh(
+        self,
+        available_cpus: set[int],
+        *,
+        force_single_cpu: bool,
+        verify_hydration: bool,
+    ) -> tuple[RefreshSample, RefreshSnapshot, RepresentativeCorpus]:
+        daemon_affinity = {min(available_cpus)} if force_single_cpu else None
         with tempfile.TemporaryDirectory(
             prefix="ctx-top-provider-performance-"
         ) as temporary:
@@ -1152,7 +1199,8 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                 snapshot = self.assert_representative_refresh(
                     cold.packet, root, env, corpus
                 )
-                self.assert_complete_hydration(root, env, corpus)
+                if verify_hydration:
+                    self.assert_complete_hydration(root, env, corpus)
             finally:
                 stop_daemon(
                     daemon,
@@ -1161,24 +1209,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                     root,
                     env,
                 )
-
-        self.assertGreaterEqual(
-            cold.cpu_per_wall,
-            MIN_COLD_CPU_PER_WALL,
-            "cold refresh did not use more than one CPU; "
-            f"set {FORCE_SINGLE_CPU_ENV}=1 to exercise the serialization control",
-        )
-        print(
-            "top-provider performance:"
-            f" fixture_files={corpus.source_count}"
-            f" fixture_events={corpus.retained_records}"
-            f" fixture_bytes={corpus.fixture_bytes}"
-            f" generation={snapshot.generation_id}"
-            f" refresh_seconds={cold.elapsed_seconds:.3f}"
-            f" daemon_cpu_seconds={cold.cpu_seconds:.3f}"
-            f" cpu_per_wall={cold.cpu_per_wall:.3f}"
-            f" forced_single_cpu={forced_single_cpu}"
-        )
+        return cold, snapshot, corpus
 
 
 if __name__ == "__main__":
