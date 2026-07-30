@@ -11,6 +11,7 @@ use sha2::Digest;
 use crate::{
     common::io::ProviderSourceRoot,
     provider::source_backed::family::document::{
+        document_frontier_fingerprint,
         register_replacement_document_tree_route as register_document_tree_route,
         register_replacement_document_tree_route_with_authority as register_document_tree_route_with_authority,
         ChangedDocumentSink, CompleteDocumentTree, DocumentLeafExecutionPolicy,
@@ -18,8 +19,9 @@ use crate::{
         ReplacementDocumentTree,
     },
     provider_sources::{
-        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+        open_root_handle_sqlite_source_physical_revision, open_root_handle_sqlite_source_snapshot,
+        retain_sqlite_source_directory_authority, SqlitePhysicalReplayHint,
+        SqliteSourceDirectoryAuthority, SqliteSourcePhysicalRevision, SqliteSourceReadSnapshot,
     },
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -51,6 +53,11 @@ pub(super) struct SqliteInventorySnapshotCounters {
     pub(super) immutable_snapshot_opens: u64,
     pub(super) copied_snapshot_opens: u64,
     pub(super) source_bytes_copied: u64,
+    pub(super) physical_revision_captures: u64,
+    pub(super) physical_replay_hits: u64,
+    pub(super) physical_database_bytes_read: u64,
+    pub(super) physical_wal_bytes_read: u64,
+    pub(super) logical_rows_scanned: u64,
     pub(super) terminal_fences: u64,
     pub(super) terminal_revalidations: u64,
     pub(super) active_snapshots: u64,
@@ -168,6 +175,109 @@ where
             Self::new(data_root, provider, source_format, provider_adapter),
         )
     }
+
+    fn discover_with_base(
+        &self,
+        base_sources: &[CertifiedSource],
+    ) -> SourceBackedRouteResult<
+        CompleteDocumentTree<SqliteInventoryDocumentLeaf<A::Leaf>, SqliteInventoryTreeAuthority>,
+    > {
+        let catalog = self.provider_adapter.discover()?;
+        let mut catalog_leaves = Vec::with_capacity(catalog.leaves.len());
+        let mut fingerprints = Vec::with_capacity(catalog.leaves.len());
+        let mut observed = Vec::with_capacity(catalog.leaves.len());
+        for (index, leaf) in catalog.leaves.into_iter().enumerate() {
+            let catalog_leaf = sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path);
+            let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
+            let replay = exact_base_certificate(base_sources, &leaf.source, self.parser_revision())
+                .zip(SqlitePhysicalReplayHint::load(
+                    &self.data_root,
+                    &leaf.source,
+                ))
+                .and_then(|(committed, hint)| {
+                    let physical = retained.open_physical_revision().ok()?;
+                    if !hint.matches(
+                        &leaf.source,
+                        self.parser_revision(),
+                        physical.revision(),
+                        committed,
+                    ) {
+                        return None;
+                    }
+                    let fingerprint = document_frontier_fingerprint(hint.certificate())?;
+                    physical.mark_replay_hit().ok()?;
+                    let physical_revision = *physical.revision();
+                    let terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync> =
+                        Box::new(move || physical.revalidate().is_ok());
+                    Some((
+                        fingerprint.as_bytes(),
+                        physical_revision,
+                        terminal_revalidate,
+                    ))
+                });
+            let (
+                logical_fingerprint,
+                physical_revision,
+                snapshot,
+                terminal_revalidate,
+                replay_hint_current,
+            ) = if let Some((fingerprint, physical_revision, terminal_revalidate)) = replay {
+                (
+                    fingerprint,
+                    physical_revision,
+                    None,
+                    terminal_revalidate,
+                    true,
+                )
+            } else {
+                let snapshot = retained.open()?;
+                let physical_revision = *snapshot.evidence().physical_revision();
+                let logical_fingerprint = sqlite_logical_leaf_fingerprint(
+                    catalog_leaf,
+                    self.provider_adapter.logical_tables(),
+                    snapshot.connection().map_err(route_error)?,
+                    &retained.authority,
+                )?;
+                let revalidate = snapshot.terminal_revalidator();
+                let terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync> =
+                    Box::new(move || revalidate().is_ok());
+                (
+                    logical_fingerprint,
+                    physical_revision,
+                    Some(snapshot),
+                    terminal_revalidate,
+                    false,
+                )
+            };
+            catalog_leaves.push(catalog_leaf);
+            fingerprints.push(logical_fingerprint);
+            observed.push(ObservedDocumentLeaf::new(
+                DocumentLeafFingerprint::new(logical_fingerprint),
+                SqliteInventoryDocumentLeaf {
+                    index,
+                    source: leaf.source,
+                    path: leaf.path,
+                    logical_fingerprint,
+                    physical_revision,
+                    replay_hint_current,
+                    provider_leaf: leaf.provider_leaf,
+                    _retained: retained,
+                    snapshot: Mutex::new(snapshot),
+                    terminal_revalidate,
+                },
+            ));
+        }
+        let tree_fingerprint =
+            sqlite_inventory_tree_fingerprint(catalog.authority_fingerprint, &fingerprints);
+        Ok(CompleteDocumentTree::new(
+            tree_fingerprint,
+            observed,
+            SqliteInventoryTreeAuthority {
+                authority_fingerprint: catalog.authority_fingerprint,
+                catalog_leaves,
+            },
+        ))
+    }
 }
 
 pub(super) struct SqliteInventoryDocumentLeaf<L> {
@@ -175,6 +285,8 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     source: SourceKey,
     path: PathBuf,
     logical_fingerprint: [u8; 32],
+    physical_revision: [u8; 32],
+    replay_hint_current: bool,
     provider_leaf: L,
     _retained: RetainedSqliteInventoryLeaf,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
@@ -228,6 +340,11 @@ impl RetainedSqliteInventoryLeaf {
             .map_err(route_error)?;
         Ok(snapshot)
     }
+
+    fn open_physical_revision(&self) -> SourceBackedRouteResult<SqliteSourcePhysicalRevision> {
+        open_root_handle_sqlite_source_physical_revision(&self.authority, &self.database_name)
+            .map_err(route_error)
+    }
 }
 
 #[derive(Debug)]
@@ -271,47 +388,14 @@ where
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
-        let catalog = self.provider_adapter.discover()?;
-        let mut catalog_leaves = Vec::with_capacity(catalog.leaves.len());
-        let mut fingerprints = Vec::with_capacity(catalog.leaves.len());
-        let mut observed = Vec::with_capacity(catalog.leaves.len());
-        for (index, leaf) in catalog.leaves.into_iter().enumerate() {
-            let catalog_leaf = sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path);
-            let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
-            let snapshot = retained.open()?;
-            let logical_fingerprint = sqlite_logical_leaf_fingerprint(
-                catalog_leaf,
-                self.provider_adapter.logical_tables(),
-                snapshot.connection().map_err(route_error)?,
-            )?;
-            let revalidate = snapshot.terminal_revalidator();
-            let terminal_revalidate = Box::new(move || revalidate().is_ok());
-            catalog_leaves.push(catalog_leaf);
-            fingerprints.push(logical_fingerprint);
-            observed.push(ObservedDocumentLeaf::new(
-                DocumentLeafFingerprint::new(logical_fingerprint),
-                SqliteInventoryDocumentLeaf {
-                    index,
-                    source: leaf.source,
-                    path: leaf.path,
-                    logical_fingerprint,
-                    provider_leaf: leaf.provider_leaf,
-                    _retained: retained,
-                    snapshot: Mutex::new(Some(snapshot)),
-                    terminal_revalidate,
-                },
-            ));
-        }
-        let tree_fingerprint =
-            sqlite_inventory_tree_fingerprint(catalog.authority_fingerprint, &fingerprints);
-        Ok(CompleteDocumentTree::new(
-            tree_fingerprint,
-            observed,
-            SqliteInventoryTreeAuthority {
-                authority_fingerprint: catalog.authority_fingerprint,
-                catalog_leaves,
-            },
-        ))
+        self.discover_with_base(&[])
+    }
+
+    fn discover_complete_with_base(
+        &self,
+        base_sources: &[CertifiedSource],
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        self.discover_with_base(base_sources)
     }
 
     fn scan_changed(
@@ -403,6 +487,11 @@ where
                         immutable_snapshot_opens: counters.immutable_snapshot_opens(),
                         copied_snapshot_opens: counters.copied_snapshot_opens(),
                         source_bytes_copied: counters.source_bytes_copied(),
+                        physical_revision_captures: counters.physical_revision_captures(),
+                        physical_replay_hits: counters.physical_replay_hits(),
+                        physical_database_bytes_read: counters.physical_database_bytes_read(),
+                        physical_wal_bytes_read: counters.physical_wal_bytes_read(),
+                        logical_rows_scanned: counters.logical_rows_scanned(),
                         terminal_fences: counters.terminal_fences(),
                         terminal_revalidations: counters.terminal_revalidations(),
                         active_snapshots: counters.active_snapshots(),
@@ -421,6 +510,40 @@ where
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
         self.provider_adapter.hydrate(request)
+    }
+
+    fn after_successful_publication(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+        certificates: &std::collections::HashMap<[u8; 32], CertifiedSource>,
+    ) {
+        for observed in &tree.leaves {
+            let leaf = &observed.provider_leaf;
+            if leaf.replay_hint_current {
+                continue;
+            }
+            let Some(certificate) = certificates.get(&leaf.source.identity().digest()) else {
+                continue;
+            };
+            if !certificate
+                .observation()
+                .source()
+                .exact_descriptor_eq(&leaf.source)
+            {
+                continue;
+            }
+            SqlitePhysicalReplayHint::publish_best_effort(
+                &self.data_root,
+                &leaf.source,
+                self.parser_revision(),
+                certificate,
+                leaf.physical_revision,
+            );
+        }
+    }
+
+    fn has_successful_publication_work(&self) -> bool {
+        true
     }
 }
 
@@ -448,10 +571,24 @@ fn sqlite_catalog_leaf_fingerprint(source: &SourceKey, path: &Path) -> [u8; 32] 
     digest.finalize().into()
 }
 
+fn exact_base_certificate<'a>(
+    base_sources: &'a [CertifiedSource],
+    source: &SourceKey,
+    parser_revision: &str,
+) -> Option<&'a CertifiedSource> {
+    let mut matching = base_sources.iter().filter(|candidate| {
+        candidate.observation().source().exact_descriptor_eq(source)
+            && candidate.parser_revision() == parser_revision
+    });
+    let certificate = matching.next()?;
+    matching.next().is_none().then_some(certificate)
+}
+
 fn sqlite_logical_leaf_fingerprint(
     catalog_leaf: [u8; 32],
     tables: &[&str],
     connection: &Connection,
+    authority: &SqliteSourceDirectoryAuthority,
 ) -> SourceBackedRouteResult<[u8; 32]> {
     let mut digest = sha2::Sha256::new();
     digest.update(SQLITE_LOGICAL_LEAF_DOMAIN);
@@ -464,9 +601,15 @@ fn sqlite_logical_leaf_fingerprint(
         crate::provider::sqlite::sqlite_schema_fingerprint(connection).map_err(route_error)?;
     hash_logical_bytes(&mut digest, schema.as_bytes());
     digest.update((tables.len() as u64).to_be_bytes());
+    let mut logical_rows = 0_u64;
     for table in tables {
-        hash_sqlite_table(connection, &mut digest, table)?;
+        logical_rows = logical_rows
+            .checked_add(hash_sqlite_table(connection, &mut digest, table)?)
+            .ok_or_else(|| sqlite_inventory_internal("SQLite logical row count overflowed"))?;
     }
+    authority
+        .record_logical_rows_scanned(logical_rows)
+        .map_err(route_error)?;
     Ok(digest.finalize().into())
 }
 
@@ -474,7 +617,7 @@ fn hash_sqlite_table(
     connection: &Connection,
     digest: &mut sha2::Sha256,
     table: &str,
-) -> SourceBackedRouteResult<()> {
+) -> SourceBackedRouteResult<u64> {
     hash_logical_bytes(digest, table.as_bytes());
     let schema = connection
         .query_row(
@@ -487,7 +630,7 @@ fn hash_sqlite_table(
         .flatten();
     let Some(schema) = schema else {
         digest.update([0]);
-        return Ok(());
+        return Ok(0);
     };
     digest.update([1]);
     hash_logical_bytes(digest, schema.as_bytes());
@@ -515,7 +658,7 @@ fn hash_sqlite_table(
         }
     }
     digest.update(row_count.to_be_bytes());
-    Ok(())
+    Ok(row_count)
 }
 
 fn hash_sqlite_value(digest: &mut sha2::Sha256, value: ValueRef<'_>) {

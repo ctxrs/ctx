@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    fs::{self, File, OpenOptions},
+    fs::{self, File, FileTimes, OpenOptions},
     io::{Seek, SeekFrom, Write},
     path::Path,
     sync::{Arc, Barrier},
@@ -17,7 +17,7 @@ use rusqlite::{config::DbConfig, params, Connection};
 use sha2::{Digest, Sha256};
 
 use super::{
-    open_root_handle_sqlite_source_snapshot,
+    open_root_handle_sqlite_source_physical_revision, open_root_handle_sqlite_source_snapshot,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
     SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceComponent,
@@ -250,6 +250,146 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn active_wal_physical_replay_is_bounded_and_opens_no_sqlite_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let cold_parent = retain_parent(temp.path());
+    let cold = open_root_handle_sqlite_source_snapshot(&cold_parent, OsStr::new("provider.sqlite"))
+        .unwrap();
+    let committed_physical_revision = *cold.evidence().physical_revision();
+    cold.finish().unwrap();
+
+    let before = directory_file_bytes(temp.path());
+    let replay_parent = retain_parent(temp.path());
+    let replay = open_root_handle_sqlite_source_physical_revision(
+        &replay_parent,
+        OsStr::new("provider.sqlite"),
+    )
+    .unwrap();
+    assert_eq!(replay.revision(), &committed_physical_revision);
+    replay.mark_replay_hit().unwrap();
+    replay.revalidate().unwrap();
+    assert_eq!(directory_file_bytes(temp.path()), before);
+
+    let counters = replay_parent.snapshot_counters();
+    assert_eq!(counters.physical_revision_captures(), 1);
+    assert_eq!(counters.physical_replay_hits(), 1);
+    assert!(counters.physical_database_bytes_read() <= 128);
+    assert!(counters.physical_wal_bytes_read() <= 128);
+    assert_eq!(counters.immutable_snapshot_opens(), 0);
+    assert_eq!(counters.copied_snapshot_opens(), 0);
+    assert_eq!(counters.source_bytes_copied(), 0);
+    assert_eq!(counters.logical_rows_scanned(), 0);
+    assert_eq!(counters.terminal_fences(), 1);
+    assert_eq!(counters.terminal_revalidations(), 1);
+    assert_eq!(counters.active_snapshots(), 0);
+}
+
+#[test]
+fn physical_replay_ignores_shared_memory_churn() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let shared_memory = database.with_file_name("provider.sqlite-shm");
+    let parent = retain_parent(temp.path());
+    let before =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+    let expected_revision = *before.revision();
+
+    let mut file = OpenOptions::new().write(true).open(&shared_memory).unwrap();
+    file.seek(SeekFrom::Start(16 * 1024)).unwrap();
+    file.write_all(b"changed-shm").unwrap();
+    file.sync_all().unwrap();
+
+    before.revalidate().unwrap();
+    let after =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+    assert_eq!(after.revision(), &expected_revision);
+    after.mark_replay_hit().unwrap();
+    after.revalidate().unwrap();
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.physical_revision_captures(), 2);
+    assert_eq!(counters.physical_replay_hits(), 1);
+    assert!(counters.physical_wal_bytes_read() <= 256);
+    assert_eq!(counters.copied_snapshot_opens(), 0);
+    assert_eq!(counters.logical_rows_scanned(), 0);
+}
+
+#[test]
+fn physical_replay_fails_if_wal_commits_before_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    let parent = retain_parent(temp.path());
+    let replay =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+
+    writer
+        .execute(
+            "INSERT INTO messages (body) VALUES ('before-publication')",
+            [],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        replay.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.physical_revision_captures(), 1);
+    assert_eq!(counters.physical_replay_hits(), 0);
+    assert_eq!(counters.terminal_revalidations(), 0);
+    assert_eq!(counters.copied_snapshot_opens(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn physical_revision_detects_wal_create_checkpoint_reset_and_delete() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "before-wal");
+    let parent = retain_parent(temp.path());
+    let without_wal =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    writer
+        .execute("INSERT INTO messages (body) VALUES ('in-wal')", [])
+        .unwrap();
+    assert!(without_wal.revalidate().is_err());
+    let with_wal =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+    assert_ne!(with_wal.revision(), without_wal.revision());
+
+    writer
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    assert!(with_wal.revalidate().is_err());
+    let after_reset =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+    assert_ne!(after_reset.revision(), with_wal.revision());
+
+    drop(writer);
+    let wal = database.with_file_name("provider.sqlite-wal");
+    if wal.exists() {
+        fs::remove_file(&wal).unwrap();
+    }
+    assert!(after_reset.revalidate().is_err());
 }
 
 #[test]
@@ -674,6 +814,39 @@ fn mutation_after_seal_fails_retained_terminal_revalidation() {
     assert_eq!(counters.active_snapshot_bytes(), 0);
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn same_size_rewrite_with_restored_mtime_fails_physical_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "expected");
+    let parent = retain_parent(temp.path());
+    let replay =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+
+    let before = fs::metadata(&database).unwrap();
+    let modified = before.modified().unwrap();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&database)
+        .unwrap();
+    file.seek(SeekFrom::Start(100)).unwrap();
+    file.write_all(b"changed!").unwrap();
+    file.sync_all().unwrap();
+    file.set_times(FileTimes::new().set_modified(modified))
+        .unwrap();
+    let after = fs::metadata(&database).unwrap();
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified().unwrap(), modified);
+
+    assert!(matches!(
+        replay.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+}
+
 #[test]
 fn authority_local_counters_track_two_overlapping_copied_snapshots() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -898,6 +1071,15 @@ fn rollback_journal_is_typed_unavailable_without_recovery() {
     .unwrap();
     let parent = retain_parent(temp.path());
 
+    let physical =
+        open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"));
+    assert!(matches!(
+        physical,
+        Err(SqliteSourceAccessError::UnsupportedSidecarIdentity {
+            component: SqliteSourceComponent::RollbackJournal,
+            ..
+        })
+    ));
     let result = open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"));
     assert!(matches!(
         result,

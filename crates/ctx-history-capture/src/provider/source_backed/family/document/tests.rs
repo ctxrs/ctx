@@ -11,6 +11,7 @@ use ctx_history_core::{
     SourceRecordLocator,
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::{

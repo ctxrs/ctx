@@ -24,14 +24,13 @@ use ctx_history_core::{
     BatchHydrationRequest, BatchHydrationResult, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, EventHydrationRequest,
     HydratedProviderRecord, HydrationFailure, HydrationFailureKind, ScannedSourceCounts,
-    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, TypedKey,
+    SourceFrontier, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use sha2::{Digest, Sha256};
 const DOCUMENT_FRONTIER_KIND: &str = "ctx-document-full-snapshot-v1";
-const DOCUMENT_INVENTORY_AUTHORITY_NAMESPACE: &str = "ctx.document-tree";
-const DOCUMENT_INVENTORY_REVISION_KIND: &str = "ctx-document-tree-fingerprint-v1";
-const DOCUMENT_INVENTORY_DISCOVERY_REVISION: &str = "ctx-document-tree-discovery-v1";
+
+mod inventory;
+use inventory::DocumentInventoryAuthority;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct DocumentLeafFingerprint([u8; 32]);
@@ -382,6 +381,12 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>>;
+    fn discover_complete_with_base(
+        &self,
+        _base_sources: &[CertifiedSource],
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        self.discover_complete()
+    }
     fn scan_changed(
         &self,
         authority: &Self::TreeAuthority,
@@ -396,6 +401,15 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
         &self,
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure>;
+    fn after_successful_publication(
+        &self,
+        _tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+        _certificates: &HashMap<[u8; 32], CertifiedSource>,
+    ) {
+    }
+    fn has_successful_publication_work(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn register_replacement_document_tree_route<A>(
@@ -456,10 +470,13 @@ where
     let source_state = Arc::clone(&state);
     let inventory_adapter = Arc::clone(&adapter);
     let inventory_state = Arc::clone(&state);
+    let publication_adapter = Arc::clone(&adapter);
+    let publication_state = Arc::clone(&state);
     let single_adapter = Arc::clone(&adapter);
     let batch_adapter = adapter;
+    let has_successful_publication_work = publication_adapter.has_successful_publication_work();
 
-    SourceBackedRouteDriver::new(
+    let driver = SourceBackedRouteDriver::new(
         move |sink| {
             {
                 let mut state = scan_state
@@ -485,6 +502,18 @@ where
         let result = batch_adapter.hydrate_group(request)?;
         result.validate_for_request(request)?;
         Ok(result)
+    });
+    if !has_successful_publication_work {
+        return driver;
+    }
+    driver.with_successful_publication(move || {
+        let Ok(state) = publication_state.lock() else {
+            return;
+        };
+        let Some(expected) = state.expected.as_ref() else {
+            return;
+        };
+        publication_adapter.after_successful_publication(&expected.tree, &expected.certificates);
     })
 }
 
@@ -496,9 +525,9 @@ fn scan_document_tree<A>(
 where
     A: ReplacementDocumentTree,
 {
-    let tree = adapter.discover_complete()?;
-    validate_unique_leaf_fingerprints(&tree.leaves)?;
     let base_sources = source_backed_base_sources(sink, |source| adapter.owns_source(source));
+    let tree = adapter.discover_complete_with_base(&base_sources)?;
+    validate_unique_leaf_fingerprints(&tree.leaves)?;
     let mut replayable = HashMap::new();
     for base in &base_sources {
         if base.parser_revision() != adapter.parser_revision() {
@@ -809,7 +838,9 @@ fn exact_document_replay_append(
     Ok(append)
 }
 
-fn document_frontier_fingerprint(certificate: &CertifiedSource) -> Option<DocumentLeafFingerprint> {
+pub(crate) fn document_frontier_fingerprint(
+    certificate: &CertifiedSource,
+) -> Option<DocumentLeafFingerprint> {
     let frontier = certificate.frontier()?;
     if frontier.checkpoint_kind() != DOCUMENT_FRONTIER_KIND {
         return None;
@@ -933,52 +964,6 @@ where
     adapter
         .revalidate_complete(&expected.tree)
         .is_ok_and(|terminal| terminal == expected.tree.tree_fingerprint)
-}
-
-#[derive(Clone)]
-struct DocumentInventoryAuthority {
-    provider: String,
-    route_key: [u8; 32],
-}
-
-impl DocumentInventoryAuthority {
-    fn new(route: &ProviderSource) -> Self {
-        let path = route.path.as_os_str().as_encoded_bytes();
-        let mut digest = Sha256::new();
-        digest.update(b"ctx.document-tree-route-authority-v1\0");
-        digest.update((route.provider.as_str().len() as u64).to_be_bytes());
-        digest.update(route.provider.as_str().as_bytes());
-        digest.update((route.source_format.len() as u64).to_be_bytes());
-        digest.update(route.source_format.as_bytes());
-        digest.update((path.len() as u64).to_be_bytes());
-        digest.update(path);
-        Self {
-            provider: route.provider.as_str().to_owned(),
-            route_key: digest.finalize().into(),
-        }
-    }
-
-    fn certify(
-        &self,
-        tree_fingerprint: [u8; 32],
-        sources: Vec<SourceKey>,
-    ) -> SourceBackedRouteResult<CertifiedSourceInventory> {
-        let observation = SourceInventoryObservation::new(
-            self.provider.clone(),
-            DOCUMENT_INVENTORY_AUTHORITY_NAMESPACE,
-            TypedKey::bytes(self.route_key.to_vec()).map_err(document_contract_error)?,
-            DOCUMENT_INVENTORY_REVISION_KIND,
-            tree_fingerprint.to_vec(),
-        )
-        .map_err(document_contract_error)?;
-        CertifiedSourceInventory::certify(
-            observation.clone(),
-            observation,
-            DOCUMENT_INVENTORY_DISCOVERY_REVISION,
-            sources,
-        )
-        .map_err(document_contract_error)
-    }
 }
 
 fn document_changed(detail: impl Into<String>) -> SourceBackedRouteError {
