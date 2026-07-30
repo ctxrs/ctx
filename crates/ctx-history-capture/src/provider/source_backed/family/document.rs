@@ -55,27 +55,22 @@ pub(crate) struct ObservedDocumentLeaf<L> {
 
 impl<L> ObservedDocumentLeaf<L> {
     pub(crate) fn new(fingerprint: DocumentLeafFingerprint, provider_leaf: L) -> Self {
-        Self {
-            fingerprint,
-            replay_from_frontier: true,
-            provider_leaf,
-        }
+        Self::with_durable_replay(fingerprint, provider_leaf, true)
     }
 
-    /// Admits one source that must be scanned once into the staged generation.
+    /// Selects whether the physical fingerprint is durable replay identity.
     ///
-    /// This is the logical-snapshot path for sources such as SQLite: physical
-    /// DB/WAL evidence can cheaply fence the read, but it is not durable
-    /// logical replay identity. If the resulting logical certificate matches
-    /// the base generation, the index writer discards the identical staging
-    /// run without publishing metadata or advancing the generation.
-    pub(crate) fn always_scan(
+    /// Ordinary files use `true`. Logical snapshots such as SQLite use
+    /// `false`: they scan once, then identical logical staging is discarded
+    /// without publishing a new generation.
+    pub(crate) fn with_durable_replay(
         physical_fingerprint: DocumentLeafFingerprint,
         provider_leaf: L,
+        replay_from_frontier: bool,
     ) -> Self {
         Self {
             fingerprint: physical_fingerprint,
-            replay_from_frontier: false,
+            replay_from_frontier,
             provider_leaf,
         }
     }
