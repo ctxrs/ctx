@@ -3,9 +3,10 @@ use std::path::Path;
 
 use anyhow::anyhow;
 use ctx_pro_host_protocol::{
-    decode_base64url, valid_pro_installation_id, SignedEntitlement, ED25519_SIGNATURE_BYTES,
-    ENTITLEMENT_CLOCK_SKEW_SECONDS, ENTITLEMENT_GRANT_SECONDS, ENTITLEMENT_MAX_GRACE_SECONDS,
-    ENTITLEMENT_SCHEMA_VERSION, INSTALLATION_PUBLIC_KEY_BYTES, PROTOCOL_VERSION,
+    decode_base64url, valid_pro_installation_id, EntitlementAccessKind, SignedEntitlement,
+    ED25519_SIGNATURE_BYTES, ENTITLEMENT_CLOCK_SKEW_SECONDS, ENTITLEMENT_GRANT_SECONDS,
+    ENTITLEMENT_MAX_GRACE_SECONDS, ENTITLEMENT_SCHEMA_VERSION, INSTALLATION_PUBLIC_KEY_BYTES,
+    PROTOCOL_VERSION,
 };
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
@@ -583,6 +584,8 @@ fn validate_entitlement(value: &SignedEntitlement) -> Result<(), CredentialVault
             .grace_deadline_unix
             .saturating_sub(grant.access_deadline_unix)
             <= ENTITLEMENT_MAX_GRACE_SECONDS
+        && (grant.access_kind != EntitlementAccessKind::Trial
+            || grant.grace_deadline_unix == grant.access_deadline_unix)
         && grant.issued_at_unix.saturating_sub(grant.not_before_unix)
             <= ENTITLEMENT_CLOCK_SKEW_SECONDS;
     let signature_valid = decode_base64url(&value.signature_base64url)
@@ -615,6 +618,8 @@ mod tests {
     use std::path::PathBuf;
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     use std::sync::{Arc, Barrier};
+
+    use ctx_pro_host_protocol::{base64url, EntitlementCapability, EntitlementGrant};
 
     use super::*;
 
@@ -728,6 +733,42 @@ mod tests {
                 Err(CredentialVaultError::InvalidRecordId)
             );
         }
+    }
+
+    #[test]
+    fn trial_entitlement_requires_its_absolute_deadline_as_grace_boundary() {
+        const NOW: i64 = 1_800_000_000;
+        let deadline = NOW + 14 * 24 * 60 * 60;
+        let mut entitlement = SignedEntitlement {
+            grant: EntitlementGrant {
+                schema_version: ENTITLEMENT_SCHEMA_VERSION,
+                issuer: "https://pro-staging.ctx.rs".to_owned(),
+                key_id: "fixture-v1".to_owned(),
+                grant_id: "019f85ff-0000-7000-8000-000000000001".to_owned(),
+                subject: "user_01".to_owned(),
+                account_id: "account_01".to_owned(),
+                product: "ctx-local-pro".to_owned(),
+                access_kind: EntitlementAccessKind::Trial,
+                installation_key_thumbprint: base64url(&[7; INSTALLATION_PUBLIC_KEY_BYTES]),
+                issued_at_unix: NOW,
+                not_before_unix: NOW - ENTITLEMENT_CLOCK_SKEW_SECONDS,
+                refresh_after_unix: NOW + 4 * 24 * 60 * 60,
+                access_deadline_unix: deadline,
+                grace_deadline_unix: deadline,
+                expires_at_unix: NOW + ENTITLEMENT_GRANT_SECONDS,
+                minimum_helper_protocol: PROTOCOL_VERSION,
+                revocation_epoch: 0,
+                capabilities: BTreeSet::from([EntitlementCapability::GraphRead]),
+            },
+            signature_base64url: base64url(&[3; ED25519_SIGNATURE_BYTES]),
+        };
+        assert_eq!(validate_entitlement(&entitlement), Ok(()));
+
+        entitlement.grant.grace_deadline_unix += 1;
+        assert_eq!(
+            validate_entitlement(&entitlement),
+            Err(CredentialVaultError::Corrupt)
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
