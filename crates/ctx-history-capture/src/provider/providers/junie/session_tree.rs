@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::common::io::{
@@ -19,7 +20,8 @@ use super::{
     MAX_JUNIE_INDEX_METADATA_BYTES,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct JunieIndexMeta {
     pub(super) session_id: String,
     pub(super) created_at: Option<i64>,
@@ -79,15 +81,7 @@ struct JunieIndex {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct JunieSessionTreeVisit {
-    // Traversal detail and retained authority remain provider diagnostics; the
-    // release coordinator currently consumes only rejection_count.
-    #[allow(dead_code)]
-    pub(super) visited: usize,
     pub(super) rejection_count: u64,
-    #[allow(dead_code)]
-    pub(super) rejections: Vec<ProviderImportFailure>,
-    #[allow(dead_code)]
-    pub(super) authority: Option<ProviderSourceRoot>,
 }
 
 pub(super) fn visit_junie_session_event_paths(
@@ -143,11 +137,7 @@ pub(super) fn visit_junie_session_event_paths(
         )?;
         authority.revalidate()?;
         index_authority.revalidate()?;
-        return Ok(JunieSessionTreeVisit {
-            visited: 1,
-            authority: Some(authority),
-            ..JunieSessionTreeVisit::default()
-        });
+        return Ok(JunieSessionTreeVisit::default());
     }
     let OpenedProviderSourcePath::Directory(selected_directory) = opened else {
         return Err(CaptureError::SystemInvariant(
@@ -191,11 +181,7 @@ pub(super) fn visit_junie_session_event_paths(
             )?;
             authority.revalidate()?;
             index_authority.revalidate()?;
-            return Ok(JunieSessionTreeVisit {
-                visited: 1,
-                authority: Some(authority),
-                ..JunieSessionTreeVisit::default()
-            });
+            return Ok(JunieSessionTreeVisit::default());
         }
         Ok(OpenedProviderSourcePath::Directory(directory)) => directory.revalidate()?,
         Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -213,10 +199,7 @@ pub(super) fn visit_junie_session_event_paths(
         Ok(index) => index,
         Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             authority.revalidate()?;
-            return Ok(JunieSessionTreeVisit {
-                authority: Some(authority),
-                ..JunieSessionTreeVisit::default()
-            });
+            return Ok(JunieSessionTreeVisit::default());
         }
         Err(error) => return Err(error),
     };
@@ -310,12 +293,8 @@ pub(super) fn visit_junie_session_event_paths(
     }
     selected_directory.revalidate()?;
     authority.revalidate()?;
-    Ok(JunieSessionTreeVisit {
-        visited,
-        rejection_count,
-        rejections,
-        authority: Some(authority),
-    })
+    let _ = (visited, rejections);
+    Ok(JunieSessionTreeVisit { rejection_count })
 }
 
 pub(super) fn junie_provider_session_id(session_path: &JunieSessionPath) -> Result<String> {

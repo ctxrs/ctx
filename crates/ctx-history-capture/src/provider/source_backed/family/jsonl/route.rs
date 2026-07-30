@@ -82,6 +82,13 @@ pub(crate) trait JsonlFamilyProjector: Send {
     fn finish(&mut self) -> Result<()> {
         Ok(())
     }
+
+    fn finish_projecting(
+        &mut self,
+        _emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+    ) -> Result<()> {
+        self.finish()
+    }
 }
 
 pub(crate) trait JsonlFamilyHydrator {
@@ -516,7 +523,23 @@ fn scan_leaf(
         .map_err(route_invalid)?
         .is_some()
     {}
-    projector.finish().map_err(route_invalid)?;
+    let before_finish = documents;
+    projector
+        .finish_projecting(&mut |document| {
+            if !document.source.exact_descriptor_eq(leaf.source()) {
+                return Err(CaptureError::InvalidPayload(
+                    "JSONL projector changed the bound source".to_owned(),
+                ));
+            }
+            sink.add_document(document)
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            documents = checked_increment(documents)?;
+            Ok(())
+        })
+        .map_err(route_invalid)?;
+    if documents != before_finish {
+        represented_records = physical_records;
+    }
     let outcome = reader
         .outcome()
         .ok_or_else(|| route_invalid("JSONL replacement scan has no terminal checkpoint"))?;

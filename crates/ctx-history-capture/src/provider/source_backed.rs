@@ -70,9 +70,7 @@ use super::providers::{
         GooseSourceRouteV0,
     },
     hermes::source_backed::{hermes_source_backed_explicit, HermesSourceCandidate},
-    junie::nativepath::{
-        JunieLocatorResolverV0, JunieSourceBackedEmissionV0, JunieSourceBackedScannerV0,
-    },
+    junie::nativepath::junie_jsonl_adapter,
     kimi::native_path::source_backed::{KimiSourceBackedCatalog, KimiSourceBackedResolver},
     lingma::native_path::{
         reject_duplicate_paths as reject_duplicate_lingma_paths, scan_lingma_snapshot_v0,

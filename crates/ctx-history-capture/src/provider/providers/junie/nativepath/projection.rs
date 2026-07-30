@@ -1,47 +1,27 @@
-use super::*;
+use chrono::{DateTime, Utc};
+use ctx_history_core::{EventRole, EventType};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RuntimeState {
-    pub(super) started_at_ms: i64,
-    pub(super) last_ts_ms: i64,
-    pub(super) ended_at_ms: Option<i64>,
-    pub(super) title: Option<String>,
-    pub(super) cwd: Option<String>,
-    pub(super) saw_supported_event: bool,
-}
+use crate::{
+    provider::{
+        normalization::{provider_local_preview, provider_timestamp_millis},
+        source_backed::family::jsonl::JsonlRecordRef,
+    },
+    CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS,
+};
 
-impl RuntimeState {
-    pub(super) fn fresh(meta: &JunieIndexMeta, imported_at: DateTime<Utc>) -> Self {
-        let started_at = provider_timestamp_millis(meta.created_at, imported_at);
-        Self {
-            started_at_ms: started_at.timestamp_millis(),
-            last_ts_ms: started_at.timestamp_millis(),
-            ended_at_ms: meta
-                .updated_at
-                .map(|value| provider_timestamp_millis(Some(value), started_at).timestamp_millis()),
-            title: meta.task_name.clone(),
-            cwd: meta.project_dir.clone(),
-            saw_supported_event: false,
-        }
-    }
+use super::super::{
+    assistant::{
+        junie_buffer_result_text, junie_merge_buffered_agent_event, junie_step_output_projection,
+        JunieAssistantBuffer, JunieOutputOutcome, JunieStepAgg,
+    },
+    session_tree::JunieIndexMeta,
+    MAX_JUNIE_TRANSIENT_TURN_BYTES,
+};
 
-    pub(super) fn started_at(&self) -> DateTime<Utc> {
-        timestamp(self.started_at_ms)
-    }
-
-    pub(super) fn last_ts(&self) -> DateTime<Utc> {
-        timestamp(self.last_ts_ms)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Frontier {
-    pub(super) offset: u64,
-    pub(super) next_ordinal: u64,
-    pub(super) next_event_index: u64,
-    pub(super) prefix_sha256: [u8; 32],
-    pub(super) state: RuntimeState,
-}
+pub(super) const MAX_RECORD_SET_ENTRIES: usize = 64;
+pub(super) const RECORD_SET_DIGEST_DOMAIN: &[u8] = b"ctx-junie-jsonl-record-set-v1\0";
 
 #[derive(Debug, Clone)]
 pub(super) struct BindingEntry {
@@ -58,13 +38,7 @@ pub(super) struct RecordSetBinding {
 }
 
 impl RecordSetBinding {
-    pub(super) fn observe(
-        &mut self,
-        ordinal: u64,
-        byte_start: u64,
-        byte_end_exclusive: u64,
-        payload: &[u8],
-    ) {
+    fn observe(&mut self, ordinal: u64, byte_start: u64, byte_end_exclusive: u64, payload: &[u8]) {
         if self.unavailable {
             return;
         }
@@ -119,138 +93,130 @@ pub(super) struct EventDraft {
     pub(super) file_change: Option<FileChangeDraft>,
 }
 
-pub(super) struct ParsedTurn {
-    pub(super) rows: Vec<EventDraft>,
-    pub(super) end_offset: u64,
-    pub(super) end_ordinal: u64,
-    pub(super) next_event_index: u64,
-    pub(super) after_state: RuntimeState,
-    pub(super) terminal: bool,
-    pub(super) incomplete: bool,
-    pub(super) after_prefix_sha256: [u8; 32],
-    pub(super) rejection_count: u64,
+#[derive(Debug, Clone)]
+struct RuntimeState {
+    started_at_ms: i64,
+    last_ts_ms: i64,
+    cwd: Option<String>,
+    saw_supported_event: bool,
 }
 
-pub(super) fn timestamp(millis: i64) -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+impl RuntimeState {
+    fn fresh(meta: &JunieIndexMeta, imported_at: DateTime<Utc>) -> Self {
+        let started_at = provider_timestamp_millis(meta.created_at, imported_at);
+        Self {
+            started_at_ms: started_at.timestamp_millis(),
+            last_ts_ms: started_at.timestamp_millis(),
+            cwd: meta.project_dir.clone(),
+            saw_supported_event: false,
+        }
+    }
+
+    fn started_at(&self) -> DateTime<Utc> {
+        timestamp(self.started_at_ms)
+    }
+
+    fn last_ts(&self) -> DateTime<Utc> {
+        timestamp(self.last_ts_ms)
+    }
 }
 
-pub(super) fn parse_session_turn(
-    session_path: &JunieSessionPath,
-    frontier: &Frontier,
-) -> Result<ParsedTurn> {
-    let opened = session_path.open_events()?;
-    let mut reader = BufReader::new(opened.file().try_clone()?);
-    reader.seek(SeekFrom::Start(frontier.offset))?;
-    let start_offset = frontier.offset;
-    let start_ordinal = frontier.next_ordinal;
-    let base_event_index = frontier.next_event_index;
-    let mut ordinal = start_ordinal;
-    let mut event_index = base_event_index;
-    let mut state = frontier.state.clone();
-    let mut buffer = JunieAssistantBuffer::default();
-    let mut binding = RecordSetBinding::default();
-    let mut rows = Vec::new();
-    let mut rejection_count = 0_u64;
-    let mut retained_turn_bytes = 0_usize;
-    let mut line = Vec::new();
-    let mut incomplete = false;
-    let mut terminal = false;
+pub(super) struct JunieProjection {
+    state: RuntimeState,
+    buffer: JunieAssistantBuffer,
+    binding: RecordSetBinding,
+    retained_turn_bytes: usize,
+    turn_start: u64,
+    next_event_index: u64,
+    rejected_records: u64,
+    require_supported_events: bool,
+}
 
-    loop {
-        let byte_start = reader.stream_position()?;
-        let read =
-            crate::common::io::read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)?;
-        let byte_end = reader.stream_position()?;
-        if !matches!(&read, crate::common::io::ProviderJsonlLineRead::Eof)
-            && byte_end.saturating_sub(start_offset) > MAX_JUNIE_TRANSIENT_TURN_BYTES as u64
+impl JunieProjection {
+    pub(super) fn new(
+        meta: &JunieIndexMeta,
+        require_supported_events: bool,
+        imported_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            state: RuntimeState::fresh(meta, imported_at),
+            buffer: JunieAssistantBuffer::default(),
+            binding: RecordSetBinding::default(),
+            retained_turn_bytes: 0,
+            turn_start: 0,
+            next_event_index: 0,
+            rejected_records: 0,
+            require_supported_events,
+        }
+    }
+
+    pub(super) fn cwd(&self) -> Option<&str> {
+        self.state.cwd.as_deref()
+    }
+
+    pub(super) fn project(&mut self, record: JsonlRecordRef<'_>) -> Result<Vec<EventDraft>> {
+        let evidence = record.evidence();
+        if evidence
+            .byte_end_exclusive()
+            .saturating_sub(self.turn_start)
+            > MAX_JUNIE_TRANSIENT_TURN_BYTES as u64
         {
-            rows.clear();
-            record_rejection(&mut rejection_count);
-            ordinal = ordinal.checked_add(1).ok_or(CaptureError::SystemInvariant(
-                "Junie source ordinal exhausted",
-            ))?;
-            break;
+            self.reset_turn(evidence.byte_end_exclusive());
+            self.reject();
+            return Ok(Vec::new());
         }
-        match read {
-            crate::common::io::ProviderJsonlLineRead::Eof => {
-                terminal = true;
-                flush_assistant(&mut buffer, &binding, &state, &mut event_index, &mut rows)?;
-                break;
-            }
-            crate::common::io::ProviderJsonlLineRead::Oversized { .. } => {
-                record_rejection(&mut rejection_count);
-                ordinal = ordinal.checked_add(1).ok_or(CaptureError::SystemInvariant(
-                    "Junie source ordinal exhausted",
-                ))?;
-                continue;
-            }
-            crate::common::io::ProviderJsonlLineRead::Line { .. } => {}
-        }
-        if line.last() != Some(&b'\n') {
-            incomplete = true;
-            record_rejection(&mut rejection_count);
-            rows.clear();
-            opened.revalidate()?;
-            return Ok(ParsedTurn {
-                rows,
-                end_offset: start_offset,
-                end_ordinal: start_ordinal,
-                next_event_index: base_event_index,
-                after_state: frontier.state.clone(),
-                terminal: false,
-                incomplete,
-                after_prefix_sha256: frontier.prefix_sha256,
-                rejection_count,
-            });
-        }
-        let payload = strip_jsonl_ending(&line);
-        let current_ordinal = ordinal;
-        ordinal = ordinal.checked_add(1).ok_or(CaptureError::SystemInvariant(
-            "Junie source ordinal exhausted",
-        ))?;
+        let payload = record.bytes();
         if payload.iter().all(u8::is_ascii_whitespace) {
-            continue;
+            return Ok(Vec::new());
         }
         let value = match serde_json::from_slice::<Value>(payload) {
             Ok(value) => value,
             Err(_) => {
-                record_rejection(&mut rejection_count);
-                continue;
+                self.reject();
+                return Ok(Vec::new());
             }
         };
+        let mut rows = Vec::new();
         match value.get("kind").and_then(Value::as_str).unwrap_or("") {
             "UserPromptEvent" => {
-                flush_assistant(&mut buffer, &binding, &state, &mut event_index, &mut rows)?;
+                flush_assistant(
+                    &mut self.buffer,
+                    &self.binding,
+                    &self.state,
+                    &mut self.next_event_index,
+                    &mut rows,
+                )?;
                 let prompt = value.get("prompt").and_then(Value::as_str).unwrap_or("");
                 if !prompt.trim().is_empty() {
-                    state.saw_supported_event = true;
-                    let mut user_binding = RecordSetBinding::default();
-                    user_binding.observe(current_ordinal, byte_start, byte_end, payload);
+                    self.state.saw_supported_event = true;
+                    let mut binding = RecordSetBinding::default();
+                    binding.observe(
+                        evidence.physical_ordinal(),
+                        evidence.byte_start(),
+                        evidence.byte_end_exclusive(),
+                        payload,
+                    );
                     rows.push(EventDraft {
-                        event_index,
+                        event_index: self.next_event_index,
                         event_type: EventType::Message,
                         role: Some(EventRole::User),
-                        occurred_at: state.last_ts(),
+                        occurred_at: self.state.last_ts(),
                         text: prompt.to_owned(),
                         body: json!({
                             "kind": "UserPromptEvent",
                             "prompt": prompt,
                         }),
                         source_backed_binding: SourceBackedBinding {
-                            records: user_binding,
+                            records: binding,
                             target: SourceBackedTarget::UserPrompt,
                         },
                         file_change: None,
                     });
-                    event_index =
-                        event_index
-                            .checked_add(1)
-                            .ok_or(CaptureError::SystemInvariant(
-                                "Junie provider event index exhausted",
-                            ))?;
+                    self.next_event_index = self.next_event_index.checked_add(1).ok_or(
+                        CaptureError::SystemInvariant("Junie provider event index exhausted"),
+                    )?;
                 }
-                break;
+                self.reset_turn(evidence.byte_end_exclusive());
             }
             "SessionA2uxEvent" => {
                 if let Some(timestamp) = value
@@ -258,32 +224,20 @@ pub(super) fn parse_session_turn(
                     .and_then(json_i64)
                     .and_then(DateTime::<Utc>::from_timestamp_millis)
                 {
-                    state.last_ts_ms = timestamp.timestamp_millis();
-                    state.ended_at_ms = Some(timestamp.timestamp_millis());
+                    self.state.last_ts_ms = timestamp.timestamp_millis();
                 }
                 let agent = value
                     .get("event")
                     .and_then(|event| event.get("agentEvent"))
                     .unwrap_or(&Value::Null);
-                let kind = agent.get("kind").and_then(Value::as_str).unwrap_or("");
-                match kind {
-                    "AgentTaskNameUpdatedEvent" => {
-                        if let Some(title) = agent
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.trim().is_empty())
-                        {
-                            state.title =
-                                Some(provider_local_preview(title, PROVIDER_MAX_PREVIEW_CHARS).0);
-                        }
-                    }
+                match agent.get("kind").and_then(Value::as_str).unwrap_or("") {
                     "CurrentDirectoryUpdatedEvent" => {
                         if let Some(cwd) = agent
                             .get("currentDirectory")
                             .and_then(Value::as_str)
                             .filter(|value| !value.trim().is_empty())
                         {
-                            state.cwd =
+                            self.state.cwd =
                                 Some(provider_local_preview(cwd, PROVIDER_MAX_PREVIEW_CHARS).0);
                         }
                     }
@@ -294,23 +248,26 @@ pub(super) fn parse_session_turn(
                     | "TerminalBlockUpdatedEvent"
                     | "ViewFilesBlockUpdatedEvent"
                     | "FileChangesBlockUpdatedEvent" => {
-                        let retained = retained_turn_bytes.checked_add(payload.len());
+                        let retained = self.retained_turn_bytes.checked_add(payload.len());
                         if retained.is_none_or(|bytes| bytes > MAX_JUNIE_TRANSIENT_TURN_BYTES) {
-                            buffer = JunieAssistantBuffer::default();
-                            binding = RecordSetBinding::default();
-                            retained_turn_bytes = 0;
-                            record_rejection(&mut rejection_count);
-                            continue;
+                            self.reset_turn(evidence.byte_end_exclusive());
+                            self.reject();
+                            return Ok(Vec::new());
                         }
-                        retained_turn_bytes = retained.unwrap_or_default();
-                        binding.observe(current_ordinal, byte_start, byte_end, payload);
+                        self.retained_turn_bytes = retained.unwrap_or_default();
+                        self.binding.observe(
+                            evidence.physical_ordinal(),
+                            evidence.byte_start(),
+                            evidence.byte_end_exclusive(),
+                            payload,
+                        );
                         if junie_merge_buffered_agent_event(
-                            &mut buffer,
+                            &mut self.buffer,
                             agent,
-                            current_ordinal.saturating_add(1),
-                            state.last_ts(),
+                            evidence.physical_ordinal().saturating_add(1),
+                            self.state.last_ts(),
                         ) {
-                            state.saw_supported_event = true;
+                            self.state.saw_supported_event = true;
                         }
                     }
                     _ => {}
@@ -318,66 +275,53 @@ pub(super) fn parse_session_turn(
             }
             _ => {}
         }
+        Ok(rows)
     }
 
-    let end_offset = reader.stream_position()?;
-    let after_prefix_sha256 = hash_prefix(session_path, end_offset)?;
-    opened.revalidate()?;
-    Ok(ParsedTurn {
-        rows,
-        end_offset,
-        end_ordinal: ordinal,
-        next_event_index: event_index,
-        after_state: state,
-        terminal,
-        incomplete,
-        after_prefix_sha256,
-        rejection_count,
-    })
-}
-
-pub(super) fn strip_jsonl_ending(line: &[u8]) -> &[u8] {
-    line.strip_suffix(b"\n")
-        .unwrap_or(line)
-        .strip_suffix(b"\r")
-        .unwrap_or_else(|| line.strip_suffix(b"\n").unwrap_or(line))
-}
-
-fn hash_prefix(session_path: &JunieSessionPath, length: u64) -> Result<[u8; 32]> {
-    let opened = session_path.open_events()?;
-    if opened.len() < length {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let mut file = opened.file().try_clone()?;
-    let mut remaining = length;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    while remaining != 0 {
-        let limit = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| CaptureError::SystemInvariant("Junie range exceeds usize"))?;
-        let read = file.read(&mut buffer[..limit])?;
-        if read == 0 {
-            return Err(CaptureError::SourceChangedDuringCapture);
+    pub(super) fn finish(&mut self) -> Result<Vec<EventDraft>> {
+        let mut rows = Vec::new();
+        flush_assistant(
+            &mut self.buffer,
+            &self.binding,
+            &self.state,
+            &mut self.next_event_index,
+            &mut rows,
+        )?;
+        if self.require_supported_events
+            && !self.state.saw_supported_event
+            && self.rejected_records == 0
+        {
+            return Err(CaptureError::InvalidPayload(
+                "Junie events.jsonl contained no supported session events".to_owned(),
+            ));
         }
-        digest.update(&buffer[..read]);
-        remaining = remaining.saturating_sub(read as u64);
+        Ok(rows)
     }
-    opened.revalidate()?;
-    Ok(digest.finalize().into())
+
+    fn reset_turn(&mut self, next_start: u64) {
+        self.buffer = JunieAssistantBuffer::default();
+        self.binding = RecordSetBinding::default();
+        self.retained_turn_bytes = 0;
+        self.turn_start = next_start;
+    }
+
+    fn reject(&mut self) {
+        self.rejected_records = self.rejected_records.saturating_add(1);
+    }
 }
 
-pub(super) fn json_i64(value: &Value) -> Option<i64> {
+fn timestamp(millis: i64) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
         .or_else(|| value.as_f64().map(|value| value.round() as i64))
 }
 
-fn record_rejection(rejection_count: &mut u64) {
-    *rejection_count = rejection_count.saturating_add(1);
-}
-
-pub(super) fn flush_assistant(
+fn flush_assistant(
     buffer: &mut JunieAssistantBuffer,
     binding: &RecordSetBinding,
     state: &RuntimeState,
@@ -398,17 +342,12 @@ pub(super) fn flush_assistant(
             ))?;
         if step.changes.is_empty() {
             rows.push(step_event(*event_index, occurred_at, step, binding));
-            *event_index = event_index
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Junie provider event index exhausted",
-                ))?;
+            increment_event_index(event_index)?;
             if let Some(projected) = junie_step_output_projection(step) {
-                let retained = matches!(
+                if matches!(
                     projected.outcome,
                     JunieOutputOutcome::Failure | JunieOutputOutcome::Timeout
-                );
-                if retained {
+                ) {
                     rows.push(output_failure_event(
                         *event_index,
                         occurred_at,
@@ -418,11 +357,7 @@ pub(super) fn flush_assistant(
                         binding,
                     ));
                 }
-                *event_index = event_index
-                    .checked_add(1)
-                    .ok_or(CaptureError::SystemInvariant(
-                        "Junie provider event index exhausted",
-                    ))?;
+                increment_event_index(event_index)?;
             }
             continue;
         }
@@ -436,11 +371,7 @@ pub(super) fn flush_assistant(
                 binding,
             ) {
                 rows.push(event);
-                *event_index = event_index
-                    .checked_add(1)
-                    .ok_or(CaptureError::SystemInvariant(
-                        "Junie provider event index exhausted",
-                    ))?;
+                increment_event_index(event_index)?;
             }
         }
     }
@@ -468,16 +399,21 @@ pub(super) fn flush_assistant(
             },
             file_change: None,
         });
-        *event_index = event_index
-            .checked_add(1)
-            .ok_or(CaptureError::SystemInvariant(
-                "Junie provider event index exhausted",
-            ))?;
+        increment_event_index(event_index)?;
     }
     Ok(())
 }
 
-pub(super) fn step_event(
+fn increment_event_index(event_index: &mut u64) -> Result<()> {
+    *event_index = event_index
+        .checked_add(1)
+        .ok_or(CaptureError::SystemInvariant(
+            "Junie provider event index exhausted",
+        ))?;
+    Ok(())
+}
+
+fn step_event(
     event_index: u64,
     occurred_at: DateTime<Utc>,
     step: &JunieStepAgg,
@@ -534,7 +470,7 @@ pub(super) fn step_event(
     }
 }
 
-pub(super) fn output_failure_event(
+fn output_failure_event(
     event_index: u64,
     occurred_at: DateTime<Utc>,
     step: &JunieStepAgg,
@@ -583,7 +519,7 @@ pub(super) fn output_failure_event(
     }
 }
 
-pub(super) fn file_change_event(
+fn file_change_event(
     event_index: u64,
     occurred_at: DateTime<Utc>,
     step: &JunieStepAgg,
@@ -631,7 +567,7 @@ pub(super) fn file_change_event(
     })
 }
 
-pub(super) fn file_content_text(value: Option<&Value>) -> Option<String> {
+fn file_content_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     value
         .get("text")
