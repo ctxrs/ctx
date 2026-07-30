@@ -470,8 +470,9 @@ mod tests {
         let crate::cli::CommandRoot::Blame(args) = cli.command else {
             panic!("expected blame command");
         };
+        let mut ui = crate::ui::Ui::stdio(crate::ui::ColorMode::Never);
 
-        let error = run(args, PathBuf::from("/unused"), &mut usage).unwrap_err();
+        let error = run(args, PathBuf::from("/unused"), &mut usage, &mut ui).unwrap_err();
         assert!(error.to_string().contains("invalid_request"));
         let completed = usage.completed(false, std::time::Duration::ZERO).unwrap();
         assert_eq!(
