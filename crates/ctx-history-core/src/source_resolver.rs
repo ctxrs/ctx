@@ -19,6 +19,7 @@ pub const MAX_BATCH_HYDRATION_EVENTS: usize = 100_000;
 
 const MAX_RELATION_BYTES: usize = 256;
 const MAX_JSON_POINTER_BYTES: usize = 8 * 1024;
+const MAX_SOURCE_PATH_HINT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SourceResolverContractError {
@@ -173,6 +174,7 @@ impl SourceRecordLocator {
 pub struct EventHydrationRequest {
     event_id: StableEntityId,
     locator: SourceRecordLocator,
+    source_path_hint: Option<String>,
 }
 
 impl EventHydrationRequest {
@@ -180,9 +182,28 @@ impl EventHydrationRequest {
         event_id: StableEntityId,
         locator: SourceRecordLocator,
     ) -> SourceResolverContractResult<Self> {
-        let request = Self { event_id, locator };
+        let request = Self {
+            event_id,
+            locator,
+            source_path_hint: None,
+        };
         request.validate_contract()?;
         Ok(request)
+    }
+
+    /// Attaches generation-bound provider path metadata used only to select
+    /// between multiple routes for the same provider/source format. The
+    /// provider adapter must still enforce containment and verify the typed
+    /// locator, native identity, record boundary, and digest.
+    pub fn with_source_path_hint(
+        mut self,
+        source_path_hint: Option<String>,
+    ) -> SourceResolverContractResult<Self> {
+        if let Some(path) = source_path_hint.as_deref() {
+            validate_text("source_path_hint", path, MAX_SOURCE_PATH_HINT_BYTES)?;
+        }
+        self.source_path_hint = source_path_hint;
+        Ok(self)
     }
 
     pub fn event_id(&self) -> StableEntityId {
@@ -191,6 +212,10 @@ impl EventHydrationRequest {
 
     pub fn locator(&self) -> &SourceRecordLocator {
         &self.locator
+    }
+
+    pub fn source_path_hint(&self) -> Option<&str> {
+        self.source_path_hint.as_deref()
     }
 
     pub fn validate_contract(&self) -> SourceResolverContractResult<()> {
@@ -206,6 +231,9 @@ impl EventHydrationRequest {
                 != self.locator.source.exact_descriptor_digest()
         {
             return Err(SourceResolverContractError::IdentitySourceMismatch);
+        }
+        if let Some(path) = self.source_path_hint.as_deref() {
+            validate_text("source_path_hint", path, MAX_SOURCE_PATH_HINT_BYTES)?;
         }
         Ok(())
     }

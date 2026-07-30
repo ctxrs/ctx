@@ -38,6 +38,117 @@ struct CodexSessionTreeTerminalEvidence {
     sources: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
 }
 
+#[derive(Debug)]
+struct CodexSessionTreeRuntime {
+    root: PathBuf,
+    resolver: Mutex<Option<Arc<CodexLocatorResolverV0>>>,
+}
+
+impl CodexSessionTreeRuntime {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            resolver: Mutex::new(None),
+        }
+    }
+
+    fn install_inventory(&self, inventory: &CodexRootInventoryV0) -> CodexSourceBackedResultV0<()> {
+        let resolver = Arc::new(CodexLocatorResolverV0::from_root_inventory(inventory)?);
+        *self.resolver.lock().map_err(|_| {
+            CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(
+                "Codex resident resolver lock was poisoned".to_owned(),
+            ))
+        })? = Some(resolver);
+        Ok(())
+    }
+
+    fn resolver(&self) -> CodexSourceBackedResultV0<Arc<CodexLocatorResolverV0>> {
+        let mut retained = self.resolver.lock().map_err(|_| {
+            CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(
+                "Codex resident resolver lock was poisoned".to_owned(),
+            ))
+        })?;
+        if let Some(resolver) = retained.as_ref() {
+            return Ok(Arc::clone(resolver));
+        }
+        let resolver = Arc::new(CodexLocatorResolverV0::discover([&self.root])?);
+        *retained = Some(Arc::clone(&resolver));
+        Ok(resolver)
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        managed_codex_session_source(source)
+            && self
+                .resolver()
+                .is_ok_and(|resolver| resolver.owns_source(source))
+    }
+
+    fn hinted_input(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<Option<CodexExplicitSessionSourceBackedInputV0>, HydrationFailure> {
+        let Some(source_path) = request.source_path_hint() else {
+            return Ok(None);
+        };
+        let source_path = Path::new(source_path);
+        if !source_path.is_absolute()
+            || source_path == self.root
+            || !source_path.starts_with(&self.root)
+        {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Codex source path hint is outside its selected provider root",
+            ));
+        }
+        CodexExplicitSessionSourceBackedInputV0::discover(source_path)
+            .map(Some)
+            .map_err(codex_explicit_observation_hydration_failure)
+    }
+
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        if let Some(input) = self.hinted_input(request)? {
+            return codex_explicit_resolver(&input)?
+                .hydrate_event_request(request)
+                .map_err(codex_locator_hydration_failure);
+        }
+        self.resolver()
+            .and_then(|resolver| resolver.hydrate_event_request(request))
+            .map_err(codex_locator_hydration_failure)
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let Some(first) = request.events().first() else {
+            return BatchHydrationResult::new(Vec::new())
+                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error));
+        };
+        let first_hint = first.source_path_hint();
+        if request
+            .events()
+            .iter()
+            .any(|event| event.source_path_hint() != first_hint)
+        {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "one exact Codex hydration group carried different source path hints",
+            ));
+        }
+        if let Some(input) = self.hinted_input(first)? {
+            return codex_explicit_resolver(&input)?
+                .hydrate_batch_request(request)
+                .map_err(codex_locator_hydration_failure);
+        }
+        self.resolver()
+            .and_then(|resolver| resolver.hydrate_batch_request(request))
+            .map_err(codex_locator_hydration_failure)
+    }
+}
+
 pub(super) fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
@@ -46,7 +157,11 @@ pub(super) fn register_codex_session_tree_route(
     let root = source.path.clone();
     let capture_root = root.clone();
     let complete_inventory_revalidation_root = root.clone();
-    let hydration_root = root;
+    let runtime = Arc::new(CodexSessionTreeRuntime::new(root));
+    let capture_runtime = Arc::clone(&runtime);
+    let ownership_runtime = Arc::clone(&runtime);
+    let hydration_runtime = Arc::clone(&runtime);
+    let batch_hydration_runtime = runtime;
     let terminal_evidence = Arc::new(Mutex::new(None::<CodexSessionTreeTerminalEvidence>));
     let capture_terminal_evidence = Arc::clone(&terminal_evidence);
     let source_terminal_evidence = Arc::clone(&terminal_evidence);
@@ -60,6 +175,9 @@ pub(super) fn register_codex_session_tree_route(
                 )
             })? = None;
             let opening = discover_codex_root_inventory_v0(&capture_root).map_err(route_error)?;
+            capture_runtime
+                .install_inventory(&opening)
+                .map_err(route_error)?;
             sink.certify_complete_inventory(opening.certificate.clone())
                 .map_err(route_coordinator_error)?;
             let base_sources = codex_writer_base_sources(sink.writer);
@@ -105,7 +223,7 @@ pub(super) fn register_codex_session_tree_route(
             });
             Ok(())
         },
-        provider_format_scope(CaptureProvider::Codex, "codex_session_jsonl"),
+        move |candidate| ownership_runtime.owns_source(candidate),
         move |target| {
             let Ok(evidence) = source_terminal_evidence.lock() else {
                 return false;
@@ -131,15 +249,7 @@ pub(super) fn register_codex_session_tree_route(
                 }
             }
         },
-        move |request| {
-            let hydrated = CodexLocatorResolverV0::discover([&hydration_root])
-                .and_then(|resolver| resolver.hydrate(request.locator()))
-                .map_err(codex_locator_hydration_failure)?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: codex_display_bytes(hydrated)?,
-            })
-        },
+        move |request| hydration_runtime.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
         let terminal = inventory_terminal_evidence
@@ -166,7 +276,8 @@ pub(super) fn register_codex_session_tree_route(
                         && certified.revalidate()
                 })
             })
-    });
+    })
+    .with_batch_hydration(move |request| batch_hydration_runtime.hydrate_batch(request));
     registry.register(executable_route(
         source,
         selection,

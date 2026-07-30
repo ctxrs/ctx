@@ -1,11 +1,12 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     process,
     sync::Arc,
     time::{Duration as StdDuration, Instant},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
@@ -30,7 +31,8 @@ use super::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
 use super::{
     daemon_autostart::{
         current_process_owns_daemon_upgrade_handoff, daemon_upgrade_handoff_blocks_current_process,
-        resume_completed_installation_daemons, InstallationDaemonLease,
+        resume_completed_installation_daemons, terminate_current_executable_daemon,
+        InstallationDaemonLease,
     },
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
@@ -51,8 +53,10 @@ use super::{
         write_daemon_status, DaemonLock,
     },
     query_service::{
-        daemon_can_begin_idle_shutdown, daemon_source_refresh_request,
-        observe_daemon_query_activity, DaemonQueryService,
+        daemon_can_begin_idle_shutdown, daemon_service_endpoint_path,
+        daemon_source_refresh_request, observe_daemon_query_activity,
+        read_daemon_service_endpoint_identity, DaemonIpcService, DaemonQueryEndpoint,
+        DaemonQueryService,
     },
     runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
     source_backed_refresh_coordinator::reconcile_verified_source_epoch,
@@ -352,8 +356,10 @@ fn run_daemon_disable(args: DaemonDisableArgs, data_root: PathBuf, ui: &mut Ui) 
 
 fn request_daemon_shutdown_and_wait(data_root: &Path) -> Result<()> {
     const SHUTDOWN_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+    const FORCED_SHUTDOWN_TIMEOUT: StdDuration = StdDuration::from_secs(5);
     const SHUTDOWN_RETRY: StdDuration = StdDuration::from_millis(50);
-    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let mut deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let mut forced = false;
     while daemon_lock_is_active(data_root) {
         let _ = daemon_source_refresh_request(
             data_root,
@@ -365,14 +371,64 @@ fn request_daemon_shutdown_and_wait(data_root: &Path) -> Result<()> {
             16 * 1024,
         );
         if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "daemon was disabled but did not release lifecycle ownership within {} seconds",
-                SHUTDOWN_TIMEOUT.as_secs()
-            ));
+            if forced {
+                return Err(anyhow!(
+                    "daemon was disabled but retained lifecycle ownership after identity-verified termination"
+                ));
+            }
+            terminate_current_executable_daemon(data_root).context(
+                "terminate identity-verified daemon after cooperative shutdown timed out",
+            )?;
+            forced = true;
+            deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
         }
         std::thread::sleep(SHUTDOWN_RETRY);
     }
+    remove_released_daemon_service_artifacts(data_root)
+}
+
+fn remove_released_daemon_service_artifacts(data_root: &Path) -> Result<()> {
+    if daemon_lock_is_active(data_root) {
+        return Err(anyhow!(
+            "refusing to remove daemon service artifacts while lifecycle ownership remains active"
+        ));
+    }
+    for service in [
+        DaemonIpcService::SemanticQuery,
+        DaemonIpcService::SourceRefresh,
+    ] {
+        let identity = read_daemon_service_endpoint_identity(data_root, service)
+            .context("inspect released daemon service endpoint")?;
+        if daemon_lock_is_active(data_root) {
+            return Err(anyhow!(
+                "daemon lifecycle ownership resumed while released service artifacts were being removed"
+            ));
+        }
+        #[cfg(unix)]
+        if let Some(identity) = identity {
+            let DaemonQueryEndpoint::Unix { path, .. } = identity.endpoint;
+            remove_file_if_present(&path)
+                .with_context(|| format!("remove released daemon socket {}", path.display()))?;
+        }
+        #[cfg(not(unix))]
+        let _ = identity;
+        let endpoint_path = daemon_service_endpoint_path(data_root, service);
+        remove_file_if_present(&endpoint_path).with_context(|| {
+            format!(
+                "remove released daemon endpoint identity {}",
+                endpoint_path.display()
+            )
+        })?;
+    }
     Ok(())
+}
+
+fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn run_daemon(

@@ -42,8 +42,9 @@ mod transport;
 pub(in crate::semantic) use transport::*;
 #[cfg(not(test))]
 pub(in crate::semantic) use transport::{
-    daemon_query_request, daemon_source_hydration_request, daemon_source_refresh_request,
-    DaemonQueryResponseTooLarge, DaemonSourceRefreshServiceUnavailable,
+    daemon_query_request, daemon_service_endpoint_path, daemon_source_hydration_request,
+    daemon_source_refresh_request, read_daemon_service_endpoint_identity, DaemonIpcService,
+    DaemonQueryEndpoint, DaemonQueryResponseTooLarge, DaemonSourceRefreshServiceUnavailable,
 };
 mod hydration_budget;
 mod semantic_filters;
@@ -551,6 +552,7 @@ fn hydrate_source_events_via_daemon(
                 ));
             }
             EventHydrationRequest::new(event.event_id, event.locator.clone())
+                .and_then(|request| request.with_source_path_hint(event.source_path.clone()))
                 .map_err(anyhow::Error::from)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -562,6 +564,7 @@ fn hydrate_source_events_via_daemon(
             json!({
                 "event_identity": event.event_id(),
                 "locator": event.locator(),
+                "source_path": event.source_path_hint(),
             })
         })
         .collect::<Vec<_>>();

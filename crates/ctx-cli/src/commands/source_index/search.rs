@@ -37,6 +37,7 @@ const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
+const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
 
 #[derive(Debug)]
 pub(super) struct SearchCollection {
@@ -146,7 +147,11 @@ pub(crate) fn run_search(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let result_count = results.len();
-    let search_context = search_context_observation(&value, &collection, &index, &data_root);
+    let search_context = if config.local_usage.enabled {
+        search_context_observation(&value, &collection, &index, &data_root)
+    } else {
+        SearchContextObservation::unavailable()
+    };
     let render_started = Instant::now();
     let output_bytes = if args.format == JsonOutputFormat::Json {
         let output_bytes = pretty_json_stdout_bytes(&value)?;
@@ -179,7 +184,11 @@ pub(crate) fn mcp_search(
     let refresh = refresh_for_search(&request, data_root)?;
     let (value, collection, index, _, _, _) =
         search_with_hydration_retry(&request, data_root, semantic_weight, refresh)?;
-    let observation = search_context_observation(&value, &collection, &index, data_root);
+    let observation = if config.local_usage.enabled {
+        search_context_observation(&value, &collection, &index, data_root)
+    } else {
+        SearchContextObservation::unavailable()
+    };
     Ok((value, observation))
 }
 
@@ -233,7 +242,9 @@ where
         .collect::<BTreeSet<_>>();
     let mut session_events = Vec::new();
     for session_id in session_ids {
-        let Ok(events) = index.events_for_session(session_id) else {
+        let Ok(Some(events)) =
+            index.events_for_session_if_bounded(session_id, MAX_USAGE_CONTEXT_EVENTS_PER_SESSION)
+        else {
             return SearchContextObservation::unavailable();
         };
         if events.is_empty() {

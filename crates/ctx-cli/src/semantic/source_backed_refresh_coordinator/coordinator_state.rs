@@ -419,6 +419,41 @@ impl SourceBackedRefreshCoordinator {
             })
     }
 
+    pub(in crate::semantic) fn recover_published_resolver(&self, data_root: &Path) -> Result<()> {
+        let Some((generation_id, resolver)) = recover_capture_owned_resolver(data_root)? else {
+            return Ok(());
+        };
+        self.install_recovered_resolver(generation_id, resolver);
+        Ok(())
+    }
+
+    pub(super) fn install_recovered_resolver(
+        &self,
+        generation_id: String,
+        resolver: Arc<SourceBackedResolverRegistry>,
+    ) {
+        let mut state = self.lock_state();
+        state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
+            generation_id,
+            source_manifest: None,
+            resolver,
+        }));
+    }
+
+    fn observed_published_generation(&self, data_root: &Path) -> Result<Option<String>> {
+        let retained = {
+            let state = self.lock_state();
+            state.current_published_generation.clone()
+        };
+        if retained.is_some() {
+            return Ok(retained);
+        }
+        if let Some(generation_id) = retained_generation_hint(data_root)? {
+            return Ok(Some(generation_id));
+        }
+        published_generation_id(data_root)
+    }
+
     pub(in crate::semantic) fn retained_published_generation(
         &self,
     ) -> Option<Arc<GenerationBoundSourceBackedResolver>> {
@@ -507,7 +542,7 @@ impl SourceBackedRefreshCoordinator {
                     .get("explicit_source_catalog")
                     .map(ExplicitSourceCatalogAuthority::from_json)
                     .transpose()?;
-                let previous_generation = published_generation_id(data_root)?;
+                let previous_generation = self.observed_published_generation(data_root)?;
                 let metadata = if requested_catalog.is_some() {
                     source_catalog_refresh_runtime_metadata(data_root)
                 } else {
@@ -566,7 +601,7 @@ impl SourceBackedRefreshCoordinator {
     }
 
     pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
-        let observed_generation = published_generation_id(data_root)?;
+        let observed_generation = self.observed_published_generation(data_root)?;
         let catalog = load_explicit_source_catalog_authority(data_root)?;
         self.enqueue_with_catalog_metadata(
             observed_generation,

@@ -42,7 +42,8 @@ pub use policy::{
 pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
     classify_publication_failure, load_manifest_for_metas, meta_generation, payload_generation_id,
-    reconcile_commit_error, searcher_generation, sync_directory, verify_searcher, write_manifest,
+    reconcile_commit_error, searcher_generation, sync_directory, verify_searcher,
+    verify_searcher_structure, write_manifest,
 };
 pub use query::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
@@ -214,7 +215,12 @@ impl GenerationWriter {
             if searcher_generation(&searcher) != meta_generation(&base_metas) {
                 return Err(IndexError::ConcurrentGenerationChange);
             }
-            verify_searcher(&searcher, &manifest)?;
+            // The immutable generation passed the exhaustive audit before its
+            // publication receipt was returned. Reopening a base only needs
+            // to bind its manifest, Tantivy generation, and aggregate count;
+            // repeating the O(document-count) identity audit would make an
+            // exact no-op refresh scale with corpus size.
+            verify_searcher_structure(&searcher, &manifest)?;
             (Some(manifest), Some(searcher))
         } else if base_metas.segments.is_empty() {
             (None, None)

@@ -332,7 +332,7 @@ fn open_exact_index(
     core_generation_id: &str,
 ) -> std::result::Result<VerifiedIndex, SourceBackedProCatchUpError> {
     let index_root = source_backed_index_root(data_root);
-    let index = VerifiedIndex::open(&index_root)
+    let index = VerifiedIndex::open_pinned(&index_root)
         .with_context(|| {
             format!(
                 "open verified source-backed lexical index {}",
@@ -656,7 +656,7 @@ mod tests {
                 "source-backed Pro catch-up contains forbidden architecture term {forbidden}"
             );
         }
-        assert!(source.contains("VerifiedIndex::open"));
+        assert!(source.contains("VerifiedIndex::open_pinned"));
         assert!(source.contains("sync_source_manifest_materialization"));
         assert!(source.contains("authority.source_manifest()"));
         assert!(source.contains("authority.resolver()"));

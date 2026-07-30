@@ -216,7 +216,9 @@ where
                 }
             };
             let request =
-                match EventHydrationRequest::new(item.event_identity, item.locator.clone()) {
+                match EventHydrationRequest::new(item.event_identity, item.locator.clone())
+                    .and_then(|request| request.with_source_path_hint(item.source_path))
+                {
                     Ok(request) => request,
                     Err(error) => {
                         return source_hydration_protocol_failure(

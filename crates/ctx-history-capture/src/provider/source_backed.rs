@@ -26,6 +26,8 @@ use ctx_history_index::{
 };
 use thiserror::Error;
 
+#[cfg(test)]
+use super::codex::nativepath::CodexHydratedRecordV0;
 use super::codex::nativepath::{
     codex_source_observation, codex_writer_base_sources, discover_codex_root_inventory_v0,
     ingest_codex_sources_serial_v0, managed_codex_session_source,
@@ -34,10 +36,10 @@ use super::codex::nativepath::{
     plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,
     scan_codex_prompt_history_source_backed_v0,
     stage_planned_codex_prompt_history_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
-    CodexHydratedRecordV0, CodexLocatorResolverV0, CodexPromptHistorySourceBackedDispositionV0,
+    CodexLocatorResolverV0, CodexPromptHistorySourceBackedDispositionV0,
     CodexPromptHistorySourceBackedInputV0, CodexPromptHistorySourceBackedResolverV0,
-    CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedPhaseTimingsV0,
-    CodexTerminalSourceEvidenceV0,
+    CodexRootInventoryV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
+    CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0, CodexTerminalSourceEvidenceV0,
 };
 use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,

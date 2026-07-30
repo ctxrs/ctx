@@ -51,6 +51,7 @@ mod old_store_retirement;
 
 use capture_refresh::{
     execute_capture_owned_refresh, execute_source_backed_refresh, hydration_failure_queues_refresh,
+    recover_capture_owned_resolver,
 };
 #[cfg(test)]
 use capture_refresh::{
@@ -237,7 +238,7 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
         }
         return Ok(None);
     }
-    match VerifiedIndex::open(&index_root) {
+    match VerifiedIndex::open_pinned(&index_root) {
         Ok(index) => Ok(Some(index)),
         // Tantivy creates schema-only meta.json before the first ctx commit.
         // It is replaceable only while no durable publication receipt proves
@@ -291,6 +292,42 @@ fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 
+fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
+    let generation_id = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root))
+        .and_then(|job| {
+            job.get("published_generation")
+                .and_then(Value::as_str)
+                .filter(|generation_id| !generation_id.is_empty())
+                .map(str::to_owned)
+        });
+    let Some(generation_id) = generation_id else {
+        return Ok(None);
+    };
+    let meta_path = source_backed_index_root(data_root).join("meta.json");
+    let meta: Value = serde_json::from_slice(
+        &fs::read(&meta_path)
+            .with_context(|| format!("read retained lexical metadata {}", meta_path.display()))?,
+    )
+    .with_context(|| format!("parse retained lexical metadata {}", meta_path.display()))?;
+    let payload = meta
+        .get("payload")
+        .and_then(Value::as_str)
+        .ok_or(IndexError::MissingCommitPayload)?;
+    let payload: Value =
+        serde_json::from_str(payload).context("parse retained lexical generation payload")?;
+    let meta_generation = payload
+        .get("generation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("retained lexical metadata has no generation ID"))?;
+    if meta_generation != generation_id {
+        bail!(
+            "retained lexical generation hint {generation_id} does not match metadata generation {meta_generation}"
+        );
+    }
+    Ok(Some(generation_id))
+}
+
 fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
     let verified = VerifiedIndex::open(source_backed_index_root(data_root))
         .context("reopen source-backed generation before retiring the old Store family")?;
@@ -305,6 +342,9 @@ fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Resu
 }
 
 pub(in crate::semantic) fn reconcile_verified_source_epoch(data_root: &Path) -> Result<()> {
+    if !old_store_retirement::is_required(data_root)? {
+        return Ok(());
+    }
     let Some(verified) = open_published_generation(data_root)? else {
         return Ok(());
     };

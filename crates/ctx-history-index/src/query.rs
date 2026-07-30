@@ -2,9 +2,8 @@ mod execution;
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     ops::Bound,
-    sync::Arc,
 };
 
 use ctx_history_core::{
@@ -13,15 +12,14 @@ use ctx_history_core::{
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{
-    collector::{DocSetCollector, TopDocs},
-    index::SegmentId,
+    collector::{Count, DocSetCollector, TopDocs},
     query::{
         AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, RegexQuery,
         TermQuery, TermSetQuery,
     },
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
-    DocAddress, DocId, DocSet, Score, TantivyDocument, Term, TERMINATED,
+    DocAddress, DocSet, Score, TantivyDocument, Term, TERMINATED,
 };
 use uuid::Uuid;
 

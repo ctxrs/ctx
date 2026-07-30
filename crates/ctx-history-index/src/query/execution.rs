@@ -159,19 +159,50 @@ impl VerifiedIndex {
             return Ok(Vec::new());
         }
         let ranking_terms = query_terms.into_iter().collect::<Vec<_>>();
-        let mut alternatives = ranking_terms
-            .iter()
-            .cloned()
-            .map(|term| {
-                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>
-            })
-            .collect::<Vec<_>>();
-        let body_query: Box<dyn Query> = if alternatives.len() == 1 {
-            alternatives.pop().expect("one query term")
-        } else {
-            Box::new(BooleanQuery::union(alternatives))
-        };
-        self.collect_event_candidates(body_query, &ranking_terms, filters, limit, fields)
+        if ranking_terms.len() == 1 {
+            let body_query = Box::new(TermQuery::new(
+                ranking_terms[0].clone(),
+                IndexRecordOption::WithFreqs,
+            ));
+            return self.collect_event_candidates(body_query, filters, limit, fields);
+        }
+
+        // Rank by exact query-term coverage without constructing one
+        // `HashMap<DocId, coverage>` entry for every matching document. That
+        // approach made memory and CPU proportional to the corpus frequency of
+        // common terms even when the caller requested only a handful of
+        // results. Tantivy's minimum-should-match query gives us the same
+        // ordering as bounded tiers: all terms first, then N-1, down to one.
+        let mut candidates = Vec::with_capacity(limit);
+        let mut seen = BTreeSet::new();
+        for minimum_required in (1..=ranking_terms.len()).rev() {
+            let alternatives = ranking_terms
+                .iter()
+                .cloned()
+                .map(|term| {
+                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>
+                })
+                .collect();
+            let body_query = Box::new(BooleanQuery::union_with_minimum_required_clauses(
+                alternatives,
+                minimum_required,
+            ));
+            // Lower-coverage tiers also contain every prior higher-coverage
+            // hit. Bounded over-collection by exactly the number already seen
+            // guarantees enough unique lookahead without a total-count scan.
+            let tier_limit = limit.saturating_add(seen.len());
+            for candidate in
+                self.collect_event_candidates(body_query, filters, tier_limit, fields)?
+            {
+                if seen.insert(candidate.event.event_id.as_uuid()) {
+                    candidates.push(candidate);
+                    if candidates.len() == limit {
+                        return Ok(candidates);
+                    }
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     /// Lists filtered metadata records without requiring a lexical term.
@@ -184,20 +215,17 @@ impl VerifiedIndex {
             return Ok(Vec::new());
         }
         let fields = fields_from_schema(self.searcher.schema())?;
-        self.collect_event_candidates(Box::new(AllQuery), &[], filters, limit, fields)
+        self.collect_event_candidates(Box::new(AllQuery), filters, limit, fields)
     }
 
     fn collect_event_candidates(
         &self,
         body_query: Box<dyn Query>,
-        ranking_terms: &[Term],
         filters: &EventSearchFilters,
         limit: usize,
         fields: Fields,
     ) -> Result<Vec<EventSearchCandidate>> {
         validate_event_sort_fast_fields(&self.searcher)?;
-        let coverage_by_segment =
-            self.query_term_coverage_by_segment(ranking_terms, fields.body_search)?;
         let source_identity_query = self.source_identity_query(filters, fields)?;
         let query = filtered_event_query(body_query, source_identity_query, filters, fields)?;
         let collector = TopDocs::with_limit(limit).tweak_score(move |segment_reader| {
@@ -214,61 +242,22 @@ impl VerifiedIndex {
                 .u64(EVENT_ID_LOW_FIELD)
                 .ok()
                 .map(|column| column.first_or_default_col(0));
-            let coverage = coverage_by_segment
-                .get(&segment_reader.segment_id())
-                .cloned()
-                .unwrap_or_default();
             move |doc, score| {
                 let high = high.as_ref().map_or(0, |column| column.get_val(doc));
                 let low = low.as_ref().map_or(0, |column| column.get_val(doc));
-                (
-                    coverage.get(&doc).copied().unwrap_or(0),
-                    score,
-                    Reverse((high, low)),
-                )
+                (score, Reverse((high, low)))
             }
         });
-        type ScoredDocAddress = ((u32, Score, Reverse<(u64, u64)>), DocAddress);
+        type ScoredDocAddress = ((Score, Reverse<(u64, u64)>), DocAddress);
         let hits: Vec<ScoredDocAddress> = self.searcher.search(query.as_ref(), &collector)?;
         let mut candidates = Vec::with_capacity(hits.len());
-        for ((_, score, _), address) in hits {
+        for ((score, _), address) in hits {
             candidates.push(EventSearchCandidate {
                 event: self.event_record(address, fields)?,
                 score,
             });
         }
         Ok(candidates)
-    }
-
-    fn query_term_coverage_by_segment(
-        &self,
-        terms: &[Term],
-        body_field: tantivy::schema::Field,
-    ) -> Result<HashMap<SegmentId, Arc<HashMap<DocId, u32>>>> {
-        let mut coverage_by_segment = HashMap::new();
-        for segment in self.searcher.segment_readers() {
-            let mut coverage = HashMap::<DocId, u32>::new();
-            if !terms.is_empty() {
-                let inverted = segment.inverted_index(body_field)?;
-                for term in terms {
-                    let Some(mut postings) =
-                        inverted.read_postings(term, IndexRecordOption::Basic)?
-                    else {
-                        continue;
-                    };
-                    let mut doc = postings.doc();
-                    while doc != TERMINATED {
-                        if !segment.is_deleted(doc) {
-                            let count = coverage.entry(doc).or_default();
-                            *count = count.saturating_add(1);
-                        }
-                        doc = postings.advance();
-                    }
-                }
-            }
-            coverage_by_segment.insert(segment.segment_id(), Arc::new(coverage));
-        }
-        Ok(coverage_by_segment)
     }
 
     fn source_identity_query(
@@ -420,6 +409,31 @@ impl VerifiedIndex {
         let mut events = self.event_records_for_query(&query, fields)?;
         sort_events_for_session(&mut events);
         Ok(events)
+    }
+
+    /// Returns one session only when its event cardinality is within a caller
+    /// budget.
+    ///
+    /// The count pass reads postings without constructing stored event
+    /// records. This lets best-effort consumers decline pathological sessions
+    /// before allocating metadata for every event.
+    pub fn events_for_session_if_bounded(
+        &self,
+        session_id: Uuid,
+        maximum_events: usize,
+    ) -> Result<Option<Vec<EventRecord>>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.session_id, &session_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let count = self.searcher.search(&query, &Count)?;
+        if count > maximum_events {
+            return Ok(None);
+        }
+        let mut events = self.event_records_for_query(&query, fields)?;
+        sort_events_for_session(&mut events);
+        Ok(Some(events))
     }
 
     fn body_query_terms(&self, natural_text: &str, fields: Fields) -> Result<Vec<Term>> {

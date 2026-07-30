@@ -121,7 +121,7 @@ pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
             root.display()
         ));
     }
-    VerifiedIndex::open(&root)
+    VerifiedIndex::open_pinned(&root)
         .with_context(|| format!("open verified source-backed Core index {}", root.display()))
 }
 

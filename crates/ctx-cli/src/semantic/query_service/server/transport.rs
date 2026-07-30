@@ -41,6 +41,19 @@ use super::{
     DAEMON_QUERY_REQUEST_MAX_BYTES, DAEMON_QUERY_REQUEST_READ_TIMEOUT,
 };
 
+fn source_refresh_coordinator(
+    data_root: &Path,
+    service: DaemonIpcService,
+) -> Result<Arc<SourceBackedRefreshCoordinator>> {
+    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
+    if service == DaemonIpcService::SourceRefresh {
+        coordinator
+            .recover_published_resolver(data_root)
+            .context("restore generation-bound source hydration resolver")?;
+    }
+    Ok(coordinator)
+}
+
 #[cfg(unix)]
 pub(in crate::semantic) const DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES: usize = 90;
 
@@ -213,7 +226,7 @@ fn start_daemon_service_with_request_timeout(
     let thread_token = endpoint.token().to_owned();
     let activity = Arc::new(DaemonQueryActivity::new());
     let thread_activity = activity.clone();
-    let source_refresh = Arc::new(SourceBackedRefreshCoordinator::new());
+    let source_refresh = source_refresh_coordinator(data_root, service)?;
     let thread_source_refresh = source_refresh.clone();
     let thread_wakeup = wakeup;
     let spawn_result = std::thread::Builder::new()
@@ -424,7 +437,7 @@ fn start_daemon_service_with_request_timeout(
     let thread_token = endpoint.token().to_owned();
     let activity = Arc::new(DaemonQueryActivity::new());
     let thread_activity = activity.clone();
-    let source_refresh = Arc::new(SourceBackedRefreshCoordinator::new());
+    let source_refresh = source_refresh_coordinator(data_root, service)?;
     let thread_source_refresh = source_refresh.clone();
     let thread_wakeup = wakeup;
     let thread_pipe_name = pipe_name.clone();

@@ -38,7 +38,7 @@ pub(crate) use source_backed::{
     observe_codex_explicit_session_source_backed_v0,
     source_observation as codex_source_observation,
     writer_base_sources as codex_writer_base_sources, CodexExplicitSessionSourceBackedInputV0,
-    CodexTerminalSourceEvidenceV0,
+    CodexRootInventoryV0, CodexTerminalSourceEvidenceV0,
 };
 pub use source_backed::{
     hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,

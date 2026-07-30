@@ -159,6 +159,36 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
 }
 
 #[test]
+fn session_event_budget_declines_before_materializing_an_oversized_session() {
+    let temp = tempdir().unwrap();
+    let source = source("bounded-session.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 1..=3 {
+        writer
+            .add_document(document(&source, sequence, "bounded body"))
+            .unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let session_id = document(&source, 1, "bounded body").session_id.as_uuid();
+    assert!(index
+        .events_for_session_if_bounded(session_id, 2)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        index
+            .events_for_session_if_bounded(session_id, 3)
+            .unwrap()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
 fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     let temp = tempdir().unwrap();
     let target = source("paged-source.jsonl");

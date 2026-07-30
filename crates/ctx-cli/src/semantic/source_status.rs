@@ -205,7 +205,7 @@ fn lexical_report(
         );
     }
 
-    match VerifiedIndex::open(&path) {
+    match VerifiedIndex::open_pinned(&path) {
         Ok(index) => {
             let manifest = index.manifest();
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;

@@ -19,7 +19,12 @@ pub(super) const REQUIRED_LEXICAL_ANALYZER_VERSION: u32 = 2;
 /// must update this hash and bump both relational projection versions.
 pub(super) const REQUIRED_SOURCE_GENERATION_POLICY_HASH: &str =
     "a17e860b6d719dfde065256ec070970b3d12e4d76ff0e59f16aabbc1666b71b9";
-const MAX_GENERATION_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
+// This is a local, generation-bound metadata transfer rather than a wire
+// payload. A representative 18.6 GB provider corpus with 5,566 certified
+// sources produces about 35 MiB of canonical source evidence, so the prior
+// 8 MiB cap rejected valid production generations. Keep one explicit memory
+// bound while admitting that measured source count with headroom.
+const MAX_GENERATION_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

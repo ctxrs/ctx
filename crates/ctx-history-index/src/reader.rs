@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
     load_manifest_for_metas, meta_generation, searcher_generation, validate_schema,
-    verify_searcher, GenerationManifest, IndexError, Result,
+    verify_searcher, verify_searcher_structure, GenerationManifest, IndexError, Result,
 };
 
 /// A verified reader pinned to one immutable lexical generation.
@@ -23,8 +23,22 @@ pub struct VerifiedIndex {
 }
 
 impl VerifiedIndex {
+    /// Opens a generation and performs the exhaustive publication audit.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref();
+        Self::open_inner(root.as_ref(), true)
+    }
+
+    /// Opens a previously audited immutable generation for querying.
+    ///
+    /// The manifest digest, generation payload, schema/policy contract,
+    /// Tantivy generation pin, and total document count are verified on every
+    /// open. The publication-time O(document-count) identity audit is not
+    /// repeated for every query.
+    pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(root.as_ref(), false)
+    }
+
+    fn open_inner(root: &Path, exhaustive: bool) -> Result<Self> {
         let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = directory.root_path().to_path_buf();
         let index = Index::open(directory)?;
@@ -40,7 +54,11 @@ impl VerifiedIndex {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        verify_searcher(&searcher, &manifest)?;
+        if exhaustive {
+            verify_searcher(&searcher, &manifest)?;
+        } else {
+            verify_searcher_structure(&searcher, &manifest)?;
+        }
         let generation_id = manifest.generation_id()?;
         Ok(Self {
             searcher,
