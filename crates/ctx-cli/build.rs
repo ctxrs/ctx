@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(ctx_cli_test_support_fixtures)");
     println!("cargo:rustc-check-cfg=cfg(ctx_cli_test_support_pro)");
     println!("cargo:rustc-check-cfg=cfg(ctx_cli_test_support_upgrade)");
+    println!("cargo:rustc-check-cfg=cfg(ctx_cli_bazel_test)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
