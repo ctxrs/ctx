@@ -344,6 +344,7 @@ steps:
     depends_on: "public-cli-macos-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
+      export CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID=ctx-mac-gui-shared-x64
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-macos-x64*" . \
         --step public-cli-macos-x64

@@ -33,13 +33,23 @@ authoritative_llvm_root() {
 
 # Release construction owns these package roots. In particular, Linux checks
 # run in the pinned inspector image; caller PATH never selects an ABI parser.
-LLVM_TOOL_ROOT="$(authoritative_llvm_root)"
-LLVM_READOBJ="${LLVM_TOOL_ROOT}/llvm-readobj"
-LLVM_OBJDUMP="${LLVM_TOOL_ROOT}/llvm-objdump"
+declared_llvm_readobj="${3:-}"
+if [[ -n "${declared_llvm_readobj}" ]]; then
+  [[ "${2:-}" != "" && "${1:-}" == "windows-x64" ]] || {
+    echo "error: a declared LLVM reader is supported only for windows-x64" >&2
+    exit 2
+  }
+  LLVM_READOBJ="${declared_llvm_readobj}"
+  LLVM_OBJDUMP=""
+else
+  LLVM_TOOL_ROOT="$(authoritative_llvm_root)"
+  LLVM_READOBJ="${LLVM_TOOL_ROOT}/llvm-readobj"
+  LLVM_OBJDUMP="${LLVM_TOOL_ROOT}/llvm-objdump"
+fi
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/check-release-binary-compat.sh PLATFORM BINARY
+Usage: scripts/check-release-binary-compat.sh PLATFORM BINARY [DECLARED_LLVM_READOBJ]
 
 Checks the executable format, architecture, loader, shared-library, ABI,
 minimum-OS, and stripped-symbol contract for one public ctx release binary.
@@ -66,7 +76,7 @@ esac
 
 require_tool() {
   local tool="$1"
-  if [[ "${tool}" == */* ]]; then
+  if [[ "${tool}" == */* || "${tool}" == *\\* ]]; then
     [[ -x "${tool}" ]] || {
       printf 'release compatibility tool is not executable: %s\n' "${tool}" >&2
       exit 127

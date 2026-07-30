@@ -204,10 +204,11 @@ fi
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 passed arm64 0 apple none absent 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 apple none absent 1)" = authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed arm64 1 apple rosetta-2 absent 1)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1 precision-7780-macos-x64-kvm-v1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1 ctx-mac-gui-shared-x64)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1 precision-7780-macos-x64-kvm-v1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1 arbitrary-qemu)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 1 generic qemu-kvm present 1 precision-7780-macos-x64-kvm-v1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 1 generic qemu-kvm present 1 ctx-mac-gui-shared-x64)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic none absent 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed unknown unknown unknown unknown unknown 0)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-arm64 Darwin arm64 passed arm64 0 apple none absent 1)" = authoritative

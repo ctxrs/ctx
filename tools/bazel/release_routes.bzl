@@ -54,6 +54,10 @@ _route_transition = transition(
 )
 
 def _launcher_content(target_id):
+    llvm_readobj_argument = ""
+    if target_id == "windows-x64":
+        llvm_readobj_argument = """  --declared-llvm-readobj-runfile "${{route_root}}/llvm-readobj.exe" \\
+"""
     return """#!/usr/bin/env bash
 set -euo pipefail
 
@@ -91,13 +95,17 @@ packager="$(resolve_main_runfile "${{route_root}}/packager")"
 exec "${{packager}}" \
   --declared-artifact-runfile "${{route_root}}/artifact" \
   --declared-rustc-runfile "${{route_root}}/rustc" \
+{llvm_readobj_argument}\
   --declared-sbom-inventory-runfile "${{route_root}}/sbom-inventory.txt" \
   --declared-license-materials-runfile "${{route_root}}/license-materials.txt" \
   --declared-cargo-lock-runfile "${{route_root}}/Cargo.lock" \
   --declared-target-matrix-runfile "${{route_root}}/release-targets-v1.json" \
   --declared-target "{target_id}" \
   "$@"
-""".format(target_id = target_id)
+""".format(
+        llvm_readobj_argument = llvm_readobj_argument,
+        target_id = target_id,
+    )
 
 def _release_route_impl(ctx):
     route = _ROUTES[ctx.attr.target_id]
@@ -109,24 +117,29 @@ def _release_route_impl(ctx):
     )
 
     route_root = "ctx_release_routes/{}".format(ctx.attr.target_id)
+    files = [
+        ctx.file.artifact,
+        ctx.file.cargo_lock,
+        ctx.file.license_materials,
+        ctx.file.rustc,
+        ctx.file.sbom_inventory,
+        ctx.file.target_matrix,
+    ]
+    symlinks = {
+        "{}/Cargo.lock".format(route_root): ctx.file.cargo_lock,
+        "{}/artifact".format(route_root): ctx.file.artifact,
+        "{}/license-materials.txt".format(route_root): ctx.file.license_materials,
+        "{}/packager".format(route_root): ctx.executable.packager,
+        "{}/release-targets-v1.json".format(route_root): ctx.file.target_matrix,
+        "{}/rustc".format(route_root): ctx.file.rustc,
+        "{}/sbom-inventory.txt".format(route_root): ctx.file.sbom_inventory,
+    }
+    if ctx.file.llvm_readobj:
+        files.append(ctx.file.llvm_readobj)
+        symlinks["{}/llvm-readobj.exe".format(route_root)] = ctx.file.llvm_readobj
     runfiles = ctx.runfiles(
-        files = [
-            ctx.file.artifact,
-            ctx.file.cargo_lock,
-            ctx.file.license_materials,
-            ctx.file.rustc,
-            ctx.file.sbom_inventory,
-            ctx.file.target_matrix,
-        ],
-        symlinks = {
-            "{}/Cargo.lock".format(route_root): ctx.file.cargo_lock,
-            "{}/artifact".format(route_root): ctx.file.artifact,
-            "{}/license-materials.txt".format(route_root): ctx.file.license_materials,
-            "{}/packager".format(route_root): ctx.executable.packager,
-            "{}/release-targets-v1.json".format(route_root): ctx.file.target_matrix,
-            "{}/rustc".format(route_root): ctx.file.rustc,
-            "{}/sbom-inventory.txt".format(route_root): ctx.file.sbom_inventory,
-        },
+        files = files,
+        symlinks = symlinks,
     )
     runfiles = runfiles.merge(
         ctx.attr.license_materials[0][DefaultInfo].default_runfiles,
@@ -157,6 +170,7 @@ _release_route = rule(
             cfg = _route_transition,
             mandatory = True,
         ),
+        "llvm_readobj": attr.label(allow_single_file = True),
         "packager": attr.label(
             cfg = "exec",
             executable = True,
@@ -189,11 +203,15 @@ def public_cli_release_route(
         sbom_inventory,
         license_materials):
     """Declares one exact target-configured release route."""
+    llvm_readobj = None
+    if target_id == "windows-x64":
+        llvm_readobj = "@ctx_llvm_mingw//:bin/llvm-readobj.exe"
     _release_route(
         name = name,
         artifact = artifact,
         cargo_lock = "//:release_cargo_lock",
         license_materials = license_materials,
+        llvm_readobj = llvm_readobj,
         packager = packager,
         rustc = rustc,
         sbom_inventory = sbom_inventory,

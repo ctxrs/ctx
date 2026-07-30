@@ -468,6 +468,17 @@ fi
 grep -Fq 'duplicate reserved argument: --declared-artifact-runfile' \
   "${test_root}/duplicate.stderr"
 
+if package --output-dir out-linux-forged-llvm \
+  --declared-llvm-readobj-runfile ctx_release_routes/linux-x64/rustc \
+  >"${test_root}/linux-forged-llvm.stdout" \
+  2>"${test_root}/linux-forged-llvm.stderr"; then
+  echo "Linux route unexpectedly accepted a declared Windows LLVM reader" >&2
+  exit 1
+fi
+grep -Fq -- \
+  '--declared-llvm-readobj-runfile is reserved for windows-x64' \
+  "${test_root}/linux-forged-llvm.stderr"
+
 if package --output-dir out-duplicate-rustc \
   --declared-rustc-runfile ctx_release_routes/linux-x64/rustc \
   >"${test_root}/duplicate-rustc.stdout" \
