@@ -739,7 +739,11 @@ broadening, not a must-include filter.
 JSON echoes the normalized positional/`--term` alternatives in `query`, trims
 surrounding whitespace, and joins nonempty alternatives with ` OR `. Scoped
 follow-up commands preserve the positional and repeatable-term argument shape
-with safe shell quoting.
+with safe shell quoting, plus a shell-quoted `ctx --data-root <path>` prefix when
+search uses a non-default data root. Each result's `rank` is its one-based
+position in the final shaped window. `retrieval_score` preserves the backend's
+diagnostic score, which can be non-monotonic after query-coverage and
+session-diversity shaping.
 Custom history imports can be filtered by canonical
 `--history-source provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. The plugin/source alias is for

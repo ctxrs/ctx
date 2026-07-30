@@ -2,7 +2,7 @@
 
 1. Fix the Unicode cache key regression in the parser.
    Session  codex · demo-unicode-session
-   Match    0.86 · event 01900001
+   Match    #1 · event 01900001
    More     2 results from this session
 
    Inspect

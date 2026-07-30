@@ -43,8 +43,11 @@ A result can include:
 
 - ctx-owned event and session IDs;
 - the provider-owned session ID when known;
-- title, hydrated snippet, rank, result scope, and match reasons;
-- session importance and the additional-match count for session results;
+- title, hydrated snippet, one-based final rank, result scope, and match reasons;
+- the backend-provided `retrieval_score`, which is diagnostic and can be
+  non-monotonic after query-coverage and session-diversity shaping;
+- compatibility session importance and the additional-match count for session
+  results; like `retrieval_score`, session importance is not an ordering contract;
 - provider, event sequence, timestamp, workspace, and working directory;
 - source path/cursor metadata and citations;
 - copyable `suggested_next_commands` for `show`, `locate`, and scoped search.
@@ -83,7 +86,9 @@ semantics rather than acting as required terms.
 JSON `query` echoes the normalized positional query and repeatable-term
 alternatives, trimming surrounding whitespace and joining nonempty alternatives
 with ` OR ` in argument order. Suggested scoped-search commands preserve the
-positional and `--term` argument shape and safely quote each value.
+positional and `--term` argument shape and safely quote each value. They also
+preserve a non-default data root with a shell-quoted `ctx --data-root <path>`
+prefix.
 
 Search requires a nonempty query, at least one nonempty `--term`, or
 `--file <path>`. Other filters only narrow an actual search.

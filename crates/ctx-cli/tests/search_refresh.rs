@@ -277,6 +277,10 @@ fn assert_source_backed_search_show_oracle(
     let results = packet["results"]
         .as_array()
         .expect("source-backed search results");
+    for (offset, result) in results.iter().enumerate() {
+        assert_eq!(result["rank"], offset + 1, "{result:#}");
+        assert!(result["retrieval_score"].is_number(), "{result:#}");
+    }
     let matching_results = results
         .iter()
         .filter(|result| {
@@ -330,27 +334,29 @@ fn assert_source_backed_search_show_oracle(
             .expect("source-backed next commands");
         let event_id = result["ctx_event_id"].as_str().unwrap();
         let session_id = result["ctx_session_id"].as_str().unwrap();
+        let command_prefix = format!(
+            "ctx --data-root {}",
+            search_refresh_data_root(temp).display()
+        );
         assert!(
             commands
                 .iter()
-                .any(|command| command == &format!("ctx show event {event_id} --window 10")),
+                .any(|command| command
+                    == &format!("{command_prefix} show event {event_id} --window 10")),
             "{result:#}"
         );
         assert!(
             commands
                 .iter()
-                .any(|command| command == &format!("ctx show session {session_id}")),
+                .any(|command| command == &format!("{command_prefix} show session {session_id}")),
             "{result:#}"
         );
         assert!(
             commands.iter().any(|command| {
-                command
-                    .as_str()
-                    .is_some_and(|command| command.starts_with("ctx search "))
-                    && command
-                        .as_str()
-                        .unwrap()
-                        .contains(&format!(" --session {session_id}"))
+                command.as_str().is_some_and(|command| {
+                    command.starts_with(&format!("{command_prefix} search "))
+                        && command.contains(&format!(" --session {session_id}"))
+                })
             }),
             "{result:#}"
         );

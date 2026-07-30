@@ -259,24 +259,26 @@ pub(crate) fn assert_session_suggested_next_commands(result: &Value) {
         "lite default should not be restated in suggestions: {result:#}"
     );
     assert!(
-        commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or("")
-            .starts_with("ctx show session ")),
+        commands.iter().any(|command| {
+            let command = command.as_str().unwrap_or("");
+            command.starts_with("ctx ") && command.contains(" show session ")
+        }),
         "missing show session suggestion in {result:#}"
     );
     assert!(
         commands.iter().any(|command| {
             let command = command.as_str().unwrap_or("");
-            command.starts_with("ctx search ") && command.contains(" --session ")
+            command.starts_with("ctx ")
+                && command.contains(" search ")
+                && command.contains(" --session ")
         }),
         "missing session event drilldown suggestion in {result:#}"
     );
     assert!(
-        commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or("")
-            .starts_with("ctx show event ")),
+        commands.iter().any(|command| {
+            let command = command.as_str().unwrap_or("");
+            command.starts_with("ctx ") && command.contains(" show event ")
+        }),
         "missing representative event suggestion in {result:#}"
     );
 }
@@ -290,10 +292,10 @@ pub(crate) fn assert_event_suggested_next_commands(result: &Value) {
         "lite default should not be restated in suggestions: {result:#}"
     );
     assert!(
-        commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or("")
-            .starts_with("ctx show event ")),
+        commands.iter().any(|command| {
+            let command = command.as_str().unwrap_or("");
+            command.starts_with("ctx ") && command.contains(" show event ")
+        }),
         "missing show event suggestion in {result:#}"
     );
     assert!(
@@ -305,6 +307,8 @@ pub(crate) fn assert_event_suggested_next_commands(result: &Value) {
     );
     assert!(commands.iter().any(|command| {
         let command = command.as_str().unwrap_or("");
-        command.starts_with("ctx search ") && command.contains(" --session ")
+        command.starts_with("ctx ")
+            && command.contains(" search ")
+            && command.contains(" --session ")
     }));
 }

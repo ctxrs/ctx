@@ -33,7 +33,8 @@ fn search_value() -> Value {
             "provider": "codex",
             "provider_session_id": "demo-unicode-session",
             "result_scope": "session",
-            "rank": 0.84,
+            "rank": 1,
+            "retrieval_score": 0.86,
             "session_importance": 0.86,
             "more_matches_in_session": 2,
             "ctx_event_id": EVENT_ID,
@@ -211,6 +212,35 @@ fn primary_renderers_match_reference_goldens_at_80_columns() {
         render_locate_document(&locate_event_value(), &context).render_plain(),
         include_str!("goldens/locate.txt")
     );
+}
+
+#[test]
+fn human_search_ranks_non_monotonic_scores_by_shaped_result_order() {
+    let mut value = search_value();
+    let mut first = value["results"][0].clone();
+    first["rank"] = json!(1);
+    first["retrieval_score"] = json!(0.25);
+    first["session_importance"] = json!(0.25);
+    let mut second = first.clone();
+    second["rank"] = json!(2);
+    second["retrieval_score"] = json!(9.5);
+    second["session_importance"] = json!(9.5);
+    second["ctx_event_id"] = json!(SECOND_EVENT_ID);
+    value["results"] = json!([first, second]);
+    value["result_window"]["returned"] = json!(2);
+
+    let rendered =
+        render_search_document(&value, false, &context(80, ColorMode::Never)).render_plain();
+    let match_lines = rendered
+        .lines()
+        .filter(|line| line.trim_start().starts_with("Match"))
+        .collect::<Vec<_>>();
+    assert_eq!(match_lines.len(), 2, "{rendered}");
+    assert!(match_lines[0].contains("#1"), "{rendered}");
+    assert!(match_lines[1].contains("#2"), "{rendered}");
+    assert!(!match_lines
+        .iter()
+        .any(|line| line.contains("0.25") || line.contains("9.50")));
 }
 
 #[test]

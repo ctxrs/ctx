@@ -137,12 +137,9 @@ fn render_result(
         Token::Text,
     );
 
-    let score = result["session_importance"]
-        .as_f64()
-        .or_else(|| result["rank"].as_f64())
-        .unwrap_or_default();
+    let rank = result["rank"].as_u64().unwrap_or_default();
     let event_id = result["ctx_event_id"].as_str().unwrap_or("unknown");
-    let matched = format!("{score:.2}{separator}event {}", short_id(event_id));
+    let matched = format!("#{rank}{separator}event {}", short_id(event_id));
     push_field(
         document,
         context,
@@ -242,25 +239,25 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
             );
         }
     }
-    if let Some(rank) = result["rank"].as_f64() {
+    if let Some(rank) = result["rank"].as_u64() {
         push_field(
             document,
             context,
             CARD_INDENT,
             "Rank",
             VERBOSE_LABEL_WIDTH,
-            &format!("{rank:.2}"),
+            &format!("#{rank}"),
             Token::Text,
         );
     }
-    if let Some(importance) = result["session_importance"].as_f64() {
+    if let Some(score) = result["retrieval_score"].as_f64() {
         push_field(
             document,
             context,
             CARD_INDENT,
-            "Importance",
+            "Retrieval score",
             VERBOSE_LABEL_WIDTH,
-            &format!("{importance:.2}"),
+            &format!("{score:.2}"),
             Token::Text,
         );
     }
