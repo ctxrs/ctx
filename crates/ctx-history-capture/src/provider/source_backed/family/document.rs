@@ -311,7 +311,6 @@ where
     let scan_state = Arc::clone(&state);
     let scan_authority = inventory_authority.clone();
     let owns_adapter = Arc::clone(&adapter);
-    let source_adapter = Arc::clone(&adapter);
     let source_state = Arc::clone(&state);
     let inventory_adapter = Arc::clone(&adapter);
     let inventory_state = Arc::clone(&state);
@@ -334,7 +333,7 @@ where
             Ok(())
         },
         move |source| owns_adapter.owns_source(source),
-        move |target| revalidate_document_target(source_adapter.as_ref(), &source_state, target),
+        move |target| revalidate_document_target(&source_state, target),
         move |request| hydrate_one_document_group(single_adapter.as_ref(), request),
     )
     .with_complete_inventory_revalidation(move |inventory| {
@@ -520,15 +519,11 @@ where
 
 struct DocumentCommitState<L, A> {
     expected: Option<ExpectedDocumentRoute<L, A>>,
-    current: Option<bool>,
 }
 
 impl<L, A> Default for DocumentCommitState<L, A> {
     fn default() -> Self {
-        Self {
-            expected: None,
-            current: None,
-        }
+        Self { expected: None }
     }
 }
 
@@ -560,18 +555,14 @@ impl<L, A> ExpectedDocumentRoute<L, A> {
     }
 }
 
-fn revalidate_document_target<A>(
-    adapter: &A,
-    state: &Mutex<DocumentCommitState<A::Leaf, A::TreeAuthority>>,
+fn revalidate_document_target<L, A>(
+    state: &Mutex<DocumentCommitState<L, A>>,
     target: SourceBackedRevalidationTarget<'_>,
-) -> bool
-where
-    A: ReplacementDocumentTree,
-{
-    let Ok(mut state) = state.lock() else {
+) -> bool {
+    let Ok(state) = state.lock() else {
         return false;
     };
-    let expected_matches = state
+    state
         .expected
         .as_ref()
         .is_some_and(|expected| match target {
@@ -587,8 +578,7 @@ where
                         .certificates
                         .contains_key(&deletion.source().identity().digest())
             }
-        });
-    expected_matches && revalidate_document_tree_once(adapter, &mut state)
+        })
 }
 
 fn revalidate_document_inventory<A>(
@@ -599,35 +589,23 @@ fn revalidate_document_inventory<A>(
 where
     A: ReplacementDocumentTree,
 {
-    let Ok(mut state) = state.lock() else {
+    let Ok(state) = state.lock() else {
         return false;
     };
-    let expected_matches = state
-        .expected
-        .as_ref()
-        .is_some_and(|expected| expected.inventory == *inventory);
-    expected_matches && revalidate_document_tree_once(adapter, &mut state)
-}
-
-fn revalidate_document_tree_once<A>(
-    adapter: &A,
-    state: &mut DocumentCommitState<A::Leaf, A::TreeAuthority>,
-) -> bool
-where
-    A: ReplacementDocumentTree,
-{
-    if let Some(current) = state.current {
-        return current;
-    }
     let Some(expected) = state.expected.as_ref() else {
-        state.current = Some(false);
         return false;
     };
-    let current = adapter
+    if expected.inventory != *inventory {
+        return false;
+    }
+
+    // Source and deletion callbacks only bind writer targets to this expected
+    // route. The final inventory callback owns the one live terminal tree
+    // observation, so changes between callbacks cannot inherit an earlier
+    // successful result.
+    adapter
         .revalidate_complete(&expected.tree)
-        .is_ok_and(|terminal| terminal == expected.tree.tree_fingerprint);
-    state.current = Some(current);
-    current
+        .is_ok_and(|terminal| terminal == expected.tree.tree_fingerprint)
 }
 
 #[derive(Clone)]

@@ -89,15 +89,15 @@ fn shared_family_gemini_noop_replacement_and_grouped_hydration_oracle() {
     assert_eq!(
         jsonl_family_work(),
         JsonlFamilyWork {
-            discoveries: 2,
+            discoveries: 3,
             leaf_opens: 2,
             provider_projections: 0,
         }
     );
     assert_eq!(
         gemini_parse_counters().0,
-        2,
-        "exact no-op may read one bounded identity header per inventory pass"
+        3,
+        "exact no-op reads one bounded identity header per capture and terminal inventory pass"
     );
     assert_eq!(unchanged.sources, cold.sources);
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
@@ -172,7 +172,7 @@ fn shared_family_gemini_noop_replacement_and_grouped_hydration_oracle() {
     assert_eq!(
         jsonl_family_work(),
         JsonlFamilyWork {
-            discoveries: 2,
+            discoveries: 3,
             leaf_opens: 2,
             provider_projections: 4,
         },

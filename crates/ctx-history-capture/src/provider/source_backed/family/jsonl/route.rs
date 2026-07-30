@@ -358,7 +358,6 @@ impl FamilyCheckpoint {
 #[derive(Debug, Clone)]
 struct TerminalSourceEvidence {
     certificate: CertifiedSource,
-    leaf: JsonlFamilyLeaf,
 }
 
 #[derive(Default)]
@@ -382,14 +381,16 @@ pub(crate) fn jsonl_family_driver(
     let hydration_root = root.clone();
     let hydration_resident = Arc::clone(&resident);
     let batch_adapter = Arc::clone(&adapter);
-    let batch_root = root;
+    let batch_root = root.clone();
     let batch_resident = Arc::clone(&resident);
+    let terminal_adapter = adapter;
+    let terminal_root = root;
     let inventory_resident = Arc::clone(&resident);
 
     SourceBackedRouteDriver::new(
         move |sink| capture(&*scan_adapter, &scan_root, &scan_resident, sink),
         move |source| owns_adapter.owns(source),
-        move |target| revalidate_target(&revalidation_resident, target).unwrap_or(false),
+        move |target| revalidate_target(&revalidation_resident, target),
         move |request| {
             hydrate_single(
                 &*hydration_adapter,
@@ -403,12 +404,13 @@ pub(crate) fn jsonl_family_driver(
         hydrate_batch(&*batch_adapter, &batch_root, &batch_resident, request)
     })
     .with_complete_inventory_revalidation(move |expected| {
-        inventory_resident
-            .lock()
-            .ok()
-            .and_then(|resident| resident.certified_inventory.as_ref().cloned())
-            .as_ref()
-            == Some(expected)
+        revalidate_complete_inventory(
+            terminal_adapter.as_ref(),
+            &terminal_root,
+            &inventory_resident,
+            expected,
+        )
+        .unwrap_or(false)
     })
 }
 
@@ -533,7 +535,6 @@ fn scan_leaf(
         sink.certify_source_append(append).map_err(route_internal)?;
         return Ok(TerminalSourceEvidence {
             certificate: base.clone(),
-            leaf: leaf.clone(),
         });
     }
 
@@ -606,10 +607,7 @@ fn scan_leaf(
     let certificate = certify(adapter, leaf, checkpoint)?;
     sink.certify_source(certificate.clone())
         .map_err(route_internal)?;
-    Ok(TerminalSourceEvidence {
-        certificate,
-        leaf: leaf.clone(),
-    })
+    Ok(TerminalSourceEvidence { certificate })
 }
 
 fn certify(
@@ -746,31 +744,80 @@ fn reset_terminal(resident: &Mutex<FamilyResident>) -> SourceBackedRouteResult<(
 fn revalidate_target(
     resident: &Mutex<FamilyResident>,
     target: SourceBackedRevalidationTarget<'_>,
-) -> Result<bool> {
-    let resident = resident.lock().map_err(|_| {
-        CaptureError::InvalidPayload("JSONL resident catalog lock was poisoned".to_owned())
-    })?;
+) -> bool {
+    let Ok(resident) = resident.lock() else {
+        return false;
+    };
     match target {
         SourceBackedRevalidationTarget::Source(expected) => {
             let Some(evidence) = resident
                 .terminal_sources
                 .get(&expected.observation().source().exact_descriptor_digest())
             else {
-                return Ok(false);
+                return false;
             };
-            if evidence.certificate != *expected {
-                return Ok(false);
-            }
-            let opened = evidence.leaf.open_verified()?;
-            let current = observe_opened_file(evidence.leaf.source_path(), opened.as_ref())?;
-            Ok(current == *evidence.leaf.observation()
-                && evidence.leaf.authority.revalidate().is_ok())
+            evidence.certificate == *expected
         }
-        SourceBackedRevalidationTarget::Deletion(deletion) => Ok(resident
+        SourceBackedRevalidationTarget::Deletion(deletion) => resident
             .certified_inventory
             .as_ref()
-            .is_some_and(|inventory| deletion.verifies(inventory))),
+            .is_some_and(|inventory| {
+                deletion.verifies(inventory)
+                    && !resident
+                        .terminal_sources
+                        .contains_key(&deletion.source().exact_descriptor_digest())
+            }),
     }
+}
+
+fn revalidate_complete_inventory(
+    adapter: &dyn JsonlFamilyAdapter,
+    root: &Path,
+    resident: &Mutex<FamilyResident>,
+    expected_inventory: &CertifiedSourceInventory,
+) -> Result<bool> {
+    let (expected_sources, certified_inventory) = {
+        let resident = resident.lock().map_err(|_| {
+            CaptureError::InvalidPayload("JSONL resident catalog lock was poisoned".to_owned())
+        })?;
+        (
+            resident.terminal_sources.clone(),
+            resident.certified_inventory.clone(),
+        )
+    };
+    if certified_inventory.as_ref() != Some(expected_inventory) {
+        return Ok(false);
+    }
+
+    // This is the single terminal filesystem witness for the route. Earlier
+    // source/deletion callbacks only bind writer targets to `expected_sources`;
+    // this final callback rediscovers membership and then reopens every leaf,
+    // so a new leaf, reappearance, deletion, or mutation between callbacks
+    // invalidates the candidate before publication.
+    let current = discover(adapter, root)?;
+    if current.root_missing() || current.leaves().len() != expected_sources.len() {
+        return Ok(false);
+    }
+    let current_inventory = current.certify_against(&current)?;
+    if current_inventory != *expected_inventory {
+        return Ok(false);
+    }
+    for leaf in current.leaves() {
+        let Some(evidence) = expected_sources.get(&leaf.source().exact_descriptor_digest()) else {
+            return Ok(false);
+        };
+        if !leaf
+            .source()
+            .exact_descriptor_eq(evidence.certificate.observation().source())
+            || source_observation(leaf.source(), leaf.observation())?
+                != *evidence.certificate.observation()
+        {
+            return Ok(false);
+        }
+        drop(leaf.open_verified()?);
+    }
+    current.revalidate_root()?;
+    Ok(true)
 }
 
 fn hydrate_single(
@@ -964,3 +1011,7 @@ fn hydration_error(kind: HydrationFailureKind, detail: impl std::fmt::Display) -
 fn contract_error(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
+
+#[cfg(test)]
+#[path = "route/tests.rs"]
+mod tests;

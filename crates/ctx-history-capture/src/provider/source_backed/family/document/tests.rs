@@ -390,17 +390,7 @@ fn synthetic_document(leaf: &SyntheticLeaf) -> LexicalDocument {
 }
 
 fn fixture_registry(root: &Path, adapter: SyntheticAdapter) -> SourceBackedProviderRegistry {
-    let source = ProviderSource {
-        provider: CaptureProvider::Auggie,
-        path: root.to_path_buf(),
-        exists: true,
-        source_format: AUGGIE_SESSION_JSON_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        status: ProviderSourceStatus::Available,
-        unsupported_reason: None,
-    };
+    let source = fixture_source(root);
     let mut registry = SourceBackedProviderRegistry::new();
     register_replacement_document_tree_route(
         &mut registry,
@@ -410,6 +400,20 @@ fn fixture_registry(root: &Path, adapter: SyntheticAdapter) -> SourceBackedProvi
     )
     .unwrap();
     registry
+}
+
+fn fixture_source(root: &Path) -> ProviderSource {
+    ProviderSource {
+        provider: CaptureProvider::Auggie,
+        path: root.to_path_buf(),
+        exists: true,
+        source_format: AUGGIE_SESSION_JSON_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    }
 }
 
 fn writer_options() -> WriterOptions {
@@ -659,6 +663,108 @@ fn replacement_tree_rejects_races_duplicates_and_replaces_on_parser_change() {
     )
     .is_err());
     assert_eq!(cold.sources.len(), 1);
+}
+
+#[test]
+fn terminal_tree_witness_rejects_mutation_and_reappearance_between_callbacks() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let retained = SyntheticLeaf {
+        physical_id: 1,
+        logical_id: 1,
+        revision: 1,
+        body: "retained".to_owned(),
+    };
+    let adapter = SyntheticAdapter::new(vec![retained.clone()]);
+    adapter.use_logical_snapshot_scans();
+    let tree = SyntheticAdapter::tree(&adapter.state.lock().unwrap());
+    let source = retained.source();
+    let observation = SourceObservation::new(
+        source.clone(),
+        "synthetic-document-observation-v1",
+        retained.content_digest().to_vec(),
+    )
+    .unwrap();
+    let certificate = CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        adapter.parser_revision(),
+        retained.content_digest(),
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            rejected_records: 0,
+            ignored_records: 0,
+            indexed_documents: 1,
+            certified_bytes: retained.body.len() as u64,
+        },
+    )
+    .unwrap();
+    let inventory = DocumentInventoryAuthority::new(&fixture_source(temp.path()))
+        .certify(tree.tree_fingerprint, vec![source.clone()])
+        .unwrap();
+    let state = Mutex::new(DocumentCommitState {
+        expected: Some(ExpectedDocumentRoute::new(
+            tree,
+            vec![certificate.clone()],
+            inventory.clone(),
+        )),
+    });
+
+    assert!(revalidate_document_target(
+        &state,
+        SourceBackedRevalidationTarget::Source(&certificate),
+    ));
+    adapter.replace(1, 2, "mutated between source and inventory callbacks");
+    assert!(!revalidate_document_inventory(&adapter, &state, &inventory,));
+
+    let tree = SyntheticAdapter::tree(&adapter.state.lock().unwrap());
+    let retained = adapter.state.lock().unwrap().leaves[0].clone();
+    let source = retained.source();
+    let observation = SourceObservation::new(
+        source.clone(),
+        "synthetic-document-observation-v1",
+        retained.content_digest().to_vec(),
+    )
+    .unwrap();
+    let certificate = CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        adapter.parser_revision(),
+        retained.content_digest(),
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            rejected_records: 0,
+            ignored_records: 0,
+            indexed_documents: 1,
+            certified_bytes: retained.body.len() as u64,
+        },
+    )
+    .unwrap();
+    let inventory = DocumentInventoryAuthority::new(&fixture_source(temp.path()))
+        .certify(tree.tree_fingerprint, vec![source])
+        .unwrap();
+    let deleted_leaf = SyntheticLeaf {
+        physical_id: 2,
+        logical_id: 2,
+        revision: 1,
+        body: "deleted".to_owned(),
+    };
+    let deletion =
+        CertifiedSourceDeletion::from_inventory(deleted_leaf.source(), &inventory).unwrap();
+    let state = Mutex::new(DocumentCommitState {
+        expected: Some(ExpectedDocumentRoute::new(
+            tree,
+            vec![certificate],
+            inventory.clone(),
+        )),
+    });
+    assert!(revalidate_document_target(
+        &state,
+        SourceBackedRevalidationTarget::Deletion(&deletion),
+    ));
+    adapter.state.lock().unwrap().leaves.push(deleted_leaf);
+    assert!(!revalidate_document_inventory(&adapter, &state, &inventory,));
 }
 
 #[test]
