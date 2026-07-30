@@ -9,6 +9,11 @@ pub(in crate::semantic) enum DaemonQueryEndpoint {
     Unsupported,
 }
 
+#[cfg(unix)]
+mod unix_response;
+#[cfg(unix)]
+pub(in crate::semantic) use unix_response::read_daemon_query_response_unix;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(in crate::semantic) enum DaemonIpcService {
     SemanticQuery,
@@ -380,23 +385,14 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
             let mut stream = UnixStream::connect(path)
                 .with_context(|| format!("connect daemon query socket {}", path.display()))?;
             stream
-                .set_read_timeout(Some(timeout))
-                .context("set daemon query read timeout")?;
-            stream
                 .set_write_timeout(Some(timeout))
                 .context("set daemon query write timeout")?;
             stream
                 .write_all(request)
                 .context("write daemon query request")?;
             let _ = stream.shutdown(Shutdown::Write);
-            let mut body = Vec::new();
-            stream
-                .take(max_response_bytes.saturating_add(1))
-                .read_to_end(&mut body)
+            let body = read_daemon_query_response_unix(&mut stream, max_response_bytes, timeout)
                 .context("read daemon query response")?;
-            if body.len() as u64 > max_response_bytes {
-                return Err(DaemonQueryResponseTooLarge::new(max_response_bytes).into());
-            }
             String::from_utf8(body).context("daemon query response is not UTF-8")
         }
         #[cfg(windows)]
