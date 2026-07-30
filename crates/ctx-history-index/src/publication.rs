@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{StableEntityId, IDENTITY_VERSION};
+use ctx_history_core::{CertifiedSource, SourceKey, StableEntityId, IDENTITY_VERSION};
 use tantivy::{
     collector::Count, directory::Directory, schema::IndexRecordOption, DocAddress, Index,
     IndexMeta, ReloadPolicy, Searcher, Term,
@@ -233,27 +233,46 @@ pub(crate) fn verify_searcher_structure(
 }
 
 pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
-    use tantivy::query::TermQuery;
-
     verify_searcher_structure(searcher, manifest)?;
-    let source_field = required_field(searcher.schema(), "source_key")?;
     for source in &manifest.sources {
-        let source_id = source_token(source.observation().source());
-        let query = TermQuery::new(
-            Term::from_field_text(source_field, &source_id),
-            IndexRecordOption::Basic,
-        );
-        let actual = searcher.search(&query, &Count)? as u64;
-        let expected = source.counts().indexed_documents;
-        if actual != expected {
-            return Err(IndexError::SourceCountMismatch {
-                source_id,
-                manifest: expected,
-                index: actual,
-            });
-        }
+        verify_source_document_count(searcher, source)?;
     }
     verify_generation_identities(searcher)?;
+    Ok(())
+}
+
+pub(crate) fn verify_source_document_count(
+    searcher: &Searcher,
+    source: &CertifiedSource,
+) -> Result<()> {
+    verify_source_count(
+        searcher,
+        source.observation().source(),
+        source.counts().indexed_documents,
+    )
+}
+
+pub(crate) fn verify_source_absent(searcher: &Searcher, source: &SourceKey) -> Result<()> {
+    verify_source_count(searcher, source, 0)
+}
+
+fn verify_source_count(searcher: &Searcher, source: &SourceKey, expected: u64) -> Result<()> {
+    use tantivy::query::TermQuery;
+
+    let source_id = source_token(source);
+    let source_field = required_field(searcher.schema(), "source_key")?;
+    let query = TermQuery::new(
+        Term::from_field_text(source_field, &source_id),
+        IndexRecordOption::Basic,
+    );
+    let actual = searcher.search(&query, &Count)? as u64;
+    if actual != expected {
+        return Err(IndexError::SourceCountMismatch {
+            source_id,
+            manifest: expected,
+            index: actual,
+        });
+    }
     Ok(())
 }
 

@@ -938,12 +938,20 @@ impl GenerationWriter {
                 detail: error.to_string(),
             });
         }
-        let verified = VerifiedIndex::open(&root).map_err(|error| {
-            IndexError::CommittedGenerationNeedsRecovery {
-                generation_id: generation_id.clone(),
-                stage: "generation verification",
-                detail: error.to_string(),
-            }
+        let verified = (|| -> Result<VerifiedIndex> {
+            // Every document admitted by this writer has already been checked
+            // against the audited base and the current staging identities.
+            // Rewalking the immutable base made tiny appends O(total documents).
+            // Bind the generation structurally, then verify changed postings;
+            // the previously audited base remains byte-immutable.
+            let verified = VerifiedIndex::open_pinned(&root)?;
+            staging::verify_published_mutations(&self, &verified)?;
+            Ok(verified)
+        })()
+        .map_err(|error| IndexError::CommittedGenerationNeedsRecovery {
+            generation_id: generation_id.clone(),
+            stage: "generation verification",
+            detail: error.to_string(),
         })?;
         if verified.generation_id() != generation_id {
             return Err(IndexError::CommittedGenerationNeedsRecovery {
