@@ -23,7 +23,7 @@ mod validation;
 #[cfg(target_arch = "x86_64")]
 #[cfg(test)]
 use scoring::exact_dot_product_f32_avx;
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 use scoring::exact_dot_product_f32_scalar;
 #[cfg(test)]
 use scoring::validate_and_dot_le_bytes;

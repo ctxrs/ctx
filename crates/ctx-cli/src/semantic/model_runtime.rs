@@ -904,22 +904,22 @@ fn reacquire_semantic_embedder(
 mod cpu;
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use cpu::acquire_cpu_backend;
+#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
+use cpu::automatic_ort_accelerator_backend;
 pub(crate) use cpu::prepare_platform_semantic_acceleration;
 pub(super) use cpu::BackendPreference;
 #[cfg(all(ctx_semantic_fastembed, not(test)))]
 use cpu::{
     accelerator_fallback_reason, acquire_accelerator_backend, acquire_accelerator_model_for_daemon,
     acquire_cpu_backend, acquire_cpu_fallback_backend, acquire_cpu_model_for_daemon,
-    acquire_ort_backend, authorize_loaded_backend, automatic_ort_accelerator_backend,
-    map_daemon_accelerator_load_error,
+    acquire_ort_backend, authorize_loaded_backend, map_daemon_accelerator_load_error,
 };
 #[cfg(all(test, ctx_semantic_fastembed))]
 use cpu::{
     accelerator_fallback_reason, acquire_accelerator_backend, acquire_accelerator_model_for_daemon,
     acquire_cpu_fallback_backend, acquire_cpu_model_for_daemon, acquire_ort_backend,
-    authorize_loaded_backend, automatic_ort_accelerator_backend, map_daemon_accelerator_load_error,
-    run_semantic_contract_canary, semantic_backend_requires_contract_canary,
-    SemanticContractCanaryExecutor,
+    authorize_loaded_backend, map_daemon_accelerator_load_error, run_semantic_contract_canary,
+    semantic_backend_requires_contract_canary, SemanticContractCanaryExecutor,
 };
 pub(crate) use cpu::{semantic_native_accelerator_target, SemanticNativeAcceleratorTarget};
 mod coreml;

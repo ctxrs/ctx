@@ -35,8 +35,10 @@ mod windows;
 use coordination::SupervisorInstallationLock;
 #[cfg(any(test, target_os = "macos"))]
 use environment::launch_agent_plist;
+#[cfg(any(test, target_os = "linux"))]
+use environment::linux_systemd_unit;
 #[cfg(target_os = "linux")]
-use environment::{linux_systemd_unit, linux_systemd_unit_with_environment};
+use environment::linux_systemd_unit_with_environment;
 use environment::{
     supervisor_environment_contract_report, supervisor_environment_snapshot,
     SupervisorEnvironmentSnapshot,
@@ -940,7 +942,7 @@ fn verify_native_supervisor(data_root: &Path, executable: &Path) -> Result<u32> 
     verify_native_supervisor_registration(data_root, executable)?;
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     let output = launchctl_print(&domain)?;
-    let pid = launchctl_print_pid(&String::from_utf8_lossy(&output))
+    let pid = launchctl_print_pid(&String::from_utf8_lossy(&output.stdout))
         .ok_or_else(|| anyhow!("LaunchAgent GUI registration has no live process identity"))?;
     verify_daemon_owner_identity(data_root, executable, Some(pid))
 }

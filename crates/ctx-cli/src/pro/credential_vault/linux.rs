@@ -9,9 +9,10 @@ use std::{
             fs::{MetadataExt as _, PermissionsExt as _},
         },
     },
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
+#[cfg(target_os = "linux")]
 use fs2::FileExt as _;
 use zeroize::Zeroize as _;
 
@@ -23,17 +24,16 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use super::secret_service;
-use super::{
-    validate_record_id, CredentialVaultBackend, CredentialVaultError, SecretBytes,
-    MAX_STORED_SECRET_BYTES,
-};
+#[cfg(target_os = "linux")]
+use super::{validate_record_id, CredentialVaultBackend};
+use super::{CredentialVaultError, SecretBytes, MAX_STORED_SECRET_BYTES};
 
 const BACKEND_MARKER: &str = ".ctx-pro.credential-backend-v1";
 const BACKEND_MARKER_STAGE: &str = ".ctx-pro.credential-backend-v1.next";
 const FILE_VAULT_DIRECTORY: &str = ".ctx-pro.credentials-v1";
 const FILE_VAULT_LOCK: &str = ".ctx-pro.credentials-v1.lock";
 const FILE_RECORD_STAGE_SUFFIX: &str = ".next";
-const FILE_SELECTION: &[u8] = b"ctx-pro-credential-backend-v1:file\n";
+pub(super) const FILE_SELECTION: &[u8] = b"ctx-pro-credential-backend-v1:file\n";
 #[cfg(target_os = "linux")]
 const SECRET_SERVICE_SELECTION: &[u8] = b"ctx-pro-credential-backend-v1:secret-service\n";
 const MAX_BACKEND_MARKER_BYTES: usize = 64;
@@ -131,7 +131,7 @@ impl CredentialVaultBackend for PlatformBackend {
 
 #[cfg(target_os = "linux")]
 struct LinuxBackend<A> {
-    data_root: PathBuf,
+    data_root: std::path::PathBuf,
     secret_service: A,
 }
 
@@ -673,8 +673,7 @@ fn open_directory_raw(parent: libc::c_int, name: &OsStr) -> io::Result<File> {
 fn create_private_directory(parent: &File, name: &OsStr) -> Result<(), CredentialVaultError> {
     let name = path_component(name)?;
     // SAFETY: parent is a live descriptor and name is a NUL-terminated path component.
-    let result =
-        unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), PRIVATE_DIRECTORY_MODE) };
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
     let created = result == 0;
     if !created {
         let error = io::Error::last_os_error();
@@ -744,7 +743,7 @@ fn open_file_at(parent: &File, name: &OsStr, flags: libc::c_int, mode: u32) -> i
             parent.as_raw_fd(),
             name.as_ptr(),
             flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-            mode,
+            if mode == PRIVATE_FILE_MODE { 0o600 } else { 0 },
         )
     };
     file_from_descriptor(descriptor)
