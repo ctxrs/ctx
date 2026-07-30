@@ -694,6 +694,13 @@ fn manage_no_open_routes_the_primary_result_to_ui_stdout_only() {
     assert!(stdout
         .text()
         .contains("Management link  https://billing.example.test/session"));
+    assert!(stdout
+        .text()
+        .contains("Enabled; no aggregate facts recorded yet"));
+    assert!(stdout
+        .text()
+        .contains("Continue with ctx Pro for $20/month."));
+    assert!(stdout.text().contains("ctx pro manage"));
     assert!(stderr.text().is_empty());
 }
 

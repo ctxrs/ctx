@@ -202,6 +202,15 @@ fn cta_uses_ui_stderr_capabilities_without_touching_stdout() {
     assert!(stdout_copy.bytes().is_empty());
     let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
     assert!(rendered.contains("\u{1b}["));
-    assert!(rendered.contains("Refer a new ctx Pro customer"));
+    assert!(rendered.contains("Refer a developer."));
+    assert!(rendered.contains("$10/month"));
+    assert!(rendered.contains("agent bill."));
+    assert!(rendered.contains("Up to $120 per friend."));
     assert!(rendered.contains("ctx referral create <codename>"));
+    assert!(!rendered.contains("Ordinary customer referrals"));
+
+    let plain_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    let plain = render::cta(&plain_context).render_plain();
+    assert!(plain.contains("Refer a developer. Earn $10/month toward your agent bill."));
+    assert!(plain.contains("Up to $120 per friend."));
 }

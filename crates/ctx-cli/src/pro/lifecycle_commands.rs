@@ -591,7 +591,13 @@ fn run_manage_with_opener(
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        let document = render_manage_human(ui.stdout_context(), &plan, browser_opened);
+        let document = render_manage_human(
+            ui.stdout_context(),
+            &plan,
+            &usage_report,
+            conversion_action.as_ref(),
+            browser_opened,
+        );
         ui.write_stdout(&document)?;
         if !no_open {
             let notice = render_browser_notice(
