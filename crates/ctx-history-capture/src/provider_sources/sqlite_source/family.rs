@@ -3,8 +3,6 @@ use super::*;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const PHYSICAL_REVISION_DOMAIN: &[u8] = b"ctx-stock-sqlite-physical-revision-v1\0";
-
 #[derive(Debug)]
 pub(super) struct SqliteSourceFamily {
     authority: SqliteSourceDirectoryAuthority,
@@ -81,43 +79,31 @@ impl SqliteSourceFamily {
         })
     }
 
-    pub(super) fn capture_evidence(
-        &self,
-    ) -> SqliteSourceAccessResult<(SqliteFamilyEvidence, u64, u64)> {
-        let (database_token, database_bytes_read) =
-            self.database.exact_content_digest_with_bytes()?;
-        let (wal_token, wal_bytes_read) = match self.wal.as_ref() {
-            Some(wal) => {
-                let (token, bytes_read) = wal.exact_content_digest_with_bytes()?;
-                (Some(token), bytes_read)
-            }
-            None => (None, 0),
-        };
-        Ok((
-            SqliteFamilyEvidence {
-                parent_identity: self.authority.identity.clone(),
-                database: self.database.capture_state()?,
-                database_token,
-                wal: self
-                    .wal
-                    .as_ref()
-                    .map(SqliteFamilyMember::capture_state)
-                    .transpose()?,
-                shared_memory: self
-                    .shared_memory
-                    .as_ref()
-                    .map(SqliteFamilyMember::capture_state)
-                    .transpose()?,
-                wal_token,
-                shared_memory_token: self
-                    .shared_memory
-                    .as_ref()
-                    .map(SqliteFamilyMember::content_digest)
-                    .transpose()?,
-            },
-            database_bytes_read,
-            wal_bytes_read,
-        ))
+    pub(super) fn capture_evidence(&self) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
+        Ok(SqliteFamilyEvidence {
+            parent_identity: self.authority.identity.clone(),
+            database: self.database.capture_state()?,
+            wal: self
+                .wal
+                .as_ref()
+                .map(SqliteFamilyMember::capture_state)
+                .transpose()?,
+            shared_memory: self
+                .shared_memory
+                .as_ref()
+                .map(SqliteFamilyMember::capture_state)
+                .transpose()?,
+            wal_token: self
+                .wal
+                .as_ref()
+                .map(SqliteFamilyMember::bounded_token)
+                .transpose()?,
+            shared_memory_token: self
+                .shared_memory
+                .as_ref()
+                .map(SqliteFamilyMember::content_digest)
+                .transpose()?,
+        })
     }
 
     pub(super) fn revalidate(
@@ -150,22 +136,11 @@ impl SqliteSourceFamily {
             &self.shared_memory_name,
             &self.shared_memory_path,
         )?;
-        let (database_token, database_bytes_read) =
-            self.database.exact_content_digest_with_bytes()?;
-        if database_token != expected.database_token {
-            return Err(SqliteSourceAccessError::SourceChanged);
-        }
-        let wal_bytes_read = match (self.wal.as_ref(), expected.wal_token.as_ref()) {
-            (Some(wal), Some(expected_token)) => {
-                let (token, bytes_read) = wal.exact_content_digest_with_bytes()?;
-                if token != *expected_token {
-                    return Err(SqliteSourceAccessError::SourceChanged);
-                }
-                bytes_read
-            }
-            (None, None) => 0,
+        match (self.wal.as_ref(), expected.wal_token.as_ref()) {
+            (Some(wal), Some(expected_token)) if wal.bounded_token()? == *expected_token => {}
+            (None, None) => {}
             _ => return Err(SqliteSourceAccessError::SourceChanged),
-        };
+        }
         match (
             self.shared_memory.as_ref(),
             expected.shared_memory_token.as_ref(),
@@ -185,9 +160,6 @@ impl SqliteSourceFamily {
         {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        self.authority
-            .snapshot_context
-            .record_physical_revision_bytes(database_bytes_read, wal_bytes_read)?;
         Ok(())
     }
 
@@ -205,7 +177,7 @@ pub(super) struct SqliteFamilyMember {
 }
 
 impl SqliteFamilyMember {
-    pub(super) fn open(
+    fn open(
         authority: &SqliteSourceDirectoryAuthority,
         name: OsString,
         path: PathBuf,
@@ -229,7 +201,7 @@ impl SqliteFamilyMember {
         }
     }
 
-    pub(super) fn open_optional(
+    fn open_optional(
         authority: &SqliteSourceDirectoryAuthority,
         name: OsString,
         path: PathBuf,
@@ -249,7 +221,7 @@ impl SqliteFamilyMember {
         self.opened.file()
     }
 
-    pub(super) fn capture_state(&self) -> SqliteSourceAccessResult<NativeFileState> {
+    fn capture_state(&self) -> SqliteSourceAccessResult<NativeFileState> {
         NativeFileState::read(
             self.opened.file(),
             &self.path,
@@ -257,7 +229,7 @@ impl SqliteFamilyMember {
         )
     }
 
-    pub(super) fn revalidate(
+    fn revalidate(
         &self,
         authority: &SqliteSourceDirectoryAuthority,
         expected: &NativeFileState,
@@ -276,24 +248,62 @@ impl SqliteFamilyMember {
         }
     }
 
-    pub(super) fn exact_content_digest_with_bytes(
-        &self,
-    ) -> SqliteSourceAccessResult<([u8; 32], u64)> {
-        self.content_digest_with_bytes(SQLITE_PHYSICAL_REVISION_MAX_COMPONENT_BYTES)
+    fn bounded_token(&self) -> SqliteSourceAccessResult<[u8; 32]> {
+        let state = self.capture_state()?;
+        let mut file =
+            self.opened
+                .file()
+                .try_clone()
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "retaining the SQLite WAL for bounded revision evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "seeking the SQLite WAL for bounded revision evidence",
+                path: self.path.clone(),
+                source,
+            })?;
+        let prefix_len = usize::try_from(state.length.min(SQLITE_WAL_TOKEN_BYTES as u64))
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let mut prefix = vec![0_u8; prefix_len];
+        file.read_exact(&mut prefix)
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "reading the SQLite WAL prefix for bounded revision evidence",
+                path: self.path.clone(),
+                source,
+            })?;
+        let suffix_len = prefix_len;
+        let mut suffix = vec![0_u8; suffix_len];
+        if suffix_len > 0 {
+            file.seek(SeekFrom::Start(state.length - suffix_len as u64))
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "seeking the SQLite WAL suffix for bounded revision evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
+            file.read_exact(&mut suffix)
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "reading the SQLite WAL suffix for bounded revision evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
+        }
+        let mut digest = Sha256::new();
+        digest.update(state.length.to_le_bytes());
+        digest.update(prefix);
+        digest.update(suffix);
+        Ok(digest.finalize().into())
     }
 
     fn content_digest(&self) -> SqliteSourceAccessResult<[u8; 32]> {
-        self.content_digest_with_bytes(SQLITE_SHM_MAX_BYTES)
-            .map(|(digest, _)| digest)
-    }
-
-    fn content_digest_with_bytes(&self, maximum: u64) -> SqliteSourceAccessResult<([u8; 32], u64)> {
         let state = self.capture_state()?;
-        if state.length > maximum {
+        if state.length > SQLITE_SHM_MAX_BYTES {
             return Err(SqliteSourceAccessError::SnapshotTooLarge {
                 path: self.path.clone(),
                 length: state.length,
-                maximum,
+                maximum: SQLITE_SHM_MAX_BYTES,
             });
         }
         let mut file =
@@ -327,11 +337,11 @@ impl SqliteFamilyMember {
             digest.update(&buffer[..requested]);
             remaining -= requested as u64;
         }
-        Ok((digest.finalize().into(), state.length))
+        Ok(digest.finalize().into())
     }
 }
 
-pub(super) fn revalidate_optional_member(
+fn revalidate_optional_member(
     authority: &SqliteSourceDirectoryAuthority,
     member: Option<&SqliteFamilyMember>,
     expected: Option<&NativeFileState>,
@@ -356,13 +366,12 @@ pub(super) fn revalidate_optional_member(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SqliteFamilyEvidence {
-    pub(super) parent_identity: NativeFileIdentity,
+    parent_identity: NativeFileIdentity,
     pub(super) database: NativeFileState,
-    pub(super) database_token: [u8; 32],
     pub(super) wal: Option<NativeFileState>,
-    pub(super) shared_memory: Option<NativeFileState>,
-    pub(super) wal_token: Option<[u8; 32]>,
-    pub(super) shared_memory_token: Option<[u8; 32]>,
+    shared_memory: Option<NativeFileState>,
+    wal_token: Option<[u8; 32]>,
+    shared_memory_token: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,28 +412,15 @@ impl SqliteSourceEvidence {
             shared_memory_length: native.shared_memory.as_ref().map(|state| state.length),
             schema: sqlite.schema.clone(),
             source: sqlite.source.clone(),
-            physical_revision: native.physical_revision(),
             revision: revision.finalize().into(),
         }
     }
 }
 
 impl SqliteFamilyEvidence {
-    pub(super) fn physical_revision(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(PHYSICAL_REVISION_DOMAIN);
-        self.hash_physical_into(&mut digest);
-        digest.finalize().into()
-    }
-
     fn hash_into(&self, digest: &mut Sha256) {
-        self.hash_physical_into(digest);
-    }
-
-    fn hash_physical_into(&self, digest: &mut Sha256) {
         self.parent_identity.hash_into(digest);
         self.database.hash_into(digest);
-        digest.update(self.database_token);
         hash_optional_state(digest, self.wal.as_ref());
         // SHM is SQLite's volatile lock coordination, not provider content.
         // Stock read-only WAL readers may update its reader marks, so source
@@ -696,7 +692,7 @@ pub(super) fn validate_approved_parent_path(path: &Path) -> SqliteSourceAccessRe
     Ok(())
 }
 
-pub(super) fn validate_database_leaf(name: &OsStr) -> SqliteSourceAccessResult<()> {
+fn validate_database_leaf(name: &OsStr) -> SqliteSourceAccessResult<()> {
     let path = Path::new(name);
     if name.is_empty()
         || path.components().count() != 1
@@ -710,7 +706,7 @@ pub(super) fn validate_database_leaf(name: &OsStr) -> SqliteSourceAccessResult<(
     Ok(())
 }
 
-pub(super) fn with_suffix(name: &OsStr, suffix: &str) -> OsString {
+fn with_suffix(name: &OsStr, suffix: &str) -> OsString {
     let mut value = name.to_os_string();
     value.push(suffix);
     value

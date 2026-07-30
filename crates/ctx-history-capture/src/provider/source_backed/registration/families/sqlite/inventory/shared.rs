@@ -5,13 +5,11 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::{types::ValueRef, Connection, OptionalExtension};
 use sha2::Digest;
 
 use crate::{
     common::io::ProviderSourceRoot,
     provider::source_backed::family::document::{
-        document_frontier_fingerprint,
         register_replacement_document_tree_route as register_document_tree_route,
         register_replacement_document_tree_route_with_authority as register_document_tree_route_with_authority,
         ChangedDocumentSink, CompleteDocumentTree, DocumentLeafExecutionPolicy,
@@ -19,16 +17,13 @@ use crate::{
         ReplacementDocumentTree,
     },
     provider_sources::{
-        open_root_handle_sqlite_source_physical_revision, open_root_handle_sqlite_source_snapshot,
-        retain_sqlite_source_directory_authority, SqlitePhysicalReplayHint,
-        SqliteSourceDirectoryAuthority, SqliteSourcePhysicalRevision, SqliteSourceReadSnapshot,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 use super::*;
-
-const SQLITE_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.sqlite-inventory-logical-leaf-v1\0";
 
 /// Central admission policy for independently certifiable SQLite inventories.
 ///
@@ -53,11 +48,11 @@ pub(super) struct SqliteInventorySnapshotCounters {
     pub(super) immutable_snapshot_opens: u64,
     pub(super) copied_snapshot_opens: u64,
     pub(super) source_bytes_copied: u64,
-    pub(super) physical_revision_captures: u64,
-    pub(super) physical_replay_hits: u64,
-    pub(super) physical_database_bytes_read: u64,
-    pub(super) physical_wal_bytes_read: u64,
-    pub(super) logical_rows_scanned: u64,
+    pub(super) logical_projection_passes: u64,
+    pub(super) logical_rows_projected: u64,
+    pub(super) documents_staged: u64,
+    pub(super) logical_noops: u64,
+    pub(super) logical_replacements: u64,
     pub(super) terminal_fences: u64,
     pub(super) terminal_revalidations: u64,
     pub(super) active_snapshots: u64,
@@ -79,12 +74,6 @@ pub(super) trait SqliteInventoryProvider: Send + Sync + 'static {
     type Leaf: Send + Sync + 'static;
 
     fn parser_revision(&self) -> &'static str;
-
-    /// Tables whose logical rows determine whether projection can be replayed.
-    ///
-    /// Missing optional tables are represented explicitly in the fingerprint;
-    /// provider validation still owns whether a schema is admissible.
-    fn logical_tables(&self) -> &'static [&'static str];
 
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>>;
 
@@ -189,82 +178,28 @@ where
         for (index, leaf) in catalog.leaves.into_iter().enumerate() {
             let catalog_leaf = sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path);
             let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
-            let replay = exact_base_certificate(base_sources, &leaf.source, self.parser_revision())
-                .zip(SqlitePhysicalReplayHint::load(
-                    &self.data_root,
-                    &leaf.source,
-                ))
-                .and_then(|(committed, hint)| {
-                    let physical = retained.open_physical_revision().ok()?;
-                    if !hint.matches(
-                        &leaf.source,
-                        self.parser_revision(),
-                        physical.revision(),
-                        committed,
-                    ) {
-                        return None;
-                    }
-                    let fingerprint = document_frontier_fingerprint(hint.certificate())?;
-                    physical.mark_replay_hit().ok()?;
-                    let physical_revision = *physical.revision();
-                    let terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync> =
-                        Box::new(move || physical.revalidate().is_ok());
-                    Some((
-                        fingerprint.as_bytes(),
-                        physical_revision,
-                        terminal_revalidate,
-                    ))
-                });
-            let (
-                logical_fingerprint,
-                physical_revision,
-                snapshot,
-                terminal_revalidate,
-                replay_hint_current,
-            ) = if let Some((fingerprint, physical_revision, terminal_revalidate)) = replay {
-                (
-                    fingerprint,
-                    physical_revision,
-                    None,
-                    terminal_revalidate,
-                    true,
-                )
-            } else {
-                let snapshot = retained.open()?;
-                let physical_revision = *snapshot.evidence().physical_revision();
-                let logical_fingerprint = sqlite_logical_leaf_fingerprint(
-                    catalog_leaf,
-                    self.provider_adapter.logical_tables(),
-                    snapshot.connection().map_err(route_error)?,
-                    &retained.authority,
-                )?;
-                let revalidate = snapshot.terminal_revalidator();
-                let terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync> =
-                    Box::new(move || revalidate().is_ok());
-                (
-                    logical_fingerprint,
-                    physical_revision,
-                    Some(snapshot),
-                    terminal_revalidate,
-                    false,
-                )
-            };
+            let base_certificate =
+                exact_base_certificate(base_sources, &leaf.source, self.parser_revision()).cloned();
+            let snapshot = retained.open()?;
+            let revalidate = snapshot.terminal_revalidator();
+            let terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync> =
+                Box::new(move || revalidate().is_ok());
             catalog_leaves.push(catalog_leaf);
-            fingerprints.push(logical_fingerprint);
-            observed.push(ObservedDocumentLeaf::new(
-                DocumentLeafFingerprint::new(logical_fingerprint),
+            fingerprints.push(catalog_leaf);
+            observed.push(ObservedDocumentLeaf::with_durable_replay(
+                DocumentLeafFingerprint::new(catalog_leaf),
                 SqliteInventoryDocumentLeaf {
                     index,
                     source: leaf.source,
                     path: leaf.path,
-                    logical_fingerprint,
-                    physical_revision,
-                    replay_hint_current,
+                    catalog_fingerprint: catalog_leaf,
+                    base_certificate,
                     provider_leaf: leaf.provider_leaf,
                     _retained: retained,
-                    snapshot: Mutex::new(snapshot),
+                    snapshot: Mutex::new(Some(snapshot)),
                     terminal_revalidate,
                 },
+                false,
             ));
         }
         let tree_fingerprint =
@@ -284,9 +219,8 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     index: usize,
     source: SourceKey,
     path: PathBuf,
-    logical_fingerprint: [u8; 32],
-    physical_revision: [u8; 32],
-    replay_hint_current: bool,
+    catalog_fingerprint: [u8; 32],
+    base_certificate: Option<CertifiedSource>,
     provider_leaf: L,
     _retained: RetainedSqliteInventoryLeaf,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
@@ -339,11 +273,6 @@ impl RetainedSqliteInventoryLeaf {
             .busy_timeout(Duration::from_secs(5))
             .map_err(route_error)?;
         Ok(snapshot)
-    }
-
-    fn open_physical_revision(&self) -> SourceBackedRouteResult<SqliteSourcePhysicalRevision> {
-        open_root_handle_sqlite_source_physical_revision(&self.authority, &self.database_name)
-            .map_err(route_error)
     }
 }
 
@@ -426,6 +355,16 @@ where
                 "logical scan returned an unexpected source certificate",
             ));
         }
+        leaf._retained
+            .authority
+            .record_logical_projection(
+                certificate.counts().complete_records,
+                certificate.counts().indexed_documents,
+                leaf.base_certificate
+                    .as_ref()
+                    .is_some_and(|base| base == &certificate),
+            )
+            .map_err(route_error)?;
         let observation = certificate.observation().clone();
         Ok(DocumentSourceTerminal {
             source: observation.source().clone(),
@@ -465,7 +404,7 @@ where
             {
                 snapshot.finish().map_err(route_error)?;
             }
-            fingerprints.push(leaf.logical_fingerprint);
+            fingerprints.push(leaf.catalog_fingerprint);
         }
         #[cfg(test)]
         self.provider_adapter.after_snapshots_sealed();
@@ -487,11 +426,11 @@ where
                         immutable_snapshot_opens: counters.immutable_snapshot_opens(),
                         copied_snapshot_opens: counters.copied_snapshot_opens(),
                         source_bytes_copied: counters.source_bytes_copied(),
-                        physical_revision_captures: counters.physical_revision_captures(),
-                        physical_replay_hits: counters.physical_replay_hits(),
-                        physical_database_bytes_read: counters.physical_database_bytes_read(),
-                        physical_wal_bytes_read: counters.physical_wal_bytes_read(),
-                        logical_rows_scanned: counters.logical_rows_scanned(),
+                        logical_projection_passes: counters.logical_projection_passes(),
+                        logical_rows_projected: counters.logical_rows_projected(),
+                        documents_staged: counters.documents_staged(),
+                        logical_noops: counters.logical_noops(),
+                        logical_replacements: counters.logical_replacements(),
                         terminal_fences: counters.terminal_fences(),
                         terminal_revalidations: counters.terminal_revalidations(),
                         active_snapshots: counters.active_snapshots(),
@@ -510,40 +449,6 @@ where
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
         self.provider_adapter.hydrate(request)
-    }
-
-    fn after_successful_publication(
-        &self,
-        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
-        certificates: &std::collections::HashMap<[u8; 32], CertifiedSource>,
-    ) {
-        for observed in &tree.leaves {
-            let leaf = &observed.provider_leaf;
-            if leaf.replay_hint_current {
-                continue;
-            }
-            let Some(certificate) = certificates.get(&leaf.source.identity().digest()) else {
-                continue;
-            };
-            if !certificate
-                .observation()
-                .source()
-                .exact_descriptor_eq(&leaf.source)
-            {
-                continue;
-            }
-            SqlitePhysicalReplayHint::publish_best_effort(
-                &self.data_root,
-                &leaf.source,
-                self.parser_revision(),
-                certificate,
-                leaf.physical_revision,
-            );
-        }
-    }
-
-    fn has_successful_publication_work(&self) -> bool {
-        true
     }
 }
 
@@ -582,117 +487,6 @@ fn exact_base_certificate<'a>(
     });
     let certificate = matching.next()?;
     matching.next().is_none().then_some(certificate)
-}
-
-fn sqlite_logical_leaf_fingerprint(
-    catalog_leaf: [u8; 32],
-    tables: &[&str],
-    connection: &Connection,
-    authority: &SqliteSourceDirectoryAuthority,
-) -> SourceBackedRouteResult<[u8; 32]> {
-    let mut digest = sha2::Sha256::new();
-    digest.update(SQLITE_LOGICAL_LEAF_DOMAIN);
-    digest.update(catalog_leaf);
-    let user_version = connection
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(sqlite_logical_observation_error)?;
-    digest.update(user_version.to_be_bytes());
-    let schema =
-        crate::provider::sqlite::sqlite_schema_fingerprint(connection).map_err(route_error)?;
-    hash_logical_bytes(&mut digest, schema.as_bytes());
-    digest.update((tables.len() as u64).to_be_bytes());
-    let mut logical_rows = 0_u64;
-    for table in tables {
-        logical_rows = logical_rows
-            .checked_add(hash_sqlite_table(connection, &mut digest, table)?)
-            .ok_or_else(|| sqlite_inventory_internal("SQLite logical row count overflowed"))?;
-    }
-    authority
-        .record_logical_rows_scanned(logical_rows)
-        .map_err(route_error)?;
-    Ok(digest.finalize().into())
-}
-
-fn hash_sqlite_table(
-    connection: &Connection,
-    digest: &mut sha2::Sha256,
-    table: &str,
-) -> SourceBackedRouteResult<u64> {
-    hash_logical_bytes(digest, table.as_bytes());
-    let schema = connection
-        .query_row(
-            "select sql from sqlite_schema where type = 'table' and name = ?1",
-            [table],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(sqlite_logical_observation_error)?
-        .flatten();
-    let Some(schema) = schema else {
-        digest.update([0]);
-        return Ok(0);
-    };
-    digest.update([1]);
-    hash_logical_bytes(digest, schema.as_bytes());
-
-    let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-    let mut statement = connection
-        .prepare(&format!("select * from {quoted} order by rowid"))
-        .map_err(sqlite_logical_observation_error)?;
-    let columns = statement.column_count();
-    digest.update((columns as u64).to_be_bytes());
-    let mut rows = statement
-        .query([])
-        .map_err(sqlite_logical_observation_error)?;
-    let mut row_count = 0_u64;
-    while let Some(row) = rows.next().map_err(sqlite_logical_observation_error)? {
-        row_count = row_count
-            .checked_add(1)
-            .ok_or_else(|| sqlite_inventory_internal("SQLite logical row count overflowed"))?;
-        for column in 0..columns {
-            hash_sqlite_value(
-                digest,
-                row.get_ref(column)
-                    .map_err(sqlite_logical_observation_error)?,
-            );
-        }
-    }
-    digest.update(row_count.to_be_bytes());
-    Ok(row_count)
-}
-
-fn hash_sqlite_value(digest: &mut sha2::Sha256, value: ValueRef<'_>) {
-    match value {
-        ValueRef::Null => digest.update([0]),
-        ValueRef::Integer(value) => {
-            digest.update([1]);
-            digest.update(value.to_be_bytes());
-        }
-        ValueRef::Real(value) => {
-            digest.update([2]);
-            digest.update(value.to_bits().to_be_bytes());
-        }
-        ValueRef::Text(value) => {
-            digest.update([3]);
-            hash_logical_bytes(digest, value);
-        }
-        ValueRef::Blob(value) => {
-            digest.update([4]);
-            hash_logical_bytes(digest, value);
-        }
-    }
-}
-
-fn hash_logical_bytes(digest: &mut sha2::Sha256, value: &[u8]) {
-    digest.update((value.len() as u64).to_be_bytes());
-    digest.update(value);
-}
-
-fn sqlite_logical_observation_error(error: rusqlite::Error) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(
-        SourceBackedRouteErrorKind::InvalidSource,
-        format!("SQLite logical observation failed: {error}"),
-    )
 }
 
 fn sqlite_inventory_tree_fingerprint(
