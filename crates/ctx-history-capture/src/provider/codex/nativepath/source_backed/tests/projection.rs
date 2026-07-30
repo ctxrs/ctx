@@ -92,7 +92,16 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
             );
         }
     }
-    scanner.finish().unwrap();
+    let scan = scanner.finish().unwrap();
+    assert!(scan.source.opened.is_some());
+    let evidence = CodexTerminalSourceEvidenceV0::new(
+        scan.source,
+        scan.after_observation,
+        scan.before_observation.len,
+        scan.full_revision_sha256,
+    );
+    assert!(evidence.source.opened.is_none());
+    assert!(evidence.revalidate());
 
     assert_eq!(documents.len(), 1);
     assert_eq!(documents[0].body, full_text);

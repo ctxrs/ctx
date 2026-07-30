@@ -239,12 +239,12 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                 counters.replayed_sources = counters.replayed_sources.saturating_add(1);
                 revalidation.insert(
                     source_key,
-                    CodexTerminalSourceEvidenceV0 {
+                    CodexTerminalSourceEvidenceV0::new(
                         source,
-                        observation: proof.checkpoint.observation.clone(),
-                        certified_len: proof.checkpoint.observation.len,
-                        full_revision_sha256: proof.checkpoint.full_revision_sha256,
-                    },
+                        proof.checkpoint.observation.clone(),
+                        proof.checkpoint.observation.len,
+                        proof.checkpoint.full_revision_sha256,
+                    ),
                 );
                 continue;
             }
@@ -369,12 +369,12 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         timings.certification += certification_started.elapsed();
         revalidation.insert(
             source_key,
-            CodexTerminalSourceEvidenceV0 {
+            CodexTerminalSourceEvidenceV0::new(
                 source,
-                observation: scan.after_observation.clone(),
-                certified_len: scan.before_observation.len,
-                full_revision_sha256: scan.full_revision_sha256,
-            },
+                scan.after_observation.clone(),
+                scan.before_observation.len,
+                scan.full_revision_sha256,
+            ),
         );
     }
     Ok(())
