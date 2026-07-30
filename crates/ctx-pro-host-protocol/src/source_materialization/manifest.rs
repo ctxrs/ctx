@@ -436,11 +436,9 @@ impl SourceManifestAdmissionCursor {
         if (self.next_page_index == 0) != (admitted_entries == 0)
             || self.next_page_index > admitted_entries
             || admitted_entries
-                > self
-                    .next_page_index
-                    .saturating_mul(
-                        u32::try_from(MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap_or(u32::MAX),
-                    )
+                > self.next_page_index.saturating_mul(
+                    u32::try_from(MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap_or(u32::MAX),
+                )
             || (self.next_page_index == header.page_count)
                 != (self.next_source_index == header.source_count
                     && self.next_removal_index == header.removal_count)
