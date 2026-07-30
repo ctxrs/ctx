@@ -25,6 +25,17 @@ pub enum SourceBackedHydrationSupport {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedRouteConstructor {
+    ProviderSource,
+    CatalogLineage,
+    FiniteInventory,
+    DiscoveryContext,
+    ExactCwd,
+    NamedSurface,
+    SelectedWithRetainedRoutes,
+}
+
 /// Static inventory of one landed provider/source-format registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceBackedProviderRouteMetadata {
@@ -39,9 +50,28 @@ pub struct SourceBackedProviderRouteMetadata {
     pub exact_hydration: SourceBackedHydrationSupport,
     pub hydration_limitation: Option<&'static str>,
     pub unsupported_reason: Option<&'static str>,
+    /// Provider-owned selector input required to construct this route.
+    pub constructor: SourceBackedRouteConstructor,
 }
 
 macro_rules! route {
+    (
+        $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
+        $authority:ident, $hydration:ident, $constructor:ident
+    ) => {
+        SourceBackedProviderRouteMetadata {
+            provider: CaptureProvider::$provider,
+            source_format: $format,
+            certified_source_format: $format,
+            automatic: $automatic,
+            explicit_manual: $explicit,
+            selector_authority: SourceBackedSelectorAuthority::$authority,
+            exact_hydration: SourceBackedHydrationSupport::$hydration,
+            hydration_limitation: None,
+            unsupported_reason: None,
+            constructor: SourceBackedRouteConstructor::$constructor,
+        }
+    };
     (
         $provider:ident, $selected_format:literal => $certified_format:literal,
         $automatic:literal, $explicit:literal, $authority:ident, $hydration:ident
@@ -56,6 +86,7 @@ macro_rules! route {
             exact_hydration: SourceBackedHydrationSupport::$hydration,
             hydration_limitation: None,
             unsupported_reason: None,
+            constructor: SourceBackedRouteConstructor::ProviderSource,
         }
     };
     (
@@ -72,71 +103,23 @@ macro_rules! route {
             exact_hydration: SourceBackedHydrationSupport::$hydration,
             hydration_limitation: None,
             unsupported_reason: None,
+            constructor: SourceBackedRouteConstructor::ProviderSource,
         }
     };
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceBackedRouteConstructor {
-    ProviderSource,
-    CatalogLineage,
-    FiniteInventory,
-    DiscoveryContext,
-    ExactCwd,
-    NamedSurface,
-    SelectedWithRetainedRoutes,
 }
 
 pub const fn source_backed_route_constructor(
     provider: CaptureProvider,
 ) -> Option<SourceBackedRouteConstructor> {
-    Some(match provider {
-        CaptureProvider::Custom | CaptureProvider::NanoClaw => {
-            SourceBackedRouteConstructor::CatalogLineage
+    let mut index = 0;
+    while index < LANDED_SOURCE_BACKED_ROUTES.len() {
+        let route = LANDED_SOURCE_BACKED_ROUTES[index];
+        if route.provider as usize == provider as usize {
+            return Some(route.constructor);
         }
-        CaptureProvider::Crush | CaptureProvider::Lingma => {
-            SourceBackedRouteConstructor::FiniteInventory
-        }
-        CaptureProvider::AstrBot => SourceBackedRouteConstructor::DiscoveryContext,
-        CaptureProvider::Shelley => SourceBackedRouteConstructor::ExactCwd,
-        CaptureProvider::Warp => SourceBackedRouteConstructor::NamedSurface,
-        CaptureProvider::Goose => SourceBackedRouteConstructor::SelectedWithRetainedRoutes,
-        CaptureProvider::Codex
-        | CaptureProvider::Claude
-        | CaptureProvider::Pi
-        | CaptureProvider::OpenCode
-        | CaptureProvider::Kilo
-        | CaptureProvider::KiroCli
-        | CaptureProvider::Antigravity
-        | CaptureProvider::Gemini
-        | CaptureProvider::Tabnine
-        | CaptureProvider::Cursor
-        | CaptureProvider::Windsurf
-        | CaptureProvider::Zed
-        | CaptureProvider::CopilotCli
-        | CaptureProvider::FactoryAiDroid
-        | CaptureProvider::QwenCode
-        | CaptureProvider::KimiCodeCli
-        | CaptureProvider::Auggie
-        | CaptureProvider::Junie
-        | CaptureProvider::Firebender
-        | CaptureProvider::ForgeCode
-        | CaptureProvider::DeepAgents
-        | CaptureProvider::MistralVibe
-        | CaptureProvider::Mux
-        | CaptureProvider::RovoDev
-        | CaptureProvider::OpenClaw
-        | CaptureProvider::Hermes
-        | CaptureProvider::Continue
-        | CaptureProvider::OpenHands
-        | CaptureProvider::Cline
-        | CaptureProvider::RooCode
-        | CaptureProvider::Qoder
-        | CaptureProvider::CodeBuddy
-        | CaptureProvider::Trae
-        | CaptureProvider::MiMoCode => SourceBackedRouteConstructor::ProviderSource,
-        _ => return None,
-    })
+        index += 1;
+    }
+    None
 }
 
 /// The central landed-adapter inventory. Adding a provider is deliberately a
@@ -148,7 +131,8 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         false,
         true,
         CatalogLineage,
-        Full
+        Full,
+        CatalogLineage
     ),
     route!(
         Codex,
@@ -422,7 +406,8 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         false,
         true,
         CatalogLineage,
-        Full
+        Full,
+        CatalogLineage
     ),
     route!(
         AstrBot,
@@ -430,9 +415,18 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         true,
         DiscoveredWinner,
-        Full
+        Full,
+        DiscoveryContext
     ),
-    route!(Shelley, "shelley_sqlite", true, false, ExactCwd, Full),
+    route!(
+        Shelley,
+        "shelley_sqlite",
+        true,
+        false,
+        ExactCwd,
+        Full,
+        ExactCwd
+    ),
     route!(
         Continue,
         "continue_cli_sessions_json",
@@ -471,7 +465,8 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         true,
         SelectedWithRetainedExplicit,
-        Full
+        Full,
+        FiniteInventory
     ),
     route!(
         Goose,
@@ -479,9 +474,18 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         true,
         SelectedWithRetainedExplicit,
-        Full
+        Full,
+        SelectedWithRetainedRoutes
     ),
-    route!(Lingma, "lingma_sqlite", true, true, DiscoveredWinner, Full),
+    route!(
+        Lingma,
+        "lingma_sqlite",
+        true,
+        true,
+        DiscoveredWinner,
+        Full,
+        FiniteInventory
+    ),
     route!(
         Qoder,
         "qoder_transcript_jsonl_tree" => "qoder_transcript_jsonl",
@@ -498,7 +502,15 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         ExplicitPath,
         Full
     ),
-    route!(Warp, "warp_sqlite", true, true, NamedSurface, Full),
+    route!(
+        Warp,
+        "warp_sqlite",
+        true,
+        true,
+        NamedSurface,
+        Full,
+        NamedSurface
+    ),
     route!(
         CodeBuddy,
         "codebuddy_history_json",
@@ -520,4 +532,102 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
 
 pub fn source_backed_route_inventory() -> &'static [SourceBackedProviderRouteMetadata] {
     LANDED_SOURCE_BACKED_ROUTES
+}
+
+#[cfg(test)]
+fn registry_inventory_oracle() -> String {
+    use std::fmt::Write;
+
+    let mut rows = String::new();
+    for route in LANDED_SOURCE_BACKED_ROUTES {
+        writeln!(
+            rows,
+            "{:?}|{}|{}|{}|{}|{:?}|{:?}|{}|{}|{:?}",
+            route.provider,
+            route.source_format,
+            route.certified_source_format,
+            route.automatic,
+            route.explicit_manual,
+            route.selector_authority,
+            route.exact_hydration,
+            route.hydration_limitation.unwrap_or("none"),
+            route.unsupported_reason.unwrap_or("none"),
+            route.constructor,
+        )
+        .expect("writing a registry inventory row to String cannot fail");
+    }
+    rows
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    use super::*;
+
+    const BASELINE_REGISTRY_INVENTORY: &str = "\
+Custom|ctx_history_jsonl_v1|ctx_history_jsonl_v1|false|true|CatalogLineage|Full|none|none|CatalogLineage
+Codex|codex_session_jsonl_tree|codex_session_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Codex|codex_history_jsonl|codex_history_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Codex|codex_session_jsonl|codex_session_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+Claude|claude_projects_jsonl_tree|claude_projects_jsonl_tree|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Pi|pi_session_jsonl|pi_session_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+OpenCode|opencode_sqlite|opencode_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Kilo|kilo_sqlite|kilo_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+KiroCli|kiro_cli_sqlite|kiro_cli_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Antigravity|antigravity_cli_transcript_jsonl_tree|antigravity_cli_transcript_jsonl_tree|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Gemini|gemini_cli_chat_recording_jsonl|gemini_cli_chat_recording_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Tabnine|tabnine_cli_chat_recording_jsonl|tabnine_cli_chat_recording_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Cursor|cursor_agent_transcript_jsonl_tree|cursor_agent_transcript_jsonl_tree|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Cursor|cursor_agent_transcript_jsonl|cursor_agent_transcript_jsonl_tree|false|true|ExplicitPath|Full|none|none|ProviderSource
+Windsurf|windsurf_cascade_hook_transcript_jsonl_tree|windsurf_cascade_hook_transcript_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Windsurf|windsurf_cascade_hook_transcript_jsonl|windsurf_cascade_hook_transcript_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+Zed|zed_threads_sqlite|zed_threads_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+CopilotCli|copilot_cli_session_events_jsonl|copilot_cli_session_events_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+FactoryAiDroid|factory_ai_droid_sessions_jsonl|factory_ai_droid_sessions_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+QwenCode|qwen_code_chat_jsonl_tree|qwen_code_chat_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+QwenCode|qwen_code_chat_jsonl|qwen_code_chat_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+KimiCodeCli|kimi_code_cli_wire_jsonl_tree|kimi_code_cli_wire_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+KimiCodeCli|kimi_code_cli_wire_jsonl|kimi_code_cli_wire_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+Auggie|auggie_session_json|auggie_session_json|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Junie|junie_session_events_jsonl_tree|junie_session_events_jsonl_tree|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Junie|junie_session_events_jsonl|junie_session_events_jsonl_tree|false|true|ExplicitPath|Full|none|none|ProviderSource
+Firebender|firebender_chat_history_sqlite|firebender_chat_history_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+ForgeCode|forgecode_sqlite|forgecode_sqlite|true|true|SelectedWithRetainedExplicit|Full|none|none|ProviderSource
+DeepAgents|deepagents_sessions_sqlite|deepagents_sessions_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+MistralVibe|mistral_vibe_session_jsonl_tree|mistral_vibe_session_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+MistralVibe|mistral_vibe_session_jsonl|mistral_vibe_session_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+Mux|mux_session_jsonl_tree|mux_session_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Mux|mux_session_jsonl|mux_session_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+RovoDev|rovodev_session_json_tree|rovodev_session_json_tree|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+OpenClaw|openclaw_session_jsonl_tree|openclaw_session_jsonl_tree|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Hermes|hermes_state_sqlite|hermes_state_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+NanoClaw|nanoclaw_project|nanoclaw_project|false|true|CatalogLineage|Full|none|none|CatalogLineage
+AstrBot|astrbot_data_v4_sqlite|astrbot_data_v4_sqlite|true|true|DiscoveredWinner|Full|none|none|DiscoveryContext
+Shelley|shelley_sqlite|shelley_sqlite|true|false|ExactCwd|Full|none|none|ExactCwd
+Continue|continue_cli_sessions_json|continue_cli_sessions_json|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+OpenHands|openhands_file_events|openhands_file_events|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Cline|cline_task_directory_json|cline_task_directory_json|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+RooCode|roo_task_directory_json|roo_task_directory_json|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Crush|crush_sqlite|crush_sqlite|true|true|SelectedWithRetainedExplicit|Full|none|none|FiniteInventory
+Goose|goose_sessions_sqlite|goose_sessions_sqlite|true|true|SelectedWithRetainedExplicit|Full|none|none|SelectedWithRetainedRoutes
+Lingma|lingma_sqlite|lingma_sqlite|true|true|DiscoveredWinner|Full|none|none|FiniteInventory
+Qoder|qoder_transcript_jsonl_tree|qoder_transcript_jsonl|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Qoder|qoder_transcript_jsonl|qoder_transcript_jsonl|false|true|ExplicitPath|Full|none|none|ProviderSource
+Warp|warp_sqlite|warp_sqlite|true|true|NamedSurface|Full|none|none|NamedSurface
+CodeBuddy|codebuddy_history_json|codebuddy_history_json|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+Trae|trae_state_vscdb|trae_state_vscdb|true|true|ExplicitPath|Full|none|none|ProviderSource
+MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|Full|none|none|ProviderSource
+";
+
+    #[test]
+    fn landed_registry_inventory_matches_pre_shard_oracle() {
+        assert_eq!(LANDED_SOURCE_BACKED_ROUTES.len(), 52);
+        assert_eq!(
+            LANDED_SOURCE_BACKED_ROUTES
+                .iter()
+                .filter(|route| route.automatic)
+                .count(),
+            41
+        );
+        assert_eq!(registry_inventory_oracle(), BASELINE_REGISTRY_INVENTORY);
+    }
 }

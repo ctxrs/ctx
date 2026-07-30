@@ -684,7 +684,7 @@ fn astrbot_hydration_types_malformed_rows_schema_and_locator_without_fallbacks()
         );
     }
     let route_source =
-        include_str!("../../../../source_backed/registration/inventories.rs");
+        include_str!("../../../../source_backed/registration/families/sqlite/inventory.rs");
     let route = route_source
         .split_once("pub fn register_astrbot_source_backed_route")
         .unwrap()

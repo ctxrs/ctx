@@ -767,7 +767,7 @@ fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks(
         );
     }
     let route_source =
-        include_str!("../../../../source_backed/registration/selected.rs");
+        include_str!("../../../../source_backed/registration/families/sqlite/inventory.rs");
     let route = route_source
         .split_once("pub fn register_lingma_source_backed_route")
         .unwrap()

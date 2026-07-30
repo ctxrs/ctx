@@ -405,3 +405,167 @@ pub fn register_hermes_explicit_source_backed_route(
         SourceBackedSelectorAuthority::ExplicitPath,
     )
 }
+
+pub fn register_lingma_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    authority_key: TypedKey,
+    databases: Vec<(std::path::PathBuf, TypedKey)>,
+) -> SourceBackedCoordinatorResult<()> {
+    let databases = databases
+        .into_iter()
+        .map(|(path, lineage)| LingmaDatabaseSourceV0::new(path, lineage))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    let inventory = LingmaSourceInventoryV0::new(authority_key, databases)
+        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    register_lingma_inventory_source(
+        registry,
+        source,
+        selection,
+        Arc::new(FixedLingmaInventorySource { inventory }),
+    )
+}
+
+pub(in crate::provider::source_backed) trait LingmaInventorySource:
+    Send + Sync
+{
+    fn observe(&self) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0>;
+}
+
+#[derive(Debug, Clone)]
+struct FixedLingmaInventorySource {
+    inventory: LingmaSourceInventoryV0,
+}
+
+impl LingmaInventorySource for FixedLingmaInventorySource {
+    fn observe(&self) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0> {
+        Ok(self.inventory.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredLingmaInventorySource {
+    selector: LingmaInventorySelector,
+}
+
+impl LingmaInventorySource for DiscoveredLingmaInventorySource {
+    fn observe(&self) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0> {
+        self.selector
+            .observe()
+            .map_err(lingma_discovery_adapter_error)
+            .and_then(lingma_adapter_inventory)
+    }
+}
+
+pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    inventory_source: Arc<dyn LingmaInventorySource>,
+) -> SourceBackedCoordinatorResult<()> {
+    let capture_inventory = Arc::clone(&inventory_source);
+    let hydration_inventory = Arc::clone(&inventory_source);
+    let batch_hydration_inventory = inventory_source;
+    let driver = captured_route_driver(
+        &source,
+        move |sink| {
+            let opening = capture_inventory.observe().map_err(route_error)?;
+            let closing_inventory = Arc::clone(&capture_inventory);
+            let scan = scan_lingma_source_backed_v0(opening, move || closing_inventory.observe())
+                .map_err(route_error)?;
+            for database in scan.databases() {
+                sink.begin(database.certificate().observation().source().clone())?;
+                for record in database.records() {
+                    sink.document(record.document().clone())?;
+                }
+                sink.certify(database.certificate().clone())?;
+            }
+            Ok(())
+        },
+        provider_format_scope(CaptureProvider::Lingma, "lingma_sqlite"),
+        move |request| {
+            let inventory = hydration_inventory.observe().map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+            LingmaSourceBackedResolverV0::new(&inventory)
+                .map_err(|error| {
+                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+                })?
+                .hydrate_event(request)
+        },
+    )
+    .with_batch_hydration(move |request| {
+        let inventory = batch_hydration_inventory.observe().map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        LingmaSourceBackedResolverV0::new(&inventory)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?
+            .hydrate_batch_request(request)
+    });
+    registry.register(executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
+    )?);
+    Ok(())
+}
+
+pub(in crate::provider::source_backed) fn discovered_lingma_inventory_source(
+    discovery: &DiscoveryContext,
+    selected_source: &ProviderSource,
+) -> Result<Arc<dyn LingmaInventorySource>, SourceBackedAutomaticUnavailableReason> {
+    let source = DiscoveredLingmaInventorySource {
+        selector: LingmaInventorySelector::new(discovery.clone()),
+    };
+    let opening = source.selector.observe().map_err(|error| {
+        SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+            detail: error.detail(),
+        }
+    })?;
+    if !opening
+        .databases()
+        .iter()
+        .any(|database| database.source() == selected_source)
+    {
+        return Err(
+            SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                detail: "Lingma selected database is absent from its installed-client inventory",
+            },
+        );
+    }
+    lingma_adapter_inventory(opening).map_err(|error| {
+        SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(Arc::new(source))
+}
+
+fn lingma_adapter_inventory(
+    inventory: crate::provider_sources::LingmaDiscoveredInventory,
+) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0> {
+    let authority_key = inventory
+        .authority_key()
+        .map_err(lingma_discovery_adapter_error)?;
+    let databases = inventory
+        .databases()
+        .iter()
+        .map(|database| {
+            let lineage = database
+                .catalog_lineage()
+                .typed_key()
+                .map_err(lingma_discovery_adapter_error)?;
+            LingmaDatabaseSourceV0::new(database.path(), lineage)
+        })
+        .collect::<LingmaSourceBackedResultV0<Vec<_>>>()?;
+    LingmaSourceInventoryV0::new(authority_key, databases)
+}
+
+fn lingma_discovery_adapter_error(error: LingmaDiscoveryUnavailable) -> LingmaSourceBackedErrorV0 {
+    CaptureError::InvalidPayload(error.to_string()).into()
+}
