@@ -55,8 +55,9 @@ impl ProClient {
         // access. Do not make those requests depend on the caller's Git installation. Every
         // other helper session preserves the existing startup binding, including file blame,
         // staged setup smoke, status, journal, and deletion operations.
-        let query_only = required.len() == 1 && required.contains(&Capability::Query);
-        let git_executable = (!query_only).then(git_executable).transpose()?;
+        let git_executable = requires_git_preflight(required)
+            .then(git_executable)
+            .transpose()?;
         let prepared_execution = execution_guard
             .as_ref()
             .map(VerifiedHelperExecutable::prepare_execution)
@@ -281,6 +282,10 @@ impl ProClient {
         self.sequence = self.sequence.saturating_add(1);
         Ok(response.message)
     }
+}
+
+pub(super) fn requires_git_preflight(required: &BTreeSet<Capability>) -> bool {
+    !required.contains(&Capability::Query) || required.contains(&Capability::GitRead)
 }
 
 pub(super) struct PublicAccessStatus {

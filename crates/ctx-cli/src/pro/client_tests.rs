@@ -38,6 +38,22 @@ fn blame_capabilities_require_git_only_for_file_targets() {
 }
 
 #[test]
+fn helper_startup_requires_git_only_for_git_bound_sessions() {
+    assert!(!requires_git_preflight(&BTreeSet::from([
+        Capability::Status,
+        Capability::Query,
+    ])));
+    assert!(requires_git_preflight(&BTreeSet::from([
+        Capability::Status,
+        Capability::Query,
+        Capability::GitRead,
+    ])));
+    assert!(requires_git_preflight(&BTreeSet::from([
+        Capability::Status,
+    ])));
+}
+
+#[test]
 fn blame_request_requires_source_manifest_authority() {
     let receipt = source_receipt('a');
     let status = StatusResult {

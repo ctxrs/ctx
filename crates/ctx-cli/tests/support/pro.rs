@@ -104,18 +104,34 @@ pub(crate) fn initialize_pro_installation_identity(data_root: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
 pub(crate) fn write_blame_helper(path: &Path) {
     write_blame_helper_with_oversized_page(path, false);
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
 pub(crate) fn write_oversized_blame_helper(path: &Path) {
     write_blame_helper_with_oversized_page(path, true);
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
 fn write_blame_helper_with_oversized_page(path: &Path, oversized_page: bool) {
+    let data_root = path
+        .parent()
+        .expect("fake Pro blame helper must live directly under its data root");
+    let active_generation =
+        ctx_history_index::VerifiedIndex::open(data_root.join("search").join("lexical"))
+            .expect("fake Pro blame helper requires an active verified Core generation");
+
     const HELPER: &str = r#"#!/usr/bin/python3
 import json, os, struct, sys
 
@@ -159,7 +175,7 @@ send({
     'state':'ready',
     'authority':'source',
     'source_receipt':{
-      'core_generation_id':'a' * 64,
+      'core_generation_id':'__CORE_GENERATION_ID__',
       'manifest_aggregate_sha256':'b' * 64,
       'materializer_revision':'fake-source-materializer-v1',
       'progress':[]
@@ -194,17 +210,18 @@ if __OVERSIZED_BLAME__:
         },
         'source_sha256':'a' * 64
       }
-    } for number in range(1, 17)]
+    } for number in range(1, 8 * 32 + 1)]
 evidence_numbers = [item['number'] for item in evidence]
 kind = target['kind']
 if kind == 'commit':
     oid = target['oid']
     commit = {'id':'commit:' + oid, 'kind':'commit', 'display':oid}
     resolved = {'kind':'commit', 'commit':commit, 'repository':repository_ref}
+    match_count = 8 if __OVERSIZED_BLAME__ else 1
     matches = [{
       'kind':'commit',
       'value':{
-        'fact_id':'fact:produced',
+        'fact_id':'fact:produced' + (':' + str(index + 1) if __OVERSIZED_BLAME__ else ''),
         'fact_type':'git.commit.produced',
         'predicate':'produced_by',
         'subject':commit,
@@ -214,9 +231,12 @@ if kind == 'commit':
         'state':'asserted',
         'direct_actor':None,
         'owning_root':None,
-        'evidence_numbers':evidence_numbers
+        'evidence_numbers':(
+          list(range(index * 32 + 1, (index + 1) * 32 + 1))
+          if __OVERSIZED_BLAME__ else evidence_numbers
+        )
       }
-    }]
+    } for index in range(match_count)]
     snapshot = None
 elif kind == 'file':
     if 'git_read' not in capabilities or not os.environ.get('CTX_PRO_GIT_EXECUTABLE'):
@@ -293,7 +313,8 @@ send({
         .replace(
             "__OVERSIZED_BLAME__",
             if oversized_page { "True" } else { "False" },
-        );
+        )
+        .replace("__CORE_GENERATION_ID__", active_generation.generation_id());
     write_python_helper(path, &helper);
 }
 
