@@ -35,14 +35,15 @@ mod tests;
 #[allow(unused_imports)]
 pub(crate) use source_backed::{
     hydrate_firebender_source_backed_row, prepare_firebender_source_backed,
-    FirebenderHydratedSourceRow, FirebenderSourceBackedError, FirebenderSourceBackedPage,
-    FirebenderSourceBackedPlan, FirebenderSourceBackedResult, FirebenderSourceBackedScanner,
+    register_source_backed_route, FirebenderHydratedSourceRow, FirebenderSourceBackedError,
+    FirebenderSourceBackedPage, FirebenderSourceBackedPlan, FirebenderSourceBackedResult,
+    FirebenderSourceBackedScanner,
 };
 
 const FIREBENDER_NATIVE_FRONTIER_VERSION: u32 = 1;
 const FIREBENDER_NATIVE_PARSER_REVISION: u32 = 1;
 const FIREBENDER_NATIVE_POLICY_REVISION: u32 = 1;
-const FIREBENDER_SOURCE_BACKED_PAGE_MAX_MESSAGES: usize = 60;
+const FIREBENDER_SOURCE_BACKED_PAGE_MAX_MESSAGES: usize = 64;
 const FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES: usize = NATIVE_INGESTION_PAGE_MAX_BYTES;
 const FIREBENDER_PAGE_OVERHEAD_BYTES: usize = 4 * 1024;
 const FIREBENDER_INITIAL_PREFIX_DOMAIN: &[u8] = b"ctx-firebender-native-prefix-v1\0";
