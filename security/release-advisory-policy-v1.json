@@ -3,7 +3,13 @@
   "scanner": {
     "name": "osv-scanner",
     "version": "2.4.0",
-    "sha256": "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0",
+    "sha256_by_target": {
+      "linux-x64": "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0",
+      "linux-arm64": "44e580752910f0ff36ec99aff59af20f65df1e859aa31e5605a8f0d055b496e9",
+      "macos-arm64": "9ca3185ad63e9ab54f7cb90f46a7362be02d80e37f0123d095a54355ea202f5d",
+      "macos-x64": "088119325156321c34c456ac3703d6013538fd71cbac82b891ab34db491e4d66",
+      "windows-x64": "0cdd113610126d5dfd5e12ad0e0b4f3e879291ff19bb43b0c52ed2f2c2df1a37"
+    },
     "max_database_age_hours": 48
   },
   "lockfiles": [

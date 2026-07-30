@@ -136,7 +136,7 @@ def tracked_lockfiles(repo_root: Path) -> set[str]:
 
 
 def validate_policy(
-    policy: dict[str, Any], repo_root: Path
+    policy: dict[str, Any], repo_root: Path, target_id: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if policy.get("schema_version") != 1:
         raise GateError("tool_failure", "advisory policy schema is unsupported")
@@ -144,14 +144,29 @@ def validate_policy(
     lockfiles = policy.get("lockfiles")
     if not isinstance(scanner, dict) or not isinstance(lockfiles, list) or not lockfiles:
         raise GateError("tool_failure", "advisory policy is incomplete")
+    scanner_hashes = scanner.get("sha256_by_target")
     if (
         scanner.get("name") != "osv-scanner"
         or not isinstance(scanner.get("version"), str)
-        or HEX_64.fullmatch(scanner.get("sha256", "")) is None
+        or not isinstance(scanner_hashes, dict)
+        or not scanner_hashes
+        or any(
+            not isinstance(target, str)
+            or not target
+            or HEX_64.fullmatch(digest or "") is None
+            for target, digest in scanner_hashes.items()
+        )
         or not isinstance(scanner.get("max_database_age_hours"), int)
         or scanner["max_database_age_hours"] < 1
     ):
         raise GateError("tool_failure", "advisory scanner policy is invalid")
+    selected_scanner_hash = scanner_hashes.get(target_id)
+    if selected_scanner_hash is None:
+        raise GateError(
+            "tool_failure",
+            f"advisory scanner policy does not support target: {target_id}",
+        )
+    scanner = {**scanner, "selected_sha256": selected_scanner_hash}
 
     declared: dict[str, dict[str, Any]] = {}
     for index, entry in enumerate(lockfiles):
@@ -521,7 +536,7 @@ def evaluate(
     except (OSError, subprocess.CalledProcessError):
         receipt["source"] = {"commit": None, "dirty": None}
     policy = read_json(args.policy, "advisory policy")
-    entries, scanner_policy = validate_policy(policy, repo_root)
+    entries, scanner_policy = validate_policy(policy, repo_root, args.target_id)
     ecosystems = {entry["ecosystem"] for entry in entries}
     receipt["policy"] = {
         "path": args.policy.name,
@@ -537,7 +552,7 @@ def evaluate(
     receipt["scanner"] = scanner_version(
         args.scanner,
         scanner_policy["version"],
-        scanner_policy["sha256"],
+        scanner_policy["selected_sha256"],
     )
     exceptions_value = read_json(args.exceptions, "advisory exception ledger")
     exceptions = parse_exceptions(exceptions_value)
