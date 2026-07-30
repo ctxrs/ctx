@@ -723,7 +723,7 @@ fn run_uninstall(
     let delete_data = disposition == UninstallDataDisposition::Delete;
     let target = default_helper_path(data_root);
     let initial_state = inspect_local_pro_uninstall_state(data_root)?;
-    if !initial_state.any_artifact() {
+    if !initial_state.data_artifact() && !initial_state.lifecycle_lock {
         return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output, ui);
     }
     let Some(_lifecycle_lock) = super::lifecycle_lock::LifecycleLock::acquire(&target, false)?
@@ -756,6 +756,9 @@ fn run_uninstall(
             };
         clear_local_pro_initialization_indicator(data_root)?;
         clear_preserved_data_marker(data_root)?;
+        if inspect_local_pro_uninstall_state(data_root)?.data_artifact() {
+            bail!("key_store_unavailable: local Pro data deletion could not be verified");
+        }
         helper_removed
     } else if state.graph_data {
         write_preserved_data_marker(data_root)?;
@@ -894,14 +897,13 @@ struct LocalProUninstallState {
 }
 
 impl LocalProUninstallState {
-    const fn any_artifact(self) -> bool {
+    const fn data_artifact(self) -> bool {
         self.initialized
             || self.cleanup_phase
             || self.graph_data
             || self.helper_files
             || self.preserved_marker
             || self.pending_materialization
-            || self.lifecycle_lock
     }
 }
 

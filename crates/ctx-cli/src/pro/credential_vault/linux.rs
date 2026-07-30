@@ -985,5 +985,8 @@ fn effective_uid() -> u32 {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+pub(super) use tests::store_file_fallback_record_for_test;
+
+#[cfg(all(test, target_os = "linux"))]
 #[path = "linux_tests.rs"]
 mod tests;

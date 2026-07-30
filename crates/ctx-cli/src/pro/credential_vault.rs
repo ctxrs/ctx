@@ -417,6 +417,23 @@ impl PlatformCredentialVault {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn store_file_fallback_installation_key_for_test(
+        data_root: &Path,
+        namespace: CredentialVaultNamespace,
+        seed: [u8; INSTALLATION_PUBLIC_KEY_BYTES],
+    ) -> Result<(), CredentialVaultError> {
+        let installation_id = crate::identity::existing_installation_id(data_root)
+            .map_err(|_| CredentialVaultError::InvalidDataRoot)?
+            .ok_or(CredentialVaultError::NotFound)?;
+        let record_ids = CredentialRecordIds::new(&installation_id, namespace)?;
+        linux::store_file_fallback_record_for_test(
+            data_root,
+            record_ids.get(CredentialRecordKind::InstallationSigningKey),
+            &seed,
+        )
+    }
+
     pub(crate) fn load(
         &self,
         kind: CredentialRecordKind,

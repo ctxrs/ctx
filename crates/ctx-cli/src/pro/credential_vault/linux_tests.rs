@@ -149,6 +149,16 @@ impl SecretServiceAdapter for FakeAdapter {
     }
 }
 
+pub(crate) fn store_file_fallback_record_for_test(
+    data_root: &Path,
+    record_id: &str,
+    value: &[u8],
+) -> Result<(), CredentialVaultError> {
+    let backend = LinuxBackend::new(data_root, FakeAdapter::new(AdapterMode::Unavailable));
+    drop(backend.load_or_store(record_id, value)?);
+    Ok(())
+}
+
 fn test_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(
