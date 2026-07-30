@@ -627,11 +627,10 @@ fn search_refresh_hermes_generation_detects_wal_only_append() {
             > first_documents,
         "{refreshed:#}"
     );
-    let refreshed_status = assert_daemon_publication(&temp, &refreshed_generation, 1, &["hermes"]);
-    assert_eq!(
-        refreshed_status["daemon"]["jobs"]["source_backed_refresh"]["generation_changed"], true,
-        "{refreshed_status:#}"
-    );
+    // The changed generation and increased document count above are the
+    // durable append proofs. A periodic no-op may legitimately replace the
+    // daemon's latest-job receipt before this status read.
+    assert_daemon_publication(&temp, &refreshed_generation, 1, &["hermes"]);
     drop(writer);
 }
 
