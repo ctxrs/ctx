@@ -15,6 +15,10 @@ use crate::ui::{
 };
 use crate::{StatusArgs, UsageStatusMode};
 
+mod health;
+
+use health::*;
+
 pub(super) fn upgrade_report(config: &config::AppConfig) -> serde_json::Value {
     crate::upgrade::upgrade_diagnostics(config).report
 }
@@ -76,13 +80,6 @@ pub(crate) fn run_status(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatusHealth {
-    Healthy,
-    Partial,
-    Failed,
-}
-
 fn render_status_human(
     context: &RenderContext,
     report: &Value,
@@ -92,7 +89,13 @@ fn render_status_human(
     pro: &Value,
     local_usage: &local_usage::UsageReport,
 ) -> Document {
-    let health = status_health(report);
+    let history_health = history_health(report);
+    let service_issues = actionable_service_issue_count(report, upgrade, local_usage);
+    let health = if history_health == StatusHealth::Healthy && service_issues > 0 {
+        StatusHealth::Partial
+    } else {
+        history_health
+    };
     let unhealthy = unhealthy_history_components(report);
     let pending = unhealthy
         .iter()
@@ -101,6 +104,14 @@ fn render_status_human(
     let lexical_status = component_status(&report["lexical"]);
     let (state, title, detail) = match health {
         StatusHealth::Healthy => (OutcomeState::Success, "ctx is healthy", None),
+        StatusHealth::Partial if history_health == StatusHealth::Healthy => (
+            OutcomeState::Warning,
+            "ctx needs attention",
+            Some(format!(
+                "{}; search remains available.",
+                auxiliary_attention_message(service_issues)
+            )),
+        ),
         StatusHealth::Partial if lexical_status == "pending" => (
             OutcomeState::Warning,
             "ctx is partially ready",
@@ -162,7 +173,7 @@ fn render_status_human(
             history_values.push((label, counted(count, singular, plural)));
         }
     }
-    if health == StatusHealth::Healthy {
+    if history_health == StatusHealth::Healthy {
         history_values.push(("Refresh", component_display(&report["refresh"]).to_owned()));
     } else {
         for (label, component) in supporting_history_components(report) {
@@ -194,12 +205,7 @@ fn render_status_human(
     if let Some(issue) = upgrade_service_issue(upgrade) {
         service_values.push(("Automatic upgrades", issue));
     }
-    if let Some(error) = &local_usage.error {
-        service_values.push((
-            "Local usage",
-            format!("{} ({}: {})", local_usage.state, error.code, error.message),
-        ));
-    }
+    service_values.push(("Local usage", local_usage_display(local_usage)));
     let service_fields = service_values
         .iter()
         .map(|(label, value)| Field::new(*label, value.as_str()))
@@ -277,126 +283,6 @@ fn render_status_human(
         ));
     }
     document
-}
-
-fn status_health(report: &Value) -> StatusHealth {
-    let lexical_status = component_status(&report["lexical"]);
-    if lexical_status == "ready"
-        && history_components(report)
-            .iter()
-            .all(|(_, component)| component_is_healthy(component))
-    {
-        StatusHealth::Healthy
-    } else if matches!(lexical_status, "ready" | "pending") {
-        StatusHealth::Partial
-    } else {
-        StatusHealth::Failed
-    }
-}
-
-fn status_next_command(
-    report: &Value,
-    health: StatusHealth,
-    pending: usize,
-    unhealthy: usize,
-) -> Option<&'static str> {
-    match health {
-        StatusHealth::Healthy => None,
-        StatusHealth::Partial if unhealthy > 0 && pending == unhealthy => Some("ctx index watch"),
-        StatusHealth::Partial => Some("ctx doctor"),
-        StatusHealth::Failed
-            if report.get("initialized").and_then(Value::as_bool) != Some(true)
-                && report["lexical"]["reason"].as_str() == Some("generation_not_published") =>
-        {
-            Some("ctx setup")
-        }
-        StatusHealth::Failed => Some("ctx doctor"),
-    }
-}
-
-fn history_components(report: &Value) -> [(&'static str, &Value); 6] {
-    [
-        ("Epoch", &report["history_epoch"]),
-        ("Search", &report["lexical"]),
-        ("Catalog", &report["catalog"]),
-        ("Refresh service", &report["resolver"]),
-        ("Refresh", &report["refresh"]),
-        ("Session view", &report["relational"]),
-    ]
-}
-
-fn supporting_history_components(report: &Value) -> [(&'static str, &Value); 4] {
-    [
-        ("Catalog", &report["catalog"]),
-        ("Refresh service", &report["resolver"]),
-        ("Refresh", &report["refresh"]),
-        ("Session view", &report["relational"]),
-    ]
-}
-
-fn unhealthy_history_components(report: &Value) -> Vec<(&'static str, &Value)> {
-    history_components(report)
-        .into_iter()
-        .filter(|(_, component)| !component_is_healthy(component))
-        .collect()
-}
-
-fn component_is_healthy(component: &Value) -> bool {
-    matches!(component_status(component), "ready" | "disabled")
-}
-
-fn component_status(component: &Value) -> &str {
-    component
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unavailable")
-}
-
-fn component_display(component: &Value) -> String {
-    let status = component_status(component);
-    if matches!(status, "ready" | "disabled" | "running") {
-        return humanize_code(status);
-    }
-    component
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(humanize_code)
-        .map_or_else(
-            || humanize_code(status),
-            |reason| format!("{} ({reason})", humanize_code(status)),
-        )
-}
-
-fn upgrade_service_issue(upgrade: &Value) -> Option<String> {
-    let install = upgrade.get("install")?;
-    if let Some(error) = install.get("error").and_then(Value::as_str) {
-        return Some(format!("needs attention ({error})"));
-    }
-    let background_apply = install.get("path")?.get("background_apply")?;
-    if background_apply.get("allowed").and_then(Value::as_bool) != Some(false) {
-        return None;
-    }
-    background_apply
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(humanize_code)
-        .map(|reason| format!("blocked ({reason})"))
-}
-
-fn service_progress_message(count: usize) -> String {
-    if count == 1 {
-        "1 history service is catching up".to_owned()
-    } else {
-        format!("{count} history services are catching up")
-    }
-}
-
-fn service_attention_message(count: usize) -> String {
-    if count == 1 {
-        "1 history service needs attention".to_owned()
-    } else {
-        format!("{count} history services need attention")
-    }
 }
 
 fn humanize_code(value: &str) -> String {
@@ -746,10 +632,11 @@ mod tests {
             assert!(rendered.contains("2 indexed sessions"));
             assert!(normalized.contains("1,000 searchable events"));
             assert!(rendered.contains("\nServices\n"));
-            assert!(rendered.contains("Daemon    running\n"));
-            assert!(rendered.contains("Semantic  disabled\n"));
+            assert!(normalized.contains("Daemon running"));
+            assert!(normalized.contains("Semantic disabled"));
             assert!(!rendered.contains("Automatic upgrades"));
-            assert!(!rendered.contains("Local usage"));
+            assert!(rendered.contains("Local usage"));
+            assert!(normalized.contains("enabled; store readable"));
             assert!(!rendered.contains("\nData\n"));
             assert!(!rendered.contains("/tmp/ctx"));
             assert!(!rendered.contains("local-only"));
@@ -790,11 +677,83 @@ mod tests {
         );
         let rendered = document.render_plain();
         let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(rendered.starts_with("! ctx needs attention\n"));
         assert!(rendered.contains("Automatic upgrades  blocked (path shadowed)\n"));
         assert!(rendered.contains("Local usage"));
         assert!(rendered.contains("local_usage_config_unavailable"));
         assert!(normalized.contains("local usage configuration could not be read"));
         assert_fits(&document, &context);
+    }
+
+    #[test]
+    fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
+        let mut daemon_failed = status_report(true, "ready", "ready", "ready", "ready", "ready");
+        daemon_failed["daemon"] = json!({
+            "status": "failed",
+            "enabled": true,
+            "running": false,
+            "reason": "daemon_process_failed",
+        });
+        let context = context(80, ColorMode::Never);
+        let rendered = render_report(&context, &daemon_failed).render_plain();
+        assert!(
+            rendered.starts_with("! ctx needs attention\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Daemon"), "{rendered}");
+        assert!(rendered.contains("failed"), "{rendered}");
+        assert!(rendered.contains("Next\n  ctx doctor\n"), "{rendered}");
+
+        let mut semantic_pending = status_report(true, "ready", "ready", "ready", "ready", "ready");
+        semantic_pending["semantic"] = json!({
+            "status": "pending",
+            "enabled": true,
+            "reason": "projection_missing",
+        });
+        let rendered = render_report(&context, &semantic_pending).render_plain();
+        assert!(
+            rendered.starts_with("! ctx needs attention\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pending (projection missing)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn normal_status_always_reports_local_usage_enablement_and_store_health() {
+        let report = status_report(true, "ready", "ready", "ready", "ready", "ready");
+        let context = context(80, ColorMode::Never);
+        for (usage, expected) in [
+            (
+                local_usage::UsageReport {
+                    enabled: false,
+                    state: "disabled",
+                    ..usage_report()
+                },
+                "Local usage  disabled",
+            ),
+            (
+                local_usage::UsageReport {
+                    state: "empty",
+                    ..usage_report()
+                },
+                "Local usage  enabled; store missing or empty",
+            ),
+        ] {
+            let rendered = render_status_human(
+                &context,
+                &report,
+                std::path::Path::new("/tmp/ctx"),
+                std::path::Path::new("/tmp/ctx/config.toml"),
+                &healthy_upgrade(),
+                &no_pro(),
+                &usage,
+            )
+            .render_plain();
+            assert!(rendered.contains(expected), "{rendered}");
+        }
     }
 
     #[test]
