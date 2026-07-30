@@ -13,6 +13,7 @@ pub(crate) fn run_doctor(
     args: DoctorArgs,
     data_root: PathBuf,
     telemetry: &mut DoctorTelemetry,
+    _ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     let json_output = args.format.is_json();
     let mut findings = Vec::new();

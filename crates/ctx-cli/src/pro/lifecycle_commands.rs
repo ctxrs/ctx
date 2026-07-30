@@ -199,7 +199,11 @@ pub(crate) trait ProDeletionService {
     fn finish_deletion(&mut self, data_root: &Path) -> Result<()>;
 }
 
-pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf) -> Result<()> {
+pub(crate) fn run_lifecycle(
+    args: ProArgs,
+    data_root: PathBuf,
+    _ui: &mut crate::ui::Ui,
+) -> Result<()> {
     let started = Instant::now();
     let mut telemetry = ProLifecycleTelemetryV1::new(args.telemetry_operation());
     let result = run_lifecycle_inner(args, &data_root, &mut telemetry);

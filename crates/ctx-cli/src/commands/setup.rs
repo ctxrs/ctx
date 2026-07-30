@@ -20,6 +20,7 @@ pub(crate) fn run_setup(
     _provider_refreshes: &mut crate::commands::import::ProviderRefreshCollector,
     quiet: bool,
     config: &mut config::AppConfig,
+    _ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     let semantic_supported = semantic_query_service_supported();
     if args.semantic && (!config.daemon.enabled || args.no_daemon) {

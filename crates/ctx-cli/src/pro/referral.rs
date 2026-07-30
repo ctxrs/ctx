@@ -244,7 +244,7 @@ impl ReferralService for CommercialLifecycleService {
     }
 }
 
-pub(crate) fn run(args: ReferralArgs, data_root: PathBuf) -> Result<()> {
+pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, _ui: &mut crate::ui::Ui) -> Result<()> {
     args.validate_invocation()?;
     let json_output = args.json_output();
     prepare_referral_identity(&data_root, json_output)?;

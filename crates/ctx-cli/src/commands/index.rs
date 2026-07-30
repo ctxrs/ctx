@@ -83,6 +83,7 @@ pub(crate) fn run_index(
     data_root: PathBuf,
     quiet: bool,
     telemetry: &mut IndexTelemetry,
+    _ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     match args.command {
         IndexCommand::Status(args) => {
