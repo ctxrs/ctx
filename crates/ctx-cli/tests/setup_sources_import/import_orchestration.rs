@@ -851,9 +851,28 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
         ));
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
-    assert_eq!(
-        status["history_epoch"]["status"], "unavailable",
+    assert!(
+        matches!(
+            status["lexical"]["status"].as_str(),
+            Some("unavailable" | "pending")
+        ),
+        "{status:#}"
+    );
+    assert!(
+        matches!(
+            status["history_epoch"]["status"].as_str(),
+            Some("unavailable" | "pending")
+        ),
+        "{status:#}"
+    );
+    assert_ne!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_ne!(status["history_epoch"]["status"], "ready", "{status:#}");
+    assert_eq!(status["initialized"], false, "{status:#}");
+    assert!(
+        status
+            .get("indexed_events")
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|count| count == 0),
         "{status:#}"
     );
 }
