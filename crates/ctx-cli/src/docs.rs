@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fmt::Write as _, fs, path::PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Command, CommandFactory, Subcommand};
@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use crate::{
     analytics::{count_bucket, text_length_bucket, DocTopicId, DocsOperation, DocsTelemetry},
+    local_usage::CliUsage,
     output::JsonOutputFormat,
     Cli,
 };
@@ -299,8 +300,12 @@ const TOPICS: &[DocTopic] = &[
     },
 ];
 
-pub fn run(args: DocsArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
-    match args.command {
+pub fn run(
+    args: DocsArgs,
+    telemetry: &mut DocsTelemetry,
+    local_usage: &mut CliUsage,
+) -> Result<()> {
+    let output_bytes = match args.command {
         Some(DocsCommand::List(args)) => {
             telemetry.operation = Some(DocsOperation::List);
             list_docs(args.format.is_json(), telemetry)
@@ -328,31 +333,33 @@ pub fn run(args: DocsArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
             telemetry.implicit_list = true;
             list_docs(false, telemetry)
         }
-    }
+    }?;
+    local_usage.set_measured_output_bytes(output_bytes);
+    Ok(())
 }
 
-fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry) -> Result<()> {
+fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry) -> Result<usize> {
     telemetry.result_count = Some(count_bucket(TOPICS.len() as u64));
     telemetry.zero_result = Some(TOPICS.is_empty());
-    if json_output {
+    let output = if json_output {
         let topics: Vec<Value> = TOPICS.iter().map(topic_json).collect();
-        println!(
-            "{}",
+        format!(
+            "{}\n",
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1,
                 "topics": topics
             }))?
-        );
+        )
     } else {
-        println!("Embedded ctx docs:");
+        let mut output = String::from("Embedded ctx docs:\n");
         for topic in TOPICS {
-            println!("  {:<20} {}", topic.id, topic.summary);
+            writeln!(output, "  {:<20} {}", topic.id, topic.summary)?;
         }
-        println!();
-        println!("Try: ctx docs search \"file path\"");
-        println!("Try: ctx docs show search");
-    }
-    Ok(())
+        output.push_str("\nTry: ctx docs search \"file path\"\nTry: ctx docs show search\n");
+        output
+    };
+    print!("{output}");
+    Ok(output.len())
 }
 
 fn search_docs(
@@ -360,7 +367,7 @@ fn search_docs(
     limit: usize,
     json_output: bool,
     telemetry: &mut DocsTelemetry,
-) -> Result<()> {
+) -> Result<usize> {
     let terms = docs_query_terms(query);
     telemetry.query_length = Some(text_length_bucket(query.chars().count()));
     telemetry.query_term_count = Some(count_bucket(terms.len() as u64));
@@ -375,7 +382,7 @@ fn search_docs(
     results.truncate(limit.max(1));
     telemetry.result_count = Some(count_bucket(results.len() as u64));
     telemetry.zero_result = Some(results.is_empty());
-    if json_output {
+    let output = if json_output {
         let rows: Vec<Value> = results
             .iter()
             .map(|(score, topic)| {
@@ -384,28 +391,32 @@ fn search_docs(
                 value
             })
             .collect();
-        println!(
-            "{}",
+        format!(
+            "{}\n",
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1,
                 "query": query,
                 "results": rows,
                 "suggested_next_commands": docs_search_suggestions(query, rows.is_empty())
             }))?
-        );
+        )
     } else if results.is_empty() {
-        println!("no docs matched");
+        let mut output = String::from("no docs matched\n");
         for command in docs_search_suggestions(query, true) {
-            println!("next: {command}");
+            writeln!(output, "next: {command}")?;
         }
+        output
     } else {
+        let mut output = String::new();
         for (index, (score, topic)) in results.iter().enumerate() {
-            println!("{}. {} - {}", index + 1, topic.id, topic.title);
-            println!("   score {score} | {}", topic.summary);
-            println!("   inspect: ctx docs show {}", topic.id);
+            writeln!(output, "{}. {} - {}", index + 1, topic.id, topic.title)?;
+            writeln!(output, "   score {score} | {}", topic.summary)?;
+            writeln!(output, "   inspect: ctx docs show {}", topic.id)?;
         }
-    }
-    Ok(())
+        output
+    };
+    print!("{output}");
+    Ok(output.len())
 }
 
 fn docs_query_terms(query: &str) -> Vec<String> {
@@ -478,7 +489,7 @@ fn docs_shell_quote_arg(value: &str) -> String {
     }
 }
 
-fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
+fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<usize> {
     let topic = TOPICS
         .iter()
         .find(|topic| topic.id == args.id)
@@ -503,19 +514,21 @@ fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
             fs::create_dir_all(parent)?;
         }
         fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+        Ok(0)
     } else {
         println!("{body}");
+        Ok(body.len().saturating_add(1))
     }
-    Ok(())
 }
 
-fn man_docs(args: DocsManArgs) -> Result<()> {
+fn man_docs(args: DocsManArgs) -> Result<usize> {
     if let Some(page) = args.print {
         let (_, command) = man_page(&page)?;
         let mut out = Vec::new();
         clap_mangen::Man::new(command).render(&mut out)?;
-        print!("{}", String::from_utf8(out)?);
-        return Ok(());
+        let output = String::from_utf8(out)?;
+        print!("{output}");
+        return Ok(output.len());
     }
     let out_dir = args
         .out
@@ -527,8 +540,9 @@ fn man_docs(args: DocsManArgs) -> Result<()> {
         clap_mangen::Man::new(command).render(&mut out)?;
         fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
     }
-    println!("wrote ctx man pages to {}", out_dir.display());
-    Ok(())
+    let output = format!("wrote ctx man pages to {}\n", out_dir.display());
+    print!("{output}");
+    Ok(output.len())
 }
 
 fn man_page(name: &str) -> Result<(String, Command)> {

@@ -367,16 +367,7 @@ fn reset_with_post_commit<T>(
     verify_schema(&transaction)?;
     super::report::validate_rows(&transaction)?;
     transaction.execute("DELETE FROM daily_usage", [])?;
-    let day = utc_day(SystemTime::now());
-    transaction.execute(
-        r#"
-        INSERT INTO maintenance (singleton, last_retention_day)
-        VALUES (1, ?1)
-        ON CONFLICT (singleton) DO UPDATE SET
-            last_retention_day = excluded.last_retention_day
-        "#,
-        [day],
-    )?;
+    transaction.execute("DELETE FROM maintenance", [])?;
     family_guard.recheck(&path)?;
     let commit_guard = preflight_existing_family(&path, true)?;
     verify_schema(&transaction)?;
