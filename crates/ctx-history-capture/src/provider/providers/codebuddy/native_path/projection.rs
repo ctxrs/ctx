@@ -96,16 +96,12 @@ pub(super) fn update_cli_session(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn cli_core_row(
     context: &ProviderAdapterContext,
     session: &mut CodeBuddySessionState,
     session_title: &mut Option<String>,
     ordinal: u64,
     physical_line: usize,
-    byte_start: u64,
-    byte_end_exclusive: u64,
-    record_bytes: &[u8],
     value: Value,
 ) -> Result<CodeBuddyRecordClassification> {
     let text = cli_message_text(&value);
@@ -121,18 +117,11 @@ pub(super) fn cli_core_row(
         return Ok(CodeBuddyRecordClassification::SkippedMetadata);
     }
     if session_title.is_none()
-        && session.generated_title_anchor.is_none()
+        && session.generated_title.is_none()
         && provider_role(role.as_deref()) == EventRole::User
     {
         *session_title = codebuddy_title_from_text(&text);
-        if session_title.is_some() {
-            session.generated_title_anchor = Some(CodeBuddyGeneratedTitleAnchor::Cli {
-                native_ordinal: ordinal,
-                byte_start,
-                byte_end_exclusive,
-                payload_sha256: sha256_hex(record_bytes),
-            });
-        }
+        session.generated_title.clone_from(session_title);
     }
     let provider_session_id = session.provider_session_id();
     let started_at = session.started_at()?.unwrap_or(occurred_at);
@@ -167,10 +156,8 @@ pub(super) fn extension_core_row(
     session: &mut CodeBuddySessionState,
     session_title: &mut Option<String>,
     ordinal: u64,
-    message_index: usize,
     message_ref: &Value,
-    message_path: &Path,
-    _record_bytes: &[u8],
+    message_modified: Option<std::time::SystemTime>,
     raw_message: Value,
 ) -> Result<CodeBuddyRecordClassification> {
     let decoded_message = codebuddy_decoded_message(&raw_message);
@@ -197,7 +184,7 @@ pub(super) fn extension_core_row(
     let occurred_at = codebuddy_message_time(
         &raw_message,
         &decoded_message,
-        message_path,
+        message_modified,
         context.imported_at,
     );
     update_session_times(session, occurred_at);
@@ -205,15 +192,11 @@ pub(super) fn extension_core_row(
         return Ok(CodeBuddyRecordClassification::SkippedMetadata);
     }
     if session_title.is_none()
-        && session.generated_title_anchor.is_none()
+        && session.generated_title.is_none()
         && provider_role(role.as_deref()) == EventRole::User
     {
         *session_title = codebuddy_title_from_text(&text);
-        if session_title.is_some() {
-            session.generated_title_anchor = Some(CodeBuddyGeneratedTitleAnchor::Extension {
-                message_index: message_index as u64,
-            });
-        }
+        session.generated_title.clone_from(session_title);
     }
     let provider_session_id = session.provider_session_id();
     let cwd = codebuddy_extension_metadata_text(

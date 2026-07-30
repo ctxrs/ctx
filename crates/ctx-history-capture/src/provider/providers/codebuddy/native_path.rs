@@ -6,28 +6,29 @@
 //! source authority, typed locators, and exact hydration.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self, File, Metadata},
+    collections::BTreeMap,
+    fs::Metadata,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType};
+use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType, SourceKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
     common::io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-        OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot,
+        open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+        ProviderSourceDirectory, ProviderSourceRoot,
     },
     provider::{
         normalization::{provider_role, provider_value_text},
+        provider_safe_path_segment,
         providers::task_json::task_json_time_field,
     },
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, Result, CODEBUDDY_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, Result, CODEBUDDY_SOURCE_FORMAT,
     MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
@@ -41,24 +42,18 @@ use super::{
     CODEBUDDY_CLI_POLICY_REVISION, CODEBUDDY_MAX_FAILURE_BYTES, CODEBUDDY_MAX_SCAN_REJECTIONS,
 };
 
-#[path = "extension/discovery.rs"]
-mod extension_discovery;
 #[path = "extension/source.rs"]
 mod extension_source;
 
 use extension_source::{
-    codebuddy_extension_line_number, codebuddy_extension_message_file,
-    codebuddy_extension_metadata, codebuddy_extension_metadata_from_admitted,
-    codebuddy_extension_metadata_text, codebuddy_message_time, CodeBuddyExtensionMessageError,
-    CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation, CodeBuddyExtensionRejection,
+    codebuddy_extension_line_number, codebuddy_extension_metadata_from_admitted,
+    codebuddy_extension_metadata_text, codebuddy_message_time, CodeBuddyExtensionMetadata,
 };
 
 const CODEBUDDY_NATIVE_PAGE_MAX_UNITS: usize = 64;
 const CODEBUDDY_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CODEBUDDY_NATIVE_RECORD_MAX_BYTES: usize = CODEBUDDY_NATIVE_PAGE_MAX_BYTES - (64 * 1024);
 const CODEBUDDY_MAX_NATIVE_ID_BYTES: usize = 1_024;
-const CODEBUDDY_INVENTORY_REVISION_DOMAIN: &[u8] = b"ctx-inventory-observed-source-revision-v1\0";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodeBuddySourceShape {
     Extension,
@@ -81,21 +76,8 @@ struct CodeBuddySessionState {
     cwd: Option<String>,
     started_at: Option<String>,
     ended_at: Option<String>,
-    generated_title_anchor: Option<CodeBuddyGeneratedTitleAnchor>,
+    generated_title: Option<String>,
     row_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CodeBuddyGeneratedTitleAnchor {
-    Cli {
-        native_ordinal: u64,
-        byte_start: u64,
-        byte_end_exclusive: u64,
-        payload_sha256: String,
-    },
-    Extension {
-        message_index: u64,
-    },
 }
 
 impl CodeBuddySessionState {
@@ -118,16 +100,7 @@ impl CodeBuddySessionState {
             .saturating_add(self.cwd.as_ref().map_or(0, String::len))
             .saturating_add(self.started_at.as_ref().map_or(0, String::len))
             .saturating_add(self.ended_at.as_ref().map_or(0, String::len))
-            .saturating_add(
-                self.generated_title_anchor
-                    .as_ref()
-                    .map_or(0, |anchor| match anchor {
-                        CodeBuddyGeneratedTitleAnchor::Cli { payload_sha256, .. } => {
-                            64_usize.saturating_add(payload_sha256.len())
-                        }
-                        CodeBuddyGeneratedTitleAnchor::Extension { .. } => 32,
-                    }),
-            )
+            .saturating_add(self.generated_title.as_ref().map_or(0, String::len))
     }
 }
 
@@ -183,9 +156,7 @@ struct CodeBuddySource {
     shape: CodeBuddySourceShape,
     path: PathBuf,
     canonical_path: PathBuf,
-    base_source_revision: String,
     source_revision: String,
-    inventory_observation_token: Option<String>,
     session_ordinal: usize,
     frozen: Option<CodeBuddyFrozenFile>,
     capability: Option<Arc<CodeBuddyCapabilitySource>>,
@@ -196,41 +167,20 @@ struct CodeBuddyCapabilitySource {
     authority: ProviderSourceRoot,
     primary: Option<OpenedProviderSourceFile>,
     extension: Option<CodeBuddyExtensionCapability>,
-    revision: String,
 }
 
 #[derive(Debug)]
 struct CodeBuddyExtensionCapability {
     metadata: CodeBuddyExtensionMetadata,
-    session_index: OpenedProviderSourceFile,
-    project_index: Option<OpenedProviderSourceFile>,
-    messages_directory: ProviderSourceDirectory,
-    messages: BTreeMap<String, OpenedProviderSourceFile>,
+    messages: BTreeMap<String, CodeBuddyObservedFile>,
 }
 
-impl CodeBuddyCapabilitySource {
-    fn revalidate(&self) -> Result<()> {
-        if let Some(primary) = &self.primary {
-            primary.revalidate()?;
-        }
-        if let Some(extension) = &self.extension {
-            extension.session_index.revalidate()?;
-            if let Some(project_index) = &extension.project_index {
-                project_index.revalidate()?;
-            }
-            extension.messages_directory.revalidate()?;
-            for message in extension.messages.values() {
-                message.revalidate()?;
-            }
-        }
-        self.authority.revalidate()
-    }
-}
-
-#[derive(Debug)]
-struct CodeBuddyInventory {
-    sources: Vec<CodeBuddySource>,
-    root_missing: bool,
+#[derive(Debug, Clone)]
+struct CodeBuddyObservedFile {
+    relative_path: PathBuf,
+    display_path: PathBuf,
+    frozen: CodeBuddyFrozenFile,
+    authority_fingerprint: [u8; 32],
 }
 
 #[derive(Debug)]
