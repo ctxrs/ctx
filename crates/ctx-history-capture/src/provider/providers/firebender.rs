@@ -19,8 +19,6 @@ mod message_text;
 pub(crate) mod native_path;
 
 pub(crate) use message_text::firebender_message_text;
-#[allow(unused_imports)]
-pub(crate) use message_text::firebender_result_content;
 
 pub(crate) fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
     match fs::symlink_metadata(path) {
@@ -173,10 +171,6 @@ pub(crate) struct FirebenderNativeEvent {
     pub(crate) cursor: String,
     pub(crate) event_type: EventType,
     pub(crate) payload: Value,
-    // Provider metadata is retained at the native-event boundary for Pro and
-    // exact diagnostic materialization.
-    #[allow(dead_code)]
-    pub(crate) metadata: Value,
 }
 
 pub(crate) fn firebender_native_event(
@@ -209,7 +203,6 @@ pub(crate) fn firebender_native_event(
             "source_format": FIREBENDER_SQLITE_SOURCE_FORMAT,
             "body": retained_body,
         }),
-        metadata: event.metadata,
     }
 }
 
@@ -222,7 +215,6 @@ struct FirebenderEventParts {
     occurred_at: DateTime<Utc>,
     text: String,
     body: Value,
-    metadata: Value,
 }
 
 fn firebender_event_parts(
@@ -262,19 +254,5 @@ fn firebender_event_parts(
         text: firebender_message_text(message)
             .unwrap_or_else(|| format!("Firebender {}", role.unwrap_or("message"))),
         body: message.clone(),
-        metadata: json!({
-            "source": "firebender_chat_sessions",
-            "source_format": FIREBENDER_SQLITE_SOURCE_FORMAT,
-            "role": role,
-            "name": message.get("name").and_then(Value::as_str),
-            "tool_call_id": message
-                .get("tool_call_id")
-                .or_else(|| message.get("toolCallId"))
-                .and_then(Value::as_str),
-            "content_type": message
-                .get("content")
-                .and_then(|content| content.get("type"))
-                .and_then(Value::as_str),
-        }),
     }
 }
