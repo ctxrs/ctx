@@ -32,7 +32,7 @@ pub(crate) use lifecycle::DirectJsonlSourceReader;
 use lifecycle::{decode_certificate, decode_previous, DirectJsonlTerminalEvidenceSet};
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
-const DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION: &str = "direct-native-jsonl-source-backed-v1";
+const DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION: &str = "direct-native-jsonl-source-backed-v2";
 const DIRECT_JSONL_SOURCE_FRONTIER_KIND: &str = "direct-native-jsonl-checkpoint-v1";
 const DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE: &str = "direct-native-jsonl-provider-root-v1";
 const DIRECT_JSONL_INVENTORY_REVISION_KIND: &str = "direct-native-jsonl-inventory-sha256-v1";
