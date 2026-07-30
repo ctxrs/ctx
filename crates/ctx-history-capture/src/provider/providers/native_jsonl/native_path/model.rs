@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::provider::source_backed::family::jsonl::JsonlCheckpoint;
 
-pub(crate) const DIRECT_JSONL_NATIVEPATH_PARSER_REVISION: &str = "direct-native-jsonl-parser-v1";
+pub(crate) const DIRECT_JSONL_NATIVEPATH_PARSER_REVISION: &str = "direct-native-jsonl-parser-v2";
 pub(crate) const DIRECT_JSONL_NATIVEPATH_POLICY_REVISION: &str = "direct-native-jsonl-policy-v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
