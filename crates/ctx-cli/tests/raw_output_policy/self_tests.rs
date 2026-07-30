@@ -16,7 +16,7 @@ fn exact_allowed_site_is_accepted() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::MachineProtocol,
         rationale: "synthetic JSON protocol",
-        owning_test: "raw_output_policy::exact_allowed_site_is_accepted",
+        owning_test: "tests/raw_output_policy/self_tests.rs::exact_allowed_site_is_accepted",
     };
     assert!(compare_policy(sites, &[entry]).is_closed());
 }
@@ -37,7 +37,7 @@ fn stale_allowlist_entry_is_rejected() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::JustifiedPlainHuman,
         rationale: "synthetic fallback",
-        owning_test: "raw_output_policy::stale_allowlist_entry_is_rejected",
+        owning_test: "tests/raw_output_policy/self_tests.rs::stale_allowlist_entry_is_rejected",
     };
     let diff = compare_policy(Vec::new(), &[entry]);
     assert_eq!(diff.stale.len(), 1);
@@ -58,7 +58,7 @@ fn classified_violation_is_rejected() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::Violation,
         rationale: "synthetic policy violation",
-        owning_test: "raw_output_policy::classified_violation_is_rejected",
+        owning_test: "tests/raw_output_policy/self_tests.rs::classified_violation_is_rejected",
     };
     let diff = compare_policy(sites, &[entry]);
     assert_eq!(diff.violations.len(), 1);
@@ -136,4 +136,131 @@ fn scanner_covers_raw_accessors_document_render_and_clap_exit() {
             Primitive::ClapParse,
         ])
     );
+}
+
+#[test]
+fn scanner_covers_direct_macros_and_writer_methods_through_a_raw_wrapper() {
+    let source = r#"
+        fn output(ui: &mut Ui) -> RawOutput<&mut dyn io::Write> {
+            RawOutput::new(ui.stdout_writer())
+        }
+
+        struct RawOutput<W> {
+            destination: W,
+        }
+
+        impl<W: io::Write> RawOutput<W> {
+            fn new(destination: W) -> Self {
+                Self { destination }
+            }
+
+            fn emit(&mut self) {
+                write!(self.destination, "one");
+                writeln!(self.destination, "two");
+                self.destination.write_all(b"three");
+            }
+        }
+    "#;
+    let sites = scan_source("src/example.rs", source);
+    let direct_writes = sites
+        .iter()
+        .filter(|site| site.key.primitive == Primitive::DirectWrite)
+        .collect::<Vec<_>>();
+    assert_eq!(direct_writes.len(), 3, "{sites:#?}");
+
+    let entries = direct_writes
+        .into_iter()
+        .map(|site| AllowEntry {
+            path: "src/example.rs",
+            fingerprint: Box::leak(site.key.fingerprint.clone().into_boxed_str()),
+            primitive: Primitive::DirectWrite,
+            class: OutputClass::Infrastructure,
+            rationale: "synthetic specialized raw writer",
+            owning_test:
+                "tests/raw_output_policy/self_tests.rs::scanner_covers_direct_macros_and_writer_methods_through_a_raw_wrapper",
+        })
+        .collect::<Vec<_>>();
+    let direct_sites = sites
+        .into_iter()
+        .filter(|site| site.key.primitive == Primitive::DirectWrite)
+        .collect();
+    assert!(compare_policy(direct_sites, &entries).is_closed());
+}
+
+#[test]
+fn scanner_tracks_raw_writers_through_free_function_parameters() {
+    let source = r#"
+        fn run(ui: &mut Ui) {
+            let destination = ui.stderr_writer();
+            emit(destination);
+        }
+
+        fn emit(target: &mut impl io::Write) {
+            writeln!(target, "error");
+        }
+    "#;
+    let sites = scan_source("src/example.rs", source);
+    assert_eq!(
+        sites
+            .iter()
+            .filter(|site| site.key.primitive == Primitive::DirectWrite)
+            .count(),
+        1,
+        "{sites:#?}"
+    );
+}
+
+#[test]
+fn scanner_covers_document_render_regardless_of_binding_names() {
+    let source = r#"
+        fn emit(page: &Document, palette: RenderContext) {
+            let _ = page.render(&palette);
+        }
+    "#;
+    let sites = scan_source("src/example.rs", source);
+    assert_eq!(sites.len(), 1, "{sites:#?}");
+    assert_eq!(sites[0].key.primitive, Primitive::DocumentRender);
+}
+
+#[test]
+fn scanner_ignores_format_buffers_and_non_document_renderers() {
+    let source = r#"
+        fn format_only(
+            text: &mut String,
+            formatter: &mut std::fmt::Formatter<'_>,
+            glyph: Glyph,
+            context: RenderContext,
+        ) {
+            write!(text, "buffered");
+            writeln!(formatter, "display");
+            let marker = Glyph::Success;
+            let _ = glyph.render(&context);
+            let _ = marker.render(&context);
+        }
+    "#;
+    assert!(scan_source("src/example.rs", source).is_empty());
+}
+
+#[test]
+fn owning_test_requires_a_resolvable_source_identity() {
+    let sites = scan_source("src/example.rs", "fn emit() { println!(\"value\"); }");
+    let fingerprint = Box::leak(sites[0].key.fingerprint.clone().into_boxed_str());
+    let arbitrary = AllowEntry {
+        path: "src/example.rs",
+        fingerprint,
+        primitive: Primitive::PrintMacro,
+        class: OutputClass::MachineProtocol,
+        rationale: "synthetic protocol",
+        owning_test: "some nonempty prose",
+    };
+    let missing = AllowEntry {
+        owning_test: "tests/raw_output_policy/self_tests.rs::not_a_real_test",
+        ..arbitrary
+    };
+    let arbitrary_diff = compare_policy(sites.clone(), &[arbitrary]);
+    assert_eq!(arbitrary_diff.invalid_metadata.len(), 1);
+    assert!(!arbitrary_diff.is_closed());
+    let missing_diff = compare_policy(sites, &[missing]);
+    assert_eq!(missing_diff.invalid_metadata.len(), 1);
+    assert!(!missing_diff.is_closed());
 }

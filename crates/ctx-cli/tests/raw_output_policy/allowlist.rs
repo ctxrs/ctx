@@ -17,20 +17,32 @@ macro_rules! allow {
     };
 }
 
-const GATE: &str = "//crates/ctx-cli:raw_output_policy_tests";
-const UNIT: &str = "//crates/ctx-cli:unit_tests";
-const ANALYTICS: &str = "//crates/ctx-cli:analytics_policy_tests";
-const INDEX: &str = "//crates/ctx-cli:index_tests";
-const SEARCH_SQL: &str = "//crates/ctx-cli:search_show_locate_sql_tests";
-const STATS: &str = "//crates/ctx-cli:stats_tests";
-const STATUS: &str = "//crates/ctx-cli:status_store_cutover_tests";
-const PUBLIC_HELP: &str = "//crates/ctx-cli:cli_public_help_docs_tests";
-const MCP: &str = "//crates/ctx-cli:integrations_mcp_tests";
-const MCP_SERVER: &str = "//crates/ctx-cli:mcp_tests";
-const PRO: &str = "//crates/ctx-cli:pro_lifecycle_tests";
-const SKILL: &str = "//crates/ctx-cli:skill_tests";
-const SLASH: &str = "//crates/ctx-cli:slash_command_e2e_tests";
-const UPGRADE: &str = "//crates/ctx-cli:upgrade_tests";
+const GATE: &str = "tests/raw_output_policy.rs::production_raw_output_inventory_is_closed";
+const UNIT: &str = "src/ui/tests.rs::ui_owns_independent_injectable_streams_and_capabilities";
+const ANALYTICS: &str =
+    "src/analytics/tests.rs::selected_telemetry_contract_inventory_hashes_match_the_running_public_source";
+const INDEX: &str =
+    "src/commands/index_dashboard.rs::styled_rendering_strips_to_the_exact_plain_bytes";
+const SEARCH_SQL: &str = "src/commands/sql.rs::csv_and_raw_cells_keep_their_machine_contracts";
+const STATS: &str = "src/commands/stats.rs::stats_plain_output_matches_ansi_stripped_output";
+const STATUS: &str =
+    "src/commands/status/usage.rs::usage_machine_receipts_keep_the_exact_public_schema";
+const PUBLIC_HELP: &str = "src/docs.rs::docs_plain_output_matches_ansi_stripped_output";
+const MCP: &str =
+    "src/integrations/mcp/operation.rs::status_output_is_responsive_control_safe_and_style_equivalent";
+const MCP_SERVER: &str =
+    "src/mcp/response_bound/tests.rs::final_mcp_serialization_is_bounded_after_json_expansion";
+const PRO: &str = "src/pro/referral.rs::create_and_status_json_preserve_the_exact_machine_contract";
+const SKILL: &str =
+    "src/skill/install.rs::skill_output_is_responsive_control_safe_and_style_equivalent";
+const SLASH: &str =
+    "src/integrations/slash_commands/tests.rs::failed_target_details_and_recovery_are_written_to_stderr";
+const UPGRADE: &str =
+    "src/upgrade/command/human.rs::automatic_mode_json_is_one_complete_machine_receipt";
+const DISPATCH_MACHINE_ERROR: &str =
+    "src/dispatch.rs::forced_color_never_decorates_generic_machine_mode_errors";
+const PROGRESS_DELIVERY: &str =
+    "src/progress.rs::progress_propagates_write_and_flush_failures_in_plain_and_json_modes";
 
 const CARGO_DIRECTIVE: &str = "Cargo build-script protocol directive";
 const JSON_PROTOCOL: &str = "documented JSON or JSONL machine-output contract";
@@ -180,6 +192,78 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         INDEX_COMMAND,
+        "print_json#1@d7261ce140360114",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#1@9e176dd4991e94f2",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#2@fa8dcaeddea22df9",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#3@9e176dd4991e94f2",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#4@2a6861777f6f2eb8",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#5@8a60a84febfd0d49",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#6@ea4a1a0bd1db8a5d",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#7@fa8dcaeddea22df9",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "print_human#8@257d49ad49992709",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        INDEX
+    ),
+    allow!(
+        INDEX_COMMAND,
         "print_human#1@800a077f8a4bc2c0",
         DocumentRender,
         Infrastructure,
@@ -206,6 +290,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         SQL,
         "write_sql_stdout#1@6390ed6c2dce4746",
         OutputRawHelper,
+        MachineProtocol,
+        MACHINE_BODY,
+        SEARCH_SQL
+    ),
+    allow!(
+        SQL,
+        "write_sql_stdout#1@6390ed6c2dce4746",
+        DirectWrite,
         MachineProtocol,
         MACHINE_BODY,
         SEARCH_SQL
@@ -248,7 +340,15 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         UiRawWriter,
         Infrastructure,
         RAW_INFRASTRUCTURE,
-        ANALYTICS
+        DISPATCH_MACHINE_ERROR
+    ),
+    allow!(
+        DISPATCH,
+        "render_generic_command_error#1@48514149721fc11e",
+        DirectWrite,
+        MachineProtocol,
+        "generic machine-mode command error",
+        DISPATCH_MACHINE_ERROR
     ),
     allow!(
         DISPATCH,
@@ -427,6 +527,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MCP_SERVER
     ),
     allow!(
+        MCP_MODULE,
+        "serve_stdio_loop#1@1f4d386a50824806",
+        DirectWrite,
+        MachineProtocol,
+        "MCP JSON-RPC response framing",
+        MCP_SERVER
+    ),
+    allow!(
         OUTPUT,
         "<module>#1@c614d2315222fabf",
         OutputRawHelper,
@@ -478,6 +586,46 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         OUTPUT,
         "stderr_writer#1@53302d94fe4bac6c",
         StderrConstructor,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        UNIT
+    ),
+    allow!(
+        OUTPUT,
+        "write#1@b99da2fdfd7f5bb1",
+        DirectWrite,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        UNIT
+    ),
+    allow!(
+        OUTPUT,
+        "write_stream#1@4b717bacd3774f81",
+        DirectWrite,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        UNIT
+    ),
+    allow!(
+        OUTPUT,
+        "write_stream#2@4b717bacd3774f81",
+        DirectWrite,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        UNIT
+    ),
+    allow!(
+        OUTPUT,
+        "write_stream#3@4b717bacd3774f81",
+        DirectWrite,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        UNIT
+    ),
+    allow!(
+        OUTPUT,
+        "write_stream#4@4b717bacd3774f81",
+        DirectWrite,
         Infrastructure,
         RAW_INFRASTRUCTURE,
         UNIT
@@ -556,6 +704,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_REFERRAL,
+        "write_json#1@e4cc8f587660af31",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PRO
+    ),
+    allow!(
+        PRO_REFERRAL,
         "write_cta#1@f53429f9d33162f3",
         DocumentRender,
         Infrastructure,
@@ -571,12 +727,36 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         PRO
     ),
     allow!(
+        PRO_RENDER,
+        "print_blame_result#1@2048412be04f5f80",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PRO
+    ),
+    allow!(
         PROGRESS,
-        "emit_status_at#1@c56c9bd95dcc23cb",
+        "emit_status_at#1@4fcd3f430927aff6",
         UiRawWriter,
         MachineProtocol,
         JSON_PROTOCOL,
-        UNIT
+        PROGRESS_DELIVERY
+    ),
+    allow!(
+        PROGRESS,
+        "emit_status_at#2@cf0efc65de930b13",
+        UiRawWriter,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        PROGRESS_DELIVERY
+    ),
+    allow!(
+        PROGRESS,
+        "emit_status_at#1@8a1f6ba42c43c948",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PROGRESS_DELIVERY
     ),
     allow!(
         RELEASE_IDENTITY,
@@ -731,6 +911,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         UNIT
     ),
     allow!(
+        UI_WRITER,
+        "write#1@62dfe1a34afb27b0",
+        DirectWrite,
+        Infrastructure,
+        UI_INFRASTRUCTURE,
+        UNIT
+    ),
+    allow!(
         UPGRADE_HUMAN,
         "render_outcome#1@b515bd1f7b8c527c",
         PrintMacro,
@@ -750,6 +938,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         WINDOWS_HELPER,
         "write_ready#1@7412c9b708be0f94",
         StdoutConstructor,
+        MachineProtocol,
+        "parent-process readiness protocol",
+        UPGRADE
+    ),
+    allow!(
+        WINDOWS_HELPER,
+        "write_ready#1@039a802fb7eff38d",
+        DirectWrite,
         MachineProtocol,
         "parent-process readiness protocol",
         UPGRADE
