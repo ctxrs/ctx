@@ -14,6 +14,7 @@ pub(crate) use empty_state::{empty_state, EmptyState};
 pub(crate) use evidence::{evidence_list, Evidence};
 pub(crate) use fields::{fields, Field};
 pub(crate) use hint::{hint, Action, Hint};
+pub(crate) use layout::is_copyable_atom;
 pub(crate) use outcome::{outcome, Outcome, OutcomeState};
 pub(crate) use progress::{progress, Progress};
 pub(crate) use section::section;

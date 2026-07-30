@@ -55,7 +55,7 @@ fn wrap_logical_line(line: &str, width: usize, output: &mut Vec<String>) {
 }
 
 fn push_word(word: &str, width: usize, current: &mut String, output: &mut Vec<String>) {
-    if copyable_atom(word) {
+    if is_copyable_atom(word) {
         current.push_str(word);
         return;
     }
@@ -69,7 +69,7 @@ fn push_word(word: &str, width: usize, current: &mut String, output: &mut Vec<St
     }
 }
 
-fn copyable_atom(word: &str) -> bool {
+pub(crate) fn is_copyable_atom(word: &str) -> bool {
     word.contains("://") || word.starts_with('-') || word.matches('-').count() >= 4
 }
 

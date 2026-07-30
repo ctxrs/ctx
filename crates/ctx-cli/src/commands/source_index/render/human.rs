@@ -1,4 +1,4 @@
-use crate::ui::{Document, Line, RenderContext, Span, Token};
+use crate::ui::{is_copyable_atom, Document, Line, RenderContext, Span, Token};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FIELD_GAP: usize = 2;
@@ -79,9 +79,13 @@ pub(super) fn push_field(
     let safe_value = safe_text(value);
     let label_width = label_width.max(display_width(&safe_label));
     let prefix_width = indent.saturating_add(label_width).saturating_add(FIELD_GAP);
+    let value_width = context
+        .content_width()
+        .map(|width| width.saturating_sub(prefix_width).max(1));
     let aligned = context
         .content_width()
-        .is_none_or(|width| width >= prefix_width.saturating_add(8));
+        .is_none_or(|width| width >= prefix_width.saturating_add(8))
+        && !value_width.is_some_and(|width| has_oversized_copyable_atom(&safe_value, width));
 
     if !aligned {
         document.push_line(
@@ -99,9 +103,6 @@ pub(super) fn push_field(
         return;
     }
 
-    let value_width = context
-        .content_width()
-        .map(|width| width.saturating_sub(prefix_width).max(1));
     for (index, segment) in wrap_safe(&safe_value, value_width).into_iter().enumerate() {
         let mut line = Line::new().with(Span::text(" ".repeat(indent)));
         if index == 0 {
@@ -211,6 +212,14 @@ fn wrap_safe(text: &str, width: Option<usize>) -> Vec<String> {
     let mut remaining = text;
     let mut wrapped = Vec::new();
     while !remaining.is_empty() {
+        if let Some(word) = remaining.split_whitespace().next() {
+            if remaining.starts_with(word) && is_copyable_atom(word) && display_width(word) > width
+            {
+                wrapped.push(word.to_owned());
+                remaining = remaining[word.len()..].trim_start();
+                continue;
+            }
+        }
         let mut used = 0usize;
         let mut last_space_end = None;
         let mut overflow_at = None;
@@ -245,6 +254,11 @@ fn wrap_safe(text: &str, width: Option<usize>) -> Vec<String> {
         remaining = &remaining[split_at..];
     }
     wrapped
+}
+
+fn has_oversized_copyable_atom(text: &str, width: usize) -> bool {
+    text.split_whitespace()
+        .any(|word| is_copyable_atom(word) && display_width(word) > width)
 }
 
 fn protected_escape_range(text: &str, split_at: usize) -> Option<std::ops::Range<usize>> {
