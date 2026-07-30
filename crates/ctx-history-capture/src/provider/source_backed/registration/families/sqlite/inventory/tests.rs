@@ -16,7 +16,9 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    provider::source_backed::family::document::DocumentLeafExecutionPolicy,
+    provider::source_backed::{
+        family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
+    },
     provider_sources::ProviderCatalogSupport,
 };
 
@@ -311,6 +313,7 @@ fn finite_sqlite_inventory_parallelism_is_explicit_and_default_safe() {
 #[test]
 fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     const DATABASES: usize = 8;
+    const REQUESTED_PARALLEL_WORKERS: usize = 4;
 
     let temp = crate::test_support_paths::tempdir().unwrap();
     let provider_dir = temp.path().join("provider");
@@ -333,8 +336,11 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     }
     let selected_database = leaves[0].path.clone();
     let catalog = Arc::new(Mutex::new(leaves));
+    let parallel_worker_count =
+        effective_test_leaf_worker_count(REQUESTED_PARALLEL_WORKERS, DATABASES);
     let serial_provider = TestProvider::with_test_workers(Arc::clone(&catalog), 1);
-    let parallel_provider = TestProvider::with_test_workers(Arc::clone(&catalog), 4);
+    let parallel_provider =
+        TestProvider::with_test_workers(Arc::clone(&catalog), REQUESTED_PARALLEL_WORKERS);
     let serial_registry = test_registry(
         &serial_data_root,
         &selected_database,
@@ -346,7 +352,7 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         parallel_provider.clone(),
     );
 
-    parallel_provider.use_scan_barrier(4);
+    parallel_provider.use_scan_barrier(parallel_worker_count);
     let before = directory_file_bytes(&provider_dir);
     let serial_cold = publish(&serial_index_root, &serial_registry);
     let parallel_cold = publish(&parallel_index_root, &parallel_registry);
@@ -357,7 +363,19 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     );
     assert_eq!(parallel_cold.sources, serial_cold.sources);
     assert_inventory_work(&serial_provider, DATABASES, 1, 2, 1, DATABASES, DATABASES);
-    assert_inventory_work(&parallel_provider, DATABASES, 4, 2, 1, DATABASES, DATABASES);
+    assert_inventory_work(
+        &parallel_provider,
+        DATABASES,
+        parallel_worker_count,
+        2,
+        1,
+        DATABASES,
+        DATABASES,
+    );
+    assert_eq!(
+        parallel_provider.state.lock().unwrap().peak_scans,
+        parallel_worker_count
+    );
 
     serial_provider.reset_scan_activity();
     parallel_provider.clear_scan_barrier();
@@ -385,7 +403,7 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_inventory_work(
         &parallel_provider,
         DATABASES * 2,
-        4,
+        parallel_worker_count,
         4,
         2,
         DATABASES * 2,
@@ -423,7 +441,7 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_inventory_work(
         &parallel_provider,
         DATABASES * 3,
-        4,
+        parallel_worker_count,
         6,
         3,
         DATABASES * 3,
@@ -457,7 +475,7 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_inventory_work(
         &parallel_provider,
         DATABASES * 3 + DATABASES - 1,
-        4,
+        parallel_worker_count,
         8,
         4,
         DATABASES * 3 + DATABASES - 1,
@@ -737,6 +755,14 @@ fn writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+fn effective_test_leaf_worker_count(requested_workers: usize, leaf_count: usize) -> usize {
+    requested_workers
+        .min(leaf_count)
+        .min(source_backed_leaf_worker_budget(
+            writer_options().indexer_threads,
+        ))
 }
 
 fn active_wal_database(path: &Path, body: &str) -> Connection {
