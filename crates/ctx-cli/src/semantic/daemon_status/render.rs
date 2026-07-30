@@ -487,6 +487,11 @@ pub(in crate::semantic) fn render_daemon_prepare_uninstall_receipt(
     report: &Value,
 ) -> Document {
     let complete = report.get("ok").and_then(Value::as_bool) == Some(true)
+        && report.get("scope").and_then(Value::as_str) == Some("installation")
+        && report
+            .get("installation_quiescent")
+            .and_then(Value::as_bool)
+            == Some(true)
         && report.get("daemon_enabled").and_then(Value::as_bool) == Some(false)
         && report.get("daemon_running").and_then(Value::as_bool) == Some(false)
         && report.get("owner_lock_released").and_then(Value::as_bool) == Some(true)
@@ -495,7 +500,8 @@ pub(in crate::semantic) fn render_daemon_prepare_uninstall_receipt(
         && report
             .get("coordination_state_removed")
             .and_then(Value::as_bool)
-            == Some(true);
+            == Some(true)
+        && report.get("binary_retained").and_then(Value::as_bool) == Some(true);
     let mut document = outcome(
         context,
         Outcome {
@@ -510,7 +516,7 @@ pub(in crate::semantic) fn render_daemon_prepare_uninstall_receipt(
                 "Daemon uninstall preparation is incomplete"
             },
             detail: Some(if complete {
-                "The daemon is disabled and stopped, and its supervisor registration was removed."
+                "All registered daemon roots are disabled and stopped, and the singleton supervisor registration was removed."
             } else {
                 "One or more lifecycle resources still need cleanup."
             }),
@@ -767,6 +773,16 @@ fn supervisor_persistence_issue(supervisor: &Value) -> Option<String> {
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    if supervisor
+        .pointer("/environment_snapshot/restart_required")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Some(
+            "native supervisor environment changed; run `ctx daemon enable` to install the current nonsecret snapshot and restart"
+                .to_owned(),
+        );
+    }
     if status == "installed"
         && supervisor
             .get("registration_verified")

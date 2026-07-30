@@ -1,7 +1,11 @@
 use super::*;
 
 #[cfg(target_os = "freebsd")]
-pub(super) fn install_native_supervisor(_data_root: &Path, _executable: &Path) -> Result<PathBuf> {
+pub(super) fn install_native_supervisor(
+    _data_root: &Path,
+    _executable: &Path,
+    _environment: &SupervisorEnvironmentSnapshot,
+) -> Result<PathBuf> {
     Err(anyhow!(native_supervisor_limitation()))
 }
 
@@ -34,7 +38,11 @@ pub(super) fn start_native_supervisor(_data_root: &Path) -> Result<()> {
     target_os = "freebsd",
     windows
 )))]
-pub(super) fn install_native_supervisor(_data_root: &Path, _executable: &Path) -> Result<PathBuf> {
+pub(super) fn install_native_supervisor(
+    _data_root: &Path,
+    _executable: &Path,
+    _environment: &SupervisorEnvironmentSnapshot,
+) -> Result<PathBuf> {
     Err(anyhow!(native_supervisor_limitation()))
 }
 

@@ -7,6 +7,10 @@ use std::{
     },
 };
 
+const SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE: &str = "CTX_SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE";
+const SUPERVISOR_ENV_ARTIFACT_PROBE_TEST: &str =
+    "semantic::daemon_supervisor::tests::native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls";
+
 #[derive(Default)]
 struct FakeSupervisorState {
     registered: bool,
@@ -44,7 +48,12 @@ impl NativeSupervisorBackend for FakeSupervisorBackend {
         Ok(Some(data_root.join("fake-native-registration")))
     }
 
-    fn install(&self, data_root: &Path, _executable: &Path) -> Result<PathBuf> {
+    fn install(
+        &self,
+        data_root: &Path,
+        _executable: &Path,
+        _environment: &SupervisorEnvironmentSnapshot,
+    ) -> Result<PathBuf> {
         {
             let mut state = self.state.lock().unwrap();
             state.installs += 1;
@@ -103,7 +112,8 @@ fn systemd_unit_is_persistent_and_restart_on_failure() {
     let unit = linux_systemd_unit(
         Path::new("/home/user/.local/bin/ctx"),
         Path::new("/home/user/.local/share/ctx"),
-    );
+    )
+    .unwrap();
     assert!(unit.contains("Restart=on-failure"));
     assert!(unit.contains("WantedBy=default.target"));
     assert!(unit.contains("ExecStart=/usr/bin/env -i "));
@@ -124,7 +134,8 @@ fn launch_agent_plist_is_persistent_sanitized_and_gui_registration_is_identity_b
     let plist = launch_agent_plist(
         Path::new("/Users/test/Library/Application Support/ctx/ctx"),
         Path::new("/Users/test/Library/Application Support/ctx/data"),
-    );
+    )
+    .unwrap();
     assert!(plist.contains("<key>Label</key><string>rs.ctx.daemon</string>"));
     assert!(plist.contains("<key>RunAtLoad</key><true/>"));
     assert!(plist.contains("<key>KeepAlive</key>"));
@@ -143,7 +154,8 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
     let script = windows_sanitized_daemon_script(
         Path::new(r"C:\Program Files\ctx\ctx.exe"),
         Path::new(r"C:\Users\test\AppData\Local\ctx"),
-    );
+    )
+    .unwrap();
     assert!(script.contains("EnvironmentVariables.Clear()"));
     assert!(script.contains("UseShellExecute=$false"));
     assert!(!script.contains("CTX_RELEASE_"));
@@ -155,7 +167,8 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
         Path::new(r"C:\Windows"),
         "S-1-5-21-1000",
         r"\ctx-daemon-S-1-5-21-1000",
-    );
+    )
+    .unwrap();
     assert!(windows_task_registration_matches(
         &xml,
         Path::new(r"C:\Program Files\ctx\ctx.exe"),
@@ -163,7 +176,8 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
         Path::new(r"C:\Windows"),
         "S-1-5-21-1000",
         r"\ctx-daemon-S-1-5-21-1000",
-    ));
+    )
+    .unwrap());
     assert!(xml.contains("<LogonTrigger>"));
     assert!(xml.contains("<UserId>S-1-5-21-1000</UserId>"));
     assert!(xml.contains("<RestartOnFailure>"));
@@ -175,7 +189,8 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
         Path::new(r"C:\Windows"),
         "S-1-5-21-1000",
         r"\ctx-daemon-S-1-5-21-1000",
-    ));
+    )
+    .unwrap());
     assert_eq!(
         windows_task_name("S-1-5-21-1000"),
         r"\ctx-daemon-S-1-5-21-1000"
@@ -185,6 +200,74 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
     assert!(state_script.contains("-TaskName 'ctx-daemon-S-1-5-21-1000'"));
     assert_eq!(parse_windows_task_state(b"4\r\n"), Some(4));
     assert_ne!(parse_windows_task_state(b"3\r\n"), Some(4));
+}
+
+#[test]
+fn native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls() -> Result<()> {
+    let forbidden = [
+        "CTX_PRO_HELPER",
+        "CTX_SEMANTIC_MODEL_ONNX",
+        "CTX_RELEASE_CONFIGURED_AUTHORITY",
+        "CTX_RELEASE_METADATA_URL",
+        "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+        "CTX_RELEASE_METADATA_SIGNATURE_URL",
+        "CTX_RELEASE_PUBLIC_KEY",
+        "CTX_RELEASE_SIGNATURE",
+        "CTX_RELEASE_VERSION",
+        "GITHUB_TOKEN",
+    ];
+    if env::var(SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE).as_deref() != Ok("final") {
+        let mut child = Command::new(env::current_exe()?);
+        child
+            .args(["--exact", SUPERVISOR_ENV_ARTIFACT_PROBE_TEST, "--nocapture"])
+            .env(SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE, "final");
+        for name in forbidden {
+            child.env(name, format!("secret-value-for-{name}"));
+        }
+        assert!(child.status()?.success());
+        return Ok(());
+    }
+
+    let executable = Path::new("/opt/ctx/bin/ctx");
+    let data_root = Path::new("/tmp/ctx-native-supervisor-environment");
+    let systemd = linux_systemd_unit(executable, data_root)?;
+    let launchd = launch_agent_plist(executable, data_root)?;
+    let windows = windows_sanitized_daemon_script(executable, data_root)?;
+    for name in forbidden {
+        let value = format!("secret-value-for-{name}");
+        for artifact in [&systemd, &launchd, &windows] {
+            assert!(!artifact.contains(name), "{name} leaked into {artifact}");
+            assert!(
+                !artifact.contains(&value),
+                "{name} value leaked into {artifact}"
+            );
+        }
+    }
+
+    env::set_var("CODEX_HOME", "line\nbreak");
+    assert!(linux_systemd_unit(executable, data_root).is_err());
+    assert!(launch_agent_plist(executable, data_root).is_err());
+    assert!(windows_sanitized_daemon_script(executable, data_root).is_err());
+    assert!(windows_task_xml(
+        executable,
+        data_root,
+        Path::new(r"C:\Windows"),
+        "S-1-5-21-1000",
+        r"\ctx-daemon-S-1-5-21-1000",
+    )
+    .is_err());
+    let hostile_root = Path::new("/tmp/ctx\ninjected-directive");
+    assert!(linux_systemd_unit(executable, hostile_root).is_err());
+    assert!(launch_agent_plist(executable, hostile_root).is_err());
+    assert!(windows_task_xml(
+        executable,
+        hostile_root,
+        Path::new(r"C:\Windows"),
+        "S-1-5-21-1000",
+        r"\ctx-daemon-S-1-5-21-1000",
+    )
+    .is_err());
+    Ok(())
 }
 
 #[test]
@@ -254,6 +337,15 @@ fn concurrent_recovery_revalidates_registration_under_the_installation_lock() ->
     assert_eq!(receipt["registration_verified"], true);
     assert_eq!(receipt["live_owner_verified"], true);
     assert_eq!(receipt["owner_pid"], 4_242);
+    assert_eq!(receipt["environment_snapshot"]["schema_version"], 1);
+    assert!(receipt["environment_snapshot"]["captured_at_ms"]
+        .as_i64()
+        .is_some());
+    assert!(receipt["environment_snapshot"]["sha256"]
+        .as_str()
+        .is_some_and(|value| value.len() == 64));
+    assert_eq!(receipt["environment_snapshot"]["values_exposed"], false);
+    assert!(receipt["environment_snapshot"].get("values").is_none());
     Ok(())
 }
 
@@ -306,6 +398,7 @@ fn status_revalidates_registration_and_live_owner_instead_of_replaying_receipt()
         &executable,
         backend.artifact_path(temp.path())?,
         4_242,
+        Some(supervisor_environment_snapshot()?.contract_report()),
     )?;
 
     backend.state.lock().unwrap().live_owner = Some(7_331);
@@ -327,6 +420,41 @@ fn status_revalidates_registration_and_live_owner_instead_of_replaying_receipt()
     assert_eq!(stale["status"], "stale_registration");
     assert_eq!(stale["registration_verified"], false);
     assert_eq!(stale["live_owner_verified"], false);
+    Ok(())
+}
+
+#[test]
+fn status_preserves_installed_environment_hash_and_flags_current_mismatch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let backend = FakeSupervisorBackend::with_registration(Some(4_242));
+    write_installed_receipt(
+        temp.path(),
+        &executable,
+        backend.artifact_path(temp.path())?,
+        4_242,
+        Some(supervisor_environment_snapshot()?.contract_report()),
+    )?;
+    let receipt_path =
+        super::super::paths_status::daemon_root_path(temp.path()).join("supervisor.json");
+    let mut installed: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    installed["environment_snapshot"]["sha256"] = json!("0".repeat(64));
+    installed["environment_snapshot"]["captured_at_ms"] = json!(1234);
+    super::super::paths_status::write_private_json_file(&receipt_path, &installed)?;
+
+    let report = revalidated_supervisor_report_with(temp.path(), &backend);
+    assert_eq!(
+        report["environment_snapshot"]["sha256"],
+        "0".repeat(64),
+        "status must retain the installed snapshot hash"
+    );
+    assert_eq!(report["environment_snapshot"]["captured_at_ms"], 1234);
+    assert_eq!(report["environment_snapshot"]["restart_required"], true);
+    assert_ne!(
+        report["environment_snapshot"]["current_sha256"],
+        report["environment_snapshot"]["sha256"]
+    );
+    assert_eq!(report["environment_snapshot"]["values_exposed"], false);
     Ok(())
 }
 

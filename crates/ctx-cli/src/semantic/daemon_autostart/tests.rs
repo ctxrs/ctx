@@ -134,6 +134,22 @@ fn installation_acknowledgements_ignore_stale_attempts_and_stopped_crashes() -> 
 }
 
 #[test]
+fn installation_root_discovery_is_all_root_sorted_and_deduplicated() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let registrations = temp.path().join("acks");
+    write_installation_registration(&registrations, "z-root", "live", None, process::id())?;
+    write_installation_registration(&registrations, "a-root", "live", None, process::id())?;
+    let duplicate = fs::read(registrations.join("a-root.json"))?;
+    fs::write(registrations.join("a-root-duplicate.json"), duplicate)?;
+
+    assert_eq!(
+        registered_installation_daemon_roots_from(&registrations)?,
+        vec![registrations.join("a-root"), registrations.join("z-root")]
+    );
+    Ok(())
+}
+
+#[test]
 fn incomplete_or_malformed_current_quiescence_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let registrations = temp.path().join("acks");
@@ -291,6 +307,144 @@ fn configured_autostart_child_inherits_source_refresh_only_mode() {
         .and_then(std::ffi::OsStr::to_str);
 
     assert_eq!(mode, Some("source-refresh-only"));
+}
+
+#[test]
+fn mismatched_live_binary_never_joins_and_returns_one_actionable_handoff_command() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _lock = DaemonLock::acquire(temp.path())?
+        .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
+    let replacement = temp.path().join("replacement-ctx");
+    fs::write(&replacement, b"different ctx image")?;
+
+    let error = handoff_mismatched_daemon_owner(temp.path(), &replacement)
+        .expect_err("a different binary image must not join the live owner");
+    let message = error.to_string();
+    assert!(message.contains("different binary image"), "{message}");
+    assert_eq!(
+        message
+            .matches("ctx daemon disable --prepare-uninstall")
+            .count(),
+        1,
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn autostart_surfaces_only_the_binary_handoff_recovery_command() -> Result<()> {
+    struct RestoreEnvironment {
+        ci: Option<std::ffi::OsString>,
+        executable: Option<std::ffi::OsString>,
+    }
+    impl Drop for RestoreEnvironment {
+        fn drop(&mut self) {
+            match self.ci.take() {
+                Some(value) => env::set_var("CI", value),
+                None => env::remove_var("CI"),
+            }
+            match self.executable.take() {
+                Some(value) => env::set_var("CTX_DAEMON_AUTOSTART_EXE", value),
+                None => env::remove_var("CTX_DAEMON_AUTOSTART_EXE"),
+            }
+        }
+    }
+
+    let _environment_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _restore = RestoreEnvironment {
+        ci: env::var_os("CI"),
+        executable: env::var_os("CTX_DAEMON_AUTOSTART_EXE"),
+    };
+    let temp = tempfile::tempdir()?;
+    let _lock = DaemonLock::acquire(temp.path())?
+        .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
+    let replacement = temp.path().join("replacement-ctx");
+    fs::write(&replacement, b"different ctx image")?;
+    env::set_var("CI", "1");
+    env::set_var("CTX_DAEMON_AUTOSTART_EXE", replacement);
+
+    let error = autostart_daemon_and_wait(
+        temp.path(),
+        &AppConfig::default(),
+        DaemonTriggerCommandArg::Search,
+    )
+    .expect_err("a mismatched live image must fail through the public autostart path");
+    let message = error.to_string();
+    assert_eq!(
+        message
+            .matches("ctx daemon disable --prepare-uninstall")
+            .count(),
+        1,
+        "{message}"
+    );
+    assert!(!message.contains("ctx daemon status"), "{message}");
+    assert!(!message.contains("ctx daemon run"), "{message}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_binary_owner_uses_cooperative_supervisor_handoff_before_releasing_lock() -> Result<()> {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        os::unix::net::UnixListener,
+        sync::mpsc,
+    };
+
+    let temp = tempfile::Builder::new()
+        .prefix("ctx-handoff-")
+        .tempdir_in("/tmp")?;
+    let owner_lock = DaemonLock::acquire(temp.path())?
+        .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
+    let replacement = temp.path().join("replacement-ctx");
+    fs::write(&replacement, b"different ctx image")?;
+
+    let socket_path = temp.path().join("source-refresh.sock");
+    let listener = UnixListener::bind(&socket_path)?;
+    let token = "0123456789abcdef0123456789abcdef";
+    write_private_json_file(
+        &daemon_root_path(temp.path()).join("source-refresh-endpoint.json"),
+        &json!({
+            "schema_version": 1,
+            "transport": "unix",
+            "path": socket_path,
+            "token": token,
+            "pid": process::id(),
+        }),
+    )?;
+    let (request_tx, request_rx) = mpsc::channel();
+    let owner = std::thread::spawn(move || -> Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        let mut request = String::new();
+        BufReader::new(stream.try_clone()?).read_line(&mut request)?;
+        let request: Value = serde_json::from_str(&request)?;
+        request_tx.send(request.clone()).ok();
+        assert_eq!(request["op"], "supervisor_handoff");
+        assert_eq!(request["token"], token);
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&json!({
+                "ok": true,
+                "schema_version": 1,
+                "supervisor_handoff": "accepted",
+                "pid": process::id(),
+            }))?
+        )?;
+        stream.flush()?;
+        drop(stream);
+        drop(owner_lock);
+        Ok(())
+    });
+
+    handoff_mismatched_daemon_owner(temp.path(), &replacement)?;
+    let request = request_rx.recv_timeout(StdDuration::from_secs(1))?;
+    assert_eq!(request["op"], "supervisor_handoff");
+    assert!(!daemon_lock_is_active(temp.path()));
+    owner.join().expect("join cooperative handoff owner")?;
+    Ok(())
 }
 
 #[cfg(unix)]

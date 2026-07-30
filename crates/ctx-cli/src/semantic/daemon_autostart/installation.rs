@@ -20,6 +20,10 @@ pub(super) struct InstallationDaemonRestart {
     pub(super) loop_interval_seconds: Option<u64>,
 }
 
+pub(super) struct InstallationDaemonQuiescence {
+    lock: fs::File,
+}
+
 impl InstallationDaemonLease {
     pub(in crate::semantic) fn acquire(
         data_root: &Path,
@@ -114,6 +118,22 @@ fn open_installation_daemon_quiescence_lock() -> Result<fs::File> {
     open_installation_daemon_quiescence_lock_at(&path)
 }
 
+pub(super) fn try_acquire_installation_daemon_quiescence(
+) -> Result<Option<InstallationDaemonQuiescence>> {
+    let lock = open_installation_daemon_quiescence_lock()?;
+    match fs2::FileExt::try_lock_exclusive(&lock) {
+        Ok(()) => Ok(Some(InstallationDaemonQuiescence { lock })),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error).context("acquire ctx installation daemon quiescence"),
+    }
+}
+
+impl Drop for InstallationDaemonQuiescence {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.lock);
+    }
+}
+
 pub(super) fn open_installation_daemon_quiescence_lock_at(path: &Path) -> Result<fs::File> {
     let (file, _) = open_or_create_pid_lock_file(path)
         .with_context(|| format!("open ctx installation daemon lock {}", path.display()))?;
@@ -174,36 +194,9 @@ pub(super) fn read_installation_daemon_restarts_from(
     attempt_id: &str,
     fail_on_live: bool,
 ) -> Result<Vec<InstallationDaemonRestart>> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read ctx daemon acknowledgements {}", root.display()));
-        }
-    };
+    let registrations = read_installation_daemon_registrations_from(root)?;
     let mut restarts = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect ctx daemon acknowledgement {}", path.display()))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(anyhow!(
-                "ctx daemon acknowledgement is not a regular file: {}",
-                path.display()
-            ));
-        }
-        let value = fs::read(&path)
-            .with_context(|| format!("read ctx daemon acknowledgement {}", path.display()))
-            .and_then(|bytes| {
-                serde_json::from_slice::<Value>(&bytes)
-                    .with_context(|| format!("parse ctx daemon acknowledgement {}", path.display()))
-            })?;
-        validate_installation_daemon_registration(&value, &path)?;
+    for (path, value) in registrations {
         let status = value["status"].as_str().unwrap_or_default();
         let registration_attempt = value.get("attempt_id").and_then(Value::as_str);
         if status == "quiescing" && registration_attempt == Some(attempt_id) {
@@ -276,6 +269,43 @@ pub(super) fn read_installation_daemon_restarts_from(
     Ok(restarts)
 }
 
+fn read_installation_daemon_registrations_from(root: &Path) -> Result<Vec<(PathBuf, Value)>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read ctx daemon acknowledgements {}", root.display()));
+        }
+    };
+    let mut registrations = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect ctx daemon acknowledgement {}", path.display()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "ctx daemon acknowledgement is not a regular file: {}",
+                path.display()
+            ));
+        }
+        let value = fs::read(&path)
+            .with_context(|| format!("read ctx daemon acknowledgement {}", path.display()))
+            .and_then(|bytes| {
+                serde_json::from_slice::<Value>(&bytes)
+                    .with_context(|| format!("parse ctx daemon acknowledgement {}", path.display()))
+            })?;
+        validate_installation_daemon_registration(&value, &path)?;
+        registrations.push((path, value));
+    }
+    registrations.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(registrations)
+}
+
 fn validate_installation_daemon_registration(value: &Value, path: &Path) -> Result<()> {
     let valid_status = matches!(
         value.get("status").and_then(Value::as_str),
@@ -302,58 +332,9 @@ fn validate_installation_daemon_registration(value: &Value, path: &Path) -> Resu
     Ok(())
 }
 
-pub(super) fn remove_installation_daemon_coordination_for(data_root: &Path) -> Result<()> {
+pub(super) fn remove_installation_daemon_coordination() -> Result<()> {
     let (_, root) = crate::upgrade::installation_daemon_coordination_paths()?;
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read ctx daemon coordination {}", root.display()))
-        }
-    };
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect ctx daemon coordination {}", path.display()))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(anyhow!(
-                "ctx daemon coordination is not a regular file: {}",
-                path.display()
-            ));
-        }
-        let value = fs::read(&path)
-            .with_context(|| format!("read ctx daemon coordination {}", path.display()))
-            .and_then(|bytes| {
-                serde_json::from_slice::<Value>(&bytes)
-                    .with_context(|| format!("parse ctx daemon coordination {}", path.display()))
-            })?;
-        validate_installation_daemon_registration(&value, &path)?;
-        if value
-            .get("data_root")
-            .and_then(Value::as_str)
-            .map(Path::new)
-            != Some(data_root)
-        {
-            continue;
-        }
-        let pid = value
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok())
-            .unwrap_or_default();
-        if matches!(
-            process_state(pid),
-            ProcessState::Running | ProcessState::Unknown
-        ) {
-            return Err(anyhow!(
-                "ctx daemon coordination still identifies a live process after lifecycle release"
-            ));
-        }
+    for (path, _) in read_installation_daemon_registrations_from(&root)? {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -363,5 +344,21 @@ pub(super) fn remove_installation_daemon_coordination_for(data_root: &Path) -> R
             }
         }
     }
+    let _ = fs::remove_dir(&root);
     Ok(())
+}
+
+pub(super) fn registered_installation_daemon_roots() -> Result<Vec<PathBuf>> {
+    let (_, root) = crate::upgrade::installation_daemon_coordination_paths()?;
+    registered_installation_daemon_roots_from(&root)
+}
+
+pub(super) fn registered_installation_daemon_roots_from(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut roots = read_installation_daemon_registrations_from(root)?
+        .into_iter()
+        .map(|(_, value)| PathBuf::from(value["data_root"].as_str().unwrap_or_default()))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
 }

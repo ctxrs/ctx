@@ -10,6 +10,7 @@ pub(super) fn revalidated_supervisor_report_with(
 ) -> Value {
     let mut report = stored_supervisor_report(data_root);
     append_forced_termination_identity_report(&mut report);
+    append_supervisor_environment_report(&mut report);
     if native_supervisor_product_authority_blocker()
         || report.get("kind").and_then(Value::as_str) != Some(native_supervisor_kind())
         || matches!(
@@ -76,6 +77,56 @@ pub(super) fn revalidated_supervisor_report_with(
         );
     }
     report
+}
+
+fn append_supervisor_environment_report(report: &mut Value) {
+    let current = supervisor_environment_contract_report();
+    let stored_sha256 = report
+        .pointer("/environment_snapshot/sha256")
+        .and_then(Value::as_str);
+    let current_sha256 = current.get("sha256").and_then(Value::as_str);
+    let native_registration = report.get("kind").and_then(Value::as_str)
+        == Some(native_supervisor_kind())
+        && !matches!(
+            report.get("status").and_then(Value::as_str),
+            Some("disabled" | "degraded")
+        );
+    let restart_required =
+        native_registration && (stored_sha256.is_none() || stored_sha256 != current_sha256);
+    let mut environment = report
+        .get("environment_snapshot")
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    if let Some(object) = environment.as_object_mut() {
+        object.insert(
+            "current_sha256".to_owned(),
+            current.get("sha256").cloned().unwrap_or(Value::Null),
+        );
+        object.insert(
+            "current_captured_names".to_owned(),
+            current
+                .get("captured_names")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        );
+        object.insert(
+            "current_observed_at_ms".to_owned(),
+            current
+                .get("captured_at_ms")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "current_error".to_owned(),
+            current.get("error").cloned().unwrap_or(Value::Null),
+        );
+        object.insert("restart_required".to_owned(), Value::Bool(restart_required));
+        object.insert("values_exposed".to_owned(), Value::Bool(false));
+    }
+    if let Some(object) = report.as_object_mut() {
+        object.insert("environment_snapshot".to_owned(), environment);
+    }
 }
 
 fn append_forced_termination_identity_report(report: &mut Value) {
