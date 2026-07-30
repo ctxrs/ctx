@@ -76,6 +76,7 @@ fn resolve_lingma_vscode(
         installed_settings_found |= base.is_some() || !base_allows_absent_profile_fallback;
         if base.is_some() {
             add_lingma_vscode_choice(
+                context.data_root(),
                 report,
                 discovered,
                 spec,
@@ -142,6 +143,7 @@ fn resolve_lingma_vscode(
                 }
             };
             add_lingma_vscode_choice(
+                context.data_root(),
                 report,
                 discovered,
                 spec,
@@ -155,6 +157,7 @@ fn resolve_lingma_vscode(
 
     if !installed_settings_found && path_presence(&default_db).suppresses_fallback() {
         push_lingma_source(
+            context.data_root(),
             report,
             discovered,
             spec,
@@ -242,6 +245,7 @@ fn read_vscode_lingma_choice(
 }
 
 fn add_lingma_vscode_choice(
+    data_root: Option<&Path>,
     report: &mut DiscoveryReport,
     discovered: &mut Vec<DiscoveredLingmaDatabase>,
     spec: &ProviderSourceSpec,
@@ -269,7 +273,7 @@ fn add_lingma_vscode_choice(
             return;
         }
     };
-    push_lingma_source(report, discovered, spec, path, lineage);
+    push_lingma_source(data_root, report, discovered, spec, path, lineage);
 }
 
 fn resolve_lingma_jetbrains(
@@ -353,7 +357,14 @@ fn resolve_lingma_jetbrains(
                         }
                         LingmaRootChoice::Unreconstructible(_) => continue,
                     };
-                    push_lingma_source(report, discovered, spec, path, lineage);
+                    push_lingma_source(
+                        context.data_root(),
+                        report,
+                        discovered,
+                        spec,
+                        path,
+                        lineage,
+                    );
                 }
             }
             Err(_) if path_presence(&config_root).suppresses_fallback() => {
@@ -381,6 +392,7 @@ fn resolve_lingma_jetbrains(
         };
         if let Some(path) = selected {
             push_lingma_source(
+                context.data_root(),
                 report,
                 discovered,
                 spec,
@@ -392,13 +404,14 @@ fn resolve_lingma_jetbrains(
 }
 
 fn push_lingma_source(
+    data_root: Option<&Path>,
     report: &mut DiscoveryReport,
     discovered: &mut Vec<DiscoveredLingmaDatabase>,
     spec: &ProviderSourceSpec,
     path: PathBuf,
     lineage: LingmaDatabaseCatalogLineage,
 ) {
-    let source = safe_native_source(spec, path, LINGMA_FORMAT);
+    let source = safe_native_source(data_root, spec, path, LINGMA_FORMAT);
     if push_source_candidate(&mut report.sources, source.clone()) {
         discovered.push(DiscoveredLingmaDatabase::new(source, lineage));
     } else {
