@@ -13,11 +13,13 @@ use crate::ui::{
     fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, RenderContext, Span,
     Token, Ui,
 };
-use crate::{StatusArgs, UsageStatusMode};
+use crate::StatusArgs;
 
 mod health;
+mod usage;
 
 use health::*;
+pub(crate) use usage::{malformed_config_failure, removed_cloud_config_failure, run_usage_action};
 
 pub(super) fn upgrade_report(config: &config::AppConfig) -> serde_json::Value {
     crate::upgrade::upgrade_diagnostics(config).report
@@ -77,11 +79,11 @@ pub(crate) fn run_status(
     ui: &mut Ui,
 ) -> Result<()> {
     if let Some(mode) = args.usage {
-        return run_usage_action(mode, &data_root, args.format.is_json(), quiet);
+        return run_usage_action(mode, &data_root, args.format.is_json(), quiet, ui);
     }
     let config_path = data_root.join(CONFIG_FILE);
     let Some(config) = load_status_config(&data_root) else {
-        return malformed_config_failure(args.format.is_json());
+        return malformed_config_failure(args.format.is_json(), ui);
     };
     let status = status_read_model(&data_root, &config)?;
     telemetry.initialized = Some(status.initialized);
@@ -339,130 +341,7 @@ fn load_status_config(data_root: &Path) -> Option<config::AppConfig> {
     config::AppConfig::load(data_root).ok()
 }
 
-pub(crate) fn run_usage_action(
-    mode: UsageStatusMode,
-    data_root: &std::path::Path,
-    json_output: bool,
-    quiet: bool,
-) -> Result<()> {
-    match mode {
-        UsageStatusMode::Enable => {
-            if config::set_local_usage_enabled(data_root, true).is_err() {
-                return usage_action_failure(
-                    mode,
-                    json_output,
-                    "usage_control_failed",
-                    "local usage enablement could not be changed",
-                );
-            }
-            let Ok(control) = config::read_local_usage_control(data_root) else {
-                return usage_action_failure(
-                    mode,
-                    json_output,
-                    "usage_control_failed",
-                    "local usage enablement could not be confirmed",
-                );
-            };
-            emit_usage_action(
-                mode,
-                json_output,
-                quiet,
-                json!({
-                    "persisted_enabled": control.persisted_enabled,
-                    "effective_enabled": control.effective_enabled,
-                    "environment_override": control.environment_override.as_str(),
-                }),
-            )
-        }
-        UsageStatusMode::Disable => {
-            if config::set_local_usage_enabled(data_root, false).is_err() {
-                return usage_action_failure(
-                    mode,
-                    json_output,
-                    "usage_control_failed",
-                    "local usage enablement could not be changed",
-                );
-            }
-            let Ok(control) = config::read_local_usage_control(data_root) else {
-                return usage_action_failure(
-                    mode,
-                    json_output,
-                    "usage_control_failed",
-                    "local usage enablement could not be confirmed",
-                );
-            };
-            emit_usage_action(
-                mode,
-                json_output,
-                quiet,
-                json!({
-                    "persisted_enabled": control.persisted_enabled,
-                    "effective_enabled": control.effective_enabled,
-                    "environment_override": control.environment_override.as_str(),
-                }),
-            )
-        }
-        UsageStatusMode::Reset => {
-            let store_state = match local_usage::reset(data_root) {
-                Ok(true) => "cleared",
-                Ok(false) => "missing",
-                Err(_) => {
-                    return usage_action_failure(
-                        mode,
-                        json_output,
-                        "usage_reset_failed",
-                        "local usage could not be reset",
-                    );
-                }
-            };
-            emit_usage_action(
-                mode,
-                json_output,
-                quiet,
-                json!({"store_state": store_state}),
-            )
-        }
-    }
-}
-
-pub(crate) fn malformed_config_failure(json_output: bool) -> Result<()> {
-    if json_output {
-        eprintln!(
-            "{}",
-            serde_json::to_string(&malformed_config_json())
-                .expect("malformed-config status errors contain only static JSON")
-        );
-    } else {
-        eprintln!("local_usage_config_unavailable: local usage configuration could not be read");
-    }
-    Err(crate::dispatch::rendered_cli_error())
-}
-
-pub(crate) fn removed_cloud_config_failure(json_output: bool) -> Result<()> {
-    if json_output {
-        eprintln!(
-            "{}",
-            serde_json::to_string(&json!({
-                "schema_version": 1,
-                "error": {
-                    "code": "removed_config_key",
-                    "config_key": "cloud.mode",
-                    "message": "cloud history configuration is no longer supported",
-                },
-                "local_only": true,
-                "read_only": true,
-            }))
-            .expect("removed-cloud status errors contain only static JSON")
-        );
-    } else {
-        eprintln!(
-            "removed_config_key: cloud.mode is no longer supported; remove it from config.toml"
-        );
-    }
-    Err(crate::dispatch::rendered_cli_error())
-}
-
-fn malformed_config_json() -> Value {
+pub(super) fn malformed_config_json() -> Value {
     json!({
         "schema_version": 1,
         "local_usage": compact_usage_health_json(&local_usage::UsageReport::config_error()),
@@ -480,78 +359,6 @@ fn compact_usage_health_json(report: &local_usage::UsageReport) -> Value {
         "retention_days": report.retention_days,
         "error": report.error,
     })
-}
-
-fn emit_usage_action(
-    mode: UsageStatusMode,
-    json_output: bool,
-    quiet: bool,
-    fields: Value,
-) -> Result<()> {
-    let mut action = fields.as_object().cloned().unwrap_or_default();
-    action.insert("action".to_owned(), json!(mode.as_str()));
-    action.insert("ok".to_owned(), json!(true));
-    if json_output {
-        print_json(json!({
-            "schema_version": 1,
-            "local_usage_action": action,
-            "local_only": true,
-            "read_only": false,
-        }))?;
-    } else if !quiet {
-        println!("local_usage_action: {}", mode.as_str());
-        match mode {
-            UsageStatusMode::Enable | UsageStatusMode::Disable => {
-                println!(
-                    "local_usage_persisted_enabled: {}",
-                    action["persisted_enabled"].as_bool().unwrap_or(false)
-                );
-                println!(
-                    "local_usage_effective_enabled: {}",
-                    action["effective_enabled"].as_bool().unwrap_or(false)
-                );
-                println!(
-                    "local_usage_environment_override: {}",
-                    action["environment_override"].as_str().unwrap_or("invalid")
-                );
-            }
-            UsageStatusMode::Reset => println!(
-                "local_usage_store: {}",
-                action["store_state"].as_str().unwrap_or("missing")
-            ),
-        }
-    }
-    Ok(())
-}
-
-fn usage_action_failure(
-    mode: UsageStatusMode,
-    json_output: bool,
-    code: &'static str,
-    message: &'static str,
-) -> Result<()> {
-    if json_output {
-        eprintln!(
-            "{}",
-            serde_json::to_string(&json!({
-                "schema_version": 1,
-                "local_usage_action": {
-                    "action": mode.as_str(),
-                    "ok": false,
-                    "error": {
-                        "code": code,
-                        "message": message,
-                    },
-                },
-                "local_only": true,
-                "read_only": false,
-            }))
-            .expect("usage action errors contain only static JSON")
-        );
-    } else {
-        eprintln!("{code}: {message}");
-    }
-    Err(crate::dispatch::rendered_cli_error())
 }
 
 #[cfg(test)]

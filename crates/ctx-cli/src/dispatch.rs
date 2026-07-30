@@ -146,7 +146,7 @@ pub(crate) fn run_cli() -> Result<()> {
         let Some(mode) = args.usage else {
             unreachable!("usage control mode was checked above");
         };
-        return run_usage_action(mode, &data_root, args.format.is_json(), quiet);
+        return run_usage_action(mode, &data_root, args.format.is_json(), quiet, &mut ui);
     }
     let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
     let mut analytics_draft = ClientOperationDraft::from_command(&cli.command, json_output);
@@ -159,10 +159,10 @@ pub(crate) fn run_cli() -> Result<()> {
                 if command_is_status_report(&cli.command)
                     && crate::config::is_removed_cloud_mode_error(&error) =>
             {
-                return removed_cloud_config_failure(json_output);
+                return removed_cloud_config_failure(json_output, &mut ui);
             }
             Err(_) if command_is_status_report(&cli.command) => {
-                return malformed_config_failure(json_output);
+                return malformed_config_failure(json_output, &mut ui);
             }
             Err(_) if matches!(&cli.command, CommandRoot::Stats(_)) => {
                 return malformed_stats_config_failure(json_output, &mut ui);
