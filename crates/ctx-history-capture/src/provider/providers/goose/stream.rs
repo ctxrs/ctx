@@ -9,8 +9,10 @@ use super::schema::{GooseNativeSchema, GooseSessionRow};
 
 mod identity;
 
-use identity::{goose_native_message_identity, goose_normalized_message_id_sql};
-pub(super) use identity::{goose_native_message_identity_at, goose_prepare_native_identity_index};
+pub(super) use identity::{
+    goose_native_message_identity, goose_native_message_identity_at,
+    goose_normalized_message_id_sql, goose_prepare_native_identity_index,
+};
 
 pub(super) fn goose_retained_length_expr(expressions: &[String]) -> String {
     expressions
@@ -21,10 +23,7 @@ pub(super) fn goose_retained_length_expr(expressions: &[String]) -> String {
 }
 
 pub(super) const GOOSE_NATIVE_DEFAULT_PAGE_ROWS: usize = 64;
-pub(super) const GOOSE_NATIVE_MAX_PAGE_ROWS: usize = 64;
 pub(super) const GOOSE_NATIVE_DEFAULT_PAGE_BYTES: u64 = 8 * 1024 * 1024;
-pub(super) const GOOSE_NATIVE_MAX_PAGE_BYTES: u64 = 8 * 1024 * 1024;
-pub(super) const GOOSE_NATIVE_MIN_PAGE_BYTES: u64 = 4 * 1024;
 pub(super) const GOOSE_NATIVE_MAX_RETAINED_CONTENT_BYTES: u64 = 8 * 1024 * 1024;
 const GOOSE_NATIVE_PAGE_ENVELOPE_BYTES: u64 = 2 * 1024;
 const GOOSE_NATIVE_PAGE_UNIT_OVERHEAD_BYTES: u64 = 1024;
@@ -34,36 +33,6 @@ const GOOSE_NATIVE_MAX_MESSAGE_ID_BYTES: u64 = 1_024;
 pub(super) struct GooseNativePageLimits {
     pub(super) rows: usize,
     pub(super) retained_bytes: u64,
-}
-
-impl GooseNativePageLimits {
-    pub(super) fn new(rows: usize, retained_bytes: u64) -> Result<Self> {
-        if rows == 0 || rows > GOOSE_NATIVE_MAX_PAGE_ROWS {
-            return Err(CaptureError::InvalidPayload(
-                format!(
-                    "Goose NativePath page row limit must be between 1 and {GOOSE_NATIVE_MAX_PAGE_ROWS}"
-                ),
-            ));
-        }
-        if !(GOOSE_NATIVE_MIN_PAGE_BYTES..=GOOSE_NATIVE_MAX_PAGE_BYTES).contains(&retained_bytes) {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Goose NativePath page byte limit must be between {GOOSE_NATIVE_MIN_PAGE_BYTES} and the frozen {GOOSE_NATIVE_MAX_PAGE_BYTES}-byte bound"
-            )));
-        }
-        let row_reserve = u64::try_from(rows)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(GOOSE_NATIVE_PAGE_UNIT_OVERHEAD_BYTES);
-        if retained_bytes <= GOOSE_NATIVE_PAGE_ENVELOPE_BYTES.saturating_add(row_reserve) {
-            return Err(CaptureError::InvalidPayload(
-                "Goose NativePath page byte limit cannot contain the requested row envelope"
-                    .to_owned(),
-            ));
-        }
-        Ok(Self {
-            rows,
-            retained_bytes,
-        })
-    }
 }
 
 impl Default for GooseNativePageLimits {
@@ -533,7 +502,7 @@ pub(super) fn goose_fetch_native_message_page(
             let logical_row_digest = content_json
                 .as_ref()
                 .map(|content_json| {
-                    super::content::goose_logical_row_digest(&[
+                    super::content::goose_message_record_digest(&[
                         parent_rowid.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
                         NativeSqliteValue::Integer(sqlite_rowid),
                         NativeSqliteValue::Integer(native_order),
@@ -607,34 +576,6 @@ fn goose_projection_page_budget(
     } else {
         available
     })
-}
-
-pub(super) fn goose_has_native_session_after(conn: &Connection, rowid: i64) -> Result<bool> {
-    conn.query_row(
-        "select exists(select 1 from sessions where rowid > ?1)",
-        [rowid],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|value| value != 0)
-    .map_err(CaptureError::from)
-}
-
-pub(super) fn goose_has_native_message_after(conn: &Connection, rowid: i64) -> Result<bool> {
-    conn.query_row(
-        "select exists(select 1 from messages where rowid > ?1)",
-        [rowid],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|value| value != 0)
-    .map_err(CaptureError::from)
-}
-
-pub(super) fn goose_has_any_native_message(conn: &Connection) -> Result<bool> {
-    conn.query_row("select exists(select 1 from messages)", [], |row| {
-        row.get::<_, i64>(0)
-    })
-    .map(|value| value != 0)
-    .map_err(CaptureError::from)
 }
 
 fn goose_message_id_uses_sql(schema: &GooseNativeSchema, alias: &str) -> String {

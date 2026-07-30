@@ -415,20 +415,15 @@ fn source_row_digest(label: &[u8], values: &[ValueRef<'_>]) -> Result<[u8; 32]> 
     Ok(hasher.finalize().into())
 }
 
-fn complete_content_record_digest(
-    rowid: i64,
-    values: &[ValueRef<'_>],
-) -> Result<CompleteContentBodyDigest> {
+fn complete_content_record_digest(values: &[ValueRef<'_>]) -> Result<CompleteContentBodyDigest> {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
     digest.update(
-        u64::try_from(values.len().saturating_add(1))
+        u64::try_from(values.len())
             .map_err(|_| CaptureError::SystemInvariant("Warp SQLite value count overflowed"))?
             .to_be_bytes(),
     );
-    digest.update([1]);
-    digest.update(rowid.to_be_bytes());
     for value in values {
         match value {
             ValueRef::Null => digest.update([0]),

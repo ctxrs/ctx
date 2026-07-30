@@ -18,7 +18,6 @@ use crate::{
     PROVIDER_MAX_TEXT_CHARS,
 };
 
-use super::schema::GooseSessionRow;
 use super::stream::{GooseRetainedContentClass, GooseRetainedMessage};
 
 pub(super) struct GooseOutputProjection {
@@ -358,13 +357,6 @@ pub(super) struct GooseNativeFileTouch {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct GooseNativeSession {
-    pub(super) sqlite_rowid: i64,
-    pub(super) native_identity: String,
-    pub(super) row: GooseSessionRow,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub(super) struct GooseNativeEvent {
     pub(super) sqlite_rowid: i64,
     pub(super) native_order: i64,
@@ -406,60 +398,6 @@ pub(super) fn goose_event_payload_hash(event: &GooseNativeEvent) -> String {
         digest.update(metadata.as_bytes());
     }
     format!("{:x}", digest.finalize())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GooseNativeExcludedOutput {
-    pub(super) sqlite_rowid: i64,
-    pub(super) native_order: i64,
-    pub(super) native_identity: String,
-    pub(super) identity_degraded: bool,
-    pub(super) session_identity: String,
-    pub(super) role: String,
-    pub(super) content_bytes: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum GooseNativeRejectionKind {
-    EmptySessionIdentity,
-    OversizedSession,
-    MissingSession,
-    MalformedJson,
-    UnsupportedJsonRoot,
-    NonObjectBlock,
-    UnknownBlockType,
-    DuplicateBlockType,
-    OversizedRetainedContent,
-    UnsupportedStorageClass,
-    RetainedParseMismatch,
-}
-
-impl GooseNativeRejectionKind {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::EmptySessionIdentity => "empty_session_identity",
-            Self::OversizedSession => "oversized_session",
-            Self::MissingSession => "missing_session",
-            Self::MalformedJson => "malformed_json",
-            Self::UnsupportedJsonRoot => "unsupported_json_root",
-            Self::NonObjectBlock => "non_object_block",
-            Self::UnknownBlockType => "unknown_block_type",
-            Self::DuplicateBlockType => "duplicate_block_type",
-            Self::OversizedRetainedContent => "oversized_retained_content",
-            Self::UnsupportedStorageClass => "unsupported_storage_class",
-            Self::RetainedParseMismatch => "retained_parse_mismatch",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GooseNativeRejection {
-    pub(super) sqlite_rowid: i64,
-    pub(super) native_order: Option<i64>,
-    pub(super) native_identity: String,
-    pub(super) session_identity: Option<String>,
-    pub(super) kind: GooseNativeRejectionKind,
-    pub(super) reason: String,
 }
 
 pub(super) fn normalize_goose_native_message(

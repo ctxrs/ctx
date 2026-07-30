@@ -1,19 +1,21 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
+    io,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use rusqlite::{limits::Limit, Connection, OptionalExtension};
+use rusqlite::{limits::Limit, params_from_iter, Connection};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -26,12 +28,20 @@ use super::{
     warp_message_content_at,
 };
 use crate::{
-    common::io::ProviderSourceRoot,
+    common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     complete_content::sqlite::sqlite_logical_record_digest,
     native_source::NativeSqliteValue,
+    provider::source_backed::{
+        family::document::{
+            ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
+            DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+        },
+        hydration_failure, route_error, SourceBackedRouteError, SourceBackedRouteErrorKind,
+        SourceBackedRouteResult,
+    },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteLogicalSnapshot, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
         SqliteSourceReadSnapshot,
     },
     CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -44,10 +54,11 @@ const WARP_NATIVE_ITEM_NAMESPACE: &str = "warp.task-message";
 const WARP_LOGICAL_SESSION_KIND: &str = "warp-conversation";
 const WARP_LOGICAL_ITEM_KIND: &str = "warp-task-message";
 const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
-const WARP_SOURCE_REVISION_KIND: &str = "warp-sqlite-snapshot-observation-v0";
-const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-v0";
-const WARP_TASK_MESSAGE_RELATION: &str = "agent_tasks.task-message.v1";
-const WARP_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.warp.source-backed.revision.v0\0";
+const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v1";
+const WARP_TASK_MESSAGE_RELATION: &str = "agent_tasks.task-message.v2";
+const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
+const WARP_MISSING_TREE_DOMAIN: &[u8] = b"ctx.warp.missing-logical-tree.v1\0";
+const HYDRATION_NATIVE_KEY_BATCH: usize = 256;
 
 #[derive(Debug, Error)]
 pub(crate) enum WarpSourceBackedErrorV0 {
@@ -61,14 +72,8 @@ pub(crate) enum WarpSourceBackedErrorV0 {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    SqliteSourceAccess(#[from] SqliteSourceAccessError),
     #[error("Warp selected surface key is empty")]
     EmptySurfaceKey,
-    #[error("Warp selected surface key {0:?} appears more than once")]
-    DuplicateSurfaceKey(String),
-    #[error("Warp SQLite source changed while its read snapshot was projected")]
-    SourceChanged,
     #[error("Warp source-backed scan count overflow")]
     CountOverflow,
     #[error("Warp source-backed parser counts do not match its emitted records")]
@@ -79,22 +84,12 @@ pub(crate) enum WarpSourceBackedErrorV0 {
     EmptyLexicalRecord,
     #[error("locator is not a Warp task-message row")]
     InvalidLocator,
-    #[error("Warp locator source revision no longer matches the selected database")]
-    StaleSourceRevision,
-    #[error("Warp locator task row no longer exists")]
-    MissingTaskRow,
     #[error("Warp locator task row digest no longer matches")]
     StaleTaskRow,
-    #[error("Warp locator message no longer exists in its task row")]
-    MissingTaskMessage,
 }
 
 pub(crate) type WarpSourceBackedResultV0<T> = Result<T, WarpSourceBackedErrorV0>;
 
-/// One source selected by the installed-surface discovery contract.
-///
-/// `surface_key` is stable catalog lineage such as `linux:stable:gui` or
-/// `windows:preview:tui`; it is not a physical path or mutable file identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WarpSourceSelectionV0 {
     path: PathBuf,
@@ -125,296 +120,298 @@ impl WarpSourceSelectionV0 {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct WarpSourceBackedSnapshotV0 {
-    pub(crate) source: SourceKey,
-    pub(crate) certified_source: CertifiedSource,
-    pub(crate) documents: Vec<LexicalDocument>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WarpHydratedRecordV0 {
-    pub(crate) provider_bytes: Vec<u8>,
-    pub(crate) event_type: String,
-    pub(crate) native_record_id: String,
-}
-
-struct OpenedWarpSource {
-    selection: WarpSourceSelectionV0,
-    source: SourceKey,
-    canonical_path: PathBuf,
-    source_root: ProviderSourceRoot,
-    sqlite_authority: SqliteSourceDirectoryAuthority,
-    database_name: OsString,
-    family_snapshot: SqliteSourceEvidence,
-    read_snapshot: SqliteSourceReadSnapshot,
-}
-
-struct ProjectedWarpSource {
-    certified_source: CertifiedSource,
-    documents: Vec<LexicalDocument>,
-}
-
-struct FinishedWarpSource {
-    selection: WarpSourceSelectionV0,
-    source: SourceKey,
-    canonical_path: PathBuf,
-    source_root: ProviderSourceRoot,
-    sqlite_authority: SqliteSourceDirectoryAuthority,
-    database_name: OsString,
-    family_snapshot: SqliteSourceEvidence,
-    _root_evidence: SqliteSourceEvidence,
-}
-
-#[cfg(test)]
-thread_local! {
-    static BEFORE_COMPOUND_REVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) fn set_before_compound_revalidation(hook: Option<Box<dyn FnOnce()>>) {
-    BEFORE_COMPOUND_REVALIDATION.with(|slot| {
-        *slot.borrow_mut() = hook;
-    });
-}
-
-#[cfg(test)]
-fn before_compound_revalidation() {
-    BEFORE_COMPOUND_REVALIDATION.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
-#[cfg(not(test))]
-fn before_compound_revalidation() {}
-
-pub(crate) fn project_selected_warp_sources_v0(
-    selections: &[WarpSourceSelectionV0],
-) -> WarpSourceBackedResultV0<Vec<WarpSourceBackedSnapshotV0>> {
-    let mut selected = BTreeSet::new();
-    let mut opened = Vec::with_capacity(selections.len());
-    for selection in selections {
-        if !selected.insert(selection.surface_key.clone()) {
-            return Err(WarpSourceBackedErrorV0::DuplicateSurfaceKey(
-                selection.surface_key.clone(),
-            ));
-        }
-        opened.push(open_warp_source(selection.clone())?);
-    }
-
-    // All selected databases remain pinned while every source is projected.
-    // Nothing provider-wide is returned until every guard has finished and the
-    // complete DB/WAL/SHM/journal family has been revalidated as one set.
-    let projected = opened
-        .iter()
-        .map(project_opened_warp_source)
-        .collect::<WarpSourceBackedResultV0<Vec<_>>>()?;
-    let finished = opened
-        .into_iter()
-        .map(finish_warp_source)
-        .collect::<WarpSourceBackedResultV0<Vec<_>>>()?;
-
-    before_compound_revalidation();
-    if !finished
-        .iter()
-        .map(revalidate_finished_warp_source)
-        .collect::<WarpSourceBackedResultV0<Vec<_>>>()?
-        .into_iter()
-        .all(|current| current)
-    {
-        return Err(WarpSourceBackedErrorV0::SourceChanged);
-    }
-
-    Ok(finished
-        .into_iter()
-        .zip(projected)
-        .map(|(source, projected)| WarpSourceBackedSnapshotV0 {
-            source: source.source,
-            certified_source: projected.certified_source,
-            documents: projected.documents,
-        })
-        .collect())
-}
+type WarpEventHydrator = fn(
+    &WarpSourceSelectionV0,
+    &EventHydrationRequest,
+) -> Result<HydratedProviderRecord, HydrationFailure>;
 
 pub(crate) fn project_warp_source_backed_v0(
     selection: WarpSourceSelectionV0,
-) -> WarpSourceBackedResultV0<WarpSourceBackedSnapshotV0> {
-    project_selected_warp_sources_v0(std::slice::from_ref(&selection))?
-        .pop()
-        .ok_or(WarpSourceBackedErrorV0::ScanCountMismatch)
-}
-
-fn open_warp_source(
-    selection: WarpSourceSelectionV0,
-) -> WarpSourceBackedResultV0<OpenedWarpSource> {
-    let source = warp_source_key(&selection)?;
-    let canonical_path = fs::canonicalize(selection.path())?;
-    let (source_root, sqlite_authority, database_name) =
-        retain_warp_sqlite_authority(&canonical_path)?;
-    let read_snapshot = open_root_handle_sqlite_source_snapshot(&sqlite_authority, &database_name)?;
-    let family_snapshot = read_snapshot.evidence().clone();
-    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
-    read_snapshot
-        .connection()?
-        .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    read_snapshot
-        .connection()?
-        .busy_timeout(std::time::Duration::from_secs(5))?;
-    source_root.revalidate()?;
-    Ok(OpenedWarpSource {
+    hydrate_event: WarpEventHydrator,
+) -> WarpSourceBackedResultV0<WarpReplacementTreeAdapter> {
+    Ok(WarpReplacementTreeAdapter {
+        source: warp_source_key(&selection)?,
         selection,
-        source,
-        canonical_path,
-        source_root,
-        sqlite_authority,
-        database_name,
-        family_snapshot,
-        read_snapshot,
+        hydrate_event,
     })
-}
-
-fn project_opened_warp_source(
-    opened: &OpenedWarpSource,
-) -> WarpSourceBackedResultV0<ProjectedWarpSource> {
-    let opening_revision = sqlite_evidence_revision_component(&opened.family_snapshot);
-    let revision_digest = source_revision_digest(&opened.source, &opening_revision);
-    let mut sink = WarpProjectionSink::new(
-        opened.source.clone(),
-        revision_digest,
-        opened.canonical_path.to_string_lossy().into_owned(),
-    );
-    let native_scan =
-        scan_warp_source_backed_connection(opened.read_snapshot.connection()?, &mut sink)?;
-    let counts = scan_counts(&native_scan, &sink)?;
-    let content_digest = parse_hex_digest(&native_scan.source_integrity_digest)?;
-    let certified_source = CertifiedSource::certify(
-        SourceObservation::new(
-            opened.source.clone(),
-            WARP_SOURCE_REVISION_KIND,
-            opening_revision.clone().into_bytes(),
-        )?,
-        SourceObservation::new(
-            opened.source.clone(),
-            WARP_SOURCE_REVISION_KIND,
-            opening_revision.into_bytes(),
-        )?,
-        WARP_SOURCE_BACKED_PARSER_REVISION,
-        content_digest,
-        counts,
-    )?;
-    Ok(ProjectedWarpSource {
-        certified_source,
-        documents: sink.documents,
-    })
-}
-
-fn finish_warp_source(opened: OpenedWarpSource) -> WarpSourceBackedResultV0<FinishedWarpSource> {
-    let OpenedWarpSource {
-        selection,
-        source,
-        canonical_path,
-        source_root,
-        sqlite_authority,
-        database_name,
-        family_snapshot,
-        read_snapshot,
-    } = opened;
-    let root_evidence = read_snapshot.finish()?;
-    Ok(FinishedWarpSource {
-        selection,
-        source,
-        canonical_path,
-        source_root,
-        sqlite_authority,
-        database_name,
-        family_snapshot,
-        _root_evidence: root_evidence,
-    })
-}
-
-fn revalidate_finished_warp_source(source: &FinishedWarpSource) -> WarpSourceBackedResultV0<bool> {
-    source.source_root.revalidate()?;
-    if fs::canonicalize(source.selection.path())? != source.canonical_path {
-        return Ok(false);
-    }
-    let current =
-        open_root_handle_sqlite_source_snapshot(&source.sqlite_authority, &source.database_name)?;
-    let current_evidence = current.evidence().clone();
-    current.finish()?;
-    source.source_root.revalidate()?;
-    Ok(current_evidence == source.family_snapshot)
 }
 
 pub(crate) fn resolve_warp_locator_v0(
     selection: &WarpSourceSelectionV0,
-    locator: &SourceRecordLocator,
-) -> WarpSourceBackedResultV0<WarpHydratedRecordV0> {
-    locator.validate_contract()?;
-    let source = warp_source_key(selection)?;
-    if !source.exact_descriptor_eq(locator.source())
-        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-    {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    }
-    let (rowid, message_ordinal) = decode_task_message_coordinate(locator)?;
-    let expected_revision = locator
-        .certified_source_revision_digest()
-        .ok_or(WarpSourceBackedErrorV0::InvalidLocator)?;
-    let opened = open_warp_source(selection.clone())?;
-    if &source_revision_digest(
-        &source,
-        &sqlite_evidence_revision_component(&opened.family_snapshot),
-    ) != expected_revision
-    {
-        return Err(WarpSourceBackedErrorV0::StaleSourceRevision);
-    }
-
-    let connection = opened.read_snapshot.connection()?;
-    WarpSqliteSchema::detect(connection)?;
-    let resolved = (|| {
-        let values =
-            load_task_values(connection, rowid)?.ok_or(WarpSourceBackedErrorV0::MissingTaskRow)?;
-        let actual_digest = digest_bytes(sqlite_logical_record_digest(&values).as_str())?;
-        if actual_digest != *locator.record_digest() {
-            return Err(WarpSourceBackedErrorV0::StaleTaskRow);
-        }
-        let [_, NativeSqliteValue::Text(conversation_id), NativeSqliteValue::Text(task_id), NativeSqliteValue::Blob(task), _] =
-            values.as_slice()
-        else {
-            return Err(WarpSourceBackedErrorV0::StaleTaskRow);
-        };
-        let content = warp_message_content_at(
-            task,
-            conversation_id,
-            task_id,
-            usize::try_from(message_ordinal)
-                .map_err(|_| WarpSourceBackedErrorV0::InvalidLocator)?,
-        )?
-        .ok_or(WarpSourceBackedErrorV0::MissingTaskMessage)?;
-        Ok(WarpHydratedRecordV0 {
-            provider_bytes: content.text.into_bytes(),
-            event_type: content.event_type.as_str().to_owned(),
-            native_record_id: content.native_record_id,
+    request: &EventHydrationRequest,
+) -> Result<HydratedProviderRecord, HydrationFailure> {
+    let batch = BatchHydrationRequest::new(vec![request.clone()])
+        .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+    hydrate_warp_group(selection, &batch)?
+        .into_records()
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Warp one-record hydration returned no record",
+            )
         })
-    })()?;
-
-    let finished = finish_warp_source(opened)?;
-    if !revalidate_finished_warp_source(&finished)? {
-        return Err(WarpSourceBackedErrorV0::SourceChanged);
-    }
-    Ok(resolved)
 }
 
-struct WarpProjectionSink {
+pub(crate) struct WarpReplacementTreeAdapter {
+    selection: WarpSourceSelectionV0,
     source: SourceKey,
-    source_revision_digest: [u8; 32],
+    hydrate_event: WarpEventHydrator,
+}
+
+pub(crate) struct WarpPresentAuthority {
+    retained: RetainedWarpDirectory,
+    physical_evidence: SqliteSourceEvidence,
+    snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
+}
+
+pub(crate) enum WarpTreeAuthority {
+    Present(Box<WarpPresentAuthority>),
+    Missing(RetainedWarpDirectory),
+}
+
+impl ReplacementDocumentTree for WarpReplacementTreeAdapter {
+    type Leaf = ();
+    type TreeAuthority = WarpTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        WARP_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        self.source.exact_descriptor_eq(source)
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let retained = RetainedWarpDirectory::open(self.selection.path()).map_err(route_error)?;
+        let Some(snapshot) = retained.open_snapshot()? else {
+            let fingerprint = missing_tree_fingerprint(&self.source);
+            return Ok(CompleteDocumentTree::new(
+                fingerprint,
+                Vec::new(),
+                WarpTreeAuthority::Missing(retained),
+            ));
+        };
+        let physical_evidence = snapshot.evidence().clone();
+        let fingerprint = *physical_evidence.revision();
+        Ok(CompleteDocumentTree::new(
+            fingerprint,
+            vec![ObservedDocumentLeaf::with_durable_replay(
+                DocumentLeafFingerprint::new(fingerprint),
+                (),
+                false,
+            )],
+            WarpTreeAuthority::Present(Box::new(WarpPresentAuthority {
+                retained,
+                physical_evidence,
+                snapshot: Mutex::new(Some(snapshot)),
+            })),
+        ))
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        _leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let WarpTreeAuthority::Present(authority) = authority else {
+            return Err(internal_route_error(
+                "Warp shared lifecycle requested a changed scan for a missing database",
+            ));
+        };
+        let snapshot = take_warp_snapshot(authority)?;
+        sink.begin_source(self.source.clone())?;
+        let terminal = scan_warp_logical_snapshot(
+            snapshot.connection().map_err(route_error)?,
+            &self.source,
+            self.selection.path(),
+            sink,
+        )
+        .map_err(route_error)?;
+        snapshot.revalidate().map_err(route_error)?;
+        authority.retained.revalidate()?;
+        restore_warp_snapshot(authority, snapshot)?;
+        Ok(terminal)
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        let current = match &tree.authority {
+            WarpTreeAuthority::Present(authority) => {
+                let snapshot = take_warp_snapshot(authority)?;
+                finish_warp_authority(authority, snapshot)?;
+                tree.tree_fingerprint
+            }
+            WarpTreeAuthority::Missing(retained) => {
+                if retained.open_snapshot()?.is_some() {
+                    return Err(source_changed("Warp database appeared"));
+                }
+                retained.revalidate()?;
+                tree.tree_fingerprint
+            }
+        };
+        Ok(current)
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        if request.events().len() == 1 {
+            let record = (self.hydrate_event)(&self.selection, &request.events()[0])?;
+            let result = BatchHydrationResult::new(vec![record])
+                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+            result.validate_for_request(request)?;
+            return Ok(result);
+        }
+        hydrate_warp_group(&self.selection, request)
+    }
+}
+
+fn restore_warp_snapshot(
+    authority: &WarpPresentAuthority,
+    snapshot: SqliteSourceReadSnapshot,
+) -> SourceBackedRouteResult<()> {
+    let mut slot = authority
+        .snapshot
+        .lock()
+        .map_err(|_| internal_route_error("Warp snapshot lock was poisoned"))?;
+    if slot.replace(snapshot).is_some() {
+        return Err(internal_route_error(
+            "Warp snapshot slot was already occupied",
+        ));
+    }
+    Ok(())
+}
+
+fn take_warp_snapshot(
+    authority: &WarpPresentAuthority,
+) -> SourceBackedRouteResult<SqliteSourceReadSnapshot> {
+    authority
+        .snapshot
+        .lock()
+        .map_err(|_| internal_route_error("Warp snapshot lock was poisoned"))?
+        .take()
+        .ok_or_else(|| internal_route_error("Warp snapshot was already consumed"))
+}
+
+fn finish_warp_authority(
+    authority: &WarpPresentAuthority,
+    snapshot: SqliteSourceReadSnapshot,
+) -> SourceBackedRouteResult<()> {
+    let evidence = snapshot.finish().map_err(route_error)?;
+    authority.retained.revalidate()?;
+    if evidence != authority.physical_evidence {
+        return Err(source_changed("Warp database changed during its snapshot"));
+    }
+    Ok(())
+}
+
+pub(crate) struct RetainedWarpDirectory {
+    root: ProviderSourceRoot,
+    directory: ProviderSourceDirectory,
+    sqlite: SqliteSourceDirectoryAuthority,
+    leaf: OsString,
+}
+
+impl RetainedWarpDirectory {
+    fn open(path: &Path) -> WarpSourceBackedResultV0<Self> {
+        let parent = path.parent().ok_or_else(|| {
+            CaptureError::InvalidPayload("Warp SQLite source has no parent directory".to_owned())
+        })?;
+        let leaf = path.file_name().map(OsString::from).ok_or_else(|| {
+            CaptureError::InvalidPayload("Warp SQLite source has no leaf name".to_owned())
+        })?;
+        let root = ProviderSourceRoot::open(parent)?;
+        let directory = root.directory()?;
+        let authority_handle = directory.try_clone_authority_handle()?;
+        let sqlite = retain_sqlite_source_directory_authority(&authority_handle, parent)
+            .map_err(sqlite_access_error)?;
+        let retained = Self {
+            root,
+            directory,
+            sqlite,
+            leaf,
+        };
+        retained.revalidate().map_err(|error| {
+            WarpSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(error.detail))
+        })?;
+        Ok(retained)
+    }
+
+    fn open_snapshot(&self) -> SourceBackedRouteResult<Option<SqliteSourceReadSnapshot>> {
+        match self.directory.open_child(&self.leaf) {
+            Ok(OpenedProviderSourcePath::File(file)) => {
+                file.revalidate().map_err(route_error)?;
+            }
+            Ok(OpenedProviderSourcePath::Directory(_)) => {
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::InvalidSource,
+                    "Warp SQLite leaf is a directory",
+                ));
+            }
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                self.revalidate()?;
+                return Ok(None);
+            }
+            Err(error) => return Err(route_error(error)),
+        }
+        let snapshot = open_root_handle_sqlite_source_snapshot(&self.sqlite, &self.leaf)
+            .map_err(route_error)?;
+        self.revalidate()?;
+        Ok(Some(snapshot))
+    }
+
+    fn revalidate(&self) -> SourceBackedRouteResult<()> {
+        self.directory.revalidate().map_err(route_error)?;
+        self.root.revalidate().map_err(route_error)
+    }
+}
+
+fn scan_warp_logical_snapshot(
+    connection: &Connection,
+    source: &SourceKey,
+    path: &Path,
+    sink: &mut ChangedDocumentSink<'_, '_>,
+) -> WarpSourceBackedResultV0<DocumentSourceTerminal> {
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    let mut projection =
+        WarpProjectionSink::new(source.clone(), path.to_string_lossy().into_owned(), sink);
+    let native_scan = scan_warp_source_backed_connection(connection, &mut projection)?;
+    let counts = scan_counts(&native_scan, &projection)?;
+    let content_digest = parse_hex_digest(&native_scan.source_integrity_digest)?;
+    let logical = SqliteLogicalSnapshot::new(
+        WARP_SOURCE_BACKED_PARSER_REVISION,
+        WARP_SCHEMA_EVIDENCE,
+        content_digest,
+        counts,
+    );
+    let certificate = logical.certify(source.clone())?;
+    Ok(DocumentSourceTerminal {
+        source: source.clone(),
+        opening: certificate.observation().clone(),
+        closing: certificate.observation().clone(),
+        parser_revision: WARP_SOURCE_BACKED_PARSER_REVISION,
+        content_digest,
+        counts,
+    })
+}
+
+struct WarpProjectionSink<'changed, 'sink, 'writer> {
+    source: SourceKey,
     source_path: String,
     session_lineage: BTreeMap<String, WarpSessionLineage>,
-    documents: Vec<LexicalDocument>,
+    sink: &'changed mut ChangedDocumentSink<'sink, 'writer>,
+    indexed_documents: u64,
     rejected_records: u64,
     ignored_records: u64,
 }
@@ -424,21 +421,25 @@ struct WarpSessionLineage {
     root_conversation_id: String,
 }
 
-impl WarpProjectionSink {
-    fn new(source: SourceKey, source_revision_digest: [u8; 32], source_path: String) -> Self {
+impl<'changed, 'sink, 'writer> WarpProjectionSink<'changed, 'sink, 'writer> {
+    fn new(
+        source: SourceKey,
+        source_path: String,
+        sink: &'changed mut ChangedDocumentSink<'sink, 'writer>,
+    ) -> Self {
         Self {
             source,
-            source_revision_digest,
             source_path,
             session_lineage: BTreeMap::new(),
-            documents: Vec::new(),
+            sink,
+            indexed_documents: 0,
             rejected_records: 0,
             ignored_records: 0,
         }
     }
 }
 
-impl WarpNativeSink for WarpProjectionSink {
+impl WarpNativeSink for WarpProjectionSink<'_, '_, '_> {
     fn push_page(&mut self, page: WarpNativePage) -> CaptureResult<()> {
         let WarpNativePage {
             sessions,
@@ -447,24 +448,25 @@ impl WarpNativeSink for WarpProjectionSink {
             rejections,
             ..
         } = page;
-        self.rejected_records = self
-            .rejected_records
-            .checked_add(u64::try_from(rejections.len()).map_err(|_| {
-                CaptureError::SystemInvariant("Warp source-backed rejection count exceeds u64")
-            })?)
-            .ok_or(CaptureError::SystemInvariant(
-                "Warp source-backed rejection count overflowed",
-            ))?;
-        let ignored_records = sessions
+        self.rejected_records = checked_add(
+            self.rejected_records,
+            u64::try_from(rejections.len())
+                .map_err(|_| CaptureError::SystemInvariant("Warp rejection count exceeds u64"))?,
+        )
+        .map_err(source_backed_capture_error)?;
+        let ignored = sessions
             .len()
             .checked_add(hierarchy_edges.len())
             .and_then(|count| u64::try_from(count).ok())
             .ok_or(CaptureError::SystemInvariant(
-                "Warp source-backed ignored count exceeds u64",
+                "Warp ignored count exceeds u64",
             ))?;
-        self.ignored_records = self.ignored_records.checked_add(ignored_records).ok_or(
-            CaptureError::SystemInvariant("Warp source-backed ignored count overflowed"),
-        )?;
+        self.ignored_records =
+            self.ignored_records
+                .checked_add(ignored)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Warp ignored count overflowed",
+                ))?;
         for session in sessions {
             let conversation_id = session.conversation_id.clone();
             if self
@@ -473,7 +475,7 @@ impl WarpNativeSink for WarpProjectionSink {
                 .is_some()
             {
                 return Err(CaptureError::SystemInvariant(
-                    "Warp source-backed parser repeated a session",
+                    "Warp parser repeated a session",
                 ));
             }
         }
@@ -482,17 +484,19 @@ impl WarpNativeSink for WarpProjectionSink {
                 .session_lineage
                 .get(&event.identity.conversation_id)
                 .ok_or(CaptureError::SystemInvariant(
-                    "Warp source-backed event has no session lineage",
+                    "Warp event has no session lineage",
                 ))?;
-            let document = lexical_document(
-                &self.source,
-                self.source_revision_digest,
-                &self.source_path,
-                lineage,
-                event,
-            )
-            .map_err(source_backed_capture_error)?;
-            self.documents.push(document);
+            let document = lexical_document(&self.source, &self.source_path, lineage, event)
+                .map_err(source_backed_capture_error)?;
+            self.sink
+                .emit_document(document)
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            self.indexed_documents =
+                self.indexed_documents
+                    .checked_add(1)
+                    .ok_or(CaptureError::SystemInvariant(
+                        "Warp indexed document count overflowed",
+                    ))?;
         }
         Ok(())
     }
@@ -509,7 +513,6 @@ impl From<WarpNativeSession> for WarpSessionLineage {
 
 fn lexical_document(
     source: &SourceKey,
-    source_revision_digest: [u8; 32],
     source_path: &str,
     lineage: &WarpSessionLineage,
     event: WarpNativeEvent,
@@ -544,19 +547,18 @@ fn lexical_document(
         subrecord_selector: None,
     })?;
     let record_digest = digest_bytes(event.source_record_digest.as_str())?;
-    let coordinate_key = TypedKey::composite(vec![
-        TypedKey::I64(event.native_order.task_rowid),
-        TypedKey::U64(u64::from(event.native_order.message_ordinal)),
-    ])?;
     let locator = SourceRecordLocator::new(
         source.clone(),
         NativeRecordCoordinate::ProviderSqlite {
             logical_relation: WARP_TASK_MESSAGE_RELATION.to_owned(),
-            primary_key: coordinate_key,
+            primary_key: TypedKey::composite(vec![
+                TypedKey::utf8(event.identity.task_id.clone())?,
+                TypedKey::U64(u64::from(event.native_order.message_ordinal)),
+            ])?,
             row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )?;
     let body = if event.lexical_body.is_empty() {
@@ -575,7 +577,6 @@ fn lexical_document(
         source: source.clone(),
         locator,
         provider_session_id: Some(event.identity.conversation_id),
-        // Warp's certified task-message model does not expose a VCS branch.
         branch: None,
         source_path: Some(source_path.to_owned()),
         agent_type: if is_primary {
@@ -595,6 +596,193 @@ fn lexical_document(
         cwd: None,
         touched_files: Vec::new(),
     })
+}
+
+fn hydrate_warp_group(
+    selection: &WarpSourceSelectionV0,
+    request: &BatchHydrationRequest,
+) -> Result<BatchHydrationResult, HydrationFailure> {
+    if request.events().is_empty() {
+        return BatchHydrationResult::new(Vec::new())
+            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error));
+    }
+    let source = warp_source_key(selection).map_err(warp_hydration_error)?;
+    let coordinates = request
+        .events()
+        .iter()
+        .map(|event| {
+            validate_warp_locator(&source, event.locator()).map(|(task_id, message_ordinal)| {
+                WarpHydrationCoordinate {
+                    task_id,
+                    message_ordinal,
+                    record_digest: *event.locator().record_digest(),
+                }
+            })
+        })
+        .collect::<WarpSourceBackedResultV0<Vec<_>>>()
+        .map_err(warp_hydration_error)?;
+    let retained = RetainedWarpDirectory::open(selection.path()).map_err(warp_hydration_error)?;
+    let snapshot = retained
+        .open_snapshot()
+        .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))?
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "Warp selected database is missing",
+            )
+        })?;
+    let hydrated = (|| {
+        let connection = snapshot
+            .connection()
+            .map_err(warp_snapshot_hydration_error)?;
+        WarpSqliteSchema::detect(connection).map_err(warp_hydration_error)?;
+        let keys = coordinates
+            .iter()
+            .map(|coordinate| coordinate.task_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let rows = load_task_value_batches(connection, &keys).map_err(warp_hydration_error)?;
+        request
+            .events()
+            .iter()
+            .zip(&coordinates)
+            .map(|(event, coordinate)| {
+                let values = rows.get(&coordinate.task_id).ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::MissingRecord,
+                        "Warp task row is missing",
+                    )
+                })?;
+                let digest = digest_bytes(sqlite_logical_record_digest(values).as_str())
+                    .map_err(warp_hydration_error)?;
+                if digest != coordinate.record_digest {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::StaleRecordEvidence,
+                        "Warp task row digest changed",
+                    ));
+                }
+                let [
+                    NativeSqliteValue::Text(conversation_id),
+                    NativeSqliteValue::Text(task_id),
+                    NativeSqliteValue::Blob(task),
+                    _,
+                ] = values.as_slice()
+                else {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::StaleRecordEvidence,
+                        "Warp task row changed storage class",
+                    ));
+                };
+                let content = warp_message_content_at(
+                    task,
+                    conversation_id,
+                    task_id,
+                    usize::try_from(coordinate.message_ordinal).map_err(|_| {
+                        hydration_failure(
+                            HydrationFailureKind::InvalidLocator,
+                            "Warp message ordinal exceeds usize",
+                        )
+                    })?,
+                )
+                .map_err(warp_hydration_error)?
+                .ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::MissingRecord,
+                        "Warp task message is missing",
+                    )
+                })?;
+                Ok(HydratedProviderRecord {
+                    event_id: event.event_id(),
+                    provider_bytes: content.text.into_bytes(),
+                })
+            })
+            .collect::<Result<Vec<_>, HydrationFailure>>()
+    })();
+    snapshot.finish().map_err(warp_snapshot_hydration_error)?;
+    retained
+        .revalidate()
+        .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
+    let result = BatchHydrationResult::new(hydrated?)
+        .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+    result.validate_for_request(request)?;
+    Ok(result)
+}
+
+struct WarpHydrationCoordinate {
+    task_id: String,
+    message_ordinal: u64,
+    record_digest: [u8; 32],
+}
+
+fn validate_warp_locator(
+    source: &SourceKey,
+    locator: &SourceRecordLocator,
+) -> WarpSourceBackedResultV0<(String, u64)> {
+    locator.validate_contract()?;
+    if !source.exact_descriptor_eq(locator.source())
+        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
+    {
+        return Err(WarpSourceBackedErrorV0::InvalidLocator);
+    }
+    let NativeRecordCoordinate::ProviderSqlite {
+        logical_relation,
+        primary_key,
+        row_version,
+    } = locator.coordinate()
+    else {
+        return Err(WarpSourceBackedErrorV0::InvalidLocator);
+    };
+    let TypedKey::Composite(parts) = primary_key else {
+        return Err(WarpSourceBackedErrorV0::InvalidLocator);
+    };
+    let [TypedKey::Utf8(task_id), TypedKey::U64(message_ordinal)] = parts.as_slice() else {
+        return Err(WarpSourceBackedErrorV0::InvalidLocator);
+    };
+    if logical_relation != WARP_TASK_MESSAGE_RELATION
+        || row_version.as_ref() != Some(&TypedKey::Bytes(locator.record_digest().to_vec()))
+    {
+        return Err(WarpSourceBackedErrorV0::InvalidLocator);
+    }
+    Ok((task_id.clone(), *message_ordinal))
+}
+
+fn load_task_value_batches(
+    connection: &Connection,
+    keys: &[String],
+) -> WarpSourceBackedResultV0<BTreeMap<String, Vec<NativeSqliteValue>>> {
+    let mut loaded = BTreeMap::new();
+    for batch in keys.chunks(HYDRATION_NATIVE_KEY_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "select cast(conversation_id as text), cast(task_id as text), task, \
+                    cast(last_modified_at as text) \
+             from agent_tasks where task_id in ({placeholders}) order by task_id collate binary"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(batch.iter()), |row| {
+            let task_id = row.get::<_, String>(1)?;
+            Ok((
+                task_id.clone(),
+                vec![
+                    NativeSqliteValue::Text(row.get(0)?),
+                    NativeSqliteValue::Text(task_id),
+                    NativeSqliteValue::Blob(row.get(2)?),
+                    NativeSqliteValue::Text(row.get(3)?),
+                ],
+            ))
+        })?;
+        for row in rows {
+            let (task_id, values) = row?;
+            if loaded.insert(task_id, values).is_some() {
+                return Err(WarpSourceBackedErrorV0::StaleTaskRow);
+            }
+        }
+    }
+    Ok(loaded)
 }
 
 fn warp_session_id(
@@ -628,10 +816,9 @@ fn warp_source_key(selection: &WarpSourceSelectionV0) -> WarpSourceBackedResultV
 
 fn scan_counts(
     native_scan: &WarpNativeSourceBackedScan,
-    sink: &WarpProjectionSink,
+    sink: &WarpProjectionSink<'_, '_, '_>,
 ) -> WarpSourceBackedResultV0<ScannedSourceCounts> {
-    let retained_records =
-        u64::try_from(sink.documents.len()).map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    let retained_records = sink.indexed_documents;
     if retained_records != native_scan.counters.retained_events
         || u64::try_from(sink.session_lineage.len())
             .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?
@@ -671,96 +858,16 @@ fn scan_counts(
     })
 }
 
-fn decode_task_message_coordinate(
-    locator: &SourceRecordLocator,
-) -> WarpSourceBackedResultV0<(i64, u64)> {
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    };
-    let [TypedKey::I64(rowid), TypedKey::U64(message_ordinal)] = parts.as_slice() else {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    };
-    if logical_relation != WARP_TASK_MESSAGE_RELATION
-        || *rowid <= 0
-        || row_version.as_ref() != Some(&TypedKey::Bytes(locator.record_digest().to_vec()))
-    {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    }
-    Ok((*rowid, *message_ordinal))
-}
-
-fn load_task_values(
-    connection: &Connection,
-    rowid: i64,
-) -> WarpSourceBackedResultV0<Option<Vec<NativeSqliteValue>>> {
-    connection
-        .query_row(
-            "select rowid, cast(conversation_id as text), cast(task_id as text), task, \
-                    cast(last_modified_at as text) \
-             from agent_tasks where rowid = ?1",
-            [rowid],
-            |row| {
-                Ok(vec![
-                    NativeSqliteValue::Integer(row.get(0)?),
-                    NativeSqliteValue::Text(row.get(1)?),
-                    NativeSqliteValue::Text(row.get(2)?),
-                    NativeSqliteValue::Blob(row.get(3)?),
-                    NativeSqliteValue::Text(row.get(4)?),
-                ])
-            },
-        )
-        .optional()
-        .map_err(WarpSourceBackedErrorV0::from)
-}
-
-fn retain_warp_sqlite_authority(
-    canonical_path: &Path,
-) -> WarpSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceDirectoryAuthority, OsString)> {
-    let parent = canonical_path.parent().ok_or_else(|| {
-        CaptureError::InvalidPayload("Warp SQLite source has no parent directory".to_owned())
-    })?;
-    let database_name = canonical_path
-        .file_name()
-        .map(OsString::from)
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload("Warp SQLite source has no leaf name".to_owned())
-        })?;
-    let source_root = ProviderSourceRoot::open(parent)?;
-    let directory = source_root.directory()?;
-    let authority_handle = directory.try_clone_authority_handle()?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle, parent)?;
-    source_root.revalidate()?;
-    Ok((source_root, sqlite_authority, database_name))
-}
-
-fn sqlite_evidence_revision_component(evidence: &SqliteSourceEvidence) -> String {
-    format!(
-        "identity={};length={};revision={}",
-        hex_bytes(evidence.identity()),
-        evidence.length(),
-        hex_bytes(evidence.revision()),
-    )
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn source_revision_digest(source: &SourceKey, revision: &str) -> [u8; 32] {
+fn missing_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(WARP_SOURCE_REVISION_DIGEST_DOMAIN);
+    digest.update(WARP_MISSING_TREE_DOMAIN);
     digest.update(source.exact_descriptor_digest());
-    digest.update((revision.len() as u64).to_be_bytes());
-    digest.update(revision.as_bytes());
     digest.finalize().into()
+}
+
+fn checked_add(left: u64, right: u64) -> WarpSourceBackedResultV0<u64> {
+    left.checked_add(right)
+        .ok_or(WarpSourceBackedErrorV0::CountOverflow)
 }
 
 fn parse_hex_digest(value: &str) -> WarpSourceBackedResultV0<[u8; 32]> {
@@ -782,6 +889,29 @@ fn digest_bytes(value: &str) -> WarpSourceBackedResultV0<[u8; 32]> {
             .map_err(|_| WarpSourceBackedErrorV0::InvalidDigest)?;
     }
     Ok(digest)
+}
+
+fn source_changed(detail: &str) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
+}
+
+fn internal_route_error(detail: &str) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
+}
+
+fn sqlite_access_error(error: crate::provider_sources::SqliteSourceAccessError) -> CaptureError {
+    CaptureError::SystemIo {
+        operation: "accessing a retained Warp SQLite source",
+        source: io::Error::other(error),
+    }
+}
+
+fn warp_snapshot_hydration_error(error: impl std::fmt::Display) -> HydrationFailure {
+    hydration_failure(HydrationFailureKind::StaleSourceEvidence, error)
+}
+
+fn warp_hydration_error(error: impl std::fmt::Display) -> HydrationFailure {
+    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
 }
 
 fn source_backed_capture_error(error: WarpSourceBackedErrorV0) -> CaptureError {

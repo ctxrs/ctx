@@ -132,5 +132,4 @@ pub(super) fn insert_message(conn: &Connection, id: i64, session_id: &str, text:
     .unwrap();
 }
 
-mod native_path;
 mod source_backed;

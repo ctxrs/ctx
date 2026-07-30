@@ -7,8 +7,6 @@ mod schema;
 mod source_backed;
 mod wire;
 
-#[cfg(test)]
-pub(crate) use source_backed::{project_selected_warp_sources_v0, WarpSourceBackedErrorV0};
 pub(crate) use source_backed::{
     project_warp_source_backed_v0, resolve_warp_locator_v0, WarpSourceSelectionV0,
 };

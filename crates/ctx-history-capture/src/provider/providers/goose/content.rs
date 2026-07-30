@@ -33,6 +33,20 @@ pub(super) fn goose_logical_row_digest(values: &[NativeSqliteValue]) -> Result<[
     Ok(decoded)
 }
 
+/// Stable message evidence excludes the parent and message SQLite rowids.
+///
+/// Goose requires `messages.id` to be an INTEGER PRIMARY KEY, so the native
+/// message id remains in the digest while incidental parent-table rowids do
+/// not turn a VACUUM into a logical replacement.
+pub(super) fn goose_message_record_digest(values: &[NativeSqliteValue]) -> Result<[u8; 32]> {
+    if values.len() != schema::GOOSE_MESSAGE_VALUE_COUNT + 1 {
+        return Err(CaptureError::InvalidPayload(
+            "Goose message evidence has an unexpected value count".to_owned(),
+        ));
+    }
+    goose_logical_row_digest(&values[2..])
+}
+
 fn decode_hex_nibble(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
@@ -79,7 +93,7 @@ pub(super) fn complete_message_with_normalized_hash(
         timestamp: message.timestamp,
         tokens_json: message.tokens,
         metadata_json: message.metadata_json,
-        logical_row_digest: goose_logical_row_digest(values)?,
+        logical_row_digest: goose_message_record_digest(values)?,
     })?;
     if event.kind != GooseNativeEventKind::Message {
         return Err(CaptureError::InvalidPayload(
