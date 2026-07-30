@@ -378,6 +378,8 @@ mutate_and_fail linux_avx linux-x64 "${linux_x64}" 's/GNU_PROPERTY_X86_ISA_1_NEE
 mutate_and_fail arm_glibcxx linux-aarch64 "${linux_arm64}" 's/Name: GLIBC_2.35/Name: GLIBC_2.35\nName: GLIBCXX_3.4.30/'
 mutate_and_fail linux_static_symbols linux-x64 "${linux_x64}" 's/Section {/Symbols [\n  Symbol {\n    Name: main (1)\n  }\n]\nSection {/'
 mutate_and_fail linux_debug_section linux-x64 "${linux_x64}" 's/Name: .dynsym/Name: .debug_info/'
+mutate_and_fail linux_rust_gdb_section linux-x64 "${linux_x64}" \
+  's/Name: .dynsym/Name: .debug_gdb_scripts/'
 
 bad_mac_dylib="${tmp}/bad-mac-dylib.txt"
 sed 's#/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML#/opt/local/libCoreML.dylib#' "${mac_objdump}" > "${bad_mac_dylib}"

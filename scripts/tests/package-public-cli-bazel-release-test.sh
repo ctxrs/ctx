@@ -301,6 +301,12 @@ compile_fixture() {
 #include <stdio.h>
 #include <string.h>
 
+__asm__(
+    ".pushsection .debug_gdb_scripts,\"MS\",@progbits,1\n"
+    ".asciz \"gdb_load_rust_pretty_printers.py\"\n"
+    ".popsection\n"
+);
+
 static int identity(void) {
   puts("CTX_RELEASE_BUILD_SOURCE_COMMIT=${embedded_commit}");
   puts("CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}");
@@ -474,6 +480,13 @@ test "$(
 )" = "$(cat "${repo}/out-success/ctx.third-party-notices.txt.sha256")"
 test "$(sha256sum "${repo}/out-success/ctx" | awk '{print $1}')" \
   = "$(cat "${repo}/out-success/ctx.sha256")"
+distribution_sections="$(readelf -SW "${repo}/out-success/ctx")"
+if grep -Eq \
+  '\][[:space:]]+(\.symtab|\.debug[^[:space:]]*|\.zdebug[^[:space:]]*)[[:space:]]' \
+  <<<"${distribution_sections}"; then
+  echo "packaged distribution artifact retains debug or static symbol sections" >&2
+  exit 1
+fi
 
 bad_bazel_build_info="${repo}/inputs/linux-x64.bad-bazel.build-info.json"
 python3 - "${build_info}" "${bad_bazel_build_info}" <<'PY'

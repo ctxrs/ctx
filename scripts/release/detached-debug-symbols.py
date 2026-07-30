@@ -119,15 +119,28 @@ def macho_uuid(path: Path) -> str:
     return matches[0].lower()
 
 
-def elf_has_debug_material(path: Path) -> bool:
+def elf_section_names(path: Path) -> list[str]:
     output = run([command("readelf"), "-SW", str(path)], output=True)
-    section_names = re.findall(r"\[\s*\d+\]\s+(\S+)", output)
+    return re.findall(r"\[\s*\d+\]\s+(\S+)", output)
+
+
+def elf_has_detachable_debug_material(path: Path) -> bool:
     return any(
         name == ".symtab"
         or name.startswith(".zdebug_")
         or (name.startswith(".debug_") and name != ".debug_gdb_scripts")
-        for name in section_names
+        for name in elf_section_names(path)
     )
+
+
+def elf_distribution_symbol_sections(path: Path) -> list[str]:
+    return [
+        name
+        for name in elf_section_names(path)
+        if name == ".symtab"
+        or name.startswith(".debug")
+        or name.startswith(".zdebug")
+    ]
 
 
 def deterministic_archive(source_root: Path, output: Path) -> list[dict[str, object]]:
@@ -239,13 +252,26 @@ def prepare_elf(artifact: Path, symbol_tree: Path) -> tuple[str, str]:
     debug_file = symbol_tree / f"{artifact.name}.debug"
     objcopy = command("objcopy")
     run([objcopy, "--only-keep-debug", str(artifact), str(debug_file)])
-    if not elf_has_debug_material(debug_file):
+    if not elf_has_detachable_debug_material(debug_file):
         fail("ELF release intermediate contains no detachable debug information")
     run([objcopy, "--strip-all", str(artifact)])
+    remaining_debug_sections = [
+        name
+        for name in elf_distribution_symbol_sections(artifact)
+        if name != ".symtab"
+    ]
+    if remaining_debug_sections:
+        run(
+            [
+                objcopy,
+                *(f"--remove-section={name}" for name in remaining_debug_sections),
+                str(artifact),
+            ]
+        )
     run([objcopy, f"--add-gnu-debuglink={debug_file}", str(artifact)])
     if elf_build_id(artifact) != identifier:
         fail("ELF build ID changed while detaching symbols")
-    if elf_has_debug_material(artifact):
+    if elf_distribution_symbol_sections(artifact):
         fail("ELF shipping artifact still contains debug or static symbol sections")
     os.chmod(debug_file, 0o600)
     return "gnu-build-id", identifier
@@ -463,7 +489,10 @@ def verify(args: argparse.Namespace) -> None:
     identifier = str(manifest.get("debug_identifier", ""))
     if PLATFORMS[args.platform] == "elf" and elf_build_id(artifact) != identifier:
         fail("verified ELF build ID differs from the manifest")
-    if PLATFORMS[args.platform] == "elf" and elf_has_debug_material(artifact):
+    if (
+        PLATFORMS[args.platform] == "elf"
+        and elf_distribution_symbol_sections(artifact)
+    ):
         fail("verified ELF artifact still contains debug or static symbol sections")
     if PLATFORMS[args.platform] == "macho" and macho_uuid(artifact) != identifier:
         fail("verified Mach-O UUID differs from the manifest")
