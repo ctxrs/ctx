@@ -4,8 +4,8 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  scripts/smoke-daemon-semantic-release.sh --runtime-archive PATH --runtime-platform PLATFORM [--ctx PATH] [--data-root DIR] [--proof-output PATH] [--timeout-seconds N] [--non-authoritative-runtime-proof] [--keep-root]
-  scripts/smoke-daemon-semantic-release.sh --coreml --runtime-platform macos-arm64|macos-x64 [--ctx PATH] [--data-root DIR] [--proof-output PATH] [--timeout-seconds N] [--keep-root]
+  scripts/smoke-daemon-semantic-release.sh --runtime-archive PATH --runtime-platform PLATFORM [--ctx PATH] [--data-root DIR] [--timeout-seconds N] [--require-authoritative] [--keep-root]
+  scripts/smoke-daemon-semantic-release.sh --coreml --runtime-platform macos-arm64|macos-x64 [--ctx PATH] [--data-root DIR] [--timeout-seconds N] [--require-authoritative] [--keep-root]
 
 Native release smoke for opt-in daemon + semantic search. The smoke creates an
 isolated ctx data root, imports a tiny custom-history fixture, enables daemon
@@ -16,10 +16,8 @@ CTX_RUNTIME_DIR. --coreml instead exercises the production hash-pinned CoreML
 bundle acquisition path using the exact supplied macOS ctx artifact; it cannot
 be combined with --runtime-archive. When --data-root is provided, it is the
 parent for a fresh unique run root; --keep-root preserves that child for
-inspection. --proof-output copies the successful proof to a canonical release
-artifact path before the isolated run root is cleaned up.
---non-authoritative-runtime-proof may only downgrade macos-x64 diagnostic proof;
-it cannot elevate unknown or translated execution to authoritative evidence.
+inspection. --require-authoritative fails unless host evidence confirms native
+execution for the requested platform.
 USAGE
 }
 
@@ -28,12 +26,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 data_root_parent=""
 runtime_archive=""
 runtime_platform=""
-proof_output=""
 runtime_version="1.27.0"
 timeout_seconds="${CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS:-900}"
 keep_root=0
 coreml_mode=0
-downgrade_runtime_authority=0
+require_authoritative=0
 
 while (($# > 0)); do
   case "$1" in
@@ -53,15 +50,11 @@ while (($# > 0)); do
       shift
       runtime_platform="${1:-}"
       ;;
-    --proof-output)
-      shift
-      proof_output="${1:-}"
-      ;;
     --coreml)
       coreml_mode=1
       ;;
-    --non-authoritative-runtime-proof)
-      downgrade_runtime_authority=1
+    --require-authoritative)
+      require_authoritative=1
       ;;
     --timeout-seconds)
       shift
@@ -90,10 +83,6 @@ if [[ -z "${runtime_platform}" ]]; then
   echo "error: --runtime-platform is required" >&2
   exit 2
 fi
-if [[ "${proof_output}" =~ ^[[:space:]]*$ && -n "${proof_output}" ]]; then
-  echo "error: --proof-output cannot be whitespace-only" >&2
-  exit 2
-fi
 if [[ ! "${timeout_seconds}" =~ ^[0-9]+$ ]] || ((timeout_seconds < 30)); then
   echo "error: --timeout-seconds must be an integer >= 30" >&2
   exit 2
@@ -114,11 +103,6 @@ case "${runtime_platform}" in
     exit 2
     ;;
 esac
-if [[ "${downgrade_runtime_authority}" == "1" && "${runtime_platform}" != "macos-x64" ]]; then
-  echo "error: --non-authoritative-runtime-proof is restricted to macos-x64" >&2
-  exit 2
-fi
-
 expected_runtime_asset=""
 runtime_sha_path=""
 actual_runtime_sha=""
@@ -300,18 +284,14 @@ else
   echo "error: sha256sum or shasum is required to verify the ctx artifact" >&2
   exit 127
 fi
-build_info_proof_line=""
 case "${runtime_platform}" in
   linux-*|freebsd-x64)
     build_info_path="${ctx_source}.build-info.json"
-    build_info_sha="$(
-      python3 -I "${script_dir}/check-public-cli-build-info.py" \
-        --artifact "${ctx_source}" \
-        --build-info "${build_info_path}" \
-        --matrix "${script_dir}/../contracts/release-targets-v1.json" \
-        --platform "${runtime_platform}"
-    )"
-    build_info_proof_line="build_info_sha256=${build_info_sha}"
+    python3 -I "${script_dir}/check-public-cli-build-info.py" \
+      --artifact "${ctx_source}" \
+      --build-info "${build_info_path}" \
+      --matrix "${script_dir}/../contracts/release-targets-v1.json" \
+      --platform "${runtime_platform}" >/dev/null
     ;;
 esac
 runtime_authority="$(
@@ -321,8 +301,9 @@ runtime_authority="$(
     "${emulation}" "${hypervisor}" "${evidence_complete}" \
     "${CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID:-}"
 )"
-if [[ "${downgrade_runtime_authority}" == "1" ]]; then
-  runtime_authority=non_authoritative
+if [[ "${require_authoritative}" == "1" && "${runtime_authority}" != "authoritative" ]]; then
+  echo "error: semantic smoke requires authoritative native ${runtime_platform} execution" >&2
+  exit 1
 fi
 if [[ "${coreml_mode}" == "1" ]]; then
   ctx_bin="${install_bin_dir}/ctx"
@@ -366,7 +347,6 @@ EOF
   grep -F '"manager": "ctx-explicit-metadata-installer"' "${ctx_bin}.install.json" >/dev/null
   grep -F '"metadata_trust": "explicit-unsigned"' "${runtime_install_dir}/ctx-runtime-install.json" >/dev/null
 fi
-runtime_proof="${data_root}/packaged-runtime-proof.txt"
 marker="ctx-release-semantic-smoke-$(python3 -I -c 'import uuid; print(uuid.uuid4().hex)')"
 query="synthetic release retrieval cobalt willow transit"
 embedding_model="intfloat/multilingual-e5-small"
@@ -691,88 +671,6 @@ while ((SECONDS < deadline)); do
         if ! find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
           echo "error: daemon reported a downloaded model without populating the clean cache" >&2
           exit 1
-        fi
-        if [[ "${coreml_mode}" == "1" ]]; then
-          runtime_fields="$(python3 -I - "${daemon_status_json}" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as source:
-    payload = json.load(source)
-runtime = payload["daemon"]["jobs"]["semantic_index"]["embedding_runtime"]
-print(
-    "\t".join(
-        (
-            runtime["compute_mode"],
-            runtime["model_id"],
-            runtime.get("acquisition_source", "unknown"),
-        )
-    )
-)
-PY
-)"
-          IFS=$'\t' read -r coreml_compute_mode coreml_model coreml_acquisition_source \
-            <<< "${runtime_fields}"
-          cat > "${runtime_proof}" <<EOF
-runtime=coreml
-platform=${runtime_platform}
-host_system=${host_system}
-host_arch=${host_arch}
-host_native_arch=${host_native_arch}
-process_translated=${process_translated}
-native_arch_probe=${native_arch_probe}
-runtime_authority=${runtime_authority}
-artifact=${ctx_source}
-artifact_sha256=${binary_sha}
-isolated_artifact=${ctx_bin}
-compute_mode=${coreml_compute_mode}
-model=${coreml_model}
-acquisition_source=${coreml_acquisition_source}
-acquisition_fallback=none
-model_cache_start=empty
-foreground_model_download=absent
-daemon_model_acquisition=download
-CTX_SEMANTIC_CACHE_DIR=${semantic_cache}
-daemon_status=running
-daemon_pid=${daemon_pid}
-marker=${marker}
-semantic_search=passed
-EOF
-        else
-          cat > "${runtime_proof}" <<EOF
-runtime=onnxruntime
-version=${runtime_version}
-embedding_backend=cpu
-platform=${runtime_platform}
-host_system=${host_system}
-host_arch=${host_arch}
-host_native_arch=${host_native_arch}
-process_translated=${process_translated}
-native_arch_probe=${native_arch_probe}
-runtime_authority=${runtime_authority}
-artifact=${ctx_source}
-artifact_sha256=${binary_sha}
-${build_info_proof_line}
-archive=${runtime_archive}
-runtime_archive_sha256=${actual_runtime_sha}
-CTX_RUNTIME_DIR=${runtime_root}
-runtime_dylib=${runtime_dylib}
-loader_overrides=unset
-acquisition_source=download
-model_cache_start=empty
-foreground_model_download=absent
-daemon_model_acquisition=download
-CTX_SEMANTIC_CACHE_DIR=${semantic_cache}
-daemon_status=running
-daemon_pid=${daemon_pid}
-embedding_model=${embedding_model}
-marker=${marker}
-semantic_search=passed
-EOF
-        fi
-        if [[ -n "${proof_output}" ]]; then
-          mkdir -p -- "$(dirname -- "${proof_output}")"
-          install -m 0644 "${runtime_proof}" "${proof_output}"
         fi
         printf 'ctx semantic smoke ok: strict semantic search found %s with %s\n' \
           "${marker}" "${embedding_model}"

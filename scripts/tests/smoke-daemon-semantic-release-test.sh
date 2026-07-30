@@ -126,7 +126,7 @@ expect_usage_failure() {
 
 "${smoke}" --help > "${tmp}/help.out" 2>&1
 grep -Fq -- '--coreml --runtime-platform macos-arm64|macos-x64' "${tmp}/help.out"
-grep -Fq -- '--non-authoritative-runtime-proof' "${tmp}/help.out"
+grep -Fq -- '--require-authoritative' "${tmp}/help.out"
 
 expect_usage_failure coreml_linux \
   '--coreml requires --runtime-platform macos-arm64 or macos-x64' \
@@ -138,9 +138,10 @@ expect_usage_failure coreml_archive \
 expect_usage_failure archive_required \
   '--runtime-archive is required unless --coreml is selected' \
   --runtime-platform macos-arm64 --ctx "${fake_ctx}"
-expect_usage_failure preview_proof_linux \
-  '--non-authoritative-runtime-proof is restricted to macos-x64' \
-  --runtime-platform linux-x64 --non-authoritative-runtime-proof --ctx "${fake_ctx}"
+expect_usage_failure retired_proof_output \
+  'Usage:' \
+  --coreml --runtime-platform macos-arm64 --proof-output "${tmp}/proof" \
+  --ctx "${fake_ctx}"
 
 cpu_ctx="${tmp}/ctx-macos-cpu-fallback"
 sed 's/"backend":"coreml"/"backend":"cpu"/g' "${fake_ctx}" > "${cpu_ctx}"
@@ -186,48 +187,19 @@ fi
 grep -Fq "CoreML daemon status reported acquisition source 'cache'" "${tmp}/cached.err"
 
 run_parent="${tmp}/runs"
-published_proof="${tmp}/published/coreml-proof.txt"
 "${smoke}" \
   --coreml \
   --runtime-platform macos-arm64 \
   --ctx "${fake_ctx}" \
   --data-root "${run_parent}" \
-  --proof-output "${published_proof}" \
   --timeout-seconds 30 \
   --keep-root \
   > "${tmp}/coreml.out" 2> "${tmp}/coreml.err"
 
 run_root="$(find "${run_parent}" -mindepth 1 -maxdepth 1 -type d -name 'ctx-semantic-smoke.*' -print -quit)"
 [[ -n "${run_root}" ]]
-proof="${run_root}/data/packaged-runtime-proof.txt"
-[[ -s "${proof}" ]]
-cmp -s "${proof}" "${published_proof}"
-grep -Fxq 'runtime=coreml' "${proof}"
-grep -Fxq 'platform=macos-arm64' "${proof}"
-grep -Fxq "host_system=$(uname -s)" "${proof}"
-grep -Fxq "host_arch=$(uname -m)" "${proof}"
-grep -Fxq "host_native_arch=$(uname -m)" "${proof}"
-grep -Fxq 'process_translated=0' "${proof}"
-grep -Fxq 'native_arch_probe=uname' "${proof}"
-grep -Fxq 'runtime_authority=non_authoritative' "${proof}"
-grep -Fxq 'compute_mode=all' "${proof}"
-grep -Fxq 'model=intfloat/multilingual-e5-small' "${proof}"
-grep -Fxq 'acquisition_source=download' "${proof}"
-grep -Fxq 'acquisition_fallback=none' "${proof}"
-grep -Fxq 'model_cache_start=empty' "${proof}"
-grep -Fxq 'foreground_model_download=absent' "${proof}"
-grep -Fxq 'daemon_model_acquisition=download' "${proof}"
-grep -Fxq 'semantic_search=passed' "${proof}"
-
-if command -v sha256sum >/dev/null 2>&1; then
-  expected_sha="$(sha256sum "${fake_ctx}" | awk '{ print $1 }')"
-else
-  expected_sha="$(shasum -a 256 "${fake_ctx}" | awk '{ print $1 }')"
-fi
-grep -Fxq "artifact=${fake_ctx}" "${proof}"
-grep -Fxq "artifact_sha256=${expected_sha}" "${proof}"
-isolated_artifact="$(sed -n 's/^isolated_artifact=//p' "${proof}")"
-cmp -s "${fake_ctx}" "${isolated_artifact}"
+test ! -e "${run_root}/data/packaged-runtime-proof.txt"
+grep -Fq 'ctx semantic smoke ok:' "${tmp}/coreml.out"
 [[ ! -e "${run_root}/data/runtime/onnxruntime" ]]
 
 daemon_pid="$(cat "${run_root}/data/fake-daemon-pid")"
@@ -285,32 +257,22 @@ else
   shasum -a 256 "${runtime_archive}" | awk '{ print $1 }' > "${runtime_archive}.sha256"
 fi
 
-onnx_proof="${tmp}/published/onnx-proof.txt"
 if ! "${smoke}" \
   --runtime-archive "${runtime_archive}" \
   --runtime-platform linux-x64 \
   --ctx "${cpu_ctx}" \
   --data-root "${tmp}/onnx-runs" \
-  --proof-output "${onnx_proof}" \
+  --require-authoritative \
   --timeout-seconds 30 \
   > "${tmp}/onnx.out" 2> "${tmp}/onnx.err"; then
   cat "${tmp}/onnx.out" >&2
   cat "${tmp}/onnx.err" >&2
   exit 1
 fi
-grep -Fxq 'runtime=onnxruntime' "${onnx_proof}"
-grep -Fxq 'embedding_backend=cpu' "${onnx_proof}"
-grep -Fxq 'runtime_authority=authoritative' "${onnx_proof}"
-grep -Fxq 'acquisition_source=download' "${onnx_proof}"
-grep -Fxq 'model_cache_start=empty' "${onnx_proof}"
-grep -Fxq 'foreground_model_download=absent' "${onnx_proof}"
-grep -Fxq 'daemon_model_acquisition=download' "${onnx_proof}"
-if command -v sha256sum >/dev/null 2>&1; then
-  expected_build_info_sha="$(sha256sum "${cpu_ctx}.build-info.json" | awk '{ print $1 }')"
-else
-  expected_build_info_sha="$(shasum -a 256 "${cpu_ctx}.build-info.json" | awk '{ print $1 }')"
+grep -Fq 'ctx semantic smoke ok:' "${tmp}/onnx.out"
+if find "${tmp}/onnx-runs" -name packaged-runtime-proof.txt -print -quit | grep -q .; then
+  printf 'semantic smoke emitted a retired proof artifact\n' >&2
+  exit 1
 fi
-grep -Fxq "build_info_sha256=${expected_build_info_sha}" "${onnx_proof}"
-grep -Fxq 'semantic_search=passed' "${onnx_proof}"
 
 printf 'daemon semantic release smoke contract tests passed\n'
