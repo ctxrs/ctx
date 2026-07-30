@@ -875,6 +875,11 @@ fn validate_timestamp(value: Option<i64>, label: &str) -> Result<()> {
 }
 
 pub(super) fn unix_time() -> Result<i64> {
+    #[cfg(ctx_pro_test_helper)]
+    if let Some(result) = crate::pro::test_control::unix_time_if_active() {
+        return result;
+    }
+
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

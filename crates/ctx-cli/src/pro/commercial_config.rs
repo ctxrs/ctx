@@ -20,6 +20,11 @@ const STAGING_ACCESS_CLIENT_SECRET_ENV: &str = "CTX_PRO_STAGING_ACCESS_CLIENT_SE
 const STAGING_ENTITLEMENT_ISSUER: &str = "https://pro-staging.ctx.rs";
 const STAGING_ENTITLEMENT_KEY_IDS: &[&str] = &["staging-2026-07-v3"];
 const PRODUCTION_ENTITLEMENT_ISSUER: &str = "https://pro.ctx.rs";
+pub(super) const TEST_CONTROL_MANIFEST_ENV: &str = "CTX_PRO_TEST_CONTROL_MANIFEST";
+#[cfg(ctx_pro_test_helper)]
+const TEST_CONTROL_ENTITLEMENT_ISSUER: &str = "https://pro-test.ctx.invalid";
+#[cfg(ctx_pro_test_helper)]
+const TEST_CONTROL_ENTITLEMENT_KEY_ID: &str = "ctx-pro-test-control-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct CommercialChannelRecord {
@@ -42,6 +47,15 @@ impl EntitlementTrust {
             bail!("invalid_response: entitlement does not match the selected commercial channel");
         }
         Ok(())
+    }
+
+    #[cfg(ctx_pro_test_helper)]
+    pub(super) fn validate_test_control_identity(issuer: &str, key_id: &str) -> Result<()> {
+        EntitlementTrust {
+            issuer: TEST_CONTROL_ENTITLEMENT_ISSUER,
+            key_ids: &[TEST_CONTROL_ENTITLEMENT_KEY_ID],
+        }
+        .validate_identity(issuer, key_id)
     }
 }
 
@@ -108,6 +122,19 @@ fn channel_record(channel: ReleaseChannel) -> CommercialChannelRecord {
 
 pub(super) fn selected_channel() -> Result<ReleaseChannel> {
     selected_channel_from_value(std::env::var_os(CHANNEL_ENV))
+}
+
+pub(super) fn reject_test_control_outside_test_host() -> Result<()> {
+    #[cfg(not(ctx_pro_test_helper))]
+    if std::env::var_os(TEST_CONTROL_MANIFEST_ENV).is_some() {
+        bail!("invalid_request: {TEST_CONTROL_MANIFEST_ENV} is accepted only by ctx_pro_test_host");
+    }
+    Ok(())
+}
+
+#[cfg(ctx_pro_test_helper)]
+pub(super) fn test_control_release_trust() -> Result<ReleaseTrust> {
+    release_trust(ReleaseChannel::Stable)
 }
 
 fn selected_channel_from_value(value: Option<OsString>) -> Result<ReleaseChannel> {

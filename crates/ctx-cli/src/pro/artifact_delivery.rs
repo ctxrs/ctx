@@ -56,6 +56,8 @@ pub(crate) enum SetupArtifactBundle {
     Release(VerifiedArtifactBundle),
     #[cfg(any(test, ctx_pro_qualification))]
     Qualification(QualificationHelperBundle),
+    #[cfg(ctx_pro_test_helper)]
+    TestControl(crate::pro::test_control::TestControlHelperBundle),
 }
 
 impl SetupArtifactBundle {
@@ -64,6 +66,8 @@ impl SetupArtifactBundle {
             Self::Release(bundle) => Ok(&bundle.artifact),
             #[cfg(any(test, ctx_pro_qualification))]
             Self::Qualification(bundle) => bundle.verified_path(),
+            #[cfg(ctx_pro_test_helper)]
+            Self::TestControl(bundle) => bundle.verified_path_ref(),
         }
     }
 }
