@@ -374,12 +374,14 @@ docker run "${docker_run_args[@]}" \
     test -f "$artifact_runfile" -a -x "$artifact_runfile"
     test -f "$rustc_runfile" -a -x "$rustc_runfile"
     install -m 0755 "$artifact_runfile" /build/release-input/ctx
+    install -m 0755 "$rustc_runfile" /build/release-input/bazel-rustc
     python3 scripts/release/detached-debug-symbols.py prepare \
       --artifact /build/release-input/ctx \
       --output-dir /build/release-input/private-debug-symbols \
       --platform linux-x64 \
       --product ctx
-    "$rustc_runfile" --version > /build/release-input/rustc.version
+    /build/release-input/bazel-rustc --version \
+      > /build/release-input/rustc.version
   '
 
 artifact="${task_root}/release-input/ctx"
@@ -434,6 +436,9 @@ docker run "${docker_run_args[@]}" \
       --build-info /build/release-input/ctx.build-info.json \
       --output-dir /release-output \
       --private-symbols-dir /release-symbol-output/bundle
+    install -m 0755 \
+      /build/release-input/bazel-rustc \
+      /release-output/bazel-rustc
   '
 
 [[ -d "${symbols_stage_parent}/bundle" ]] \
@@ -446,10 +451,18 @@ mv "${symbols_stage_parent}/bundle" "${private_symbols_dir}"
   || die "source commit changed during Linux x64 Bazel dogfood construction"
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
   || die "source checkout changed during Linux x64 Bazel dogfood construction"
-for leaf in ctx ctx.sha256 ctx.version ctx.build-info.json ctx.cdx.json; do
+for leaf in \
+  ctx \
+  bazel-rustc \
+  ctx.sha256 \
+  ctx.version \
+  ctx.build-info.json \
+  ctx.cdx.json; do
   [[ -s "${output_dir}/${leaf}" ]] \
     || die "packaged dogfood output is missing: ${output_dir}/${leaf}"
 done
+[[ "$(stat -c '%a' "${output_dir}/bazel-rustc")" == "755" ]] \
+  || die "packaged dogfood Bazel rustc must have mode 0755"
 
 trap - EXIT
 cleanup

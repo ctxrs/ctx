@@ -101,9 +101,15 @@ for required in \
   '--build-arg "RELEASE_ARCH=x86_64"' \
   'CTX_OSV_SCANNER=/release-advisory/osv-scanner' \
   'CTX_OSV_DATABASE_DIR=/release-advisory/database' \
-  'CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json'; do
+  'CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json' \
+  'test -f "$rustc_runfile" -a -x "$rustc_runfile"' \
+  'install -m 0755 "$rustc_runfile" /build/release-input/bazel-rustc' \
+  '/build/release-input/bazel-rustc --version' \
+  '/release-output/bazel-rustc' \
+  'stat -c '\''%a'\'' "${output_dir}/bazel-rustc"' \
+  'packaged dogfood Bazel rustc must have mode 0755'; do
   grep -Fq -- "${required}" "${dogfood_wrapper}" || {
-    printf 'Linux x64 dogfood wrapper missing architecture pin: %s\n' \
+    printf 'Linux x64 dogfood wrapper missing release contract: %s\n' \
       "${required}" >&2
     exit 1
   }
