@@ -123,12 +123,12 @@ fn observe_ordinary_file_inner(
     #[cfg(test)]
     reject_forbidden_content_open(path)?;
     let opened = open_provider_source_file(path)?;
-    observe_opened_ordinary_file(path, opened)
+    observe_opened_ordinary_file(path, &opened)
 }
 
-fn observe_opened_ordinary_file(
+pub(crate) fn observe_opened_ordinary_file(
     path: &Path,
-    opened: OpenedProviderSourceFile,
+    opened: &OpenedProviderSourceFile,
 ) -> Result<OrdinaryFileObservation> {
     let metadata = opened.metadata().clone();
     let platform_before = platform_token(path, opened.file(), &metadata)?;
