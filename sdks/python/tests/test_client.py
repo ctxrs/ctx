@@ -25,7 +25,7 @@ from ctx_agent_history import (
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
 from ctx_agent_history.transport import LocalCliAdapter
-from ctx_agent_history.types import AgentHistoryErrorCode
+from ctx_agent_history.types import AgentHistoryErrorCode, SearchHit
 import dogfood_local
 
 
@@ -39,10 +39,13 @@ class LocalCliAdapterTests(unittest.TestCase):
 
         show_event_hints = typing.get_type_hints(AgentHistoryClient.showEvent)
         show_session_hints = typing.get_type_hints(AgentHistoryClient.showSession)
+        search_hit_hints = typing.get_type_hints(SearchHit)
         self.assertEqual(show_event_hints["event_id"], str)
         self.assertEqual(show_event_hints["return"].__name__, "ShowEventResponse")
         self.assertEqual(show_session_hints["session_id"], str)
         self.assertEqual(show_session_hints["return"].__name__, "ShowSessionResponse")
+        self.assertEqual(search_hit_hints["rank"], typing.Optional[float])
+        self.assertEqual(search_hit_hints["retrievalScore"], typing.Optional[float])
 
     def test_status_uses_local_cli_json(self) -> None:
         with fake_ctx() as cli:
@@ -186,6 +189,8 @@ class LocalCliAdapterTests(unittest.TestCase):
                         "recordType": "event",
                         "itemType": "event",
                         "result_scope": "event",
+                        "rank": 1,
+                        "retrieval_score": 0.98,
                         "citations": [{"target_type": "event", "label": "codex event"}],
                     }
                 ],
@@ -214,6 +219,8 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertNotIn("recordType", hit)
         self.assertNotIn("itemType", hit)
         self.assertEqual(hit["resultType"], "event")
+        self.assertEqual(hit["rank"], 1)
+        self.assertEqual(hit["retrievalScore"], 0.98)
         self.assertEqual(hit["citations"][0]["targetType"], "event")
         self.assertEqual(
             result["search"]["resultWindow"],
@@ -558,6 +565,8 @@ def assert_agent_history_v1_envelope(test: unittest.TestCase, payload: object) -
         test.assertNotIn("nextCursor", value["pagination"])
         for hit in value["results"]:
             _assert_required_keys(test, hit, {"resultScope"})
+            test.assertEqual(hit["rank"], 1)
+            test.assertEqual(hit["retrievalScore"], 0.98)
     elif operation == "showEvent":
         _assert_required_keys(test, value, {"events"})
     elif operation in {"locateEvent", "locateSession"}:

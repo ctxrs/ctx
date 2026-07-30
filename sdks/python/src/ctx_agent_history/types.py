@@ -125,6 +125,7 @@ class SearchHit(_SearchHitRequired, total=False):
     title: Optional[str]
     snippet: Optional[str]
     rank: Optional[float]
+    retrievalScore: Optional[float]
     resultType: Optional[str]
     provider: Optional[str]
     timestamp: Optional[str]

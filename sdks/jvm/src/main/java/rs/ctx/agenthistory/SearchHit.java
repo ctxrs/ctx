@@ -73,6 +73,14 @@ public final class SearchHit {
         return getRank();
     }
 
+    public Double getRetrievalScore() {
+        return AgentHistoryValue.doubleValue(fields.get("retrievalScore"));
+    }
+
+    public Double retrievalScore() {
+        return getRetrievalScore();
+    }
+
     public String getResultType() {
         return AgentHistoryValue.string(fields.get("resultType"));
     }

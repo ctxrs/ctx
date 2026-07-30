@@ -93,6 +93,8 @@ public final class AgentHistoryClientTest {
         assertEquals(Integer.valueOf(1), Integer.valueOf(response.getSearch().getResults().size()));
         SearchHit hit = response.getSearch().getResults().get(0);
         assertEquals("11111111-1111-4111-8111-111111111111", hit.getCtxEventId());
+        assertEquals(Double.valueOf(1.0), hit.getRank());
+        assertEquals(Double.valueOf(0.98), hit.getRetrievalScore());
         assertEquals("event", hit.getResultType());
         assertEquals("event", hit.getResultScope());
         assertEquals("event", hit.getCitations().get(0).getTargetType());
@@ -114,11 +116,14 @@ public final class AgentHistoryClientTest {
                         + "\"coverage\":{\"embedded_items\":4,\"indexed_now\":1},"
                         + "\"diagnostics\":{\"query_embed_ms\":2}"
                         + "},"
-                        + "\"results\":[{\"result_scope\":\"event\"}],"
+                        + "\"results\":[{\"result_scope\":\"event\",\"rank\":1,\"retrieval_score\":0.98}],"
                         + "\"result_window\":{\"limit\":1,\"returned\":1,\"more_available\":true}"
                         + "}"));
 
         SearchResponse response = client.search(AgentHistoryOptions.search().query("agent history"));
+        SearchHit hit = response.getSearch().getResults().get(0);
+        assertEquals(Double.valueOf(1.0), hit.getRank());
+        assertEquals(Double.valueOf(0.98), hit.getRetrievalScore());
         Map<String, Object> retrieval = AgentHistoryValue.object(response.getSearch().getRetrieval());
         assertEquals("hybrid", retrieval.get("requestedMode"));
         assertEquals("lexical", retrieval.get("effectiveMode"));

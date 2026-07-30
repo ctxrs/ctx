@@ -196,6 +196,8 @@ internal static class Program
                   "recordType": "event",
                   "itemType": "event",
                   "result_scope": "event",
+                  "rank": 1,
+                  "retrieval_score": 0.98,
                   "citations": [{"target_type":"event","label":"codex event"}]
                 }
               ],
@@ -219,6 +221,8 @@ internal static class Program
         True(!response.Search.Results[0].ToJsonObject().ContainsKey("recordType"), "search hit leaked recordType");
         True(!response.Search.Results[0].ToJsonObject().ContainsKey("itemType"), "search hit leaked itemType");
         Equal("event", response.Search.Results[0].ResultType ?? "");
+        Equal(1.0, response.Search.Results[0].Rank ?? 0.0);
+        Equal(0.98, response.Search.Results[0].RetrievalScore ?? 0.0);
         Equal("event", response.Search.Results[0].Citations[0].TargetType ?? "");
         Equal(1, response.Search.ResultWindow!.Limit);
         Equal(1, response.Search.ResultWindow.Returned);
@@ -351,6 +355,11 @@ internal static class Program
                     Equal(search.Results.Count, search.ResultWindow!.Returned);
                     Equal(search.ResultWindow.Limit, search.Pagination["limit"]!.GetValue<int>());
                     Equal(search.ResultWindow.MoreAvailable, search.Pagination["hasMore"]!.GetValue<bool>());
+                    if (search.Results.Count > 0)
+                    {
+                        Equal(1.0, search.Results[0].Rank ?? 0.0);
+                        Equal(0.98, search.Results[0].RetrievalScore ?? 0.0);
+                    }
                     break;
                 case "showEvent":
                     _ = (await ClientFor(node["event"]).ShowEventAsync("event-1")).Event.Events;
