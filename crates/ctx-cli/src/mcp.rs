@@ -55,7 +55,6 @@ use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
 use crate::local_usage::{McpInvocation, McpUsageRecorder};
 use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
-use crate::semantic::source_epoch_status_report;
 use crate::source_sql::SqlCompatibility;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -521,7 +520,7 @@ fn parsed_show_context_target(name: &str, arguments: &Value) -> Result<Option<St
 
 fn tool_status(data_root: &Path) -> Result<Value> {
     let config = config::AppConfig::load(data_root)?;
-    Ok(source_epoch_status_report(data_root, &config)?.report)
+    Ok(crate::commands::status::status_read_model(data_root, &config)?.report)
 }
 
 fn tool_sources(data_root: &Path) -> Result<Value> {

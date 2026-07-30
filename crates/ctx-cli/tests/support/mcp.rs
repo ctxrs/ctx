@@ -211,6 +211,50 @@ pub(crate) fn mcp_roundtrip_with_env(
         .collect()
 }
 
+pub(crate) fn assert_cli_mcp_status_parity(
+    temp: &TempDir,
+    envs: &[(&str, &str)],
+) -> (Value, Value) {
+    let mut command = ctx(temp);
+    command
+        .args(["status", "--format=json"])
+        .env("CTX_DAEMON_AUTOSTART_OFF", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let cli = json_output(&mut command);
+
+    let mut mcp_envs = vec![("CTX_DAEMON_AUTOSTART_OFF", "1")];
+    mcp_envs.extend_from_slice(envs);
+    let responses = mcp_roundtrip_with_env(
+        temp,
+        &[
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-status-parity-test", "version": "0" }
+                }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "status",
+                "method": "tools/call",
+                "params": { "name": "status", "arguments": {} }
+            }),
+        ],
+        &mcp_envs,
+    );
+    assert_eq!(responses.len(), 2, "{responses:#?}");
+    let result = responses[1]["result"].clone();
+    assert!(result["isError"].is_null(), "{result:#}");
+    assert_eq!(result["structuredContent"], cli, "{result:#}");
+    (cli, result)
+}
+
 pub(crate) fn mcp_raw_roundtrip(temp: &TempDir, stdin: String) -> Vec<Value> {
     mcp_raw_roundtrip_bytes(temp, stdin.into_bytes())
 }

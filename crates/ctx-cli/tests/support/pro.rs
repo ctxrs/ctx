@@ -112,6 +112,62 @@ pub(crate) fn write_blame_helper(path: &Path) {
     write_blame_helper_with_oversized_page(path, false);
 }
 
+#[cfg(unix)]
+pub(crate) fn write_status_helper(path: &Path) {
+    const HELPER: &str = r#"#!/usr/bin/python3
+import json, struct, sys
+
+def receive():
+    header = sys.stdin.buffer.read(12)
+    if len(header) != 12 or header[:6] != b'CTXPRO':
+        sys.exit(20)
+    size = struct.unpack('>I', header[8:12])[0]
+    return json.loads(sys.stdin.buffer.read(size))
+
+def send(value):
+    payload = json.dumps(value, separators=(',', ':')).encode()
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.flush()
+
+hello = receive()
+if 'status' not in hello['message']['body']['capabilities']:
+    sys.exit(21)
+send({
+  'sequence': hello['sequence'],
+  'request_id': hello['request_id'],
+  'message': {'kind':'hello','body':{
+    'protocol_version':1,
+    'protocol_fingerprint':'__PROTOCOL_FINGERPRINT__',
+    'helper_version':'fake-status-v1',
+    'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'capabilities':['status']
+  }}
+})
+request = receive()
+if request['message']['kind'] != 'status':
+    sys.exit(22)
+send({
+  'sequence': request['sequence'],
+  'request_id': request['request_id'],
+  'message': {'kind':'status','body':{
+    'state':'ready',
+    'authority':'source',
+    'source_receipt':{
+      'core_generation_id':'a' * 64,
+      'manifest_aggregate_sha256':'b' * 64,
+      'materializer_revision':'fake-source-materializer-v1',
+      'progress':[]
+    }
+  }}
+})
+"#;
+    let helper = HELPER.replace(
+        "__PROTOCOL_FINGERPRINT__",
+        ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
+    );
+    write_python_helper(path, &helper);
+}
+
 #[cfg(all(
     unix,
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)

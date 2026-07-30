@@ -20,8 +20,8 @@ the support matrix, config paths, and manual snippets.
 The server advertises its current tool set through MCP discovery rather than a
 fixed documented count. Core tools include:
 
-- `status`, local ctx index status, semantic coverage, and daemon coordinator
-  state;
+- `status`, the same structured source, upgrade, Pro, and compact local-usage
+  status as `ctx status --format json`;
 - `sources`, discovered local agent history sources;
 - `search`, search the existing index;
 - `sql`, run one read-only SQL statement against the existing index;
@@ -37,6 +37,14 @@ MCP aggregate response limit and fail without a partial result if any selected
 record cannot be verified. MCP hosts may log or forward the returned
 transcript. Typed failures are returned in `structuredContent` with the same
 stable hydration error codes as the CLI JSON contract.
+
+The `status` tool returns the CLI JSON status read model unchanged in
+`structuredContent`: the source-backed history report plus `upgrade`, `pro`,
+compact `local_usage`, and `read_only: true`. The added facts remain
+machine-only and do not expand the MCP text fallback. The status read does not
+import, initialize, refresh, or mutate source, Pro, upgrade, or usage state;
+configured post-delivery local-usage accounting remains the independent server
+boundary described below.
 
 Optional Local Pro tools include:
 
@@ -146,6 +154,8 @@ pagination. Unknown Pro query payload types fail closed in text instead of
 being presented as search results; callers can still inspect the accompanying
 `structuredContent` for the original bounded response.
 
-MCP `status` can include semantic and daemon diagnostic path fields such as
-`vector_path`, `lock_path`, and `status_path` in `structuredContent`. They are
-local troubleshooting hints for this machine, not portable contract IDs.
+Like CLI JSON status, MCP `status` can include local source, semantic, daemon,
+upgrade, and Pro diagnostic path fields in `structuredContent`. They are local
+troubleshooting hints for this machine, not portable contract IDs. Compact
+`local_usage` contains only enablement, state, definition/retention versions,
+and a stable content-free error when unavailable.
