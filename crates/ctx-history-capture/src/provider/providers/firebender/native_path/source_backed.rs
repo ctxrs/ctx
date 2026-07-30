@@ -1,12 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, EventIdentityInput, EventType,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,16 +15,12 @@ use super::super::{
     firebender_event_parts, firebender_message_time, firebender_output_evidence,
     FirebenderOutputEvidence,
 };
-use super::{
-    firebender_path_identity, firebender_raw_row_digest, firebender_source_revision,
-    scan::build_page, validate_schema, FirebenderFrontier, FirebenderPage, FirebenderRow,
-    FirebenderSqliteDatabase, SqliteSourceEvidence, FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES,
-};
+use super::{FirebenderRow, FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES};
 use crate::{
     native_source::NativeSqliteValue,
     provider::{
         normalization::{provider_policy_event_text, provider_timestamp_millis},
-        sqlite::{sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard},
+        sqlite::{sqlite_table_columns, SqliteLengthPreflightGuard},
     },
     CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
 };
@@ -48,8 +43,6 @@ const FIREBENDER_POSITION_KIND: &str = "firebender.messages-json-index";
 const FIREBENDER_LOGICAL_SESSION_KIND: &str = "firebender-chat-session";
 const FIREBENDER_LOGICAL_EVENT_KIND: &str = "firebender-message";
 const FIREBENDER_SOURCE_SCHEMA_VARIANT: &str = "firebender-chat-sessions-v1";
-const FIREBENDER_SOURCE_REVISION_KIND: &str = "firebender-sqlite-snapshot-v1";
-const FIREBENDER_SOURCE_PARSER_REVISION: &str = "firebender-source-backed-v1";
 const FIREBENDER_LOCATOR_RELATION: &str = "chat_sessions.messages_json";
 
 #[derive(Debug, Error)]
@@ -60,290 +53,16 @@ pub(crate) enum FirebenderSourceBackedError {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     Resolver(#[from] SourceResolverContractError),
-    #[error("Firebender source-backed scan must be drained before certification")]
-    ScanNotComplete,
     #[error("Firebender source-backed scan accounting overflowed")]
     CountOverflow,
     #[error("Firebender source-backed locator is malformed")]
     InvalidLocator,
-    #[error("Firebender source-backed locator names a different explicit source")]
-    LocatorSourceMismatch,
-    #[error("Firebender source-backed locator source revision is stale")]
-    StaleSourceEvidence,
-    #[error("Firebender source-backed chat-session row is missing")]
-    MissingSourceRow,
-    #[error("Firebender source-backed chat-session row digest is stale")]
-    StaleRowEvidence,
-    #[error("Firebender source-backed nested message is missing")]
-    MissingMessage,
     #[error("Firebender source-backed row exceeds the bounded hydration limit")]
     HydrationTooLarge,
 }
 
 pub(crate) type FirebenderSourceBackedResult<T> =
     std::result::Result<T, FirebenderSourceBackedError>;
-
-// Both variants own source authority. Boxing the 1,072-byte replacement scanner
-// to match the 496-byte certificate adds indirection without measured benefit.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum FirebenderSourceBackedPlan {
-    // The exact certificate remains source authority even when the caller
-    // already owns the matching prior certificate.
-    #[allow(dead_code)]
-    Exact(CertifiedSource),
-    Replacement(FirebenderSourceBackedScanner),
-}
-
-#[derive(Debug)]
-pub(crate) struct FirebenderSourceBackedPage {
-    documents: Vec<LexicalDocument>,
-    retained_bytes: usize,
-}
-
-impl FirebenderSourceBackedPage {
-    // Read-only page evidence is retained for bounded scanner verification.
-    #[allow(dead_code)]
-    pub(crate) fn documents(&self) -> &[LexicalDocument] {
-        &self.documents
-    }
-
-    pub(crate) fn into_documents(self) -> Vec<LexicalDocument> {
-        self.documents
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.retained_bytes
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct FirebenderHydratedSourceRow {
-    provider_session_id: String,
-    message_index: u64,
-    messages_json: Vec<u8>,
-}
-
-impl FirebenderHydratedSourceRow {
-    // Provider session identity is provenance for the hydrated native row.
-    #[allow(dead_code)]
-    pub(crate) fn provider_session_id(&self) -> &str {
-        &self.provider_session_id
-    }
-
-    pub(crate) fn message_index(&self) -> u64 {
-        self.message_index
-    }
-
-    pub(crate) fn messages_json(&self) -> &[u8] {
-        &self.messages_json
-    }
-}
-
-pub(crate) struct FirebenderSourceBackedScanner {
-    database_path: PathBuf,
-    source_path: String,
-    workspace: Option<String>,
-    source: SourceKey,
-    opening: SourceObservation,
-    database: FirebenderSqliteDatabase,
-    frontier: FirebenderFrontier,
-    counts: ScannedSourceCounts,
-    drained: bool,
-}
-
-pub(crate) fn prepare_firebender_source_backed(
-    explicit_path: &Path,
-    prior: Option<&CertifiedSource>,
-) -> FirebenderSourceBackedResult<FirebenderSourceBackedPlan> {
-    let opened = OpenedFirebenderSource::open(explicit_path)?;
-    if let Some(prior) = prior.filter(|prior| {
-        prior.parser_revision() == FIREBENDER_SOURCE_PARSER_REVISION
-            && prior.observation() == &opened.observation
-    }) {
-        return Ok(FirebenderSourceBackedPlan::Exact(prior.clone()));
-    }
-    Ok(FirebenderSourceBackedPlan::Replacement(
-        FirebenderSourceBackedScanner {
-            source_path: opened.database_path.display().to_string(),
-            workspace: firebender_workspace(&opened.database_path),
-            database_path: opened.database_path,
-            source: opened.source,
-            opening: opened.observation,
-            database: opened.database,
-            frontier: FirebenderFrontier::initial(),
-            counts: ScannedSourceCounts::default(),
-            drained: false,
-        },
-    ))
-}
-
-impl FirebenderSourceBackedScanner {
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
-    pub(crate) fn next_page(
-        &mut self,
-    ) -> FirebenderSourceBackedResult<Option<FirebenderSourceBackedPage>> {
-        if self.drained {
-            return Ok(None);
-        }
-        let page = self
-            .database
-            .read(&self.database_path, |conn| build_page(conn, &self.frontier))?;
-        self.frontier = page.next.clone();
-        if page.row.is_none() && page.rejection.is_none() {
-            self.drained = page.next.terminal;
-            return Ok(None);
-        }
-        let documents = self.project_page(&page)?;
-        self.drained = page.next.terminal;
-        Ok(Some(FirebenderSourceBackedPage {
-            documents,
-            retained_bytes: page.retained_bytes,
-        }))
-    }
-
-    pub(crate) fn finish(self) -> FirebenderSourceBackedResult<CertifiedSource> {
-        if !self.drained || !self.frontier.terminal {
-            return Err(FirebenderSourceBackedError::ScanNotComplete);
-        }
-        self.database.revalidate()?;
-        let closing = SourceObservation::new(
-            self.source.clone(),
-            FIREBENDER_SOURCE_REVISION_KIND,
-            self.opening.revision().to_vec(),
-        )?;
-        Ok(CertifiedSource::certify(
-            self.opening,
-            closing,
-            FIREBENDER_SOURCE_PARSER_REVISION,
-            self.frontier.prefix_sha256,
-            self.counts,
-        )?)
-    }
-
-    fn project_page(
-        &mut self,
-        page: &FirebenderPage,
-    ) -> FirebenderSourceBackedResult<Vec<LexicalDocument>> {
-        let Some(row) = page.row.as_ref() else {
-            if page.rejection.is_some() {
-                increment(&mut self.counts.complete_records, 1)?;
-                increment(&mut self.counts.rejected_records, 1)?;
-                increment(
-                    &mut self.counts.certified_bytes,
-                    u64::try_from(page.retained_bytes)
-                        .map_err(|_| FirebenderSourceBackedError::CountOverflow)?,
-                )?;
-            }
-            return Ok(Vec::new());
-        };
-        if page.message_start == 0 {
-            increment(&mut self.counts.certified_bytes, canonical_row_bytes(row)?)?;
-        }
-        if page.rejection.is_some() {
-            increment(&mut self.counts.complete_records, 1)?;
-            increment(&mut self.counts.rejected_records, 1)?;
-            return Ok(Vec::new());
-        }
-
-        let session_id = firebender_session_id(&self.source, &row.id)?;
-        let row_digest = firebender_raw_row_digest(&row.logical_values());
-        let mut documents = Vec::with_capacity(page.message_end.saturating_sub(page.message_start));
-        for (relative_index, message) in row.messages[page.message_start..page.message_end]
-            .iter()
-            .enumerate()
-        {
-            let message_index = page.message_start.saturating_add(relative_index);
-            increment(&mut self.counts.complete_records, 1)?;
-            let Some(document) = firebender_document(
-                &self.source,
-                session_id,
-                &self.source_path,
-                self.workspace.as_deref(),
-                row,
-                message_index,
-                message,
-                row_digest,
-            )?
-            else {
-                increment(&mut self.counts.ignored_records, 1)?;
-                continue;
-            };
-            increment(&mut self.counts.retained_records, 1)?;
-            increment(&mut self.counts.indexed_documents, 1)?;
-            documents.push(document);
-        }
-        Ok(documents)
-    }
-}
-
-pub(crate) fn hydrate_firebender_source_backed_row(
-    explicit_path: &Path,
-    locator: &SourceRecordLocator,
-) -> FirebenderSourceBackedResult<FirebenderHydratedSourceRow> {
-    let opened = OpenedFirebenderSource::open(explicit_path)?;
-    if !opened.source.exact_descriptor_eq(locator.source()) {
-        return Err(FirebenderSourceBackedError::LocatorSourceMismatch);
-    }
-    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(FirebenderSourceBackedError::StaleSourceEvidence);
-    }
-    let (rowid, expected_session_id, expected_updated_at, message_index) =
-        decode_locator_coordinate(locator)?;
-    let row = opened
-        .database
-        .read(&opened.database_path, |conn| load_exact_row(conn, rowid))?
-        .ok_or(FirebenderSourceBackedError::MissingSourceRow)?;
-    if row.id != expected_session_id || row.updated_at != expected_updated_at {
-        return Err(FirebenderSourceBackedError::StaleRowEvidence);
-    }
-    if &firebender_raw_row_digest(&row.logical_values()) != locator.record_digest() {
-        return Err(FirebenderSourceBackedError::StaleRowEvidence);
-    }
-    let message_index_usize =
-        usize::try_from(message_index).map_err(|_| FirebenderSourceBackedError::MissingMessage)?;
-    if message_index_usize >= row.messages.len() {
-        return Err(FirebenderSourceBackedError::MissingMessage);
-    }
-    Ok(FirebenderHydratedSourceRow {
-        provider_session_id: row.id,
-        message_index,
-        messages_json: row.messages_json.into_bytes(),
-    })
-}
-
-struct OpenedFirebenderSource {
-    database_path: PathBuf,
-    source: SourceKey,
-    observation: SourceObservation,
-    database: FirebenderSqliteDatabase,
-}
-
-impl OpenedFirebenderSource {
-    fn open(explicit_path: &Path) -> FirebenderSourceBackedResult<Self> {
-        let identity = firebender_path_identity(explicit_path)?;
-        let database_path = identity.canonical_database_path;
-        let (database, schema_fingerprint) =
-            FirebenderSqliteDatabase::open(&database_path, |conn| {
-                validate_schema(conn, &database_path)?;
-                sqlite_schema_fingerprint(conn)
-            })?;
-        let source = firebender_source_key(&identity.route_identity)?;
-        let observation =
-            source_observation(source.clone(), database.evidence(), &schema_fingerprint)?;
-        Ok(Self {
-            database_path,
-            source,
-            observation,
-            database,
-        })
-    }
-}
 
 pub(super) fn firebender_source_key(
     route_identity: &str,
@@ -358,18 +77,6 @@ pub(super) fn firebender_source_key(
         FIREBENDER_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
-    )?)
-}
-
-fn source_observation(
-    source: SourceKey,
-    evidence: &SqliteSourceEvidence,
-    schema_fingerprint: &str,
-) -> FirebenderSourceBackedResult<SourceObservation> {
-    Ok(SourceObservation::new(
-        source,
-        FIREBENDER_SOURCE_REVISION_KIND,
-        firebender_source_revision(evidence, schema_fingerprint).into_bytes(),
     )?)
 }
 

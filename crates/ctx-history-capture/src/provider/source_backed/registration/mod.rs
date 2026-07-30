@@ -143,34 +143,6 @@ pub(in crate::provider::source_backed) fn codex_display_bytes(
         })
 }
 
-pub(in crate::provider::source_backed) fn firebender_display_bytes(
-    messages_json: &[u8],
-    message_index: u64,
-) -> Result<Vec<u8>, HydrationFailure> {
-    let messages = serde_json::from_slice::<Vec<serde_json::Value>>(messages_json)
-        .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
-    let index = usize::try_from(message_index).map_err(|_| {
-        hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            "Firebender message index exceeds platform limits",
-        )
-    })?;
-    let message = messages.get(index).ok_or_else(|| {
-        hydration_failure(
-            HydrationFailureKind::MissingRecord,
-            "Firebender message is absent from its verified source row",
-        )
-    })?;
-    firebender_message_text(message)
-        .map(String::into_bytes)
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::UnsupportedParserRevision,
-                "Firebender message has no exact decoded display text",
-            )
-        })
-}
-
 pub(crate) fn hydration_failure(
     kind: HydrationFailureKind,
     detail: impl fmt::Display,

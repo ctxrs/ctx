@@ -641,7 +641,7 @@ fn registry_rejects_duplicate_routes_before_batch_callbacks() {
 }
 
 #[test]
-fn central_hydration_returns_decoded_event_text_not_serialized_containers() {
+fn central_hydration_returns_decoded_codex_event_text() {
     let codex = CodexHydratedRecordV0 {
         provider_bytes: br#"{"type":"event_msg","payload":{"message":"raw"}}"#.to_vec(),
         decoded_display_text: Some("decoded Codex text".to_owned()),
@@ -658,15 +658,6 @@ fn central_hydration_returns_decoded_event_text_not_serialized_containers() {
     assert_eq!(
         missing.kind,
         HydrationFailureKind::UnsupportedParserRevision
-    );
-
-    let firebender = br#"[
-            {"role":"user","content":"first"},
-            {"role":"assistant","content":{"text":"decoded Firebender text"}}
-        ]"#;
-    assert_eq!(
-        firebender_display_bytes(firebender, 1).unwrap(),
-        b"decoded Firebender text".to_vec()
     );
 }
 

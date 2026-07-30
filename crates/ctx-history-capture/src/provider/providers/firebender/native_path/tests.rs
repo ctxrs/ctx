@@ -1,6 +1,4 @@
 use std::{
-    cell::Cell,
-    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -10,9 +8,11 @@ use std::{
     thread,
 };
 
-use ctx_history_core::{BatchHydrationRequest, EventHydrationRequest, HydrationFailureKind};
+use ctx_history_core::{
+    BatchHydrationRequest, CaptureProvider, EventHydrationRequest, HydrationFailureKind,
+};
 use ctx_history_index::WriterOptions;
-use rusqlite::{config::DbConfig, params, Connection};
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use super::*;
@@ -70,63 +70,8 @@ fn replace_messages(database: &Path, id: &str, updated_at: i64, messages: Value)
     .unwrap();
 }
 
-fn drain_source_backed_plan(
-    plan: FirebenderSourceBackedPlan,
-) -> (
-    ctx_history_core::CertifiedSource,
-    Vec<ctx_history_index::LexicalDocument>,
-    Vec<usize>,
-) {
-    let FirebenderSourceBackedPlan::Replacement(mut scanner) = plan else {
-        panic!("expected a replacement scan");
-    };
-    let mut documents = Vec::new();
-    let mut page_sizes = Vec::new();
-    while let Some(page) = scanner.next_page().unwrap() {
-        assert!(page.retained_bytes() <= FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES);
-        page_sizes.push(page.documents().len());
-        documents.extend(page.into_documents());
-    }
-    let certificate = scanner.finish().unwrap();
-    (certificate, documents, page_sizes)
-}
-
 #[test]
-fn stock_snapshot_queries_active_wal_without_persistent_writes_and_rejects_swap() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let source = temp.path().join("firebender.sqlite");
-    let attacker = temp.path().join("attacker.sqlite");
-    let admitted = temp.path().join("admitted.sqlite");
-    create_database(&source, "main");
-    create_database(&attacker, "attacker");
-    persist_wal_row(&source, "from-wal");
-    let before_read = persistent_directory_snapshot(temp.path());
-
-    let (database, opened_value) = FirebenderSqliteDatabase::open(&source, read_latest).unwrap();
-    assert_eq!(opened_value, "from-wal");
-    assert!(database.evidence().wal_length().is_some());
-    assert!(database.evidence().shared_memory_length().is_some());
-    assert_eq!(database.read(&source, read_latest).unwrap(), "from-wal");
-    assert_eq!(persistent_directory_snapshot(temp.path()), before_read);
-
-    fs::rename(&source, &admitted).unwrap();
-    fs::rename(&attacker, &source).unwrap();
-    let before_rejected_read = persistent_directory_snapshot(temp.path());
-    let queried = Cell::new(false);
-    let result = database.read(&source, |_| -> crate::Result<()> {
-        queried.set(true);
-        Ok(())
-    });
-    assert!(result.is_err());
-    assert!(!queried.get());
-    assert_eq!(
-        persistent_directory_snapshot(temp.path()),
-        before_rejected_read
-    );
-}
-
-#[test]
-fn firebender_source_backed_cold_and_exact_keep_full_policy_body_and_hydrate() {
+fn direct_cold_scan_keeps_full_policy_body_and_exact_hydration() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("project");
     let complete_text = format!("firebender-head-{}-firebender-tail", "x".repeat(3_000));
@@ -150,8 +95,15 @@ fn firebender_source_backed_cold_and_exact_keep_full_policy_body_and_hydrate() {
         &[("stable-session", 10, &Value::Array(messages).to_string())],
     );
 
-    let cold = prepare_firebender_source_backed(&root, None).unwrap();
-    let (certificate, documents, page_sizes) = drain_source_backed_plan(cold);
+    let mut documents = Vec::new();
+    let mut page_sizes = Vec::new();
+    let scan = source_backed::scan_for_test(&root, &mut |page| {
+        page_sizes.push(page.len());
+        documents.extend(page);
+        Ok(())
+    })
+    .unwrap();
+    let certificate = scan.certificate();
     assert_eq!(page_sizes, vec![61]);
     assert_eq!(documents.len(), 61);
     assert_eq!(certificate.counts().complete_records, 61);
@@ -211,30 +163,15 @@ fn firebender_source_backed_cold_and_exact_keep_full_policy_body_and_hydrate() {
         .iter()
         .all(|document| document.locator.record_digest() == first.locator.record_digest()));
 
-    let hydrated = hydrate_firebender_source_backed_row(&root, &first.locator).unwrap();
-    assert_eq!(hydrated.provider_session_id(), "stable-session");
-    assert_eq!(hydrated.message_index(), 0);
-    let hydrated_messages: Value = serde_json::from_slice(hydrated.messages_json()).unwrap();
-    assert_eq!(
-        hydrated_messages.pointer("/0/role").and_then(Value::as_str),
-        Some("user")
-    );
-    assert_eq!(
-        hydrated_messages
-            .pointer("/0/content")
-            .and_then(Value::as_str),
-        Some(complete_text.as_str())
-    );
-
-    let exact = prepare_firebender_source_backed(&root, Some(&certificate)).unwrap();
-    let FirebenderSourceBackedPlan::Exact(exact_certificate) = exact else {
-        panic!("unchanged Firebender snapshot was reparsed");
-    };
-    assert_eq!(exact_certificate, certificate);
+    let request = EventHydrationRequest::new(first.event_id, first.locator.clone()).unwrap();
+    let hydrated = source_backed::resolver_for_test(&root)
+        .hydrate_event(&request)
+        .unwrap();
+    assert_eq!(hydrated.provider_bytes, complete_text.as_bytes());
 }
 
 #[test]
-fn firebender_source_backed_replacement_keeps_ids_and_stales_old_row_evidence() {
+fn direct_replacement_keeps_ids_and_stales_old_row_evidence() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("project");
     let database = create_test_database(
@@ -248,8 +185,14 @@ fn firebender_source_backed_replacement_keeps_ids_and_stales_old_row_evidence() 
             ]"#,
         )],
     );
-    let (before, before_documents, _) =
-        drain_source_backed_plan(prepare_firebender_source_backed(&root, None).unwrap());
+    let mut before_documents = Vec::new();
+    let before = source_backed::scan_for_test(&root, &mut |page| {
+        before_documents.extend(page);
+        Ok(())
+    })
+    .unwrap()
+    .certificate()
+    .clone();
     let old_locator = before_documents[0].locator.clone();
     let old_ids = before_documents
         .iter()
@@ -265,9 +208,14 @@ fn firebender_source_backed_replacement_keeps_ids_and_stales_old_row_evidence() 
             {"role": "assistant", "content": "answer"}
         ]),
     );
-    let replacement =
-        prepare_firebender_source_backed(&root, Some(&before)).expect("replacement plan");
-    let (after, after_documents, _) = drain_source_backed_plan(replacement);
+    let mut after_documents = Vec::new();
+    let after = source_backed::scan_for_test(&root, &mut |page| {
+        after_documents.extend(page);
+        Ok(())
+    })
+    .unwrap()
+    .certificate()
+    .clone();
     assert_ne!(after.observation(), before.observation());
     assert_eq!(
         after_documents
@@ -282,14 +230,22 @@ fn firebender_source_backed_replacement_keeps_ids_and_stales_old_row_evidence() 
         old_locator.record_digest()
     );
     assert!(matches!(
-        hydrate_firebender_source_backed_row(&root, &old_locator),
-        Err(FirebenderSourceBackedError::StaleRowEvidence)
+        source_backed::resolver_for_test(&root).hydrate_event(
+            &EventHydrationRequest::new(before_documents[0].event_id, old_locator).unwrap()
+        ),
+        Err(error) if error.kind == HydrationFailureKind::StaleRecordEvidence
     ));
+    let request = EventHydrationRequest::new(
+        after_documents[0].event_id,
+        after_documents[0].locator.clone(),
+    )
+    .unwrap();
     assert_eq!(
-        hydrate_firebender_source_backed_row(&root, &after_documents[0].locator)
+        source_backed::resolver_for_test(&root)
+            .hydrate_event(&request)
             .unwrap()
-            .provider_session_id(),
-        "stable-session"
+            .provider_bytes,
+        b"replacement"
     );
 }
 
@@ -789,63 +745,4 @@ fn provider_local_route_is_direct_replacement_only_and_batch_hydrated() {
     assert!(!route.contains(concat!("captured_route_", "driver")));
     assert!(!route.contains(concat!("begin_source_", "append")));
     assert!(!route.contains(concat!("certify_source_", "append")));
-}
-
-fn create_database(path: &Path, value: &str) {
-    let connection = Connection::open(path).unwrap();
-    connection
-        .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
-        .unwrap();
-    connection
-        .execute("INSERT INTO messages (body) VALUES (?1)", params![value])
-        .unwrap();
-}
-
-fn persist_wal_row(path: &Path, value: &str) {
-    let writer = Connection::open(path).unwrap();
-    let mode: String = writer
-        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(mode, "wal");
-    writer
-        .execute("INSERT INTO messages (body) VALUES (?1)", params![value])
-        .unwrap();
-    writer
-        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
-        .unwrap();
-    drop(writer);
-    assert!(path.with_file_name("firebender.sqlite-wal").exists());
-    assert!(path.with_file_name("firebender.sqlite-shm").exists());
-}
-
-fn read_latest(connection: &Connection) -> crate::Result<String> {
-    Ok(connection.query_row(
-        "SELECT body FROM messages ORDER BY rowid DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?)
-}
-
-fn persistent_directory_snapshot(directory: &Path) -> Vec<(OsString, Vec<u8>)> {
-    let mut paths = fs::read_dir(directory)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            !path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .ends_with("-shm")
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths
-        .into_iter()
-        .map(|path| {
-            (
-                path.file_name().unwrap().to_os_string(),
-                fs::read(path).unwrap(),
-            )
-        })
-        .collect()
 }
