@@ -984,5 +984,9 @@ pub(crate) fn pin_active_verified_generation(
 }
 
 #[cfg(test)]
+#[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_retained_generation_tests.rs"]
+mod retained_generation_tests;
+
+#[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests.rs"]
 mod tests;
