@@ -111,10 +111,6 @@ pub(crate) fn invalid_route(
     }
 }
 
-pub(crate) fn route_capture_error(error: CaptureError) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Unavailable, error.to_string())
-}
-
 pub(crate) fn route_error(error: impl fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
 }
