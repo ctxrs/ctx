@@ -338,6 +338,12 @@ mod native {
                             || job["previous_generation"] == append_generation))
                         .then_some(job)
                 });
+            let retained_meta_after_failure = snapshot_file(&retained_meta_path);
+            let retained_manifest_after_failure = snapshot_file(&retained_manifest_path);
+            let failed_request_id = failed_job["request_id"]
+                .as_str()
+                .expect("failed refresh request id")
+                .to_owned();
             fs::set_permissions(&sessions_root, fs::Permissions::from_mode(original_mode)).unwrap();
             assert_eq!(
                 failed_job["error_code"], "all_provider_terminal_coverage_unavailable",
@@ -350,20 +356,31 @@ mod native {
                 "{failed_job:#}"
             );
             assert_eq!(
-                snapshot_file(&retained_meta_path),
-                retained_meta,
+                retained_meta_after_failure, retained_meta,
                 "failed refresh rewrote the verified Tantivy generation metadata"
             );
             assert_eq!(
-                snapshot_file(&retained_manifest_path),
-                retained_manifest,
+                retained_manifest_after_failure, retained_manifest,
                 "failed refresh rewrote the verified generation manifest"
             );
+            let recovered_job = wait_for_job_with_timeout(
+                &harness,
+                "refresh after provider root recovery",
+                OBSERVATION_TIMEOUT * 2,
+                |job| {
+                    (job["request_state"] == "published"
+                        && job["request_id"].as_str() != Some(failed_request_id.as_str()))
+                    .then_some(job)
+                },
+            );
+            let recovered_generation = recovered_job["published_generation"]
+                .as_str()
+                .expect("recovered refresh generation");
             let retained = harness.search("persistent daemon passive append oracle", "off");
             assert_search_result(
                 &retained,
                 "persistent daemon passive append oracle",
-                &append_generation,
+                recovered_generation,
             );
         }
 
@@ -384,8 +401,9 @@ mod native {
         let stopped_wakeup = read_json_file(&wakeup_path(harness.root()));
         assert_eq!(stopped_wakeup["status"], "stopped", "{stopped_wakeup:#}");
         assert_eq!(
-            stopped_wakeup["wakeup"]["timeout_wakeups"], 0,
-            "bounded qualification observed a polling timeout signature: {stopped_wakeup:#}"
+            stopped_wakeup["wakeup"]["timeout_wakeups"],
+            stopped_wakeup["wakeup"]["scheduled_retry_wakeups"],
+            "bounded qualification observed an unclassified timeout wake: {stopped_wakeup:#}"
         );
         assert!(
             counter(&stopped_wakeup, "filesystem_signals")
@@ -961,8 +979,17 @@ mod native {
         description: &str,
         predicate: impl Fn(Value) -> Option<Value>,
     ) -> Value {
+        wait_for_job_with_timeout(harness, description, OBSERVATION_TIMEOUT, predicate)
+    }
+
+    fn wait_for_job_with_timeout(
+        harness: &Harness,
+        description: &str,
+        timeout: Duration,
+        predicate: impl Fn(Value) -> Option<Value>,
+    ) -> Value {
         let path = harness.root().join("daemon/jobs/core-refresh.json");
-        let deadline = Instant::now() + OBSERVATION_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let last = fs::read(&path)
                 .ok()

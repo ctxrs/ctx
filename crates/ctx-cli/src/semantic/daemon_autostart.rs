@@ -60,7 +60,8 @@ use autostart::{
 };
 #[cfg(test)]
 use autostart::{
-    daemon_autostart_allowed, daemon_handoff_observation_from, wait_for_daemon_handoff_with,
+    daemon_autostart_allowed, daemon_handoff_observation_from,
+    daemon_live_endpoint_observation_from, wait_for_daemon_handoff_with,
 };
 
 pub(crate) use handoff::prepare_daemon_uninstall;

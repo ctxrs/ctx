@@ -966,6 +966,61 @@ fn setup_handoff_wait_rejects_stale_or_future_heartbeat_without_sleep() {
 }
 
 #[test]
+fn responsive_owned_endpoint_allows_an_idle_event_driven_daemon() {
+    let mut expected = AppConfig::default();
+    expected.daemon.enabled = true;
+    let status = json!({
+        "status": "running",
+        "pid": 45,
+        "heartbeat_at_ms": 1_000,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": true,
+                "daemon_mode": expected.daemon.mode.as_str(),
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+
+    assert_eq!(
+        daemon_live_endpoint_observation_from(Some(&status), Some(45), &expected),
+        DaemonHandoffObservation::Running(DaemonHandoff {
+            pid: 45,
+            heartbeat_at_ms: 1_000,
+        })
+    );
+}
+
+#[test]
+fn responsive_endpoint_does_not_waive_owner_or_config_identity() {
+    let mut expected = AppConfig::default();
+    expected.daemon.enabled = true;
+    let status = json!({
+        "status": "running",
+        "pid": 45,
+        "heartbeat_at_ms": 1_000,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": false,
+                "daemon_mode": expected.daemon.mode.as_str(),
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+
+    assert_eq!(
+        daemon_live_endpoint_observation_from(Some(&status), Some(46), &expected),
+        DaemonHandoffObservation::Pending
+    );
+    assert_eq!(
+        daemon_live_endpoint_observation_from(Some(&status), Some(45), &expected),
+        DaemonHandoffObservation::Pending
+    );
+}
+
+#[test]
 fn setup_handoff_wait_ignores_stale_nested_config_failure_without_sleep() {
     let status = json!({
         "status": "running",
