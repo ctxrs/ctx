@@ -20,11 +20,13 @@ Put a manifest at one of:
 - any directory or manifest file listed in `CTX_HISTORY_PLUGIN_PATH`.
 
 `ctx sources` and `ctx sources --format json` discover manifests without
-executing commands. A valid source is reported as `available`, `importable:
-true`, and `import_mode: explicit_source_backed`. Its `history_source` is the
-filterable `provider_key/source_id` route identity; `plugin_source` is the
-`plugin/source` import-selection alias. Invalid manifests are listed as
-non-importable `history_source_plugin` rows with their validation error.
+executing commands. A durable regular-file source is reported as `available`,
+`importable: true`, and `import_mode: explicit_source_backed`. Its
+`history_source` is the filterable `provider_key/source_id` route identity;
+`plugin_source` is the `plugin/source` import-selection alias. Command-only
+compatibility sources are reported as `unsupported` and never importable.
+Invalid manifests are listed as non-importable `history_source_plugin` rows
+with their validation error.
 
 Manifest example:
 
