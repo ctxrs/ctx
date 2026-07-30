@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
-use ctx_history_capture::ProviderImportSummary;
+use ctx_history_capture::{ProviderImportSummary, ProviderImportWorkResult};
 use serde_json::json;
 
 use crate::{
@@ -64,10 +64,15 @@ pub(crate) fn run_explicit_source_catalog_import(
     let refresh = SourceBackedRefreshMode::Wait
         .coordinate_explicit_source_catalog(&context.data_root, &upsert.authority)
         .context("publish explicit source through daemon-owned source refresh")?;
+    let receipt = refresh
+        .receipt
+        .as_ref()
+        .context("explicit source refresh has no authoritative terminal receipt")?;
     let published_generation = refresh.pin.generation_id().to_owned();
 
     let summary = ProviderImportSummary {
-        imported: 1,
+        imported: usize::from(receipt.generation_changed),
+        skipped: usize::from(!receipt.generation_changed),
         ..ProviderImportSummary::default()
     };
     context.provider_refreshes.record_success_with_facts(
@@ -83,17 +88,40 @@ pub(crate) fn run_explicit_source_catalog_import(
         ProviderRefreshRuntimeFacts::observed_success(started.elapsed(), &summary),
     );
 
-    let mut totals = ImportTotals::default();
-    totals.add(&summary, &stats);
+    let current = &receipt.current;
+    let totals = ImportTotals {
+        current_source_count: Some(current.source_count),
+        current_indexed_documents: Some(current.indexed_documents),
+        current_complete_records: Some(current.complete_records),
+        current_retained_records: Some(current.retained_records),
+        current_rejected_records: Some(current.rejected_records),
+        current_ignored_records: Some(current.ignored_records),
+        current_certified_source_bytes: Some(current.certified_source_bytes),
+        current_sources_with_rejections: Some(current.sources_with_rejections),
+        removed_source_count: Some(current.removed_source_count),
+        work_result: if receipt.generation_changed {
+            ProviderImportWorkResult::Changed
+        } else {
+            ProviderImportWorkResult::NoOp
+        },
+        ..ImportTotals::default()
+    };
+    context.provider_refreshes.record_source_backed_publication(
+        ProviderRefreshTrigger::Import,
+        receipt.generation_changed,
+    );
     context.telemetry.sources_seen = Some(count_bucket(1));
     context.telemetry.source_files = Some(count_bucket(stats.files as u64));
     context.telemetry.source_bytes = Some(bytes_bucket(stats.bytes));
     context.telemetry.failed_sources = Some(count_bucket(0));
-    context.telemetry.sessions_imported = Some(count_bucket(0));
-    context.telemetry.events_imported = Some(count_bucket(0));
-    context.telemetry.edges_imported = Some(count_bucket(0));
-    context.telemetry.skipped = Some(count_bucket(0));
-    context.telemetry.rejected_records = Some(count_bucket(0));
+    context.telemetry.sessions_imported = None;
+    context.telemetry.events_imported = None;
+    context.telemetry.edges_imported = None;
+    context.telemetry.skipped = None;
+    // The refresh receipt exposes current corpus rejections, not a per-run
+    // rejection delta. Do not mislabel that retained cardinality as work
+    // performed by this import invocation.
+    context.telemetry.rejected_records = None;
 
     let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!("Published source-backed generation {published_generation}.")
@@ -105,7 +133,7 @@ pub(crate) fn run_explicit_source_catalog_import(
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        sources: vec![json!({
+        sources: vec![crate::compact_json(json!({
             "status": "published",
             "failure_scope": "none",
             "failure_type": "none",
@@ -117,24 +145,26 @@ pub(crate) fn run_explicit_source_catalog_import(
             "catalog_changed": upsert.changed,
             "catalog_lineage": upsert.catalog_lineage_hex(),
             "catalog_authority": upsert.authority.to_json(),
+            "previous_generation": receipt.previous_generation,
             "published_generation": published_generation,
+            "generation_changed": receipt.generation_changed,
             "daemon_request_id": refresh.request_id,
             "daemon_request_metadata": {
                 "owner": "daemon",
                 "trigger": "import",
                 "trigger_provenance": "explicit_source_catalog",
             },
-            "change": summary.work_result().as_str(),
-            "imported_sessions": 0,
-            "imported_events": 0,
-            "imported_edges": 0,
-            "skipped_sessions": 0,
-            "skipped_events": 0,
-            "skipped_edges": 0,
-            "skipped": 0,
-            "rejected_records": 0,
-            "rejections": [],
-        })],
+            "change": if receipt.generation_changed { "changed" } else { "no_op" },
+            "current_source_count": current.source_count,
+            "current_indexed_documents": current.indexed_documents,
+            "current_complete_records": current.complete_records,
+            "current_retained_records": current.retained_records,
+            "current_rejected_records": current.rejected_records,
+            "current_ignored_records": current.ignored_records,
+            "current_certified_source_bytes": current.certified_source_bytes,
+            "current_sources_with_rejections": current.sources_with_rejections,
+            "removed_source_count": current.removed_source_count,
+        }))],
     })
 }
 
