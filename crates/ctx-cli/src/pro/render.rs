@@ -1,5 +1,3 @@
-use std::io::{self, Write as _};
-
 use anyhow::Result;
 use ctx_pro_host_protocol::BlameResult;
 use serde_json::Value;
@@ -30,7 +28,7 @@ pub(crate) fn print_blame_result(
     if json_output {
         let mut rendered = serde_json::to_vec_pretty(result)?;
         rendered.push(b'\n');
-        io::stdout().lock().write_all(&rendered)?;
+        ui.stdout_writer().write_all(&rendered)?;
         return Ok(rendered.len());
     }
 

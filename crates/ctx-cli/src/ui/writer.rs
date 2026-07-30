@@ -1,5 +1,7 @@
 use std::io::{self, IsTerminal as _, Write};
 
+use crate::output::MeasuredWriter;
+
 use super::{ColorMode, Document, RenderContext, StreamKind};
 
 type BoxedWriter = Box<dyn Write + Send>;
@@ -24,9 +26,9 @@ impl Ui {
             supports_unicode::on(supports_unicode::Stream::Stdout),
             stdout_auto_color,
         );
-        let stdout_writer: BoxedWriter = Box::new(anstream::AutoStream::new(
-            stdout,
-            stdout_context.adapter_choice(),
+        let stdout_writer: BoxedWriter = Box::new(MeasuredWriter::current(
+            anstream::AutoStream::new(stdout, stdout_context.adapter_choice()),
+            StreamKind::Stdout,
         ));
 
         let stderr = io::stderr();
@@ -40,9 +42,9 @@ impl Ui {
             supports_unicode::on(supports_unicode::Stream::Stderr),
             stderr_auto_color,
         );
-        let stderr_writer: BoxedWriter = Box::new(anstream::AutoStream::new(
-            stderr,
-            stderr_context.adapter_choice(),
+        let stderr_writer: BoxedWriter = Box::new(MeasuredWriter::current(
+            anstream::AutoStream::new(stderr, stderr_context.adapter_choice()),
+            StreamKind::Stderr,
         ));
 
         Self {
@@ -102,6 +104,10 @@ impl Ui {
         self.stdout.writer()
     }
 
+    pub(crate) fn stderr_writer(&mut self) -> &mut (dyn Write + Send) {
+        self.stderr.writer()
+    }
+
     pub(crate) fn flush(&mut self) -> io::Result<()> {
         self.stdout.flush()?;
         self.stderr.flush()
@@ -125,7 +131,8 @@ impl Destination {
         let writer: BoxedWriter = Box::new(writer);
         let adapted: BoxedWriter =
             Box::new(anstream::AutoStream::new(writer, context.adapter_choice()));
-        Self::new(context, adapted)
+        let measured: BoxedWriter = Box::new(MeasuredWriter::current(adapted, context.stream()));
+        Self::new(context, measured)
     }
 
     const fn context(&self) -> &RenderContext {

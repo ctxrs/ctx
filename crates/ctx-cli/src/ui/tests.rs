@@ -525,8 +525,12 @@ struct SharedWriter {
 }
 
 impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().unwrap().clone()
+    }
+
     fn text(&self) -> String {
-        String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+        String::from_utf8(self.bytes()).unwrap()
     }
 }
 
@@ -576,4 +580,78 @@ fn ui_owns_independent_injectable_streams_and_capabilities() {
     assert_eq!(strip_ansi(&stdout_copy.text()), stderr_copy.text());
     assert_eq!(ui.context(StreamKind::Stdout).content_width(), Some(79));
     assert_eq!(ui.context(StreamKind::Stderr).content_width(), None);
+}
+
+#[test]
+fn ui_measurement_matches_final_cross_width_color_and_stream_bytes() {
+    let mut rendered_sizes = Vec::new();
+    for (width, color) in [
+        (32, ColorMode::Never),
+        (80, ColorMode::Never),
+        (80, ColorMode::Always),
+    ] {
+        let measurement = crate::output::OutputMeasurement::start();
+        let stdout = SharedWriter::default();
+        let stdout_copy = stdout.clone();
+        let stderr = SharedWriter::default();
+        let stderr_copy = stderr.clone();
+        let stdout_context =
+            RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+        let stderr_context =
+            RenderContext::for_test(TestContext::tty(StreamKind::Stderr, width).color(color));
+        let stdout_document = outcome(
+            &stdout_context,
+            Outcome {
+                state: OutcomeState::Success,
+                title: "History is ready",
+                detail: Some(
+                    "The final terminal-width decision controls these exact delivered bytes.",
+                ),
+            },
+        );
+        let stderr_document = diagnostic(
+            &stderr_context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: "One source needs attention",
+                detail: Some("Run the recovery command after reviewing the source."),
+                fields: &[],
+                action: Some(Action {
+                    command: "ctx sources --all",
+                }),
+            },
+        );
+        let mut ui = Ui::with_writers(stdout, stdout_context, stderr, stderr_context);
+
+        ui.write_stdout(&stdout_document).unwrap();
+        ui.write_stderr(&stderr_document).unwrap();
+        ui.flush().unwrap();
+
+        let stdout_bytes = stdout_copy.bytes();
+        let stderr_bytes = stderr_copy.bytes();
+        assert_eq!(
+            measurement.stream_bytes(StreamKind::Stdout),
+            u64::try_from(stdout_bytes.len()).unwrap()
+        );
+        assert_eq!(
+            measurement.stream_bytes(StreamKind::Stderr),
+            u64::try_from(stderr_bytes.len()).unwrap()
+        );
+        assert_eq!(
+            measurement.total_bytes(),
+            u64::try_from(stdout_bytes.len() + stderr_bytes.len()).unwrap()
+        );
+        assert_eq!(stdout_bytes.contains(&0x1b), color == ColorMode::Always);
+        assert_eq!(stderr_bytes.contains(&0x1b), color == ColorMode::Always);
+        rendered_sizes.push(measurement.total_bytes());
+    }
+
+    assert_ne!(
+        rendered_sizes[0], rendered_sizes[1],
+        "wrapping must affect the measured delivered byte count"
+    );
+    assert!(
+        rendered_sizes[2] > rendered_sizes[1],
+        "selected ANSI bytes must be included"
+    );
 }

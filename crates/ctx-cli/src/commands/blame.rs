@@ -179,7 +179,7 @@ pub(crate) fn run(
         telemetry.complete(result.matches.len(), result.next.is_some());
         emit_blame_result(&result, json, local_usage, ui, print_blame_result)?;
         let eligible = referral_cta_eligible(&result, json, interactive_human);
-        crate::pro::show_cta_once(&data_root, eligible, &mut io::stderr().lock());
+        crate::pro::show_cta_once(&data_root, eligible, ui);
         Ok(())
     })();
     finish_blame_telemetry(&data_root, &mut telemetry, started, result)

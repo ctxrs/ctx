@@ -137,7 +137,7 @@ fn prompt_for_agents(context: &PathContext) -> Result<Vec<SkillAgentArg>> {
     let options = picker_agents();
     let detected = detected_agents(context);
     let defaults = default_picker_agents(context);
-    let mut stderr = io::stderr();
+    let mut stderr = crate::output::stderr_writer();
     writeln!(
         stderr,
         "Select where to install {BUNDLED_SKILL_NAME}. Detected agents are preselected."

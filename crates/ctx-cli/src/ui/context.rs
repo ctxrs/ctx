@@ -46,9 +46,9 @@ pub(crate) struct RenderContext {
 }
 
 impl RenderContext {
-    /// Stable, unbounded plain-text context used only for local accounting and
-    /// output-limit decisions. Terminal capabilities must not change the bytes
-    /// attributed to the same logical result.
+    /// Stable, unbounded plain-text context for deterministic command-local
+    /// estimates and output-limit decisions. Dispatch separately accounts for
+    /// the actual terminal-adapted bytes delivered at runtime.
     pub(crate) const fn canonical_human_measurement() -> Self {
         Self {
             stream: StreamKind::Stdout,
