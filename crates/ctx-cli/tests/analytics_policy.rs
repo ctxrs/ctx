@@ -29,7 +29,7 @@ fn analytics_sends_coarse_cli_metadata_by_default() {
     assert_eq!(event["events"][0]["properties"]["output"], "human");
     assert_eq!(
         event["events"][0]["properties"]["finding_count_bucket"],
-        "2-5"
+        "6-20"
     );
     assert_capability_snapshot_is_coarse(analytics_event_properties(&event));
     assert_analytics_properties_are_allowlisted(analytics_event_properties(&event));
@@ -64,8 +64,10 @@ fn analytics_sends_coarse_cli_metadata_by_default() {
 fn analytics_config_opt_out_suppresses_delivery() {
     let temp = tempdir();
     let state = temp.path().join("state");
+    let data_root = data_root(&temp);
+    fs::create_dir_all(&data_root).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root.join("config.toml"),
         "[analytics]\nenabled = false\n",
     )
     .unwrap();

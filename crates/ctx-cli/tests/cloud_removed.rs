@@ -15,7 +15,9 @@ fn cloud_subcommand_is_not_reachable() {
 #[test]
 fn removed_cloud_config_is_rejected_without_initializing_storage() {
     let temp = tempdir();
-    let config_path = temp.path().join("config.toml");
+    let data_root = data_root(&temp);
+    fs::create_dir_all(&data_root).unwrap();
+    let config_path = data_root.join("config.toml");
     let stale_config = "[cloud]\nmode = \"local_and_cloud\"\n";
     fs::write(&config_path, stale_config).unwrap();
 
@@ -26,9 +28,9 @@ fn removed_cloud_config_is_rejected_without_initializing_storage() {
         .stderr(predicate::str::contains("cloud.mode"));
 
     assert_eq!(fs::read_to_string(config_path).unwrap(), stale_config);
-    assert!(!temp.path().join("search").exists());
-    assert!(!temp.path().join("relational.sqlite").exists());
-    assert!(!temp.path().join("spool").exists());
+    assert!(!data_root.join("search").exists());
+    assert!(!data_root.join("relational.sqlite").exists());
+    assert!(!data_root.join("spool").exists());
 }
 
 #[test]
