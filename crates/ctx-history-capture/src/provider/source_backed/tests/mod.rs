@@ -1,6 +1,5 @@
 mod codex;
 mod inventory;
-mod lifecycle;
 mod registry;
 
 use std::{
