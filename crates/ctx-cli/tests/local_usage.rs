@@ -1,6 +1,6 @@
 mod support;
 
-use std::fs;
+use std::{fs, path::Path};
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -12,6 +12,16 @@ fn enabled(command: &mut assert_cmd::Command) -> &mut assert_cmd::Command {
 
 fn usage_db_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
     data_root(temp).join("usage.sqlite")
+}
+
+fn create_owner_private_data_root(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
 }
 
 fn definition(report: &Value, version: i64) -> &Value {
@@ -125,7 +135,7 @@ fn report_is_content_free_and_stats_emit_no_commercial_analytics() {
     let home = temp.path().join("home");
     let state = temp.path().join("state");
     let events_path = temp.path().join("status-analytics.jsonl");
-    fs::create_dir_all(&data_root).unwrap();
+    create_owner_private_data_root(&data_root);
     fs::create_dir_all(&home).unwrap();
     fs::write(
         data_root.join("config.toml"),
@@ -263,7 +273,7 @@ fn cli_non_search_results_are_not_reclassified_as_value_or_context() {
 #[test]
 fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
     let temp = tempdir();
-    fs::create_dir_all(data_root(&temp)).unwrap();
+    create_owner_private_data_root(&data_root(&temp));
     enabled(ctx(&temp).args(["pro", "--referral", "agent-smith", "setup", "--format=json"]))
         .assert()
         .failure();
@@ -279,7 +289,7 @@ fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
     assert_eq!(current["by_operation"][0]["operation"], "pro_setup");
 
     let unavailable = tempdir();
-    fs::create_dir_all(data_root(&unavailable)).unwrap();
+    create_owner_private_data_root(&data_root(&unavailable));
     fs::create_dir(usage_db_path(&unavailable)).unwrap();
     enabled(ctx(&unavailable).args(["doctor"]))
         .assert()
@@ -305,7 +315,7 @@ fn protocol_control_and_cli_control_paths_do_not_record() {
 fn malformed_store_is_an_explicit_content_free_report_error() {
     let temp = tempdir();
     let marker = "SECRET_PATH_TOKEN_7f98";
-    fs::create_dir_all(data_root(&temp)).unwrap();
+    create_owner_private_data_root(&data_root(&temp));
     fs::write(
         usage_db_path(&temp),
         format!("not sqlite: /tmp/{marker}/bearer-secret"),
