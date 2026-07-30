@@ -58,11 +58,6 @@ use super::providers::{
         CrushSourceBackedResultV0, CRUSH_DISCOVERY_REVISION, CRUSH_FRONTIER_KIND,
         CRUSH_PARSER_REVISION, CRUSH_SOURCE_SCHEMA_VARIANT,
     },
-    cursor::{
-        extract_cursor_source_backed_cold, hydrate_cursor_source_backed_message,
-        CursorSourceBackedPage, CursorSourceBackedRecord, CursorSourceBackedSink,
-        CursorSourceBackedSourcePlan, CursorSourceBackedTerminal,
-    },
     deepagents::native_path::source_backed::DeepAgentsDatabaseSelectionV0,
     forgecode::nativepath::source_backed::ForgeCodeSourceSelectionV0,
     goose::{
@@ -112,7 +107,6 @@ use crate::{
     discover_provider_sources_with_context, provider_source_spec, CaptureError, DiscoveryContext,
     DiscoveryIssue, DiscoveryPlatform, ProviderAdapterContext, ProviderImportSupport,
     ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
-    Result as CaptureResult, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
 };
 
 mod discovery;

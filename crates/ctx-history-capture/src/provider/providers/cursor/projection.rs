@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::{ContentRef, EventRole, EventType};
 use serde::{Deserialize, Serialize};
@@ -7,10 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 
-use super::{
-    checkpoint::CursorSessionCheckpoint,
-    parser::{CursorSafePart, CursorSanitizedRecord},
-};
+use super::parser::{CursorSafePart, CursorSanitizedRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct CursorNativeOrder {
@@ -47,27 +42,19 @@ pub(crate) struct CursorNativeEvent {
     pub(crate) provider_event_hash: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CursorNativeSession {
-    pub(crate) native_session_id: String,
-    pub(crate) project: PathBuf,
-    pub(crate) started_at: Option<DateTime<Utc>>,
-    pub(crate) ended_at: Option<DateTime<Utc>>,
-    pub(crate) title: Option<String>,
-}
-
 pub(super) fn project_cursor_record(
-    record: &CursorSanitizedRecord,
+    record: CursorSanitizedRecord,
 ) -> serde_json::Result<Vec<CursorNativeEvent>> {
+    let occurred_at = record.timestamp.as_deref().and_then(parse_rfc3339_utc);
     record
         .parts
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(part_ordinal, part)| {
             let part_ordinal = u32::try_from(part_ordinal).unwrap_or(u32::MAX);
             let (event_type, role, body, complete_content_ref) = match part {
                 CursorSafePart::BodyFree { event_type, role } => {
-                    (*event_type, *role, CursorEventBody::None, None)
+                    (event_type, role, CursorEventBody::None, None)
                 }
                 CursorSafePart::Text {
                     event_type,
@@ -75,10 +62,10 @@ pub(super) fn project_cursor_record(
                     text,
                     complete_content_ref,
                 } => (
-                    *event_type,
-                    *role,
-                    CursorEventBody::Text { text: text.clone() },
-                    complete_content_ref.clone(),
+                    event_type,
+                    role,
+                    CursorEventBody::Text { text },
+                    complete_content_ref,
                 ),
                 CursorSafePart::ToolUse {
                     role,
@@ -87,11 +74,11 @@ pub(super) fn project_cursor_record(
                     input_paths,
                 } => (
                     EventType::ToolCall,
-                    *role,
+                    role,
                     CursorEventBody::ToolCall {
-                        call_id: call_id.clone(),
-                        tool_name: tool_name.clone(),
-                        input_paths: input_paths.clone(),
+                        call_id,
+                        tool_name,
+                        input_paths,
                     },
                     None,
                 ),
@@ -106,7 +93,7 @@ pub(super) fn project_cursor_record(
                 },
                 event_type,
                 role,
-                occurred_at: record.timestamp.as_deref().and_then(parse_rfc3339_utc),
+                occurred_at,
                 body,
                 complete_content_ref,
                 record_byte_start: record.byte_start,
@@ -116,43 +103,4 @@ pub(super) fn project_cursor_record(
             })
         })
         .collect()
-}
-
-pub(super) fn retained_body_bytes(events: &[CursorNativeEvent]) -> usize {
-    events.iter().fold(0_usize, |total, event| {
-        let body_bytes = match &event.body {
-            CursorEventBody::None => 0,
-            CursorEventBody::Text { text } => text.len(),
-            CursorEventBody::ToolCall {
-                call_id,
-                tool_name,
-                input_paths,
-            } => {
-                call_id.as_deref().map_or(0, str::len)
-                    + tool_name.as_deref().map_or(0, str::len)
-                    + input_paths.iter().map(String::len).sum::<usize>()
-            }
-        };
-        total.saturating_add(body_bytes)
-    })
-}
-
-pub(super) fn update_cursor_session_checkpoint(
-    session: &mut CursorSessionCheckpoint,
-    events: &[CursorNativeEvent],
-) {
-    for event in events {
-        if let Some(occurred_at) = event.occurred_at {
-            session.started_at.get_or_insert(occurred_at);
-            session.ended_at = Some(occurred_at);
-        }
-        if session.title.is_none() && event.role == EventRole::User {
-            if let CursorEventBody::Text { text } = &event.body {
-                let title = text.replace('\n', " ").chars().take(80).collect::<String>();
-                if !title.trim().is_empty() {
-                    session.title = Some(title);
-                }
-            }
-        }
-    }
 }
