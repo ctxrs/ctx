@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     time::{Duration as StdDuration, Instant},
 };
@@ -7,6 +7,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
     BatchHydrationRequest, EventHydrationRequest, HydrationFailure, HydrationFailureKind,
+    MAX_BATCH_HYDRATION_EVENTS,
 };
 #[cfg(test)]
 use ctx_history_core::{CaptureProvider, EventRole, EventType};
@@ -111,7 +112,6 @@ impl SourceHydrationUnavailable {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn code(&self) -> &str {
         &self.code
     }
@@ -136,6 +136,7 @@ impl SourceHydrationUnavailable {
                 "missing_record" => HydrationFailureKind::MissingRecord,
                 "unsupported_parser_revision" => HydrationFailureKind::UnsupportedParserRevision,
                 "invalid_locator" => HydrationFailureKind::InvalidLocator,
+                "content_too_large" => HydrationFailureKind::ContentTooLarge,
                 _ => HydrationFailureKind::TemporarilyUnavailable,
             },
             detail: self.to_string(),
@@ -143,9 +144,9 @@ impl SourceHydrationUnavailable {
     }
 }
 
-const SOURCE_HYDRATION_BATCH_MAX_ITEMS: usize = 128;
 const SOURCE_HYDRATION_RESPONSE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const SOURCE_HYDRATION_RETAINED_ITEM_OVERHEAD_BYTES: usize = 512;
+const SOURCE_HYDRATION_REQUEST_TRANSPORT_OVERHEAD_BYTES: usize = 256;
 const SOURCE_HYDRATION_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const SOURCE_HYDRATION_RECOVERY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const SOURCE_HYDRATION_RECOVERY_RETRY: StdDuration = StdDuration::from_millis(50);
@@ -248,7 +249,43 @@ fn map_source_hydration_request_error(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
+fn preflight_source_hydration_payload(payload: &Value) -> Result<()> {
+    let payload_bytes = hydration_budget::serialized_json_bytes(payload).map_err(|error| {
+        source_hydration_budget_exceeded(format!(
+            "source hydration request size could not be measured safely: {error}"
+        ))
+    })?;
+    let payload_limit = server::DAEMON_QUERY_REQUEST_MAX_BYTES
+        .checked_sub(SOURCE_HYDRATION_REQUEST_TRANSPORT_OVERHEAD_BYTES)
+        .ok_or_else(|| {
+            source_hydration_budget_exceeded(
+                "daemon source hydration request allowance is smaller than its transport envelope",
+            )
+        })?;
+    if payload_bytes > payload_limit {
+        return Err(source_hydration_budget_exceeded(format!(
+            "source hydration request metadata requires {payload_bytes} bytes; maximum is {payload_limit}"
+        )));
+    }
+    Ok(())
+}
+
 impl PinnedSourceBackedGeneration {
+    #[cfg(test)]
+    pub(crate) fn source_hydration_error_for_test(
+        code: &'static str,
+        failure_kind: &'static str,
+    ) -> anyhow::Error {
+        SourceHydrationUnavailable::new(code, failure_kind, "test-only internal detail", false)
+            .into()
+    }
+
+    pub(crate) fn source_hydration_code(error: &anyhow::Error) -> Option<&str> {
+        error
+            .downcast_ref::<SourceHydrationUnavailable>()
+            .map(SourceHydrationUnavailable::code)
+    }
+
     pub(crate) fn source_hydration_retryable(error: &anyhow::Error) -> bool {
         error
             .downcast_ref::<SourceHydrationUnavailable>()
@@ -461,55 +498,64 @@ fn hydrate_source_events_via_daemon(
     mode: &'static str,
     max_chars: Option<usize>,
 ) -> Result<HashMap<Uuid, String>> {
-    let mut hydrated = HashMap::with_capacity(events.len().min(SOURCE_HYDRATION_BATCH_MAX_ITEMS));
+    if events.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if events.len() > MAX_BATCH_HYDRATION_EVENTS {
+        return Err(source_hydration_budget_exceeded(format!(
+            "source hydration request has {} items; maximum is {MAX_BATCH_HYDRATION_EVENTS}",
+            events.len()
+        )));
+    }
+
     let mut operation_budget =
         SourceHydrationOperationBudget::new(SOURCE_HYDRATION_RESPONSE_MAX_BYTES as usize);
     let recovery_deadline = Instant::now() + SOURCE_HYDRATION_RECOVERY_TIMEOUT;
-    for batch in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS) {
-        let requests = batch
-            .iter()
-            .map(|event| {
-                event.event_id.validate_contract()?;
-                event.session_id.validate_contract()?;
-                event.locator.validate_contract()?;
-                if event.event_id.source_digest() != event.locator.source().identity().digest()
-                    || event.event_id.source_descriptor_digest()
-                        != event.locator.source().exact_descriptor_digest()
-                    || event.session_id.source_digest()
-                        != event.locator.source().identity().digest()
-                    || event.session_id.source_descriptor_digest()
-                        != event.locator.source().exact_descriptor_digest()
-                {
-                    return Err(anyhow!(
-                        "source-backed presentation identity does not match its generation locator"
-                    ));
-                }
-                EventHydrationRequest::new(event.event_id, event.locator.clone())
-                    .map_err(anyhow::Error::from)
+    let requests = events
+        .iter()
+        .map(|event| {
+            event.event_id.validate_contract()?;
+            event.session_id.validate_contract()?;
+            event.locator.validate_contract()?;
+            if event.event_id.source_digest() != event.locator.source().identity().digest()
+                || event.event_id.source_descriptor_digest()
+                    != event.locator.source().exact_descriptor_digest()
+                || event.session_id.source_digest() != event.locator.source().identity().digest()
+                || event.session_id.source_descriptor_digest()
+                    != event.locator.source().exact_descriptor_digest()
+            {
+                return Err(anyhow!(
+                    "source-backed presentation identity does not match its generation locator"
+                ));
+            }
+            EventHydrationRequest::new(event.event_id, event.locator.clone())
+                .map_err(anyhow::Error::from)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let request = BatchHydrationRequest::new(requests)?;
+    let items = request
+        .events()
+        .iter()
+        .map(|event| {
+            json!({
+                "event_identity": event.event_id(),
+                "locator": event.locator(),
             })
-            .collect::<Result<Vec<_>>>()?;
-        let request = BatchHydrationRequest::new(requests)?;
-        let items = request
-            .events()
-            .iter()
-            .map(|event| {
-                json!({
-                    "event_identity": event.event_id(),
-                    "locator": event.locator(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let payload = compact_json(json!({
-            "schema_version": 1,
-            "op": "source_hydrate_batch",
-            "generation_id": index.generation_id(),
-            "mode": mode,
-            "max_chars": max_chars,
-            "items": items,
-        }));
-        let remaining_response_bytes = operation_budget.remaining_response_bytes()?;
-        let mut response = loop {
-            let response = match daemon_source_hydration_request(
+        })
+        .collect::<Vec<_>>();
+    let payload = compact_json(json!({
+        "schema_version": 1,
+        "op": "source_hydrate_batch",
+        "generation_id": index.generation_id(),
+        "mode": mode,
+        "max_chars": max_chars,
+        "items": items,
+    }));
+    drop(request);
+    preflight_source_hydration_payload(&payload)?;
+    let remaining_response_bytes = operation_budget.remaining_response_bytes()?;
+    let mut response = loop {
+        let response = match daemon_source_hydration_request(
                 data_root,
                 payload.clone(),
                 SOURCE_HYDRATION_TIMEOUT,
@@ -540,107 +586,100 @@ fn hydrate_source_events_via_daemon(
                 }
                 Err(error) => return Err(map_source_hydration_request_error(error)),
             };
-            let resolver_recovery_pending = response.get("ok").and_then(Value::as_bool)
-                != Some(true)
-                && response.get("code").and_then(Value::as_str)
-                    == Some("resolver_generation_unavailable")
-                && response.get("refresh_scheduled").and_then(Value::as_bool) == Some(true);
-            if !resolver_recovery_pending || Instant::now() >= recovery_deadline {
-                break response;
-            }
-            std::thread::sleep(SOURCE_HYDRATION_RECOVERY_RETRY);
-        };
-        if response.get("ok").and_then(Value::as_bool) != Some(true) {
-            let code = response
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("source_hydration_unavailable");
-            let kind = response
-                .get("failure_kind")
-                .and_then(Value::as_str)
-                .unwrap_or("temporarily_unavailable");
-            let detail = response
-                .get("detail")
-                .or_else(|| response.get("error"))
-                .and_then(Value::as_str)
-                .unwrap_or("daemon source hydration failed");
-            let refresh_scheduled = response
-                .get("refresh_scheduled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let kind = source_hydration_failure_kind(kind).ok_or_else(|| {
-                anyhow!("daemon source hydration returned unknown failure kind {kind:?}")
-            })?;
-            return Err(
-                SourceHydrationUnavailable::new(code, kind, detail, refresh_scheduled).into(),
-            );
+        let resolver_recovery_pending = response.get("ok").and_then(Value::as_bool) != Some(true)
+            && response.get("code").and_then(Value::as_str)
+                == Some("resolver_generation_unavailable")
+            && response.get("refresh_scheduled").and_then(Value::as_bool) == Some(true);
+        if !resolver_recovery_pending || Instant::now() >= recovery_deadline {
+            break response;
         }
-        if response.get("generation_id").and_then(Value::as_str) != Some(index.generation_id()) {
-            return Err(SourceHydrationUnavailable::new(
-                "resolver_generation_mismatch",
-                "stale_source_evidence",
-                format!(
-                    "daemon source hydration response does not match pinned generation {}",
-                    index.generation_id()
-                ),
-                true,
-            )
-            .into());
-        }
-        let results = response
-            .get_mut("items")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| anyhow!("daemon source hydration response has no item array"))?;
-        if results.len() != batch.len() {
+        std::thread::sleep(SOURCE_HYDRATION_RECOVERY_RETRY);
+    };
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        let code = response
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("source_hydration_unavailable");
+        let kind = response
+            .get("failure_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("temporarily_unavailable");
+        let detail = response
+            .get("detail")
+            .or_else(|| response.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("daemon source hydration failed");
+        let refresh_scheduled = response
+            .get("refresh_scheduled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let kind = source_hydration_failure_kind(kind).ok_or_else(|| {
+            anyhow!("daemon source hydration returned unknown failure kind {kind:?}")
+        })?;
+        return Err(SourceHydrationUnavailable::new(code, kind, detail, refresh_scheduled).into());
+    }
+    if response.get("generation_id").and_then(Value::as_str) != Some(index.generation_id()) {
+        return Err(SourceHydrationUnavailable::new(
+            "resolver_generation_mismatch",
+            "stale_source_evidence",
+            format!(
+                "daemon source hydration response does not match pinned generation {}",
+                index.generation_id()
+            ),
+            true,
+        )
+        .into());
+    }
+    let results = response
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("daemon source hydration response has no item array"))?;
+    if results.len() != events.len() {
+        return Err(anyhow!(
+            "daemon source hydration returned {} items for a {}-item request",
+            results.len(),
+            events.len()
+        ));
+    }
+    let mut hydrated = HashMap::with_capacity(events.len());
+    let mut returned_event_ids = HashSet::with_capacity(events.len());
+    let mut batch_hydrated = Vec::with_capacity(events.len());
+    for (expected, value) in events.iter().zip(results) {
+        let event_id = value
+            .get("event_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or_else(|| anyhow!("daemon source hydration item has no valid event ID"))?;
+        if event_id != expected.event_id.as_uuid() || !returned_event_ids.insert(event_id) {
             return Err(anyhow!(
-                "daemon source hydration returned {} items for a {}-item batch",
-                results.len(),
-                batch.len()
-            ));
-        }
-        let mut batch_hydrated = Vec::with_capacity(batch.len());
-        for (expected, value) in batch.iter().zip(results) {
-            let event_id = value
-                .get("event_id")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .ok_or_else(|| anyhow!("daemon source hydration item has no valid event ID"))?;
-            if event_id != expected.event_id.as_uuid()
-                || hydrated.contains_key(&event_id)
-                || batch_hydrated
-                    .iter()
-                    .any(|(retained_event_id, _)| *retained_event_id == event_id)
-            {
-                return Err(anyhow!(
                     "daemon source hydration response is reordered, duplicated, or mismatched at event {}",
                     expected.event_id
                 ));
-            }
-            let text_value = value.get_mut("text").ok_or_else(|| {
-                anyhow!(
-                    "daemon source hydration returned no content for event {}",
-                    expected.event_id
-                )
-            })?;
-            let mut text = match text_value.take() {
-                Value::String(text) if !text.is_empty() => text,
-                _ => {
-                    return Err(anyhow!(
-                        "daemon source hydration returned empty content for event {}",
-                        expected.event_id
-                    ))
-                }
-            };
-            if let Some(max_chars) = max_chars {
-                if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
-                    text.truncate(byte_index);
-                }
-            }
-            batch_hydrated.push((event_id, text));
         }
-        operation_budget.retain_batch(&batch_hydrated)?;
-        hydrated.extend(batch_hydrated);
+        let text_value = value.get_mut("text").ok_or_else(|| {
+            anyhow!(
+                "daemon source hydration returned no content for event {}",
+                expected.event_id
+            )
+        })?;
+        let mut text = match text_value.take() {
+            Value::String(text) if !text.is_empty() => text,
+            _ => {
+                return Err(anyhow!(
+                    "daemon source hydration returned empty content for event {}",
+                    expected.event_id
+                ))
+            }
+        };
+        if let Some(max_chars) = max_chars {
+            if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
+                text.truncate(byte_index);
+            }
+        }
+        batch_hydrated.push((event_id, text));
     }
+    operation_budget.retain_batch(&batch_hydrated)?;
+    hydrated.extend(batch_hydrated);
     Ok(hydrated)
 }
 

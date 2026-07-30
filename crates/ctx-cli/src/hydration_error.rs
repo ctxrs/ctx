@@ -14,13 +14,32 @@ struct PublicHydrationClass {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceHydrationErrorContract {
     class: PublicHydrationClass,
+    error_code: &'static str,
     retryable: bool,
 }
 
 impl SourceHydrationErrorContract {
+    #[cfg(test)]
     pub(crate) fn from_failure(failure: &HydrationFailure, retryable: bool) -> Self {
+        Self::from_failure_with_code(failure, retryable, None)
+    }
+
+    fn from_failure_with_code(
+        failure: &HydrationFailure,
+        retryable: bool,
+        stable_code: Option<&str>,
+    ) -> Self {
+        let class = public_hydration_class(failure.kind);
         Self {
-            class: public_hydration_class(failure.kind),
+            class,
+            error_code: match stable_code {
+                Some("hydration_budget_exceeded")
+                    if failure.kind == HydrationFailureKind::ContentTooLarge =>
+                {
+                    "hydration_budget_exceeded"
+                }
+                _ => class.error_kind.as_str(),
+            },
             retryable,
         }
     }
@@ -30,7 +49,7 @@ impl SourceHydrationErrorContract {
     }
 
     pub(crate) fn structured(&self) -> Value {
-        let error_code = self.class.error_kind.as_str();
+        let error_code = self.error_code;
         let error = format!("{error_code}/{}", self.class.failure_kind);
         json!({
             "error": error,
@@ -46,9 +65,12 @@ pub(crate) fn source_hydration_error_contract(
     error: &anyhow::Error,
 ) -> Option<SourceHydrationErrorContract> {
     let retryable = semantic::PinnedSourceBackedGeneration::source_hydration_retryable(error);
+    let stable_code = semantic::PinnedSourceBackedGeneration::source_hydration_code(error);
     let failure = semantic::PinnedSourceBackedGeneration::source_hydration_failure(error)?;
-    Some(SourceHydrationErrorContract::from_failure(
-        &failure, retryable,
+    Some(SourceHydrationErrorContract::from_failure_with_code(
+        &failure,
+        retryable,
+        stable_code,
     ))
 }
 
@@ -85,6 +107,10 @@ fn public_hydration_class(kind: HydrationFailureKind) -> PublicHydrationClass {
         HydrationFailureKind::InvalidLocator => (
             CompleteContentErrorKind::ContentVerificationFailed,
             "the indexed source locator could not be verified",
+        ),
+        HydrationFailureKind::ContentTooLarge => (
+            CompleteContentErrorKind::ContentTooLarge,
+            "source hydration exceeds the aggregate byte budget",
         ),
         HydrationFailureKind::InvalidRequest => (
             CompleteContentErrorKind::ContentVerificationFailed,
@@ -160,6 +186,12 @@ mod tests {
                 false,
             ),
             (
+                HydrationFailureKind::ContentTooLarge,
+                "content_too_large",
+                "content_too_large",
+                false,
+            ),
+            (
                 HydrationFailureKind::InvalidRequest,
                 "content_verification_failed",
                 "invalid_request",
@@ -204,6 +236,7 @@ mod tests {
             public_codes,
             BTreeSet::from([
                 "content_verification_failed",
+                "content_too_large",
                 "hydration_unsupported",
                 "source_changed",
                 "source_missing",
@@ -214,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_cli_json_is_byte_stable_and_budget_projection_stays_generic() {
+    fn ordinary_cli_json_is_byte_stable_and_budget_code_stays_typed() {
         let ordinary = HydrationFailure {
             kind: HydrationFailureKind::StaleRecordEvidence,
             detail: "secret provider content at /private/source/path".to_owned(),
@@ -229,23 +262,64 @@ mod tests {
         );
 
         let budget = HydrationFailure {
-            kind: HydrationFailureKind::TemporarilyUnavailable,
-            detail: "hydration_budget_exceeded/content_too_large at /private/source/path"
-                .to_owned(),
+            kind: HydrationFailureKind::ContentTooLarge,
+            detail: "aggregate limit at /private/source/path".to_owned(),
         };
-        let public = SourceHydrationErrorContract::from_failure(&budget, false).structured();
+        let public = SourceHydrationErrorContract::from_failure_with_code(
+            &budget,
+            false,
+            Some("hydration_budget_exceeded"),
+        )
+        .structured();
         assert_eq!(
             public,
             json!({
-                "error": "source_unreadable/temporarily_unavailable",
-                "error_code": "source_unreadable",
-                "failure_kind": "temporarily_unavailable",
-                "detail": "source hydration is temporarily unavailable",
+                "error": "hydration_budget_exceeded/content_too_large",
+                "error_code": "hydration_budget_exceeded",
+                "failure_kind": "content_too_large",
+                "detail": "source hydration exceeds the aggregate byte budget",
                 "retryable": false,
             })
         );
-        assert!(budget.detail.contains("hydration_budget_exceeded"));
-        assert!(!public.to_string().contains("hydration_budget_exceeded"));
         assert!(!public.to_string().contains("/private/source/path"));
+    }
+
+    #[test]
+    fn stable_code_override_is_allowlisted_and_requires_matching_typed_kind() {
+        let transient = HydrationFailure {
+            kind: HydrationFailureKind::TemporarilyUnavailable,
+            detail: "provider detail".to_owned(),
+        };
+        let public = SourceHydrationErrorContract::from_failure_with_code(
+            &transient,
+            false,
+            Some("hydration_budget_exceeded"),
+        )
+        .structured();
+
+        assert_eq!(public["error_code"], "source_unreadable");
+        assert_eq!(public["failure_kind"], "temporarily_unavailable");
+    }
+
+    #[test]
+    fn daemon_budget_pair_has_client_core_and_public_code_parity() {
+        let error = semantic::PinnedSourceBackedGeneration::source_hydration_error_for_test(
+            "hydration_budget_exceeded",
+            "content_too_large",
+        );
+        let public = source_hydration_error_contract(&error)
+            .expect("typed daemon hydration error")
+            .structured();
+
+        assert_eq!(
+            public,
+            json!({
+                "error": "hydration_budget_exceeded/content_too_large",
+                "error_code": "hydration_budget_exceeded",
+                "failure_kind": "content_too_large",
+                "detail": "source hydration exceeds the aggregate byte budget",
+                "retryable": false,
+            })
+        );
     }
 }

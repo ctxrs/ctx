@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::{self, Write},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
@@ -18,6 +19,24 @@ use crate::semantic::query_service::hydration_budget::SOURCE_HYDRATION_MAX_ITEM_
 use super::*;
 
 const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const LEGACY_HYDRATION_CHUNK_ITEMS: usize = 128;
+
+#[derive(Default)]
+struct SerializedByteCounter(usize);
+
+impl Write for SerializedByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("serialized byte count overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 struct FixtureLocator {
     event_id: StableEntityId,
@@ -358,6 +377,39 @@ fn source_hydration_groups_by_exact_source_and_restores_request_order() {
 }
 
 #[test]
+fn source_hydration_groups_129_exact_events_from_one_source_into_one_provider_batch() {
+    let items = (0..129)
+        .map(|sequence| jsonl_fixture(34, sequence, 64))
+        .collect::<Vec<_>>();
+    let resolver = items
+        .iter()
+        .fold(MockResolver::default(), |resolver, item| {
+            resolver.with_body(item, format!("event-{}", item.event_id))
+        });
+    let references = items.iter().collect::<Vec<_>>();
+    let request = request(&references, "complete", None);
+    let encoded_request_bytes = serde_json::to_vec(&request).unwrap().len();
+    assert!(
+        encoded_request_bytes + 256 <= super::super::DAEMON_QUERY_REQUEST_MAX_BYTES,
+        "encoded request bytes: {encoded_request_bytes}"
+    );
+    let (response, snapshot) = handle_source_hydration_batch_with_budget(
+        &request,
+        GENERATION,
+        &resolver,
+        |_| false,
+        DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
+    );
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["items"].as_array().unwrap().len(), items.len());
+    assert_eq!(snapshot.committed_items, items.len());
+    let calls = resolver.batch_calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].len(), items.len());
+}
+
+#[test]
 fn source_search_hydration_truncates_exact_content_by_character() {
     let item = fixture(3, 1);
     let resolver = MockResolver::default().with_body(&item, "αβγδ");
@@ -443,12 +495,12 @@ fn source_hydration_20_tiny_native_and_sqlite_items_succeed_in_bounded_waves() {
 
 #[test]
 fn source_hydration_128_tiny_native_and_sqlite_items_succeed_in_bounded_waves() {
-    let native = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
+    let native = (0..LEGACY_HYDRATION_CHUNK_ITEMS as u64)
         .map(|sequence| fixture(32, sequence))
         .collect::<Vec<_>>();
     assert_tiny_unknown_batch_succeeds(native, 32);
 
-    let sqlite = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
+    let sqlite = (0..LEGACY_HYDRATION_CHUNK_ITEMS as u64)
         .map(|sequence| sqlite_fixture(33, sequence))
         .collect::<Vec<_>>();
     assert_tiny_unknown_batch_succeeds(sqlite, 32);
@@ -653,7 +705,7 @@ fn source_hydration_exact_read_boundary_passes_and_next_byte_never_reaches_provi
 }
 
 #[test]
-fn source_hydration_valid_policy_near_limit_bounds_value_and_transport_coexistence() {
+fn source_hydration_valid_policy_near_limit_supports_streamed_transport() {
     let probe = jsonl_fixture(28, 0, 1);
     let probe_request = EventHydrationRequest::new(probe.event_id, probe.locator.clone()).unwrap();
     let read_overhead = provider_read_reservation_bytes(&probe_request, 0).unwrap() - 1;
@@ -703,26 +755,20 @@ fn source_hydration_valid_policy_near_limit_bounds_value_and_transport_coexisten
     );
     assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 1);
 
-    let transport = serde_json::to_string(&response).unwrap();
-    assert!(transport.len() <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES);
-    assert!(transport.capacity() <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES);
-    assert!(transport.len() <= snapshot.retained_bytes);
-    let coexistence_peak = snapshot
-        .retained_bytes
-        .checked_add(transport.capacity())
-        .unwrap();
-    assert!(coexistence_peak <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES.saturating_mul(2));
+    let mut transport = SerializedByteCounter::default();
+    serde_json::to_writer(&mut transport, &response).unwrap();
+    assert!(transport.0 <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES);
+    assert!(transport.0 <= snapshot.retained_bytes);
     eprintln!(
-        "near-limit serialization evidence: hydration={snapshot:?}, transport_len={}, transport_capacity={}, coexistence_peak={coexistence_peak}",
-        transport.len(),
-        transport.capacity(),
+        "near-limit streamed serialization evidence: hydration={snapshot:?}, transport_len={}",
+        transport.0,
     );
 }
 
 #[test]
 fn source_hydration_128_near_limit_jsonl_items_fail_before_resolver_work() {
     let body_bytes = SOURCE_HYDRATION_MAX_ITEM_BYTES - 4 * 1024;
-    let items = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
+    let items = (0..LEGACY_HYDRATION_CHUNK_ITEMS as u64)
         .map(|sequence| jsonl_fixture(22, sequence, body_bytes))
         .collect::<Vec<_>>();
     let resolver = items
@@ -747,9 +793,36 @@ fn source_hydration_128_near_limit_jsonl_items_fail_before_resolver_work() {
 }
 
 #[test]
+fn source_hydration_129_item_aggregate_rejects_before_any_provider_read() {
+    let item_count = LEGACY_HYDRATION_CHUNK_ITEMS + 1;
+    let body_bytes = 600 * 1024;
+    let items = (0..item_count as u64)
+        .map(|sequence| jsonl_fixture(35, sequence, body_bytes))
+        .collect::<Vec<_>>();
+    let resolver = items
+        .iter()
+        .fold(MockResolver::default(), |resolver, item| {
+            resolver.with_body_size(item, body_bytes)
+        });
+    let references = items.iter().collect::<Vec<_>>();
+    let (response, snapshot) = handle_source_hydration_batch_with_budget(
+        &request(&references, "complete", None),
+        GENERATION,
+        &resolver,
+        |_| false,
+        DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
+    );
+
+    assert_preflight_budget_failure(&response, snapshot);
+    assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.allocated_bytes.load(Ordering::SeqCst), 0);
+    assert!(resolver.batch_calls.into_inner().unwrap().is_empty());
+}
+
+#[test]
 fn source_hydration_unknown_huge_sqlite_items_stop_before_the_next_wave() {
     let body_bytes = 10 * 1024 * 1024;
-    let items = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
+    let items = (0..LEGACY_HYDRATION_CHUNK_ITEMS as u64)
         .map(|sequence| sqlite_fixture(23, sequence))
         .collect::<Vec<_>>();
     let resolver = items
@@ -785,12 +858,12 @@ fn source_hydration_unknown_huge_sqlite_items_stop_before_the_next_wave() {
 #[test]
 fn source_hydration_mixed_small_and_huge_items_fail_before_resolver_work() {
     let huge_bytes = SOURCE_HYDRATION_MAX_ITEM_BYTES - 4 * 1024;
-    let mut items = Vec::with_capacity(DAEMON_SOURCE_HYDRATION_MAX_ITEMS);
+    let mut items = Vec::with_capacity(LEGACY_HYDRATION_CHUNK_ITEMS);
     items.push(jsonl_fixture(24, 0, 32));
     for sequence in 1..=4 {
         items.push(jsonl_fixture(24, sequence, huge_bytes));
     }
-    for sequence in 5..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64 {
+    for sequence in 5..LEGACY_HYDRATION_CHUNK_ITEMS as u64 {
         items.push(jsonl_fixture(24, sequence, 32));
     }
     let resolver =

@@ -1,7 +1,11 @@
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::{
+    io::{self, Write},
+    sync::{Condvar, Mutex, MutexGuard},
+};
 
 use ctx_history_capture::complete_content::COMPLETE_CONTENT_MAX_BODY_BYTES;
 use ctx_history_core::{EventHydrationRequest, NativeRecordCoordinate};
+use serde::Serialize;
 
 pub(super) const SOURCE_HYDRATION_MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -13,6 +17,31 @@ pub(super) const SOURCE_HYDRATION_MAX_ITEM_BYTES: usize = COMPLETE_CONTENT_MAX_B
 const TRANSIENT_ITEM_OVERHEAD_BYTES: usize = 512;
 const RETAINED_ITEM_OVERHEAD_BYTES: usize = 512;
 const RESPONSE_ENVELOPE_OVERHEAD_BYTES: usize = 512;
+
+#[derive(Default)]
+struct SerializedByteCounter(usize);
+
+impl Write for SerializedByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("serialized byte count overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(super) fn serialized_json_bytes<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<usize, serde_json::Error> {
+    let mut counter = SerializedByteCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum HydrationBudgetError {
@@ -337,32 +366,42 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_reservations_never_cross_one_aggregate_limit() {
-        let budget = Arc::new(HydrationByteBudget::new(1_024));
-        budget.charge_retained(24).unwrap();
+    fn pathological_concurrency_never_crosses_one_aggregate_limit() {
+        const THREADS: usize = 128;
+        const RESERVATION_BYTES: usize = 1_024;
+        const LIMIT_BYTES: usize = 64 * 1_024;
+
+        let budget = Arc::new(HydrationByteBudget::new(LIMIT_BYTES));
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
-            for _ in 0..8 {
+            for _ in 0..THREADS {
                 let budget = Arc::clone(&budget);
                 let active = Arc::clone(&active);
                 let max_active = Arc::clone(&max_active);
                 scope.spawn(move || {
-                    let reservation = budget.reserve(250).unwrap();
+                    let reservation = budget.reserve(RESERVATION_BYTES).unwrap();
                     let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                     max_active.fetch_max(now, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(2));
                     active.fetch_sub(1, Ordering::SeqCst);
-                    reservation.commit(10, 1).unwrap();
+                    reservation.commit(1, 1).unwrap();
                 });
             }
         });
 
         let snapshot = budget.snapshot();
-        assert!(max_active.load(Ordering::SeqCst) <= 4);
+        assert!(
+            max_active.load(Ordering::SeqCst) <= LIMIT_BYTES / RESERVATION_BYTES,
+            "{snapshot:?}"
+        );
         assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
-        assert_eq!(snapshot.committed_items, 8);
+        assert_eq!(snapshot.committed_items, THREADS);
+        assert_eq!(snapshot.retained_bytes, THREADS);
+        assert_eq!(snapshot.reservations, THREADS);
         assert_eq!(snapshot.in_flight_bytes, 0);
+        assert!(!snapshot.cancelled);
+        assert!(!snapshot.exhausted);
     }
 
     #[test]
