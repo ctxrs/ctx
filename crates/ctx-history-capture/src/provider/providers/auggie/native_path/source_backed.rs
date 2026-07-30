@@ -1,8 +1,9 @@
-//! Thin source-backed projection for Auggie's whole-session JSON documents.
-//!
-//! Auggie owns the complete content in `sessions/*.json`. This adapter emits
-//! policy-selected lexical records plus exact document coordinates; lifecycle and
-//! publication remain shared coordinator responsibilities.
+//! One-pass replacement-only source-backed ingestion for Auggie documents.
+
+#[path = "document_family.rs"]
+mod document_family;
+#[path = "source_backed/hydration.rs"]
+mod hydration;
 
 use std::{
     collections::HashSet,
@@ -11,17 +12,30 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    EventIdentityInput, HydrationFailure, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use self::document_family::{
+    register_replacement_document_tree_route, ChangedDocumentSink, CompleteDocumentTree,
+    DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+};
+use self::hydration::hydrate_auggie_group_with_observer;
+#[cfg(test)]
+use self::hydration::hydrate_auggie_source_backed;
 use super::{
     model::{
         ParsedAuggieEvent, ParsedAuggieSession, ParsedAuggieSource, AUGGIE_MAX_DISCOVERED_FILES,
@@ -32,10 +46,14 @@ use super::{
     source::{invalid_source_path, AuggieFileStamp},
 };
 use crate::{
-    common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceRoot},
-    provider::providers::auggie::{auggie_request_text, auggie_response_text},
+    common::io::{
+        open_provider_source_path, OpenedProviderSourcePath, ProviderSourceDirectory,
+        ProviderSourceRoot,
+    },
+    provider::source_backed::{
+        route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    },
     CaptureError, ProviderAdapterContext, AUGGIE_SESSION_JSON_SOURCE_FORMAT,
-    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 const AUGGIE_SOURCE_ANCHOR_NAMESPACE: &str = "auggie.session";
@@ -59,8 +77,6 @@ pub(crate) enum AuggieSourceBackedError {
     Resolver(#[from] SourceResolverContractError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error("Auggie source-backed inventory contains duplicate native session ID {0:?}")]
-    DuplicateNativeSessionId(String),
     #[error("Auggie source contains duplicate stable event identity {0}")]
     DuplicateEventIdentity(StableEntityId),
     #[error("Auggie source-backed event has no meaningful lexical text")]
@@ -77,18 +93,71 @@ pub(crate) enum AuggieSourceBackedError {
 
 pub(crate) type AuggieSourceBackedResult<T> = Result<T, AuggieSourceBackedError>;
 
-/// One selected Auggie authority root.
-///
-/// Shared discovery supplies either the sessions directory itself or a
-/// one-shot cache root whose direct `sessions` child is authoritative.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct AuggieSourceBackedRoot {
     path: PathBuf,
+    #[cfg(test)]
+    open_tracker: Option<Arc<AuggieLeafOpenTracker>>,
 }
 
 impl AuggieSourceBackedRoot {
     pub(crate) fn explicit(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            #[cfg(test)]
+            open_tracker: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_open_tracker(mut self, open_tracker: Arc<AuggieLeafOpenTracker>) -> Self {
+        self.open_tracker = Some(open_tracker);
+        self
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct AuggieLeafOpenTracker {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    total: AtomicUsize,
+}
+
+#[cfg(test)]
+impl AuggieLeafOpenTracker {
+    fn begin(self: &Arc<Self>) -> AuggieLeafOpenGuard {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.total.fetch_add(1, Ordering::SeqCst);
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        AuggieLeafOpenGuard {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    fn total(&self) -> usize {
+        self.total.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+struct AuggieLeafOpenGuard {
+    tracker: Arc<AuggieLeafOpenTracker>,
+}
+
+#[cfg(test)]
+impl Drop for AuggieLeafOpenGuard {
+    fn drop(&mut self) {
+        let previous = self.tracker.active.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0);
     }
 }
 
@@ -98,302 +167,554 @@ pub(crate) enum AuggieSourceBackedInventoryStatus {
     Unavailable,
 }
 
-/// Provider-local inventory only. Shared code owns deletion certification.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct AuggieSourceBackedInventory {
     pub(crate) status: AuggieSourceBackedInventoryStatus,
-    pub(crate) paths: Vec<PathBuf>,
-    authority: Option<ProviderSourceRoot>,
+    tree: Option<AuggieDocumentTree>,
 }
 
 impl AuggieSourceBackedInventory {
+    #[cfg(test)]
     pub(crate) fn is_complete(&self) -> bool {
         self.status == AuggieSourceBackedInventoryStatus::Complete
     }
 
-    fn open_source(&self, path: &Path) -> AuggieSourceBackedResult<AuggieFileStamp> {
-        let authority = self
-            .authority
+    #[cfg(test)]
+    fn paths(&self) -> Vec<PathBuf> {
+        self.tree
             .as_ref()
-            .ok_or(CaptureError::SystemInvariant(
-                "complete Auggie source-backed inventory has no retained authority",
-            ))?;
-        let relative = path.strip_prefix(authority.named_path()).map_err(|_| {
-            invalid_source_path(path, "Auggie source escaped its retained authority root")
-        })?;
-        let opened = authority.open_file(relative)?;
-        AuggieFileStamp::from_opened(path.to_path_buf(), opened).map_err(Into::into)
+            .map(|tree| match &tree.authority {
+                AuggieTreeAuthority::File { selected, .. } => {
+                    vec![selected.canonical_path.clone()]
+                }
+                AuggieTreeAuthority::Directory { routes, .. } => routes
+                    .iter()
+                    .map(|route| route.canonical_path.clone())
+                    .collect(),
+            })
+            .unwrap_or_default()
     }
-}
 
-#[derive(Debug, Clone)]
-pub(crate) struct AuggieSourceBackedSource {
-    pub(crate) certified_source: CertifiedSource,
-    pub(crate) documents: Vec<LexicalDocument>,
+    fn into_complete_tree(self) -> Option<AuggieDocumentTree> {
+        if self.status == AuggieSourceBackedInventoryStatus::Complete {
+            self.tree
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuggieHydratedSourceRecord {
-    /// Exact provider-owned message bytes selected by the typed document locator.
     pub(crate) provider_bytes: Vec<u8>,
     pub(crate) decoded_display_text: String,
 }
 
-/// Enumerates only direct `*.json` children of the selected sessions root.
-///
-/// A missing authority is unavailable, not a complete empty inventory. An
-/// existing empty directory is complete and may be used by shared lifecycle
-/// code as one input to deletion certification.
+#[derive(Debug, Clone, Copy)]
+enum AuggieTreeSelection {
+    ExplicitFile,
+    SelectedDirectory,
+    DirectSessionsChild,
+}
+
+impl AuggieTreeSelection {
+    fn tag(self) -> u8 {
+        match self {
+            Self::ExplicitFile => 1,
+            Self::SelectedDirectory => 2,
+            Self::DirectSessionsChild => 3,
+        }
+    }
+}
+
+/// Handle-free identity captured while one admitted leaf was open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuggieDocumentLeaf {
+    canonical_path: PathBuf,
+    authority_relative_path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+    readonly: bool,
+    device: Option<u64>,
+    inode: Option<u64>,
+    authority_fingerprint: [u8; 32],
+}
+
+impl AuggieDocumentLeaf {
+    fn from_opened(
+        canonical_path: PathBuf,
+        authority_relative_path: PathBuf,
+        stamp: &AuggieFileStamp,
+    ) -> Self {
+        Self {
+            canonical_path,
+            authority_relative_path,
+            len: stamp.len,
+            modified: stamp.modified,
+            readonly: stamp.readonly,
+            device: stamp.device,
+            inode: stamp.inode,
+            authority_fingerprint: stamp.authority_fingerprint(),
+        }
+    }
+
+    fn matches(&self, stamp: &AuggieFileStamp) -> bool {
+        self.canonical_path == stamp.canonical_path
+            && self.len == stamp.len
+            && self.modified == stamp.modified
+            && self.readonly == stamp.readonly
+            && self.device == stamp.device
+            && self.inode == stamp.inode
+            && self.authority_fingerprint == stamp.authority_fingerprint()
+    }
+}
+
+#[derive(Debug)]
+enum AuggieTreeAuthority {
+    File {
+        root: ProviderSourceRoot,
+        selected: AuggieDocumentLeaf,
+        #[cfg(test)]
+        open_tracker: Option<Arc<AuggieLeafOpenTracker>>,
+    },
+    Directory {
+        directory: ProviderSourceDirectory,
+        selection: AuggieTreeSelection,
+        routes: Vec<AuggieDocumentLeaf>,
+        #[cfg(test)]
+        open_tracker: Option<Arc<AuggieLeafOpenTracker>>,
+    },
+}
+
+impl AuggieTreeAuthority {
+    fn open_leaf(&self, leaf: &AuggieDocumentLeaf) -> AuggieSourceBackedResult<AuggieFileStamp> {
+        let opened = match self {
+            Self::File { root, .. } => root.open_file(&leaf.authority_relative_path)?,
+            Self::Directory { directory, .. } => {
+                let opened = directory.open_child(leaf.authority_relative_path.as_os_str())?;
+                let OpenedProviderSourcePath::File(opened) = opened else {
+                    return Err(invalid_source_path(
+                        &leaf.canonical_path,
+                        "Auggie observed document leaf became a directory",
+                    )
+                    .into());
+                };
+                opened
+            }
+        };
+        let stamp = AuggieFileStamp::from_opened(leaf.canonical_path.clone(), opened)?;
+        if !leaf.matches(&stamp) {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        Ok(stamp)
+    }
+
+    #[cfg(test)]
+    fn track_open(&self) -> Option<AuggieLeafOpenGuard> {
+        match self {
+            Self::File { open_tracker, .. } | Self::Directory { open_tracker, .. } => {
+                open_tracker.as_ref().map(AuggieLeafOpenTracker::begin)
+            }
+        }
+    }
+}
+
+type AuggieDocumentTree = CompleteDocumentTree<AuggieDocumentLeaf, AuggieTreeAuthority>;
+
+/// Enumerates direct `*.json` children and closes each leaf after observation.
+#[cfg(test)]
 pub(crate) fn discover_auggie_source_backed(
     root: &AuggieSourceBackedRoot,
 ) -> AuggieSourceBackedResult<AuggieSourceBackedInventory> {
-    let selected = normalized_auggie_authority_path(&selected_sessions_path(root)?)?;
+    let inventory = discover_auggie_source_backed_unfenced(root)?;
+    if let Some(tree) = inventory.tree.as_ref() {
+        if revalidate_auggie_tree(tree)? != tree.tree_fingerprint {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+    }
+    Ok(inventory)
+}
+
+fn discover_auggie_source_backed_unfenced(
+    root: &AuggieSourceBackedRoot,
+) -> AuggieSourceBackedResult<AuggieSourceBackedInventory> {
+    let selected = normalized_auggie_authority_path(&root.path)?;
     let opened = match open_provider_source_path(&selected) {
         Ok(opened) => opened,
         Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(AuggieSourceBackedInventory {
                 status: AuggieSourceBackedInventoryStatus::Unavailable,
-                paths: Vec::new(),
-                authority: None,
+                tree: None,
             });
         }
         Err(error) => return Err(error.into()),
     };
+    let tree = match opened {
+        OpenedProviderSourcePath::File(opened) => {
+            drop(opened);
+            complete_auggie_file_tree(root, selected)?
+        }
+        OpenedProviderSourcePath::Directory(directory) => {
+            let (directory, selection) =
+                match directory.open_child(std::ffi::OsStr::new("sessions")) {
+                    Ok(OpenedProviderSourcePath::Directory(child)) => {
+                        (child, AuggieTreeSelection::DirectSessionsChild)
+                    }
+                    Ok(OpenedProviderSourcePath::File(opened)) => {
+                        drop(opened);
+                        return Err(invalid_source_path(
+                            &selected.join("sessions"),
+                            "Auggie sessions selection must be a directory",
+                        )
+                        .into());
+                    }
+                    Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                        (directory, AuggieTreeSelection::SelectedDirectory)
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+            complete_auggie_directory_tree(root, directory, selection)?
+        }
+    };
+    Ok(AuggieSourceBackedInventory {
+        status: AuggieSourceBackedInventoryStatus::Complete,
+        tree: Some(tree),
+    })
+}
 
-    if let OpenedProviderSourcePath::File(opened_file) = opened {
-        let file_name = selected.file_name().ok_or_else(|| {
-            invalid_source_path(&selected, "Auggie source file has no final component")
-        })?;
-        let parent = selected.parent().ok_or_else(|| {
-            invalid_source_path(&selected, "Auggie source file has no authority parent")
-        })?;
-        let authority = ProviderSourceRoot::open(parent)?;
-        let selected = authority.named_path().join(file_name);
-        authority.open_file(Path::new(file_name))?.revalidate()?;
-        opened_file.revalidate()?;
-        let paths = if is_json_path(&selected) {
-            vec![selected.clone()]
-        } else {
-            Vec::new()
-        };
-        return Ok(AuggieSourceBackedInventory {
-            status: AuggieSourceBackedInventoryStatus::Complete,
-            paths,
-            authority: Some(authority),
-        });
-    }
-    let OpenedProviderSourcePath::Directory(directory) = opened else {
-        return Err(CaptureError::SystemInvariant(
-            "Auggie source-backed root classification is incomplete",
+fn complete_auggie_file_tree(
+    _source_root: &AuggieSourceBackedRoot,
+    path: PathBuf,
+) -> AuggieSourceBackedResult<AuggieDocumentTree> {
+    if !is_json_path(&path) {
+        return Err(invalid_source_path(
+            &path,
+            "explicit Auggie source files must have a .json extension",
         )
         .into());
-    };
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| invalid_source_path(&path, "Auggie source file has no final component"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_source_path(&path, "Auggie source file has no authority parent"))?;
+    let root = ProviderSourceRoot::open(parent)?;
+    let relative_path = PathBuf::from(file_name);
+    #[cfg(test)]
+    let open_guard = _source_root
+        .open_tracker
+        .as_ref()
+        .map(AuggieLeafOpenTracker::begin);
+    let opened = root.open_file(&relative_path)?;
+    let stamp = AuggieFileStamp::from_opened(path.clone(), opened)?;
+    let selected = AuggieDocumentLeaf::from_opened(path.clone(), relative_path, &stamp);
+    drop(stamp);
+    #[cfg(test)]
+    drop(open_guard);
+    let leaves = vec![observed_auggie_leaf(selected.clone())];
+    let tree_fingerprint = auggie_tree_fingerprint(
+        AuggieTreeSelection::ExplicitFile,
+        selected.authority_fingerprint,
+        std::slice::from_ref(&selected),
+    );
+    Ok(CompleteDocumentTree::new(
+        tree_fingerprint,
+        leaves,
+        AuggieTreeAuthority::File {
+            root,
+            selected,
+            #[cfg(test)]
+            open_tracker: _source_root.open_tracker.clone(),
+        },
+    ))
+}
+
+fn complete_auggie_directory_tree(
+    _source_root: &AuggieSourceBackedRoot,
+    directory: ProviderSourceDirectory,
+    selection: AuggieTreeSelection,
+) -> AuggieSourceBackedResult<AuggieDocumentTree> {
     let authority = directory.authority_root();
+    let selected_path = authority.named_path().join(directory.relative_path());
     let entries = directory.entries(AUGGIE_MAX_DISCOVERED_FILES.saturating_add(1))?;
-    let mut paths = Vec::new();
+    let mut physical_sources = HashSet::<[u8; 32]>::new();
+    let mut routes = Vec::new();
+    let mut leaves = Vec::new();
     for name in entries {
-        let path = authority.named_path().join(&name);
+        let path = selected_path.join(&name);
+        #[cfg(test)]
+        let open_guard = _source_root
+            .open_tracker
+            .as_ref()
+            .map(AuggieLeafOpenTracker::begin);
         match directory.open_child(&name)? {
             OpenedProviderSourcePath::File(opened) if is_json_path(&path) => {
-                opened.revalidate()?;
-                paths.push(path);
+                let stamp = AuggieFileStamp::from_opened(path.clone(), opened)?;
+                let leaf = AuggieDocumentLeaf::from_opened(path, PathBuf::from(&name), &stamp);
+                routes.push(leaf.clone());
+                if physical_sources.insert(leaf.authority_fingerprint) {
+                    leaves.push(observed_auggie_leaf(leaf));
+                }
             }
             OpenedProviderSourcePath::File(_) | OpenedProviderSourcePath::Directory(_) => {}
         }
-        if paths.len() > AUGGIE_MAX_DISCOVERED_FILES {
+        #[cfg(test)]
+        drop(open_guard);
+        if routes.len() > AUGGIE_MAX_DISCOVERED_FILES {
             return Err(invalid_source_path(
-                authority.named_path(),
+                &selected_path,
                 "Auggie source-backed discovery exceeds the file bound",
             )
             .into());
         }
     }
-    directory.revalidate()?;
-    authority.revalidate()?;
-    Ok(AuggieSourceBackedInventory {
-        status: AuggieSourceBackedInventoryStatus::Complete,
-        paths,
-        authority: Some(authority),
-    })
+    let authority_fingerprint = directory.authority_fingerprint();
+    let tree_fingerprint = auggie_tree_fingerprint(selection, authority_fingerprint, &routes);
+    Ok(CompleteDocumentTree::new(
+        tree_fingerprint,
+        leaves,
+        AuggieTreeAuthority::Directory {
+            directory,
+            selection,
+            routes,
+            #[cfg(test)]
+            open_tracker: _source_root.open_tracker.clone(),
+        },
+    ))
 }
 
-fn project_opened_auggie_source_backed(
-    stamp: AuggieFileStamp,
+fn observed_auggie_leaf(leaf: AuggieDocumentLeaf) -> ObservedDocumentLeaf<AuggieDocumentLeaf> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.auggie-document-physical-leaf-v1\0");
+    digest.update(leaf.authority_fingerprint);
+    ObservedDocumentLeaf::new(DocumentLeafFingerprint::new(digest.finalize().into()), leaf)
+}
+
+fn auggie_tree_fingerprint(
+    selection: AuggieTreeSelection,
+    authority_fingerprint: [u8; 32],
+    routes: &[AuggieDocumentLeaf],
+) -> [u8; 32] {
+    let mut fingerprints = routes
+        .iter()
+        .map(|route| {
+            let mut digest = Sha256::new();
+            digest.update(b"ctx.auggie-document-route-v1\0");
+            let path = route.canonical_path.as_os_str().as_encoded_bytes();
+            digest.update((path.len() as u64).to_be_bytes());
+            digest.update(path);
+            digest.update(route.authority_fingerprint);
+            <[u8; 32]>::from(digest.finalize())
+        })
+        .collect::<Vec<_>>();
+    fingerprints.sort_unstable();
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.auggie-document-tree-v1\0");
+    digest.update([selection.tag()]);
+    digest.update(authority_fingerprint);
+    digest.update((fingerprints.len() as u64).to_be_bytes());
+    for fingerprint in fingerprints {
+        digest.update(fingerprint);
+    }
+    digest.finalize().into()
+}
+
+fn revalidate_auggie_tree(tree: &AuggieDocumentTree) -> AuggieSourceBackedResult<[u8; 32]> {
+    let (selection, authority_fingerprint) = match &tree.authority {
+        AuggieTreeAuthority::File { root, selected, .. } => {
+            #[cfg(test)]
+            let open_guard = tree.authority.track_open();
+            let stamp = tree.authority.open_leaf(selected)?;
+            if !stamp.revalidate()? || !selected.matches(&stamp) {
+                return Err(CaptureError::SourceChangedDuringCapture.into());
+            }
+            drop(stamp);
+            #[cfg(test)]
+            drop(open_guard);
+            root.revalidate()?;
+            (
+                AuggieTreeSelection::ExplicitFile,
+                selected.authority_fingerprint,
+            )
+        }
+        AuggieTreeAuthority::Directory {
+            directory,
+            selection,
+            routes,
+            ..
+        } => {
+            for route in routes {
+                #[cfg(test)]
+                let open_guard = tree.authority.track_open();
+                let stamp = tree.authority.open_leaf(route)?;
+                if !stamp.revalidate()? || !route.matches(&stamp) {
+                    return Err(CaptureError::SourceChangedDuringCapture.into());
+                }
+                drop(stamp);
+                #[cfg(test)]
+                drop(open_guard);
+            }
+            directory.revalidate()?;
+            directory.authority_root().revalidate()?;
+            (*selection, directory.authority_fingerprint())
+        }
+    };
+    Ok(auggie_tree_fingerprint(
+        selection,
+        authority_fingerprint,
+        match &tree.authority {
+            AuggieTreeAuthority::File { selected, .. } => std::slice::from_ref(selected),
+            AuggieTreeAuthority::Directory { routes, .. } => routes,
+        },
+    ))
+}
+
+#[derive(Debug)]
+struct AuggieDocumentTreeAdapter {
+    root: AuggieSourceBackedRoot,
+    context: ProviderAdapterContext,
+    #[cfg(test)]
+    parse_count: Option<Arc<AtomicUsize>>,
+}
+
+impl AuggieDocumentTreeAdapter {
+    fn new(root: AuggieSourceBackedRoot, context: ProviderAdapterContext) -> Self {
+        Self {
+            root,
+            context,
+            #[cfg(test)]
+            parse_count: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_parse_count(mut self, parse_count: Arc<AtomicUsize>) -> Self {
+        self.parse_count = Some(parse_count);
+        self
+    }
+}
+
+impl ReplacementDocumentTree for AuggieDocumentTreeAdapter {
+    type Leaf = AuggieDocumentLeaf;
+    type TreeAuthority = AuggieTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        AUGGIE_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        owns_auggie_source(source)
+    }
+
+    fn discover_complete(&self) -> SourceBackedRouteResult<AuggieDocumentTree> {
+        let inventory = discover_auggie_source_backed_unfenced(&self.root).map_err(route_error)?;
+        inventory.into_complete_tree().ok_or_else(|| {
+            SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Unavailable,
+                "Auggie selected route inventory is temporarily unavailable",
+            )
+        })
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        scan_changed_auggie_document(authority, leaf, &self.context, sink, || {
+            #[cfg(test)]
+            if let Some(parse_count) = self.parse_count.as_ref() {
+                parse_count.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    }
+
+    fn revalidate_complete(&self, tree: &AuggieDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
+        revalidate_auggie_tree(tree).map_err(route_error)
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        hydrate_auggie_group_with_observer(&self.root, request, || {})
+    }
+}
+
+fn scan_changed_auggie_document(
+    authority: &AuggieTreeAuthority,
+    leaf: &AuggieDocumentLeaf,
     context: &ProviderAdapterContext,
-) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
-    let parsed = parse_opened_auggie_source(stamp, context)?;
-    project_parsed_auggie_source_backed(parsed)
-}
-
-fn project_parsed_auggie_source_backed(
-    parsed: ParsedAuggieSource,
-) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
-    let source = auggie_source_key(&parsed.session.provider_session_id)?;
-    let session_id = auggie_session_id(&source, &parsed.session.provider_session_id)?;
-    let mut documents = Vec::with_capacity(parsed.events.len());
-    let mut event_ids = HashSet::with_capacity(parsed.events.len());
-    for event in parsed.events {
-        let document = auggie_lexical_document(
-            &source,
-            session_id,
-            &parsed.session,
-            parsed.content_digest,
-            event,
-        )?;
+    sink: &mut ChangedDocumentSink<'_, '_>,
+    observe_parse: impl FnOnce(),
+) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+    #[cfg(test)]
+    let open_guard = authority.track_open();
+    let stamp = authority.open_leaf(leaf).map_err(route_error)?;
+    observe_parse();
+    let parsed = parse_opened_auggie_source(stamp, context).map_err(route_error)?;
+    let ParsedAuggieSource {
+        stamp,
+        content_digest,
+        session,
+        events,
+    } = parsed;
+    if !leaf.matches(&stamp) {
+        return Err(route_error(CaptureError::SourceChangedDuringCapture));
+    }
+    let source = auggie_source_key(&session.provider_session_id).map_err(route_error)?;
+    let session_id =
+        auggie_session_id(&source, &session.provider_session_id).map_err(route_error)?;
+    let observation = auggie_source_observation(&source, &stamp).map_err(route_error)?;
+    let certified_bytes = stamp.len;
+    drop(stamp);
+    #[cfg(test)]
+    drop(open_guard);
+    sink.begin_source(source.clone())?;
+    let mut event_ids = HashSet::with_capacity(events.len());
+    let mut indexed_documents = 0_u64;
+    for event in events {
+        let document =
+            auggie_lexical_document(&source, session_id, &session, content_digest, event)
+                .map_err(route_error)?;
         if !event_ids.insert(document.event_id) {
-            return Err(AuggieSourceBackedError::DuplicateEventIdentity(
-                document.event_id,
+            return Err(route_error(
+                AuggieSourceBackedError::DuplicateEventIdentity(document.event_id),
             ));
         }
-        documents.push(document);
+        sink.emit_document(document)?;
+        indexed_documents = indexed_documents
+            .checked_add(1)
+            .ok_or_else(|| route_error("too many Auggie messages"))?;
     }
-    let indexed_documents = u64::try_from(documents.len())
-        .map_err(|_| CaptureError::InvalidPayload("too many Auggie messages".to_owned()))?;
-    let observation = auggie_source_observation(&source, &parsed.stamp)?;
-    let certified_source = CertifiedSource::certify(
-        observation.clone(),
-        observation,
-        AUGGIE_PARSER_REVISION,
-        parsed.content_digest,
-        ScannedSourceCounts {
+    Ok(DocumentSourceTerminal {
+        source,
+        opening: observation.clone(),
+        closing: observation,
+        parser_revision: AUGGIE_PARSER_REVISION,
+        content_digest,
+        counts: ScannedSourceCounts {
             complete_records: indexed_documents,
             retained_records: indexed_documents,
             rejected_records: 0,
             ignored_records: 0,
             indexed_documents,
-            certified_bytes: parsed.stamp.len,
+            certified_bytes,
         },
-    )?;
-    Ok(AuggieSourceBackedSource {
-        certified_source,
-        documents,
     })
-}
-
-/// Projects every source in a complete inventory and rejects duplicate native
-/// session ownership before returning any provider rows.
-pub(crate) fn project_auggie_source_backed_inventory(
-    inventory: &AuggieSourceBackedInventory,
-    context: &ProviderAdapterContext,
-) -> AuggieSourceBackedResult<Vec<AuggieSourceBackedSource>> {
-    if !inventory.is_complete() {
-        return Ok(Vec::new());
-    }
-    let mut source_ids = HashSet::with_capacity(inventory.paths.len());
-    let mut sources = Vec::with_capacity(inventory.paths.len());
-    for path in &inventory.paths {
-        let source = project_opened_auggie_source_backed(inventory.open_source(path)?, context)?;
-        let provider_session_id = source
-            .documents
-            .first()
-            .and_then(|document| document.provider_session_id.as_deref())
-            .map(str::to_owned)
-            .or_else(|| source_session_id_from_key(&source.certified_source).ok())
-            .ok_or(AuggieSourceBackedError::InvalidLocator)?;
-        if !source_ids.insert(provider_session_id.clone()) {
-            return Err(AuggieSourceBackedError::DuplicateNativeSessionId(
-                provider_session_id,
-            ));
-        }
-        sources.push(source);
-    }
-    if let Some(authority) = inventory.authority.as_ref() {
-        authority.revalidate()?;
-    }
-    Ok(sources)
-}
-
-/// Rehydrates one exact message from the provider-owned JSON document.
-pub(crate) fn hydrate_auggie_source_backed(
-    path: &Path,
-    locator: &SourceRecordLocator,
-) -> AuggieSourceBackedResult<AuggieHydratedSourceRecord> {
-    locator.validate_contract()?;
-    let (expected_session_id, expected_event_key, chat_index, message_kind, json_pointer) =
-        validate_auggie_locator(locator)?;
-    let before = AuggieFileStamp::observe(path)?;
-    let maximum = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).unwrap_or(u64::MAX);
-    if before.len > maximum {
-        return Err(CaptureError::InvalidPayload(format!(
-            "Auggie session JSON exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
-        ))
-        .into());
-    }
-    let provider_bytes = before.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
-    if u64::try_from(provider_bytes.len()).unwrap_or(u64::MAX) != before.len
-        || !before.revalidate()?
-    {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-    let document_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
-    if locator.certified_source_revision_digest() != Some(&document_digest) {
-        return Err(AuggieSourceBackedError::SourceRevisionChanged);
-    }
-    if locator.record_digest() != &document_digest {
-        return Err(AuggieSourceBackedError::LocatorDigestMismatch);
-    }
-
-    let root: Value = serde_json::from_slice(&provider_bytes)?;
-    let actual_session_id = root
-        .get("sessionId")
-        .or_else(|| root.get("session_id"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(AuggieSourceBackedError::LocatorRecordMissing)?;
-    if actual_session_id != expected_session_id {
-        return Err(AuggieSourceBackedError::LocatorRecordMissing);
-    }
-    let expected_pointer = auggie_message_pointer(&root, chat_index)?;
-    if json_pointer != expected_pointer {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    }
-    let exchange = root
-        .pointer(json_pointer)
-        .ok_or(AuggieSourceBackedError::LocatorRecordMissing)?;
-    let actual_event_key = auggie_native_event_key(exchange, chat_index, message_kind);
-    if actual_event_key != expected_event_key {
-        return Err(AuggieSourceBackedError::LocatorRecordMissing);
-    }
-    let decoded_display_text = match message_kind {
-        "request" => auggie_request_text(exchange),
-        "response" => auggie_response_text(exchange),
-        _ => return Err(AuggieSourceBackedError::InvalidLocator),
-    }
-    .ok_or(AuggieSourceBackedError::LocatorRecordMissing)?;
-
-    Ok(AuggieHydratedSourceRecord {
-        provider_bytes: decoded_display_text.as_bytes().to_vec(),
-        decoded_display_text,
-    })
-}
-
-fn selected_sessions_path(root: &AuggieSourceBackedRoot) -> AuggieSourceBackedResult<PathBuf> {
-    let root_path = normalized_auggie_authority_path(&root.path)?;
-    let opened = match open_provider_source_path(&root_path) {
-        Ok(opened) => opened,
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(root_path);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if let OpenedProviderSourcePath::Directory(directory) = opened {
-        let sessions = root_path.join("sessions");
-        match directory.open_child(std::ffi::OsStr::new("sessions")) {
-            Ok(OpenedProviderSourcePath::Directory(child)) => {
-                child.revalidate()?;
-                directory.revalidate()?;
-                return Ok(sessions);
-            }
-            Ok(OpenedProviderSourcePath::File(_)) => {}
-            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(root_path)
 }
 
 fn is_json_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("json")
+}
+
+fn owns_auggie_source(source: &SourceKey) -> bool {
+    source.provider() == ctx_history_core::CaptureProvider::Auggie.as_str()
+        && source.source_format() == AUGGIE_SESSION_JSON_SOURCE_FORMAT
+        && source.schema_variant() == AUGGIE_SOURCE_SCHEMA_VARIANT
+        && source.provider_identity_version() == 1
 }
 
 fn auggie_source_key(native_session_id: &str) -> AuggieSourceBackedResult<SourceKey> {
@@ -551,115 +872,18 @@ fn system_time_parts(time: SystemTime) -> (u8, u64, u32) {
     }
 }
 
-fn validate_auggie_locator(
-    locator: &SourceRecordLocator,
-) -> AuggieSourceBackedResult<(String, String, u64, &str, &str)> {
-    let source = locator.source();
-    if source.provider() != ctx_history_core::CaptureProvider::Auggie.as_str()
-        || source.source_format() != AUGGIE_SESSION_JSON_SOURCE_FORMAT
-        || source.schema_variant() != AUGGIE_SOURCE_SCHEMA_VARIANT
-        || source.provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-    {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    }
-    let SourceAnchor::ProviderNative { namespace, key } = source.anchor() else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Utf8(native_session_id) = key else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    if namespace != AUGGIE_SOURCE_ANCHOR_NAMESPACE {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    }
-    let NativeRecordCoordinate::Document {
-        object_key,
-        json_pointer: Some(json_pointer),
-    } = locator.coordinate()
-    else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = object_key else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    let [TypedKey::Utf8(event_key), TypedKey::U64(chat_index), TypedKey::Utf8(message_kind)] =
-        parts.as_slice()
-    else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    if !matches!(message_kind.as_str(), "request" | "response") {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    }
-    Ok((
-        native_session_id.clone(),
-        event_key.clone(),
-        *chat_index,
-        message_kind,
-        json_pointer,
-    ))
-}
-
-fn auggie_message_pointer(root: &Value, chat_index: u64) -> AuggieSourceBackedResult<String> {
-    let chat_index =
-        usize::try_from(chat_index).map_err(|_| AuggieSourceBackedError::InvalidLocator)?;
-    let (history_key, entries) =
-        if let Some(entries) = root.get("chatHistory").and_then(Value::as_array) {
-            ("chatHistory", entries)
-        } else if let Some(entries) = root.get("chat_history").and_then(Value::as_array) {
-            ("chat_history", entries)
-        } else {
-            return Err(AuggieSourceBackedError::LocatorRecordMissing);
-        };
-    let entry = entries
-        .get(chat_index)
-        .ok_or(AuggieSourceBackedError::LocatorRecordMissing)?;
-    Ok(if entry.get("exchange").is_some() {
-        format!("/{history_key}/{chat_index}/exchange")
-    } else {
-        format!("/{history_key}/{chat_index}")
-    })
-}
-
-fn auggie_native_event_key(exchange: &Value, chat_index: u64, message_kind: &str) -> String {
-    exchange
-        .get("request_id")
-        .or_else(|| exchange.get("requestId"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(|request_id| format!("{request_id}:{message_kind}"))
-        .unwrap_or_else(|| format!("chat-{chat_index}:{message_kind}"))
-}
-
-fn source_session_id_from_key(source: &CertifiedSource) -> AuggieSourceBackedResult<String> {
-    let SourceAnchor::ProviderNative { namespace, key } = source.observation().source().anchor()
-    else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Utf8(session_id) = key else {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    };
-    if namespace != AUGGIE_SOURCE_ANCHOR_NAMESPACE {
-        return Err(AuggieSourceBackedError::InvalidLocator);
-    }
-    Ok(session_id.clone())
-}
-
 #[cfg(test)]
 #[path = "source_backed_tests.rs"]
 mod tests;
 
 pub(crate) mod registration {
     use chrono::{DateTime, Utc};
-    use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
 
     use super::{
-        discover_auggie_source_backed, hydrate_auggie_source_backed,
-        project_auggie_source_backed_inventory, AuggieSourceBackedRoot,
+        register_replacement_document_tree_route, AuggieDocumentTreeAdapter, AuggieSourceBackedRoot,
     };
     use crate::provider::source_backed::{
-        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
-        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
-        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+        SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
     };
     use crate::{ProviderAdapterContext, ProviderSource};
 
@@ -668,65 +892,16 @@ pub(crate) mod registration {
         source: ProviderSource,
         selection: SourceBackedRouteSelection,
     ) -> SourceBackedCoordinatorResult<()> {
-        let root = AuggieSourceBackedRoot::explicit(source.path.clone());
-        let capture_root = root.clone();
         let context = ProviderAdapterContext {
             machine_id: "source-backed-auggie".to_owned(),
             source_path: Some(source.path.clone()),
             source_root: Some(source.path.clone()),
             imported_at: DateTime::<Utc>::UNIX_EPOCH,
         };
-        let capture_context = context.clone();
-        let hydration_root = root;
-        let driver = captured_route_driver(
-            &source,
-            move |sink| {
-                let inventory =
-                    discover_auggie_source_backed(&capture_root).map_err(route_error)?;
-                if !inventory.is_complete() {
-                    return Err(crate::provider::source_backed::SourceBackedRouteError::new(
-                        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable,
-                        "Auggie selected route inventory is temporarily unavailable",
-                    ));
-                }
-                for projected in
-                    project_auggie_source_backed_inventory(&inventory, &capture_context)
-                        .map_err(route_error)?
-                {
-                    sink.begin(projected.certified_source.observation().source().clone())?;
-                    for document in projected.documents {
-                        sink.document(document)?;
-                    }
-                    sink.certify(projected.certified_source)?;
-                }
-                Ok(())
-            },
-            provider_format_scope(CaptureProvider::Auggie, "auggie_session_json"),
-            move |request| {
-                let inventory =
-                    discover_auggie_source_backed(&hydration_root).map_err(|error| {
-                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                    })?;
-                for path in inventory.paths {
-                    if let Ok(hydrated) = hydrate_auggie_source_backed(&path, request.locator()) {
-                        return Ok(HydratedProviderRecord {
-                            event_id: request.event_id(),
-                            provider_bytes: hydrated.provider_bytes,
-                        });
-                    }
-                }
-                Err(hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    "the exact Auggie source record is absent",
-                ))
-            },
+        let adapter = AuggieDocumentTreeAdapter::new(
+            AuggieSourceBackedRoot::explicit(source.path.clone()),
+            context,
         );
-        registry.register(executable_route(
-            source,
-            selection,
-            SourceBackedSelectorAuthority::DiscoveredWinner,
-            driver,
-        )?);
-        Ok(())
+        register_replacement_document_tree_route(registry, source, selection, adapter)
     }
 }

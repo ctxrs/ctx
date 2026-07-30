@@ -24,6 +24,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
+use sha2::{Digest, Sha256};
+
 use super::AuthorityOpenError;
 
 const DIRECTORY_QUERY_BUFFER_BYTES: usize = 64 * 1024;
@@ -225,6 +227,19 @@ pub(super) fn object_stamp(file: &File, metadata: &Metadata) -> io::Result<Objec
         length: metadata.len(),
         attributes: details.attributes,
     })
+}
+
+pub(super) fn object_fingerprint(stamp: &ObjectStamp) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.retained-authority.windows-object-v1\0");
+    digest.update(stamp.volume_serial_number.to_be_bytes());
+    digest.update(stamp.file_id);
+    digest.update(stamp.creation_time.to_be_bytes());
+    digest.update(stamp.last_write_time.to_be_bytes());
+    digest.update(stamp.change_time.to_be_bytes());
+    digest.update(stamp.length.to_be_bytes());
+    digest.update(stamp.attributes.to_be_bytes());
+    digest.finalize().into()
 }
 
 pub(super) fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) -> io::Result<()> {

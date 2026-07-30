@@ -130,6 +130,13 @@ impl ProviderSourceRoot {
         &self.inner.named_path
     }
 
+    /// Fixed-width observation hint for the exact directory handle retained at
+    /// construction. Callers must still use [`Self::revalidate`] as their
+    /// terminal authority fence.
+    pub(crate) fn authority_fingerprint(&self) -> [u8; 32] {
+        platform::object_fingerprint(&self.inner.opened)
+    }
+
     pub(crate) fn directory(&self) -> Result<ProviderSourceDirectory> {
         let directory = self.inner.directory.try_clone()?;
         Ok(ProviderSourceDirectory {
@@ -218,6 +225,11 @@ impl ProviderSourceDirectory {
 
     pub(crate) fn relative_path(&self) -> &Path {
         &self.relative_path
+    }
+
+    /// Fixed-width observation hint for this exact retained directory.
+    pub(crate) fn authority_fingerprint(&self) -> [u8; 32] {
+        platform::object_fingerprint(&self.opened)
     }
 
     /// Duplicates this exact retained directory capability without consulting
@@ -315,6 +327,12 @@ impl OpenedProviderSourceFile {
 
     pub(crate) fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// Fixed-width observation hint for the exact file handle opened by the
+    /// authority walk. This is not a substitute for [`Self::revalidate`].
+    pub(crate) fn authority_fingerprint(&self) -> [u8; 32] {
+        platform::object_fingerprint(&self.opened)
     }
 
     pub(crate) fn file(&self) -> &File {
@@ -551,7 +569,7 @@ fn changed_path(path: &Path) -> CaptureError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Read};
+    use std::{fs, io::Read, time::Duration};
 
     use super::*;
 
@@ -628,5 +646,60 @@ mod tests {
         retained.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"0123456789");
         assert!(source.revalidate().is_err());
+    }
+
+    #[test]
+    fn authority_fingerprints_are_stable_for_the_same_objects_and_change_on_mutation() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let path = root.join("source.json");
+        fs::create_dir(&root).unwrap();
+        fs::write(&path, b"before").unwrap();
+
+        let first_root = ProviderSourceRoot::open(&root).unwrap();
+        let first_file = first_root.open_file(Path::new("source.json")).unwrap();
+        let reopened_root = ProviderSourceRoot::open(&root).unwrap();
+        let reopened_file = reopened_root.open_file(Path::new("source.json")).unwrap();
+        assert_eq!(
+            first_root.authority_fingerprint(),
+            reopened_root.authority_fingerprint()
+        );
+        assert_eq!(
+            first_file.authority_fingerprint(),
+            reopened_file.authority_fingerprint()
+        );
+
+        let changed_modified = fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .checked_add(Duration::from_secs(2))
+            .unwrap();
+        fs::write(&path, b"after!").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(changed_modified))
+            .unwrap();
+        let changed_file = ProviderSourceRoot::open(&root)
+            .unwrap()
+            .open_file(Path::new("source.json"))
+            .unwrap();
+        assert_ne!(
+            first_file.authority_fingerprint(),
+            changed_file.authority_fingerprint()
+        );
+        assert!(first_file.revalidate().is_err());
+
+        let moved_root = temp.path().join("moved-root");
+        fs::rename(&root, &moved_root).unwrap();
+        fs::create_dir(&root).unwrap();
+        let replacement_root = ProviderSourceRoot::open(&root).unwrap();
+        assert_ne!(
+            first_root.authority_fingerprint(),
+            replacement_root.authority_fingerprint()
+        );
+        assert!(first_root.revalidate().is_err());
     }
 }
