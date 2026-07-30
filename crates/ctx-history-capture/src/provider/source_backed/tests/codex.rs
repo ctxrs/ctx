@@ -708,6 +708,8 @@ fn codex_session_tree_route_parallel_cold_scan_matches_single_worker_and_preserv
     let parallel_scan = parallel_counters.lock().unwrap()[0];
     assert_eq!(single_scan.scanner_workers, 1);
     assert_eq!(parallel_scan.scanner_workers, 4);
+    assert_eq!(single_scan.peak_active_scanners, 1);
+    assert_eq!(parallel_scan.peak_active_scanners, 4);
     assert_eq!(single_scan.catalog_sources, 4);
     assert_eq!(parallel_scan.catalog_sources, 4);
     assert_eq!(single_scan.cold_sources, 4);
@@ -720,6 +722,8 @@ fn codex_session_tree_route_parallel_cold_scan_matches_single_worker_and_preserv
     let mut normalized_parallel_scan = parallel_scan;
     normalized_single_scan.scanner_workers = 0;
     normalized_parallel_scan.scanner_workers = 0;
+    normalized_single_scan.peak_active_scanners = 0;
+    normalized_parallel_scan.peak_active_scanners = 0;
     assert_eq!(normalized_single_scan, normalized_parallel_scan);
     assert_eq!(single.commit.indexed_documents, 8);
     assert_eq!(parallel.commit.indexed_documents, 8);
