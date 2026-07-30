@@ -3,10 +3,7 @@ use ctx_history_core::{AgentType, EventRole, EventType, FileChangeKind, SessionS
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::provider::source_backed::family::jsonl::JsonlCheckpoint;
-
 pub(crate) const DIRECT_JSONL_NATIVEPATH_PARSER_REVISION: &str = "direct-native-jsonl-parser-v2";
-pub(crate) const DIRECT_JSONL_NATIVEPATH_POLICY_REVISION: &str = "direct-native-jsonl-policy-v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DirectJsonlSession {
@@ -63,47 +60,4 @@ pub(crate) struct DirectJsonlRejection {
     pub(crate) byte_start: u64,
     pub(crate) byte_end_exclusive: u64,
     pub(crate) reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DirectJsonlCheckpoint {
-    pub(crate) version: u32,
-    pub(crate) physical: JsonlCheckpoint,
-    pub(crate) accepted_events: u64,
-    pub(crate) accepted_file_touches: u64,
-    pub(crate) rejected_records: u64,
-    pub(crate) rejection_details: Vec<DirectJsonlRejection>,
-    pub(crate) represented_physical_records: u64,
-    pub(crate) ignored_records: u64,
-    pub(crate) indexed_documents: u64,
-    pub(crate) session: Option<DirectJsonlSession>,
-}
-
-impl DirectJsonlCheckpoint {
-    pub(crate) const VERSION: u32 = 3;
-
-    pub(crate) fn is_internally_consistent(&self) -> bool {
-        let Some(classified_physical) = self
-            .represented_physical_records
-            .checked_add(self.rejected_records)
-            .and_then(|value| value.checked_add(self.ignored_records))
-        else {
-            return false;
-        };
-        self.version == Self::VERSION
-            && self.physical.is_internally_consistent()
-            && classified_physical == self.physical.next_physical_ordinal()
-            && self.accepted_events == self.indexed_documents
-            && self.rejection_details.len()
-                <= super::source_backed::DIRECT_JSONL_MAX_REJECTION_DETAILS
-            && u64::try_from(self.rejection_details.len())
-                .is_ok_and(|details| details <= self.rejected_records)
-            && self.rejection_details.iter().all(|rejection| {
-                rejection.raw_ordinal < self.physical.next_physical_ordinal()
-                    && rejection.byte_start < rejection.byte_end_exclusive
-                    && rejection.byte_end_exclusive <= self.physical.complete_prefix_end()
-            })
-            && self.session.is_some()
-    }
 }
