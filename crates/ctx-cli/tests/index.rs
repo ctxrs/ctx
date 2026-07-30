@@ -34,43 +34,6 @@ fn contains_cursor_up(rendered: &[u8]) -> bool {
     })
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64"),
-    target_env = "gnu"
-))]
-fn write_fake_semantic_model_cache(cache_root: &Path) {
-    let model_root = cache_root.join("models--intfloat--multilingual-e5-small");
-    let snapshot = model_root
-        .join("snapshots")
-        .join("614241f622f53c4eeff9890bdc4f31cfecc418b3");
-    fs::create_dir_all(&snapshot).unwrap();
-    for (file, size) in [
-        ("onnx/model.onnx", 470_268_510),
-        ("tokenizer.json", 17_082_730),
-        ("config.json", 655),
-        ("special_tokens_map.json", 167),
-        ("tokenizer_config.json", 443),
-    ] {
-        let path = snapshot.join(file);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::File::create(path).unwrap().set_len(size).unwrap();
-    }
-}
-
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64"),
-    target_env = "gnu"
-))]
-fn remove_semantic_cache_env(command: &mut Command) {
-    command.env_remove("CTX_SEMANTIC_CACHE_DIR");
-    command.env_remove("FASTEMBED_CACHE_DIR");
-    command.env_remove("HF_HOME");
-    command.env_remove("HF_HUB_CACHE");
-    command.env_remove("XDG_CACHE_HOME");
-}
-
 #[test]
 fn index_status_and_watch_are_read_only_for_missing_store() {
     let temp = tempdir();
@@ -83,7 +46,7 @@ fn index_status_and_watch_are_read_only_for_missing_store() {
     assert_eq!(status["local_only"], true);
     assert_eq!(status["read_only"], true);
     assert!(
-        !temp.path().join("work.sqlite").exists(),
+        !data_root(&temp).join("work.sqlite").exists(),
         "index status must not initialize the store"
     );
 
@@ -96,7 +59,7 @@ fn index_status_and_watch_are_read_only_for_missing_store() {
     ]));
     assert!(stderr.contains("ctx index does not exist yet"), "{stderr}");
     assert!(
-        !temp.path().join("work.sqlite").exists(),
+        !data_root(&temp).join("work.sqlite").exists(),
         "index watch failure must not initialize the store"
     );
 }
@@ -114,7 +77,6 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
         "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
     )
     .unwrap();
-
     let daemon_root = data_root(&temp).join("daemon");
     fs::create_dir_all(&daemon_root).unwrap();
     fs::write(
@@ -161,6 +123,51 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
 }
 
 #[test]
+fn index_watch_reports_missing_generation_before_stale_daemon_failure() {
+    let temp = tempdir();
+    let daemon_root = data_root(&temp).join("daemon");
+    fs::create_dir_all(&daemon_root).unwrap();
+    fs::write(
+        daemon_root.join("status.json"),
+        json!({
+            "schema_version": 1,
+            "status": "failed",
+            "pid": 0,
+            "finished_at_ms": 1,
+            "last_error": "synthetic terminal failure",
+            "semantic_runtime_active": false,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args([
+            "index",
+            "watch",
+            "--format=jsonl",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let snapshots = String::from_utf8(output.stdout).unwrap();
+    let snapshots = snapshots.lines().collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1, "{snapshots:#?}");
+    let status: Value = serde_json::from_str(snapshots[0]).unwrap();
+    assert_eq!(status["lexical"]["status"], "missing", "{status:#}");
+    assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("ctx index does not exist yet; run `ctx setup` first"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn index_status_reports_stale_daemon_lock_as_recoverable() {
     let temp = tempdir();
     let daemon = data_root(&temp).join("daemon");
@@ -180,51 +187,28 @@ fn index_status_reports_stale_daemon_lock_as_recoverable() {
     assert_eq!(status["daemon"]["recoverable"], true);
     assert_eq!(status["daemon"]["reason"], "daemon_lock_stale");
     assert!(
-        !temp.path().join("work.sqlite").exists(),
+        !data_root(&temp).join("work.sqlite").exists(),
         "stale lock reporting must not initialize the store"
     );
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64"),
-    target_env = "gnu"
-))]
 #[test]
-fn index_status_omits_transient_semantic_cache_policy_fields() {
+fn index_status_omits_removed_semantic_worker_runtime_fields() {
     let temp = tempdir();
-    let workspace = temp.path().join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    write_fake_semantic_model_cache(&workspace.join(".fastembed_cache"));
-
-    let mut current_dir_command = ctx(&temp);
-    current_dir_command.current_dir(&workspace);
-    remove_semantic_cache_env(&mut current_dir_command);
-    let status = json_output(current_dir_command.args(["index", "status", "--format=json"]));
-    assert!(
-        status["semantic"].get("model_cache_available").is_none(),
-        "{status:#}"
-    );
-    assert!(
-        status["semantic"].get("embed_policy").is_none(),
-        "{status:#}"
-    );
-
-    let temp = tempdir();
-    let hf_home = temp.path().join("hf-home");
-    write_fake_semantic_model_cache(&hf_home.join("hub"));
-    let mut hf_home_command = ctx(&temp);
-    remove_semantic_cache_env(&mut hf_home_command);
-    hf_home_command.env("HF_HOME", &hf_home);
-    let status = json_output(hf_home_command.args(["index", "status", "--format=json"]));
-    assert!(
-        status["semantic"].get("model_cache_available").is_none(),
-        "{status:#}"
-    );
-    assert!(
-        status["semantic"].get("embed_policy").is_none(),
-        "{status:#}"
-    );
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
+    let semantic = status["semantic"].as_object().unwrap();
+    for removed in [
+        "model_cache_available",
+        "model_acquisition",
+        "embed_policy",
+        "embedding_runtime",
+        "worker_status",
+    ] {
+        assert!(
+            !semantic.contains_key(removed),
+            "removed semantic worker field {removed} appeared in {status:#}"
+        );
+    }
 }
 
 #[test]

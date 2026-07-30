@@ -67,7 +67,7 @@ fn start_source_refresh_daemon_with_codex_home(
         "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
-    let binary = copied_ctx_binary(temp);
+    let binary = bind_test_ctx_binary(temp);
     launch_source_refresh_daemon(temp, &binary, codex_home)
 }
 

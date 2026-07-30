@@ -173,11 +173,15 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     assert!(
-        replaced["results"].as_array().unwrap().iter().all(|result| {
-            result["snippet"]
-                .as_str()
-                .is_none_or(|snippet| !snippet.contains(append_query))
-        }),
+        replaced["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| {
+                result["snippet"]
+                    .as_str()
+                    .is_none_or(|snippet| !snippet.contains(append_query))
+            }),
         "{replaced:#}"
     );
     assert_eq!(generation_id(&replaced), rewrite_generation);
@@ -664,44 +668,28 @@ fn search_refresh_wait_json_keeps_stderr_clean_and_reports_daemon_progress() {
 }
 
 #[test]
-fn search_refresh_wait_reports_typed_failure_for_empty_source_inventory() {
+fn search_refresh_wait_publishes_verified_empty_source_generation() {
     let temp = tempdir();
     let _daemon = start_source_refresh_daemon(&temp);
-    let output = ctx(&temp)
-        .args(["search", "anything", "--refresh", "wait", "--format=json"])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let search =
+        json_output(ctx(&temp).args(["search", "anything", "--refresh", "wait", "--format=json"]));
+    assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
+    assert_eq!(search["freshness"]["source_count"], 0, "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["indexed_documents"], 0, "{search:#}");
     assert!(
-        stderr.contains("daemon-owned source-backed refresh failed"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("no executable source-backed routes were registered"),
-        "{stderr}"
+        search["results"].as_array().is_some_and(Vec::is_empty),
+        "{search:#}"
     );
 
-    let status = assert_daemon_refresh_failure(&temp, 0, None);
-    assert_eq!(
-        status["history_epoch"]["status"], "unavailable",
-        "{status:#}"
-    );
-    assert_eq!(
-        status["history_epoch"]["reason"], "source_refresh_failed",
-        "{status:#}"
-    );
-    assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
+    let generation = assert_published_generation(&search, "wait");
+    let status = assert_daemon_publication(&temp, &generation, 0, &[]);
+    assert_eq!(status["history_epoch"]["status"], "ready", "{status:#}");
+    assert_eq!(status["lexical"]["indexed_documents"], 0, "{status:#}");
     assert_eq!(status["refresh"]["source_count"], 0, "{status:#}");
-    assert_eq!(
-        status["refresh"]["progress"]["phase"], "failed",
-        "{status:#}"
-    );
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
-    assert!(!search_refresh_data_root(&temp)
+    assert!(search_refresh_data_root(&temp)
         .join("search/lexical/meta.json")
-        .exists());
-    assert!(generation_manifest_paths(&temp).is_empty());
+        .is_file());
+    assert_eq!(generation_manifest_paths(&temp).len(), 1);
 }
