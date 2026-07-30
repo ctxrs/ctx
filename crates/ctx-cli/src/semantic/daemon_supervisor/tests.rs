@@ -158,6 +158,13 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
     .unwrap();
     assert!(script.contains("EnvironmentVariables.Clear()"));
     assert!(script.contains("UseShellExecute=$false"));
+    assert!(script.contains("while($true)"));
+    assert!(script.contains("if($code -eq 0){exit 0}"));
+    assert!(script.contains("Start-Sleep -Seconds $delay"));
+    assert!(script.contains("$delay=[Math]::Min($delay*2,60)"));
+    assert!(script.contains("finally{if($null -ne $c){$c.Dispose()}}"));
+    assert!(!script.contains("exit $c.ExitCode"));
+    assert!(!script.contains("if($c.ExitCode -eq 0){exit 0};exit 1"));
     assert!(!script.contains("CTX_RELEASE_"));
     assert!(!script.contains("idle-exit-seconds"));
 
@@ -169,28 +176,98 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
         r"\ctx-daemon-S-1-5-21-1000",
     )
     .unwrap();
-    assert!(windows_task_registration_matches(
-        &xml,
-        Path::new(r"C:\Program Files\ctx\ctx.exe"),
-        Path::new(r"C:\Users\test\AppData\Local\ctx"),
-        Path::new(r"C:\Windows"),
-        "S-1-5-21-1000",
-        r"\ctx-daemon-S-1-5-21-1000",
-    )
-    .unwrap());
+    let xml_bytes = windows_task_xml_bytes(&xml);
+    assert!(xml_bytes.starts_with(&[0xff, 0xfe]));
+    assert_eq!(decode_supervisor_text(&xml_bytes), xml);
+    let registration_matches = |candidate: &str| {
+        windows_task_registration_matches(
+            candidate,
+            Path::new(r"C:\Program Files\ctx\ctx.exe"),
+            Path::new(r"C:\Users\test\AppData\Local\ctx"),
+            Path::new(r"C:\Windows"),
+            "S-1-5-21-1000",
+            r"\ctx-daemon-S-1-5-21-1000",
+        )
+        .unwrap()
+    };
+    assert!(registration_matches(&xml));
     assert!(xml.contains("<LogonTrigger>"));
     assert!(xml.contains("<UserId>S-1-5-21-1000</UserId>"));
     assert!(xml.contains("<RestartOnFailure>"));
+    assert!(xml.contains("<Interval>PT1M</Interval>"));
+    assert!(xml.contains("<Count>255</Count>"));
     assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
-    assert!(!windows_task_registration_matches(
-        "<Task><LogonType>InteractiveToken</LogonType></Task>",
-        Path::new(r"C:\Program Files\ctx\ctx.exe"),
-        Path::new(r"C:\Users\test\AppData\Local\ctx"),
-        Path::new(r"C:\Windows"),
+    assert!(!registration_matches(
+        "<Task><LogonType>InteractiveToken</LogonType></Task>"
+    ));
+    let no_logon_trigger = xml
+        .replace("<LogonTrigger>", "<TimeTrigger>")
+        .replace("</LogonTrigger>", "</TimeTrigger>");
+    assert!(!registration_matches(&no_logon_trigger));
+    assert!(!registration_matches(
+        &xml.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>")
+    ));
+    let normalized_defaults = xml
+        .replace("<Enabled>true</Enabled>", "")
+        .replace("<RunLevel>LeastPrivilege</RunLevel>", "");
+    assert!(registration_matches(&normalized_defaults));
+    assert!(windows_task_user_identity_matches(
+        r"CTX-WIN11\ctxlab",
         "S-1-5-21-1000",
-        r"\ctx-daemon-S-1-5-21-1000",
-    )
-    .unwrap());
+        Some("S-1-5-21-1000"),
+    ));
+    assert!(!windows_task_user_identity_matches(
+        r"CTX-WIN11\ctxlab",
+        "S-1-5-21-1000",
+        Some("S-1-5-21-2000"),
+    ));
+    let disabled_trigger_with_task_enabled = xml
+        .replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>")
+        .replace("<Settings>", "<Settings><Enabled>true</Enabled>");
+    assert!(!registration_matches(&disabled_trigger_with_task_enabled));
+    assert!(!registration_matches(
+        &xml.replace("<Settings>", "<Settings><Enabled>false</Enabled>")
+    ));
+    assert!(!registration_matches(&xml.replace(
+        "</Triggers>",
+        "<TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary></TimeTrigger></Triggers>",
+    )));
+    assert!(!registration_matches(
+        &xml.replace("</Triggers>", "<EventTrigger/></Triggers>")
+    ));
+    assert!(!registration_matches(
+        &xml.replace("</Actions>", "<ComHandler/></Actions>")
+    ));
+    assert!(!registration_matches(&xml.replace(
+        WINDOWS_TASK_XML_NAMESPACE,
+        "https://example.invalid/not-task-scheduler",
+    )));
+    assert!(!registration_matches(&xml.replace(
+        "<Enabled>true</Enabled>",
+        "<Enabled xmlns=\"https://example.invalid/not-task-scheduler\">true</Enabled>",
+    )));
+    assert!(!registration_matches(
+        &xml.replace("<Enabled>true</Enabled>", "<Enabled></Enabled>")
+    ));
+    assert!(!registration_matches(&xml.replace(
+        "<RunLevel>LeastPrivilege</RunLevel>",
+        "<RunLevel></RunLevel>",
+    )));
+    assert!(!registration_matches(&xml.replace(
+        "<Count>255</Count>",
+        "<Count>255</Count><Count>255</Count>"
+    )));
+    assert!(!registration_matches(
+        &xml.replace("<Count>255</Count>", "<Count/>")
+    ));
+    let truncated = xml.strip_suffix("</Task>\n").unwrap();
+    assert!(!registration_matches(truncated));
+    assert!(!registration_matches(&format!("{xml}<Other/>")));
+    assert!(!registration_matches(&format!("{xml}unexpected")));
+    assert!(!registration_matches(&xml.replace(
+        "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+        "<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>",
+    )));
     assert_eq!(
         windows_task_name("S-1-5-21-1000"),
         r"\ctx-daemon-S-1-5-21-1000"
@@ -200,6 +277,242 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
     assert!(state_script.contains("-TaskName 'ctx-daemon-S-1-5-21-1000'"));
     assert_eq!(parse_windows_task_state(b"4\r\n"), Some(4));
     assert_ne!(parse_windows_task_state(b"3\r\n"), Some(4));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn supervisor_artifact_atomic_write_replaces_existing_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("supervisor-artifact");
+    write_atomic_file(&path, b"first").unwrap();
+    write_atomic_file(&path, b"second").unwrap();
+    assert_eq!(fs::read(path).unwrap(), b"second");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
+    struct TaskCleanup {
+        task_name: String,
+        powershell: PathBuf,
+    }
+
+    impl Drop for TaskCleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("schtasks")
+                .args(["/End", "/TN"])
+                .arg(&self.task_name)
+                .output();
+            let state_script = windows_task_state_script(&self.task_name);
+            for _ in 0..50 {
+                let Ok(output) = Command::new(&self.powershell)
+                    .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+                    .arg(&state_script)
+                    .output()
+                else {
+                    break;
+                };
+                if !output.status.success() || parse_windows_task_state(&output.stdout) != Some(4) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = Command::new("schtasks")
+                .args(["/Delete", "/TN"])
+                .arg(&self.task_name)
+                .arg("/F")
+                .output();
+        }
+    }
+
+    let sid = current_windows_user_sid()?;
+    let task_name = format!(r"\ctx-test-daemon-xml-{}", std::process::id());
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("windows-task.xml");
+    let system_root =
+        env::var_os("SystemRoot").ok_or_else(|| anyhow!("Windows SystemRoot is unavailable"))?;
+    let powershell = Path::new(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let cleanup = TaskCleanup {
+        task_name: task_name.clone(),
+        powershell: powershell.clone(),
+    };
+    let executable = Path::new(&system_root).join("System32").join("where.exe");
+    let stale_xml = windows_task_xml(
+        &executable,
+        &temp.path().join("stale-data"),
+        Path::new(&system_root),
+        &sid,
+        &task_name,
+    )?;
+    write_atomic_file(&path, &windows_task_xml_bytes(&stale_xml))?;
+    let create_stale = Command::new("schtasks")
+        .args(["/Create", "/TN"])
+        .arg(&task_name)
+        .arg("/XML")
+        .arg(&path)
+        .arg("/F")
+        .output()?;
+    if !create_stale.status.success() {
+        return Err(anyhow!(
+            "schtasks /Create rejected stale generated XML: {}{}",
+            String::from_utf8_lossy(&create_stale.stdout),
+            String::from_utf8_lossy(&create_stale.stderr)
+        ));
+    }
+
+    let xml = windows_task_xml(
+        &executable,
+        &temp.path().join("data"),
+        Path::new(&system_root),
+        &sid,
+        &task_name,
+    )?;
+    write_atomic_file(&path, &windows_task_xml_bytes(&xml))?;
+
+    let create = Command::new("schtasks")
+        .args(["/Create", "/TN"])
+        .arg(&task_name)
+        .arg("/XML")
+        .arg(&path)
+        .arg("/F")
+        .output()?;
+    if !create.status.success() {
+        return Err(anyhow!(
+            "schtasks /Create rejected generated XML: {}{}",
+            String::from_utf8_lossy(&create.stdout),
+            String::from_utf8_lossy(&create.stderr)
+        ));
+    }
+    let query = Command::new("schtasks")
+        .args(["/Query", "/TN"])
+        .arg(&task_name)
+        .arg("/XML")
+        .output()?;
+    assert!(
+        query.status.success(),
+        "schtasks /Query failed: {}{}",
+        String::from_utf8_lossy(&query.stdout),
+        String::from_utf8_lossy(&query.stderr)
+    );
+    assert!(windows_task_registration_matches(
+        &decode_supervisor_text(&query.stdout),
+        &executable,
+        &temp.path().join("data"),
+        Path::new(&system_root),
+        &sid,
+        &task_name,
+    )?);
+
+    let probe = temp.path().join("restart-probe.ps1");
+    let counter = temp.path().join("restart-count.txt");
+    let marker = temp.path().join("restart-recovered.txt");
+    let probe_script = format!(
+        "$ErrorActionPreference='Stop';$countPath='{}';$markerPath='{}';$count=0;if(Test-Path -LiteralPath $countPath){{$count=[int](Get-Content -Raw -LiteralPath $countPath)}};$count++;[IO.File]::WriteAllText($countPath,[string]$count);if($count -eq 1){{exit 23}};[IO.File]::WriteAllText($markerPath,'recovered');exit 0",
+        powershell_single_quote(validated_supervisor_artifact_path(
+            "Windows restart test counter",
+            &counter,
+        )?),
+        powershell_single_quote(validated_supervisor_artifact_path(
+            "Windows restart test marker",
+            &marker,
+        )?),
+    );
+    let mut probe_bytes = vec![0xff, 0xfe];
+    probe_bytes.extend(probe_script.encode_utf16().flat_map(u16::to_le_bytes));
+    fs::write(&probe, probe_bytes)?;
+    let probe_arguments = vec![
+        "-NoLogo".to_owned(),
+        "-NoProfile".to_owned(),
+        "-NonInteractive".to_owned(),
+        "-ExecutionPolicy".to_owned(),
+        "Bypass".to_owned(),
+        "-File".to_owned(),
+        validated_supervisor_artifact_path("Windows restart test probe", &probe)?.to_owned(),
+    ];
+    let action_script = windows_sanitized_process_supervisor_script(
+        &powershell,
+        &probe_arguments,
+        &supervisor_environment_snapshot()?,
+    )?;
+    let probe_xml =
+        windows_task_xml_with_script(Path::new(&system_root), &sid, &task_name, &action_script)?;
+    write_atomic_file(&path, &windows_task_xml_bytes(&probe_xml))?;
+    let replace = Command::new("schtasks")
+        .args(["/Create", "/TN"])
+        .arg(&task_name)
+        .arg("/XML")
+        .arg(&path)
+        .arg("/F")
+        .output()?;
+    if !replace.status.success() {
+        return Err(anyhow!(
+            "schtasks /Create rejected restart-probe XML: {}{}",
+            String::from_utf8_lossy(&replace.stdout),
+            String::from_utf8_lossy(&replace.stderr)
+        ));
+    }
+
+    let run = Command::new("schtasks")
+        .args(["/Run", "/TN"])
+        .arg(&task_name)
+        .output()?;
+    assert!(
+        run.status.success(),
+        "schtasks /Run failed: {}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let recovery_deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < recovery_deadline && !marker.exists() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        marker.exists(),
+        "scheduled action did not relaunch its failing child"
+    );
+    assert_eq!(
+        fs::read_to_string(&counter)?.trim(),
+        "2",
+        "scheduled action did not recover on exactly the second child launch"
+    );
+
+    let task = task_name.trim_start_matches('\\');
+    let result_script = format!(
+        "$i=Get-ScheduledTaskInfo -TaskPath '\\' -TaskName '{}' -ErrorAction Stop;[Console]::Out.Write([uint32]$i.LastTaskResult)",
+        task,
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last_result = None;
+    while Instant::now() < deadline {
+        let result = Command::new(&powershell)
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(&result_script)
+            .output()?;
+        if result.status.success() {
+            last_result = decode_supervisor_text(&result.stdout).trim().parse().ok();
+            if last_result == Some(0) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        last_result,
+        Some(0),
+        "scheduled action did not finish successfully after recovering its child"
+    );
+
+    drop(cleanup);
+    let absent = Command::new("schtasks")
+        .args(["/Query", "/TN"])
+        .arg(&task_name)
+        .output()?;
+    assert!(!absent.status.success());
+    Ok(())
 }
 
 #[test]

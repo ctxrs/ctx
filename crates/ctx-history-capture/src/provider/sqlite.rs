@@ -672,6 +672,7 @@ mod tests {
         connection.finish().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn provider_sqlite_initial_snapshot_succeeds_with_idle_wal_writer() {
         let temp = crate::test_support_paths::tempdir().unwrap();
@@ -703,6 +704,7 @@ mod tests {
         drop(writer);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn active_source_family_contract_sqlite_reads_active_wal_without_provider_writes() {
         let temp = crate::test_support_paths::tempdir().unwrap();

@@ -3,6 +3,20 @@ use std::{
     io,
     path::{Component, Path, PathBuf},
 };
+#[cfg(windows)]
+use std::{
+    mem::MaybeUninit,
+    os::windows::{fs::OpenOptionsExt as _, io::AsRawHandle as _},
+};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    },
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedPath {
@@ -165,7 +179,7 @@ fn resolve_path(path: &Path, require_directory: bool) -> io::Result<ResolvedPath
     };
     let existing_identities = identity_chain(&existing_path)?;
     let terminal_identity = if missing.is_empty() {
-        file_identity(&endpoint)
+        file_identity(&existing_path, &endpoint)?
     } else {
         None
     };
@@ -197,7 +211,7 @@ fn inspect_named_endpoint(
             if require_directory && !metadata.is_dir() {
                 return Err(overlap_error("ctx data root is not a directory"));
             }
-            Ok(file_identity(&metadata))
+            file_identity(path, &metadata)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -214,7 +228,7 @@ fn identity_chain(path: &Path) -> io::Result<Vec<FileIdentity>> {
         }
         let metadata = fs::symlink_metadata(ancestor)?;
         reject_reparse_or_symlink(&metadata)?;
-        if let Some(identity) = file_identity(&metadata) {
+        if let Some(identity) = file_identity(ancestor, &metadata)? {
             identities.push(identity);
         }
     }
@@ -222,28 +236,60 @@ fn identity_chain(path: &Path) -> io::Result<Vec<FileIdentity>> {
 }
 
 #[cfg(unix)]
-fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
+fn file_identity(_path: &Path, metadata: &Metadata) -> io::Result<Option<FileIdentity>> {
     use std::os::unix::fs::MetadataExt as _;
 
-    Some(FileIdentity {
+    Ok(Some(FileIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
-    })
+    }))
 }
 
 #[cfg(windows)]
-fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
-    use std::os::windows::fs::MetadataExt as _;
+fn file_identity(path: &Path, metadata: &Metadata) -> io::Result<Option<FileIdentity>> {
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | if metadata.is_dir() {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
+    let file = fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(flags)
+        .open(path)?;
+    let opened = file.metadata()?;
+    reject_reparse_or_symlink(&opened)?;
+    if opened.file_type() != metadata.file_type() {
+        return Err(overlap_error(
+            "provider/data root endpoint changed during identity inspection",
+        ));
+    }
 
-    Some(FileIdentity {
-        volume: metadata.volume_serial_number()?,
-        index: metadata.file_index()?,
-    })
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: `file` owns a live handle and `information` is a valid out pointer.
+    if unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful call initialized the structure.
+    let information = unsafe { information.assume_init() };
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(overlap_error(
+            "provider/data root endpoint is a symlink or reparse point",
+        ));
+    }
+    Ok(Some(FileIdentity {
+        volume: information.dwVolumeSerialNumber,
+        index: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+    }))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn file_identity(_metadata: &Metadata) -> Option<FileIdentity> {
-    None
+fn file_identity(_path: &Path, _metadata: &Metadata) -> io::Result<Option<FileIdentity>> {
+    Ok(None)
 }
 
 fn reject_reparse_or_symlink(metadata: &Metadata) -> io::Result<()> {
@@ -323,7 +369,7 @@ mod tests {
         assert!(validate_provider_source_outside_data_root(&data, &source).is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn source_swap_during_validation_fails_closed() {
         let temp = tempfile::tempdir().unwrap();

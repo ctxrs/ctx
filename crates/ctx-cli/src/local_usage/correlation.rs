@@ -185,6 +185,7 @@ enum ControlFileRevision {
         device: u64,
         #[cfg(unix)]
         inode: u64,
+        #[cfg(unix)]
         changed_seconds: i64,
         #[cfg(unix)]
         changed_nanoseconds: i64,

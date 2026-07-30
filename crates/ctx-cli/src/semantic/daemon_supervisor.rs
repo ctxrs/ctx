@@ -15,6 +15,8 @@ use crate::compact_json;
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
 use crate::identity;
 
+#[cfg(windows)]
+use super::paths_status::daemon_root_path;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use super::{
     paths_status::{daemon_lock_is_active, pid_from_lock_json, read_pid_lock_json},
