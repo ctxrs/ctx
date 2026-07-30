@@ -39,7 +39,6 @@ pub struct CodexHydratedRecordV0 {
 #[derive(Debug)]
 pub struct CodexLocatorResolverV0 {
     sources_by_native_session: HashMap<String, (CodexCatalogSource, SourceKey)>,
-    sources_by_descriptor: HashMap<[u8; 32], SourceKey>,
 }
 
 impl CodexLocatorResolverV0 {
@@ -77,8 +76,8 @@ impl CodexLocatorResolverV0 {
         Self::from_native_session_sources(sources_by_native_session)
     }
 
-    pub(crate) fn from_root_inventory(
-        inventory: &CodexRootInventoryV0,
+    pub(crate) fn from_session_tree_inventory(
+        inventory: &CodexSessionTreeInventoryV0,
     ) -> CodexSourceBackedResultV0<Self> {
         Self::from_bound_sources(inventory.sources.clone())
     }
@@ -103,13 +102,9 @@ impl CodexLocatorResolverV0 {
     fn from_native_session_sources(
         sources_by_native_session: HashMap<String, (CodexCatalogSource, SourceKey)>,
     ) -> CodexSourceBackedResultV0<Self> {
-        let mut sources_by_descriptor = HashMap::with_capacity(sources_by_native_session.len());
+        let mut source_descriptors = HashSet::with_capacity(sources_by_native_session.len());
         for (_, source_key) in sources_by_native_session.values() {
-            let digest = source_key.exact_descriptor_digest();
-            if sources_by_descriptor
-                .insert(digest, source_key.clone())
-                .is_some()
-            {
+            if !source_descriptors.insert(source_key.exact_descriptor_digest()) {
                 return Err(CodexSourceBackedErrorV0::Capture(
                     CaptureError::SystemInvariant(
                         "distinct Codex catalog entries shared one source descriptor",
@@ -119,14 +114,7 @@ impl CodexLocatorResolverV0 {
         }
         Ok(Self {
             sources_by_native_session,
-            sources_by_descriptor,
         })
-    }
-
-    pub(crate) fn owns_source(&self, source: &SourceKey) -> bool {
-        self.sources_by_descriptor
-            .get(&source.exact_descriptor_digest())
-            .is_some_and(|candidate| candidate.exact_descriptor_eq(source))
     }
 
     pub fn hydrate(

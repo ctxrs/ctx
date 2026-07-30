@@ -458,6 +458,114 @@ fn codex_automatic_session_roots_are_one_move_stable_inventory_and_resolver() {
 }
 
 #[test]
+fn codex_session_union_recovers_exact_hydration_before_successor_refresh() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let sessions = home.join(".codex/sessions");
+    let archived = home.join(".codex/archived_sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&archived).unwrap();
+
+    let active_id = "019fb3ec-7ea0-7150-bba0-acde00000001";
+    let archived_id = "019fb3ec-7ea0-7150-bba0-acde00000002";
+    let active_text = "resident active Codex union sentinel";
+    let archived_text = "resident archived Codex union sentinel";
+    fs::write(
+        sessions.join(format!("rollout-{active_id}.jsonl")),
+        codex_rollout_bytes(active_id, &[active_text]),
+    )
+    .unwrap();
+    fs::write(
+        archived.join(format!("rollout-{archived_id}.jsonl")),
+        codex_rollout_bytes(archived_id, &[archived_text]),
+    )
+    .unwrap();
+
+    let context = DiscoveryContext::new(
+        &home,
+        temp.path().join("cwd"),
+        DiscoveryPlatform::Linux,
+        crate::DiscoveryPlatformDirs::default(),
+    );
+    let sources = || {
+        vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &archived,
+            ),
+        ]
+    };
+    let data_root = temp.path().join("ctx-data");
+    let initial = build_automatic_source_backed_registry_from_parts(
+        &context,
+        &data_root,
+        sources(),
+        Vec::new(),
+    );
+    assert_eq!(initial.executable_route_count(), 1);
+    let index_root = temp.path().join("index");
+    refresh_source_backed_generation(
+        &index_root,
+        &initial.registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let requests = [active_text, archived_text]
+        .into_iter()
+        .map(|text| {
+            let candidate = index
+                .search_event_candidates(text, 2)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            EventHydrationRequest::new(candidate.event.event_id, candidate.event.locator)
+                .unwrap()
+                .with_source_path_hint(candidate.event.source_path)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    drop(index);
+    drop(initial);
+
+    // This is the daemon-restart shape: rebuild provider routes from current
+    // authority and hydrate the retained generation before a successor scan.
+    let recovered = build_automatic_source_backed_registry_from_parts(
+        &context,
+        &data_root,
+        sources(),
+        Vec::new(),
+    );
+    assert_eq!(recovered.executable_route_count(), 1);
+    let result = recovered
+        .registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap();
+    assert_eq!(
+        result
+            .records()
+            .iter()
+            .map(|record| record.provider_bytes.as_slice())
+            .collect::<Vec<_>>(),
+        vec![active_text.as_bytes(), archived_text.as_bytes()]
+    );
+}
+
+#[test]
 fn codex_automatic_session_union_rejects_duplicate_native_ids_before_publication() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
