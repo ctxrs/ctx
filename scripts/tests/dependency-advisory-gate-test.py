@@ -20,6 +20,12 @@ NOW = "2026-07-29T17:00:00Z"
 
 
 class AdvisoryGateTest(unittest.TestCase):
+    def test_release_runtime_uses_python_3_10_datetime_api(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("from datetime import UTC", source)
+        self.assertIn("UTC = timezone.utc", source)
+        self.assertIn("import tomli as tomllib", source)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
