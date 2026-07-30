@@ -25,12 +25,9 @@ fn read_gemini_transcript_pages_from<'a>(
     previous: Option<&'a GeminiPreviousSource>,
     resume_frontier: Option<&GeminiPageFrontier>,
 ) -> GeminiScanResult<GeminiNativePageReader<'a>> {
-    let initial_observation = GeminiFileObservation::from_metadata(source.source_file.metadata())?;
-    if initial_observation != source.observation {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-
-    let mut file = open_gemini_transcript(source)?;
+    let source_file = source.open()?;
+    let initial_observation = GeminiFileObservation::from_metadata(source_file.metadata())?;
+    let mut file = source_file.file().try_clone()?;
     if GeminiFileObservation::from_metadata(&file.metadata()?)? != initial_observation {
         return Err(CaptureError::SourceChangedDuringCapture.into());
     }
@@ -127,6 +124,7 @@ fn read_gemini_transcript_pages_from<'a>(
     };
     Ok(GeminiNativePageReader {
         source,
+        source_file,
         previous,
         initial_observation,
         source_hasher,

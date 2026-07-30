@@ -4,16 +4,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{EventType, LocatorRevisionPolicy, NativeRecordCoordinate, StableEntityId};
+use ctx_history_core::{
+    EventType, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator, StableEntityId,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
 use super::source_backed::CursorSourceBackedSummary;
 use super::{
-    extract_cursor_source_backed_cold, hydrate_cursor_source_backed_message,
-    CursorSourceBackedPage, CursorSourceBackedRecord, CursorSourceBackedSink,
-    CursorSourceBackedSourcePlan, CursorSourceBackedTerminal, CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES,
-    CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS,
+    discover_cursor_transcripts, extract_cursor_source_backed_cold, freeze_cursor_source,
+    hydrate_cursor_source_backed_message, CursorSourceBackedPage, CursorSourceBackedRecord,
+    CursorSourceBackedSink, CursorSourceBackedSourcePlan, CursorSourceBackedTerminal,
+    CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES, CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS,
 };
 use crate::{CaptureError, Result, PROVIDER_MAX_TEXT_CHARS};
 
@@ -497,6 +499,21 @@ fn cursor_source_backed_exact_locator_hydrates_and_rejects_root_or_source_mutati
         hydrate_cursor_source_backed_message(&data_dir, &altered_record),
         Err(CaptureError::SourceChangedDuringCapture)
     ));
+    let mut wrong_digest = *record.locator.record_digest();
+    wrong_digest[0] ^= 1;
+    let mut wrong_digest_record = record.clone();
+    wrong_digest_record.locator = SourceRecordLocator::new(
+        record.locator.source().clone(),
+        record.locator.coordinate().clone(),
+        record.locator.revision_policy(),
+        record.locator.certified_source_revision_digest().copied(),
+        wrong_digest,
+    )
+    .unwrap();
+    assert!(matches!(
+        hydrate_cursor_source_backed_message(&data_dir, &wrong_digest_record),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
 
     let relocated_data_dir = temp.path().join("relocated-cursor-data");
     let relocated_projects = relocated_data_dir.join("projects");
@@ -522,4 +539,115 @@ fn cursor_source_backed_exact_locator_hydrates_and_rejects_root_or_source_mutati
         hydrate_cursor_source_backed_message(&data_dir, &record),
         Err(CaptureError::SourceChangedDuringCapture)
     ));
+}
+
+#[test]
+fn cursor_catalog_descriptor_growth_is_bounded_at_provider_cap() {
+    const TRANSCRIPTS: usize = 128;
+
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    for index in 0..TRANSCRIPTS {
+        write_transcript(
+            &projects,
+            "project",
+            &format!("session-{index:03}"),
+            [user("bounded catalog")],
+        );
+    }
+    #[cfg(target_os = "linux")]
+    let descriptors_before = fs::read_dir("/proc/self/fd").unwrap().count();
+
+    let inventory = discover_cursor_transcripts(&data_dir);
+
+    assert!(inventory.completed);
+    assert_eq!(inventory.transcripts.len(), TRANSCRIPTS);
+    #[cfg(target_os = "linux")]
+    assert!(
+        fs::read_dir("/proc/self/fd").unwrap().count() <= descriptors_before + 64,
+        "the resident Cursor catalog must not retain one descriptor per transcript"
+    );
+    inventory.revalidate().unwrap();
+}
+
+#[test]
+fn cursor_catalog_rejects_same_size_rewrite_with_restored_mtime() {
+    use std::fs::FileTimes;
+
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    let path = write_transcript(&projects, "project", "rewrite", [user("first")]);
+    let source = discover_cursor_transcripts(&data_dir).transcripts.remove(0);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    let index = bytes.iter().position(|byte| *byte == b'f').unwrap();
+    bytes[index] = b'w';
+    fs::write(&path, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(modified))
+        .unwrap();
+
+    assert!(matches!(
+        freeze_cursor_source(&source),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
+}
+
+#[test]
+fn cursor_catalog_accepts_hardlink_aliases() {
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    let first = write_transcript(&projects, "project", "first", [user("alias")]);
+    let second = transcript_path(&projects, "project", "second");
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+    fs::hard_link(first, second).unwrap();
+
+    let inventory = discover_cursor_transcripts(&data_dir);
+
+    assert!(inventory.completed);
+    assert_eq!(inventory.transcripts.len(), 2);
+    for source in inventory.transcripts {
+        freeze_cursor_source(&source).unwrap().revalidate().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cursor_catalog_rejects_root_and_leaf_swaps() {
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    write_transcript(&projects, "project", "root-swap", [user("original")]);
+    let source = discover_cursor_transcripts(&data_dir).transcripts.remove(0);
+    fs::rename(&data_dir, temp.path().join("cursor-data-displaced")).unwrap();
+    write_transcript(
+        &data_dir.join("projects"),
+        "project",
+        "root-swap",
+        [user("replacement")],
+    );
+    assert!(freeze_cursor_source(&source)
+        .and_then(|frozen| frozen.revalidate())
+        .is_err());
+
+    let leaf_data = temp.path().join("leaf-cursor-data");
+    let leaf_projects = leaf_data.join("projects");
+    let leaf = write_transcript(&leaf_projects, "project", "leaf-swap", [user("original")]);
+    let leaf_source = discover_cursor_transcripts(&leaf_data)
+        .transcripts
+        .remove(0);
+    fs::rename(&leaf, leaf.with_extension("displaced")).unwrap();
+    write_transcript(
+        &leaf_projects,
+        "project",
+        "leaf-swap",
+        [user("replacement")],
+    );
+    assert!(freeze_cursor_source(&leaf_source).is_err());
 }

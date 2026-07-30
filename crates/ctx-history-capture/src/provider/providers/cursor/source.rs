@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::common::io::OpenedProviderSourceFile;
 use crate::{provider::provider_path_identity, CaptureError, Result};
 
 use super::{
@@ -68,10 +69,11 @@ pub(crate) struct CursorSourceObservation {
     pub(crate) file_identity: Option<CursorFileIdentity>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct CursorFrozenSource {
     transcript: CursorTranscriptPath,
     observation: CursorSourceObservation,
+    source_file: OpenedProviderSourceFile,
 }
 
 impl CursorFrozenSource {
@@ -80,46 +82,27 @@ impl CursorFrozenSource {
     }
 
     fn open(&self) -> Result<File> {
-        let (file, observed) = open_observed_cursor_file(
-            self.transcript.source_file(),
-            &self.observation.path,
-            &self.observation.native_session_id,
-        )?;
-        if !observed.same_strong_snapshot(&self.observation) {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        Ok(file)
+        Ok(self.source_file.file().try_clone()?)
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
-        if !observation_from_metadata(
-            &self.observation.path,
-            &self.observation.native_session_id,
-            self.transcript.source_file().metadata(),
-            self.observation.content_sha256,
-        )?
-        .same_strong_snapshot(&self.observation)
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        self.transcript
-            .source_file()
-            .revalidate()
-            .map_err(|_| CaptureError::SourceChangedDuringCapture)
+        self.transcript.revalidate(&self.source_file)
     }
 }
 
 pub(crate) fn freeze_cursor_source(
     transcript: &CursorTranscriptPath,
 ) -> Result<CursorFrozenSource> {
+    let source_file = transcript.open()?;
     let (_, observation) = open_observed_cursor_file(
-        transcript.source_file(),
+        &source_file,
         transcript.path(),
         transcript.native_session_id(),
     )?;
     Ok(CursorFrozenSource {
         transcript: transcript.clone(),
         observation,
+        source_file,
     })
 }
 
@@ -223,16 +206,6 @@ fn cursor_observed_time_stamp(time: CursorObservedTime) -> String {
     )
 }
 
-impl CursorSourceObservation {
-    fn same_strong_snapshot(&self, other: &Self) -> bool {
-        self.path == other.path
-            && self.locator_identity == other.locator_identity
-            && self.native_session_id == other.native_session_id
-            && self.length == other.length
-            && self.content_sha256 == other.content_sha256
-    }
-}
-
 fn open_observed_cursor_file(
     opened: &crate::common::io::OpenedProviderSourceFile,
     path: &Path,
@@ -251,7 +224,7 @@ fn open_observed_cursor_file(
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     opened
-        .revalidate()
+        .revalidate_leaf()
         .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
     file.seek(SeekFrom::Start(0))?;
     Ok((file, after_observation))

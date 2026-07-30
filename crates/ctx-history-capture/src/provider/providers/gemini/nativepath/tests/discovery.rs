@@ -23,7 +23,10 @@ fn gemini_discovery_rejects_root_swap_through_retained_source() {
     fs::create_dir_all(replacement.parent().unwrap()).unwrap();
     fs::write(replacement, "{\"replacement\":true}\n").unwrap();
 
-    assert!(source.source_file.revalidate().is_err());
+    assert!(source
+        .open()
+        .and_then(|opened| opened.revalidate())
+        .is_err());
 }
 
 #[cfg(unix)]
@@ -35,7 +38,10 @@ fn gemini_discovery_rejects_ancestor_swap_through_retained_source() {
     fs::create_dir_all(replacement.parent().unwrap()).unwrap();
     fs::write(replacement, "{\"replacement\":true}\n").unwrap();
 
-    assert!(source.source_file.revalidate().is_err());
+    assert!(source
+        .open()
+        .and_then(|opened| opened.revalidate())
+        .is_err());
 }
 
 #[cfg(unix)]
@@ -45,7 +51,10 @@ fn gemini_discovery_rejects_leaf_swap_through_retained_source() {
     fs::rename(&leaf, leaf.with_file_name("session-displaced.jsonl")).unwrap();
     fs::write(&leaf, "{\"replacement\":true}\n").unwrap();
 
-    assert!(source.source_file.revalidate().is_err());
+    assert!(source
+        .open()
+        .and_then(|opened| opened.revalidate())
+        .is_err());
 }
 
 #[test]
@@ -162,24 +171,74 @@ fn gemini_nativepath_discovery_budgets_fail_at_the_exact_count_and_byte_boundari
 
 #[test]
 fn gemini_nativepath_discovery_handles_large_bounded_directories() {
-    const NOISE_ENTRIES: usize = 2_000;
+    const TRANSCRIPTS: usize = 2_000;
 
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
-    let noise = root.join("tmp/noise");
-    fs::create_dir_all(&noise).unwrap();
-    for index in 0..NOISE_ENTRIES {
-        fs::write(noise.join(format!("{index:04}.log")), b"noise").unwrap();
+    let chats = root.join("tmp/project/chats");
+    fs::create_dir_all(&chats).unwrap();
+    for index in 0..TRANSCRIPTS {
+        fs::write(chats.join(format!("{index:04}.jsonl")), b"{}\n").unwrap();
     }
-    let path = write_transcript(&root, &[header("bounded-discovery", "main")]);
+    #[cfg(target_os = "linux")]
+    let descriptors_before = fs::read_dir("/proc/self/fd").unwrap().count();
 
     let discovery = discover_gemini_transcripts(&root).unwrap();
 
-    assert_eq!(discovery.transcripts.len(), 1);
-    assert_eq!(
-        discovery.transcripts[0].path,
-        fs::canonicalize(path).unwrap()
+    assert_eq!(discovery.transcripts.len(), TRANSCRIPTS);
+    #[cfg(target_os = "linux")]
+    assert!(
+        fs::read_dir("/proc/self/fd").unwrap().count() <= descriptors_before + 64,
+        "the resident Gemini catalog must not retain one descriptor per transcript"
     );
+}
+
+#[test]
+fn gemini_catalog_rejects_same_size_rewrite_with_restored_mtime() {
+    use std::fs::FileTimes;
+
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let path = root.join("tmp/project/chats/session.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"{\"a\":1}\n").unwrap();
+    let source = discover_gemini_transcripts(&root)
+        .unwrap()
+        .transcripts
+        .remove(0);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+    fs::write(&path, b"{\"b\":2}\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(modified))
+        .unwrap();
+
+    assert!(matches!(
+        source.open(),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
+}
+
+#[test]
+fn gemini_catalog_accepts_hardlink_aliases() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let chats = root.join("tmp/project/chats");
+    fs::create_dir_all(&chats).unwrap();
+    let first = chats.join("first.jsonl");
+    let second = chats.join("second.jsonl");
+    fs::write(&first, b"{}\n").unwrap();
+    fs::hard_link(&first, &second).unwrap();
+
+    let discovery = discover_gemini_transcripts(&root).unwrap();
+
+    assert_eq!(discovery.transcripts.len(), 2);
+    for source in discovery.transcripts {
+        source.open().unwrap().revalidate().unwrap();
+    }
 }
 
 #[test]

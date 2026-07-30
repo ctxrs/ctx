@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeSet, VecDeque},
     ffi::OsStr,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use crate::common::io::{
@@ -24,14 +23,18 @@ pub(crate) struct CursorTranscriptPath {
     project: PathBuf,
     session_id: String,
     path: PathBuf,
-    source_file: Arc<OpenedProviderSourceFile>,
+    authority_relative_path: PathBuf,
+    ordinary_file_token: [u8; 32],
+    authority: ProviderSourceRoot,
 }
 
 impl CursorTranscriptPath {
     fn parse(
         projects_root: &Path,
         path: &Path,
-        source_file: Arc<OpenedProviderSourceFile>,
+        authority_relative_path: PathBuf,
+        ordinary_file_token: [u8; 32],
+        authority: ProviderSourceRoot,
     ) -> Result<Self, &'static str> {
         let relative = path
             .strip_prefix(projects_root)
@@ -64,7 +67,9 @@ impl CursorTranscriptPath {
             project: PathBuf::from(components[0]),
             session_id: session_id.to_owned(),
             path: path.to_path_buf(),
-            source_file,
+            authority_relative_path,
+            ordinary_file_token,
+            authority,
         })
     }
 
@@ -84,8 +89,21 @@ impl CursorTranscriptPath {
         &self.path
     }
 
-    pub(crate) fn source_file(&self) -> &Arc<OpenedProviderSourceFile> {
-        &self.source_file
+    pub(crate) fn open(&self) -> crate::Result<OpenedProviderSourceFile> {
+        let opened = self.authority.open_file(&self.authority_relative_path)?;
+        if opened.ordinary_file_token() != self.ordinary_file_token {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(opened)
+    }
+
+    pub(crate) fn revalidate(&self, opened: &OpenedProviderSourceFile) -> crate::Result<()> {
+        if opened.ordinary_file_token() != self.ordinary_file_token {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        opened
+            .revalidate()
+            .map_err(|_| CaptureError::SourceChangedDuringCapture)
     }
 }
 
@@ -95,6 +113,8 @@ impl PartialEq for CursorTranscriptPath {
             && self.project == other.project
             && self.session_id == other.session_id
             && self.path == other.path
+            && self.authority_relative_path == other.authority_relative_path
+            && self.ordinary_file_token == other.ordinary_file_token
     }
 }
 
@@ -133,13 +153,7 @@ pub(crate) struct CursorRootInventory {
     pub(crate) issues: Vec<CursorDiscoveryIssue>,
     pub(crate) completed: bool,
     pub(crate) stats: CursorDiscoveryStats,
-    authority: Option<CursorInventoryAuthority>,
-}
-
-#[derive(Debug, Clone)]
-enum CursorInventoryAuthority {
-    File(Arc<OpenedProviderSourceFile>),
-    Root(ProviderSourceRoot),
+    authority: Option<ProviderSourceRoot>,
 }
 
 impl CursorRootInventory {
@@ -191,8 +205,7 @@ impl CursorRootInventory {
 
     pub(crate) fn revalidate(&self) -> crate::Result<()> {
         match self.authority.as_ref() {
-            Some(CursorInventoryAuthority::File(file)) => file.revalidate(),
-            Some(CursorInventoryAuthority::Root(root)) => root.revalidate(),
+            Some(root) => root.revalidate(),
             None => Err(CaptureError::InvalidProviderTranscriptPath {
                 path: self.input.clone(),
                 reason: "Cursor discovery has no retained source authority",
@@ -234,15 +247,34 @@ pub(crate) fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
     };
     match opened {
         OpenedProviderSourcePath::File(file) => {
-            let file = Arc::new(file);
-            inventory.authority = Some(CursorInventoryAuthority::File(file.clone()));
             inventory.stats.entries_visited = 1;
             inventory.stats.regular_files_visited = 1;
-            inspect_file(input, input, file, &mut inventory, true);
+            let (authority, relative_path) = match cursor_explicit_authority(input) {
+                Ok(admitted) => admitted,
+                Err(error) => {
+                    inventory.reject(
+                        input.to_path_buf(),
+                        CursorDiscoveryIssueKind::Io,
+                        error.to_string(),
+                        true,
+                    );
+                    return inventory;
+                }
+            };
+            inventory.authority = Some(authority.clone());
+            inspect_file(
+                input,
+                input,
+                relative_path,
+                file,
+                authority,
+                &mut inventory,
+                true,
+            );
         }
         OpenedProviderSourcePath::Directory(directory) => {
             let authority = directory.authority_root();
-            inventory.authority = Some(CursorInventoryAuthority::Root(authority.clone()));
+            inventory.authority = Some(authority.clone());
             let (scan_path, scan_directory) =
                 select_projects_directory(input, directory, &mut inventory);
             inventory.input = scan_path.clone();
@@ -261,6 +293,22 @@ pub(crate) fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
         }
     }
     inventory
+}
+
+fn cursor_explicit_authority(input: &Path) -> crate::Result<(ProviderSourceRoot, PathBuf)> {
+    let parent = input
+        .parent()
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: input.to_path_buf(),
+            reason: "explicit Cursor transcript has no parent authority",
+        })?;
+    let relative_path = input.file_name().map(PathBuf::from).ok_or_else(|| {
+        CaptureError::InvalidProviderTranscriptPath {
+            path: input.to_path_buf(),
+            reason: "explicit Cursor transcript has no authority-relative name",
+        }
+    })?;
+    Ok((ProviderSourceRoot::open(parent)?, relative_path))
 }
 
 fn select_projects_directory(
@@ -349,7 +397,15 @@ fn visit_directories(
                 Ok(OpenedProviderSourcePath::File(file)) => {
                     inventory.stats.regular_files_visited =
                         inventory.stats.regular_files_visited.saturating_add(1);
-                    inspect_file(input, &path, Arc::new(file), inventory, false);
+                    inspect_file(
+                        input,
+                        &path,
+                        relative_path.join(name),
+                        file,
+                        authority.clone(),
+                        inventory,
+                        false,
+                    );
                 }
                 Err(error) => inventory.reject(
                     path,
@@ -420,7 +476,9 @@ fn read_directory_entries(
 fn inspect_file(
     input: &Path,
     path: &Path,
-    source_file: Arc<OpenedProviderSourceFile>,
+    authority_relative_path: PathBuf,
+    source_file: OpenedProviderSourceFile,
+    authority: ProviderSourceRoot,
     inventory: &mut CursorRootInventory,
     explicit_file: bool,
 ) {
@@ -475,7 +533,30 @@ fn inspect_file(
         );
         return;
     }
-    match CursorTranscriptPath::parse(projects_root, path, source_file) {
+    let ordinary_file_token = match cursor_catalog_token(
+        &source_file,
+        &authority,
+        &authority_relative_path,
+        explicit_file,
+    ) {
+        Ok(token) => token,
+        Err(error) => {
+            inventory.reject(
+                path.to_path_buf(),
+                CursorDiscoveryIssueKind::Io,
+                error.to_string(),
+                true,
+            );
+            return;
+        }
+    };
+    match CursorTranscriptPath::parse(
+        projects_root,
+        path,
+        authority_relative_path,
+        ordinary_file_token,
+        authority,
+    ) {
         Ok(source) if inventory.transcripts.len() < CURSOR_MAX_TRANSCRIPTS => {
             inventory.transcripts.push(source);
         }
@@ -492,4 +573,22 @@ fn inspect_file(
             false,
         ),
     }
+}
+
+fn cursor_catalog_token(
+    source_file: &OpenedProviderSourceFile,
+    authority: &ProviderSourceRoot,
+    authority_relative_path: &Path,
+    explicit_file: bool,
+) -> crate::Result<[u8; 32]> {
+    let token = source_file.ordinary_file_token();
+    source_file.revalidate_leaf()?;
+    if explicit_file {
+        let reopened = authority.open_file(authority_relative_path)?;
+        if reopened.ordinary_file_token() != token {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        reopened.revalidate_leaf()?;
+    }
+    Ok(token)
 }

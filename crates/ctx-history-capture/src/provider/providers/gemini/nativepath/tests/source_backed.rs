@@ -1,8 +1,10 @@
 use ctx_history_core::{
-    AgentType, CaptureProvider, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
+    AgentType, CaptureProvider, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
+    TypedKey,
 };
 use sha2::{Digest, Sha256};
 
+use super::super::source_backed::GeminiSourceBackedError;
 use super::*;
 
 #[test]
@@ -221,6 +223,20 @@ fn gemini_source_backed_exact_jsonl_locator_reopens_original_record_after_append
     let hydrated = hydrate_gemini_source_backed_record(&source, &document.locator).unwrap();
     assert_eq!(hydrated.provider_bytes, exact_text.as_bytes());
     assert_eq!(hydrated.decoded_display_text.as_deref(), Some(exact_text));
+    let mut wrong_digest = *document.locator.record_digest();
+    wrong_digest[0] ^= 1;
+    let wrong_locator = SourceRecordLocator::new(
+        document.locator.source().clone(),
+        document.locator.coordinate().clone(),
+        document.locator.revision_policy(),
+        document.locator.certified_source_revision_digest().copied(),
+        wrong_digest,
+    )
+    .unwrap();
+    assert!(matches!(
+        hydrate_gemini_source_backed_record(&source, &wrong_locator),
+        Err(GeminiSourceBackedError::LocatorDigestMismatch)
+    ));
 
     OpenOptions::new()
         .append(true)
