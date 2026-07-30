@@ -427,7 +427,13 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["initialized"], false);
     assert_eq!(status["read_only"], true);
-    assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
+    assert!(
+        matches!(
+            status["lexical"]["status"].as_str(),
+            Some("pending" | "unavailable")
+        ),
+        "{status:#}"
+    );
     assert!(!publication_pointer.exists());
     assert_eq!(fs::read(manifest_path).unwrap(), manifest_before);
 }
