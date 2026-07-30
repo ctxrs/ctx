@@ -1,168 +1,15 @@
 mod support;
 
-use std::{
-    io::Read,
-    process::{Child, Command as StdCommand, Stdio},
-};
-
 use support::{daemon_test_root as tempdir, *};
 
+#[path = "support/native_providers/daemon.rs"]
+mod provider_daemon;
 #[path = "support/native_providers/sqlite_sources.rs"]
 mod sqlite_sources;
 #[path = "support/native_providers/workspace_sources.rs"]
 mod workspace_sources;
 
-struct SourceRefreshDaemon {
-    child: Option<Child>,
-}
-
-impl Drop for SourceRefreshDaemon {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
-    fs::write(
-        temp.path().join("config.toml"),
-        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
-    )
-    .unwrap();
-    let binary = copied_ctx_binary(temp);
-    let prepared = ctx_from_binary(temp, &binary);
-    let mut command = StdCommand::new(prepared.get_program());
-    for (name, value) in prepared.get_envs() {
-        match value {
-            Some(value) => {
-                command.env(name, value);
-            }
-            None => {
-                command.env_remove(name);
-            }
-        }
-    }
-    command
-        .current_dir(temp.path())
-        .args([
-            "daemon",
-            "run",
-            "--force",
-            "--idle-exit-seconds",
-            "600",
-            "--loop-interval-seconds",
-            "600",
-        ])
-        .env("CTX_DAEMON_MODE", "full")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let spawn_deadline = Instant::now() + Duration::from_secs(1);
-    let child = loop {
-        match command.spawn() {
-            Ok(child) => break child,
-            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
-        }
-    };
-    let mut daemon = SourceRefreshDaemon { child: Some(child) };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
-            let mut stderr = String::new();
-            daemon
-                .child
-                .as_mut()
-                .unwrap()
-                .stderr
-                .as_mut()
-                .unwrap()
-                .read_to_string(&mut stderr)
-                .unwrap();
-            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
-        }
-        let status = ctx(temp)
-            .args(["daemon", "status", "--format=json"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
-        if status.as_ref().is_some_and(|status| {
-            status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
-        }) {
-            wait_for_test_daemon_source_refresh(temp);
-            return daemon;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for source-refresh daemon readiness: {status:#?}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let packet = loop {
-        let output = ctx(temp)
-            .args(["sql", sql, "--format=json"])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("source-backed SQL projection")
-            || stderr.contains("source-backed relational projection")
-            || stderr.contains("no such table: source_backed_relational_state"))
-            && Instant::now() < deadline
-        {
-            if let Ok(job) = fs::read(temp.path().join("daemon/jobs/relational-catch-up.json"))
-                .and_then(|bytes| {
-                    serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
-                })
-            {
-                if job["status"] == "error" {
-                    panic!(
-                        "source-backed SQL projection failed for `{sql}` ({}): {}",
-                        job["error_code"].as_str().unwrap_or("unknown_error"),
-                        job["last_error"]
-                            .as_str()
-                            .unwrap_or("unknown projection error")
-                    );
-                }
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            continue;
-        }
-        panic!("source-backed SQL failed for `{sql}`: {stderr}");
-    };
-    packet["rows"][0][0]
-        .as_i64()
-        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
-}
-
-fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
-    assert_eq!(search["schema_version"], 1, "{search:#}");
-    assert_eq!(search["query"], query, "{search:#}");
-    assert_eq!(search["filters"]["provider"], provider, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
-    let results = search["results"].as_array().unwrap();
-    assert_eq!(results.len(), 1, "{search:#}");
-    assert_eq!(results[0]["provider"], provider, "{search:#}");
-    assert!(results[0]["ctx_event_id"].is_string(), "{search:#}");
-    assert!(results[0]["ctx_session_id"].is_string(), "{search:#}");
-    assert!(
-        results[0]["snippet"]
-            .as_str()
-            .is_some_and(|snippet| snippet.contains(query)),
-        "{search:#}"
-    );
-}
+use provider_daemon::*;
 
 #[test]
 fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() {
@@ -187,7 +34,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
         Path::new(&provider_history_fixture("qoder/projects")),
         &temp.path().join(".qoder").join("projects"),
     );
-    let _daemon = start_source_refresh_daemon(&temp);
+    let _daemon = start_isolated_provider_daemon(&temp);
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     for (provider, source_format) in [
@@ -699,7 +546,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
         let temp = tempdir();
         let query = format!("{stored_provider}-cli-flow-oracle");
         let path = fixture(&temp, &query);
-        let _daemon = start_source_refresh_daemon(&temp);
+        let _daemon = start_isolated_provider_daemon(&temp);
 
         let first = json_output(ctx(&temp).args([
             "import",
@@ -911,7 +758,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             }
             _ => (fixture_path, false, false),
         };
-        let _daemon = start_source_refresh_daemon(&temp);
+        let _daemon = start_isolated_provider_daemon(&temp);
 
         let mut first_command = ctx(&temp);
         first_command.args(["import", "--provider", cli_provider]);
@@ -1134,7 +981,7 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
 #[test]
 fn native_provider_cli_requires_existing_history_or_explicit_path() {
     let temp = tempdir();
-    let _daemon = start_source_refresh_daemon(&temp);
+    let _daemon = start_isolated_provider_daemon(&temp);
     for cli_provider in [
         "claude",
         "opencode",
@@ -1178,7 +1025,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 fn task_json_cli_imports_cline_and_roo_and_searches() {
     let temp = tempdir();
     let cline = provider_history_fixture("cline/data");
-    let _daemon = start_source_refresh_daemon(&temp);
+    let _daemon = start_isolated_provider_daemon(&temp);
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -1282,7 +1129,7 @@ fn antigravity_cli_imports_native_transcript_tree() {
     for session in ["agy-future", "agy-resume", "agy-success"] {
         copy_dir_all(&source_fixture.join(session), &fixture.join(session));
     }
-    let _daemon = start_source_refresh_daemon(&temp);
+    let _daemon = start_isolated_provider_daemon(&temp);
 
     let imported = json_output(ctx(&temp).args([
         "import",
