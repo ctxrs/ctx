@@ -90,9 +90,7 @@ use super::providers::{
         openhands_owns_source, openhands_route_error, OpenHandsEventFileAdapterV2,
         OpenHandsEventFileSourcePlan,
     },
-    pi::nativepath::{
-        project_pi_source_backed_root_cold, PiSourceBackedResolver, PiSourceBackedRoot,
-    },
+    pi::nativepath::{pi_source_backed_adapter, PiSourceBackedRoot},
     rovodev::native_path::RovoDevDocumentTreeAdapter,
     shelley::native_path::source_backed::{
         discover_shelley_source_backed_exact_cwd, ShelleySourceBackedAdapter,
