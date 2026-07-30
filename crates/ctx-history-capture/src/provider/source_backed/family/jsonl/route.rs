@@ -140,6 +140,7 @@ pub(crate) struct JsonlFamilyLeaf {
     observation: JsonlFileObservation,
     binding: TypedKey,
     identity_probe: Option<JsonlProbe>,
+    whole_record: bool,
 }
 
 impl JsonlFamilyLeaf {
@@ -150,18 +151,31 @@ impl JsonlFamilyLeaf {
         authority_path: PathBuf,
         binding: TypedKey,
     ) -> Result<Self> {
-        let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(&source_path, &opened)?;
-        drop(opened);
-        Ok(Self {
+        Self::observe_with_framing(
             source,
             source_path,
-            authority_path,
             authority,
-            observation,
+            authority_path,
             binding,
-            identity_probe: None,
-        })
+            false,
+        )
+    }
+
+    pub(crate) fn observe_whole_record(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+    ) -> Result<Self> {
+        Self::observe_with_framing(
+            source,
+            source_path,
+            authority,
+            authority_path,
+            binding,
+            true,
+        )
     }
 
     pub(crate) fn observe_after_identity_probe(
@@ -186,6 +200,30 @@ impl JsonlFamilyLeaf {
             observation,
             binding,
             identity_probe: Some(identity_probe),
+            whole_record: false,
+        })
+    }
+
+    fn observe_with_framing(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+        whole_record: bool,
+    ) -> Result<Self> {
+        let opened = authority.open_file(&authority_path)?;
+        let observation = observe_opened_file(&source_path, &opened)?;
+        drop(opened);
+        Ok(Self {
+            source,
+            source_path,
+            authority_path,
+            authority,
+            observation,
+            binding,
+            identity_probe: None,
+            whole_record,
         })
     }
 
@@ -442,15 +480,24 @@ fn scan_leaf(
             && checkpoint.physical.source_observation() == leaf.observation()
     });
     let opened = leaf.open_verified().map_err(route_invalid)?;
-    let mut reader = JsonlReader::open(
-        physical_identity(adapter, leaf),
-        Arc::clone(&opened),
-        exact_terminal
-            .then_some(previous.as_ref())
-            .flatten()
-            .map(|checkpoint| &checkpoint.physical),
-        leaf.identity_probe.clone(),
-    )
+    let previous_physical = exact_terminal
+        .then_some(previous.as_ref())
+        .flatten()
+        .map(|checkpoint| &checkpoint.physical);
+    let mut reader = if leaf.whole_record {
+        JsonlReader::open_whole_record(
+            physical_identity(adapter, leaf),
+            Arc::clone(&opened),
+            previous_physical,
+        )
+    } else {
+        JsonlReader::open(
+            physical_identity(adapter, leaf),
+            Arc::clone(&opened),
+            previous_physical,
+            leaf.identity_probe.clone(),
+        )
+    }
     .map_err(route_invalid)?;
 
     if reader.source_change() == JsonlSourceChange::Unchanged {
@@ -865,6 +912,7 @@ fn inventory_observation(
     }
     for leaf in leaves {
         digest.update(leaf.source.exact_descriptor_digest());
+        digest.update([u8::from(leaf.whole_record)]);
         digest.update(
             (leaf.authority_path.as_os_str().as_encoded_bytes().len() as u64).to_be_bytes(),
         );

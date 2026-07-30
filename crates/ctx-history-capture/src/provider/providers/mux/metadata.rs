@@ -1,19 +1,21 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::normalization::{
-    provider_capped_json, provider_local_preview, provider_timestamp_seconds_to_datetime,
+    provider_local_preview, provider_timestamp_seconds_to_datetime,
 };
 use crate::{CaptureError, ProviderImportSummary, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
 use super::source::MuxSessionSource;
 use super::{MUX_MAX_FAILURE_BYTES, MUX_MAX_ID_BYTES};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct MuxBoundedSessionMetadata {
     pub(super) provider_session_id: String,
     pub(super) parent_provider_session_id: Option<String>,
@@ -21,9 +23,6 @@ pub(super) struct MuxBoundedSessionMetadata {
     pub(super) started_at: String,
     pub(super) cwd: Option<String>,
     pub(super) model: Option<String>,
-    // The bounded metadata preview remains staging-Pro/session diagnostic data.
-    #[allow(dead_code)]
-    pub(super) metadata: Value,
     pub(super) metadata_revision: String,
     pub(super) metadata_failure: Option<String>,
 }
@@ -114,15 +113,6 @@ fn mux_bounded_session_metadata_from_value(
         .failures
         .first()
         .map(|failure| bounded_mux_failure(failure.error.clone()));
-    let metadata = json!({
-        "workspaceId": provider_session_id.clone(),
-        "parentWorkspaceId": parent_provider_session_id.clone(),
-        "rootWorkspaceId": root_provider_session_id.clone(),
-        "createdAt": started_at.to_rfc3339(),
-        "projectPath": cwd.clone(),
-        "model": model.clone(),
-        "preview": provider_capped_json(&metadata, PROVIDER_MAX_PREVIEW_CHARS),
-    });
     Ok(MuxBoundedSessionMetadata {
         provider_session_id,
         parent_provider_session_id,
@@ -130,7 +120,6 @@ fn mux_bounded_session_metadata_from_value(
         started_at: started_at.to_rfc3339(),
         cwd,
         model,
-        metadata,
         metadata_revision: metadata_revision.to_owned(),
         metadata_failure,
     })

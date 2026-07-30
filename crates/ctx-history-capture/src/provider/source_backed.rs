@@ -78,10 +78,7 @@ use super::providers::{
         LingmaSourceBackedResultV0, LingmaSourceInventoryV0, LINGMA_SOURCE_BACKED_PARSER_REVISION,
     },
     mistral_vibe::native_path::source_backed::scan_mistral_vibe_source_backed,
-    mux::native_path::{
-        discover_mux_source_backed_sources, scan_mux_source_backed, MuxSourceBackedDisposition,
-        MuxSourceBackedResolverV0,
-    },
+    mux::mux_jsonl_adapter,
     nanoclaw::native_path::source_backed::NanoClawDocumentTreeAdapter,
     openclaw::openclaw_source_backed_adapter_v0,
     openhands::nativepath::{
