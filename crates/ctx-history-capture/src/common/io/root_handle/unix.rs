@@ -14,6 +14,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use sha2::{Digest, Sha256};
+
 use super::AuthorityOpenError;
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
@@ -194,6 +196,20 @@ pub(super) fn object_stamp(_file: &File, metadata: &Metadata) -> io::Result<Obje
         changed_seconds: metadata.ctime(),
         changed_nanoseconds: metadata.ctime_nsec(),
     })
+}
+
+pub(super) fn object_fingerprint(stamp: &ObjectStamp) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.retained-authority.unix-object-v1\0");
+    digest.update(stamp.device.to_be_bytes());
+    digest.update(stamp.inode.to_be_bytes());
+    digest.update(stamp.mode.to_be_bytes());
+    digest.update(stamp.length.to_be_bytes());
+    digest.update(stamp.modified_seconds.to_be_bytes());
+    digest.update(stamp.modified_nanoseconds.to_be_bytes());
+    digest.update(stamp.changed_seconds.to_be_bytes());
+    digest.update(stamp.changed_nanoseconds.to_be_bytes());
+    digest.finalize().into()
 }
 
 #[allow(

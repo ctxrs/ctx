@@ -1,18 +1,22 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::Arc,
     time::SystemTime,
 };
 
-use crate::{
-    common::io::{open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath},
-    CaptureError, Result,
-};
+use crate::{common::io::OpenedProviderSourceFile, CaptureError, Result};
 
+#[cfg(test)]
+use crate::common::io::{open_provider_source_path, OpenedProviderSourcePath};
+
+#[cfg(test)]
 use super::normalized_auggie_authority_path;
 
-#[derive(Debug, Clone)]
+/// Short-lived handle for one actively read Auggie document.
+///
+/// Complete inventories retain only closed observations and reopen through
+/// their bounded tree authority; this value must never be stored per leaf.
+#[derive(Debug)]
 pub(super) struct AuggieFileStamp {
     pub(super) canonical_path: PathBuf,
     pub(super) len: u64,
@@ -20,7 +24,8 @@ pub(super) struct AuggieFileStamp {
     pub(super) readonly: bool,
     pub(super) device: Option<u64>,
     pub(super) inode: Option<u64>,
-    opened: Arc<OpenedProviderSourceFile>,
+    authority_fingerprint: [u8; 32],
+    opened: OpenedProviderSourceFile,
 }
 
 impl AuggieFileStamp {
@@ -41,10 +46,12 @@ impl AuggieFileStamp {
             readonly: metadata.permissions().readonly(),
             device,
             inode,
-            opened: Arc::new(opened),
+            authority_fingerprint: opened.authority_fingerprint(),
+            opened,
         })
     }
 
+    #[cfg(test)]
     pub(super) fn observe(path: &Path) -> Result<Self> {
         let path = normalized_auggie_authority_path(path)?;
         let opened = match open_provider_source_path(&path)? {
@@ -67,6 +74,10 @@ impl AuggieFileStamp {
             | Err(CaptureError::SourceChangedDuringCapture) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    pub(super) fn authority_fingerprint(&self) -> [u8; 32] {
+        self.authority_fingerprint
     }
 
     pub(super) fn read_all_bounded(&self, maximum: usize) -> Result<Vec<u8>> {
