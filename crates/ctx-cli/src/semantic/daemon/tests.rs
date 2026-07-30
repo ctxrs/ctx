@@ -210,6 +210,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
         history_refresh: Some(json!({"status": "completed"})),
         relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
+        relational_blocker: None,
     });
     let mut runtime = DaemonRuntime {
         config: AppConfig {
@@ -321,23 +322,42 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
         "unsupported_routes",
         "certified_source_count",
         "certified_source_bytes",
-        "timings_us",
     ] {
         assert_eq!(source_only[key], full[key], "{key}");
+    }
+    for key in ["discovery", "scan_stage", "commit"] {
+        assert_eq!(
+            source_only["timings_us"][key], full["timings_us"][key],
+            "timings_us.{key}"
+        );
+    }
+    for job in [&source_only, &full] {
+        assert!(
+            job["timings_us"]["publication_probe"]
+                .as_u64()
+                .is_some_and(|duration| duration > 0),
+            "{job:#}"
+        );
+        assert!(
+            job["timings_us"]["retirement"]
+                .as_u64()
+                .is_some_and(|duration| duration > 0),
+            "{job:#}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Result<()> {
+fn daemon_run_once_publishes_core_without_entering_a_blocked_sidecar() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
     };
 
     let temp = tempfile::tempdir()?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let executor_calls = calls.clone();
+    let refresh_calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = refresh_calls.clone();
     let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
@@ -360,6 +380,32 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
         },
     ));
     assert!(!coordinator.has_pending_request());
+    let sidecar_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
+    let (_release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+    let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
+        calls: sidecar_calls.clone(),
+        history_refresh: None,
+        relational_projection: Some(json!({
+            "status": "completed",
+            "pending": false,
+            "retryable": false,
+            "did_work": true,
+        })),
+        semantic_index: Some(json!({
+            "status": "ready",
+            "source_generation_ready": true,
+            "source_work_remaining": false,
+        })),
+        relational_blocker: Some(std::rc::Rc::new(move || {
+            started_sender
+                .send(())
+                .expect("report blocked relational test job");
+            release_receiver
+                .recv_timeout(StdDuration::from_secs(10))
+                .expect("release blocked relational test job");
+        })),
+    });
     let mut runtime = DaemonRuntime::default();
 
     let iteration = run_daemon_once_with_activity(
@@ -374,19 +420,36 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
 
     assert!(iteration.did_work);
     assert!(!iteration.failed);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(iteration.continue_immediately);
+    assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    assert!(sidecar_calls.borrow().is_empty());
+    assert!(matches!(
+        started_receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
     let job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
         .ok_or_else(|| anyhow!("periodic source refresh job was not persisted"))?;
     assert_eq!(job["status"], "completed");
     assert_eq!(job["daemon_mode"], "full");
     assert_eq!(job["trigger"], "periodic");
     assert_eq!(job["trigger_provenance"], "daemon_scheduler");
-    assert_eq!(job["semantic_projection"]["status"], "ready");
-    let semantic_job = read_daemon_job_status(
-        &super::super::paths_status::daemon_semantic_job_path(temp.path()),
-    )
-    .ok_or_else(|| anyhow!("source-backed semantic projection job was not persisted"))?;
-    assert_eq!(semantic_job["status"], "ready");
+    assert!(job.get("relational_projection").is_none());
+    assert!(job.get("pro_projection").is_none());
+    assert!(job.get("semantic_projection").is_none());
+    assert!(!super::super::paths_status::daemon_semantic_job_path(temp.path()).exists());
+    let published_generation = job["published_generation"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Core generation was not published"))?;
+    assert_eq!(
+        runtime.sidecar_drain.generation.as_deref(),
+        Some(published_generation)
+    );
+    assert!(
+        super::super::source_backed_relational_catch_up::generation_needs_catch_up(
+            temp.path(),
+            published_generation
+        )
+    );
     assert!(temp
         .path()
         .join("search")
@@ -422,6 +485,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
         history_refresh: Some(json!({"status": "completed"})),
         relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
+        relational_blocker: None,
     });
     let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
@@ -457,13 +521,28 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
 
     assert!(iteration.did_work);
     assert!(!iteration.failed);
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
+    assert!(iteration.continue_immediately);
+    assert!(calls.borrow().is_empty());
     assert!(!legacy_database.exists());
     assert_eq!(fs::read(&legacy_semantic_job)?, b"legacy-semantic-job");
     assert!(ctx_history_index::VerifiedIndex::open(
         crate::semantic::source_backed_refresh_coordinator::source_backed_index_root(temp.path())
     )
     .is_ok());
+    let mut sidecar_args = test_daemon_run_args();
+    sidecar_args.once = false;
+    let sidecar = run_daemon_once_with_activity(
+        &sidecar_args,
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!sidecar.failed);
+    assert!(sidecar.continue_immediately);
+    assert_eq!(&*calls.borrow(), &["relational_projection"]);
     let report = daemon_report(temp.path());
     assert_eq!(
         report["jobs"]["history_refresh"]["reason"],

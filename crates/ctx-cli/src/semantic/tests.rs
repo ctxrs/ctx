@@ -68,6 +68,7 @@ fn install_test_daemon_jobs(
         history_refresh,
         relational_projection: None,
         semantic_index,
+        relational_blocker: None,
     })
 }
 
