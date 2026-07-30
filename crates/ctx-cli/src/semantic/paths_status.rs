@@ -304,59 +304,6 @@ pub(super) fn lock_started_at_is_stale(value: &Value) -> bool {
     utc_now().timestamp_millis().saturating_sub(started_at_ms) > DAEMON_LOCK_STALE_AFTER_MS
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ProcessState {
-    Running,
-    NotRunning,
-    Unknown,
-}
-
-#[cfg(unix)]
-pub(super) fn process_state(pid: u32) -> ProcessState {
-    if pid == 0 {
-        return ProcessState::NotRunning;
-    }
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return ProcessState::NotRunning;
-    };
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return ProcessState::Running;
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::ESRCH) => ProcessState::NotRunning,
-        Some(libc::EPERM) => ProcessState::Running,
-        _ => ProcessState::Unknown,
-    }
-}
-
-#[cfg(windows)]
-pub(super) fn process_state(pid: u32) -> ProcessState {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    if pid == 0 {
-        return ProcessState::NotRunning;
-    }
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if !handle.is_null() {
-        unsafe {
-            CloseHandle(handle);
-        }
-        return ProcessState::Running;
-    }
-    match unsafe { GetLastError() } {
-        windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER => ProcessState::NotRunning,
-        ERROR_ACCESS_DENIED => ProcessState::Running,
-        _ => ProcessState::Unknown,
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(super) fn process_state(_pid: u32) -> ProcessState {
-    ProcessState::Unknown
-}
-
 pub(super) fn unknown_process_lock_reports_running(
     lock_path: &Path,
     state: Option<ProcessState>,
@@ -554,10 +501,22 @@ pub(super) fn daemon_report_with_disabled_status(
         .and_then(|value| json_string(value, "status"))
         .unwrap_or_else(|| "unknown".to_owned());
     let lock_state = lock_pid.map(process_state);
-    let running = pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
+    let lock_reports_running =
+        pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
+    let owner_identity_matches = lock_reports_running
+        && lock_value.as_ref().is_some_and(|identity| {
+            crate::upgrade::installation_executable_path()
+                .ok()
+                .and_then(|executable| {
+                    daemon_owner_binary_identity_matches(identity, &executable).ok()
+                })
+                .unwrap_or(false)
+        });
+    let owner_identity_mismatch = lock_reports_running && !owner_identity_matches;
+    let running = lock_reports_running && owner_identity_matches;
     let stale_lock = lock_path.exists() && pid_lock_file_is_orphaned(&lock_path);
-    let stale_lock_overrides_lifecycle =
-        stale_lock && !["completed", "failed"].contains(&status.as_str());
+    let stale_lock_overrides_lifecycle = (stale_lock || owner_identity_mismatch)
+        && !["completed", "failed"].contains(&status.as_str());
     let stale_running_status = !running && status == "running";
     if running {
         status = "running".to_owned();
@@ -635,6 +594,7 @@ pub(super) fn daemon_report_with_disabled_status(
         "binary_sha256": lock_value
             .as_ref()
             .and_then(|value| json_string(value, "binary_sha256")),
+        "owner_image_matches": owner_identity_matches,
         "protocol": lock_value
             .as_ref()
             .and_then(|value| json_string(value, "lock_protocol")),
@@ -645,7 +605,9 @@ pub(super) fn daemon_report_with_disabled_status(
         "mode": daemon_mode.as_str(),
         "running": running,
         "recoverable": stale_lock_overrides_lifecycle || stale_running_status,
-        "reason": if stale_lock_overrides_lifecycle {
+        "reason": if owner_identity_mismatch {
+            Some("daemon_owner_identity_mismatch".to_owned())
+        } else if stale_lock_overrides_lifecycle {
             Some("daemon_lock_stale".to_owned())
         } else if stale_running_status {
             Some("daemon_status_stale".to_owned())

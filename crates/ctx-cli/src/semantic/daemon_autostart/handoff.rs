@@ -1,7 +1,7 @@
 use super::*;
 
 mod termination;
-use termination::terminate_identity_verified_residual_daemon;
+pub(super) use termination::terminate_identity_verified_residual_daemon;
 
 pub(in crate::semantic) fn terminate_current_executable_daemon(data_root: &Path) -> Result<()> {
     let executable = env::current_exe().context("resolve current ctx executable")?;
@@ -87,13 +87,17 @@ pub(in crate::semantic) fn current_process_owns_daemon_upgrade_handoff(data_root
 pub(crate) struct DaemonUpgradeHandoff {
     data_root: PathBuf,
     handoff_id: String,
+    installation_executable: PathBuf,
     pub(super) restart_trigger: Option<DaemonTriggerCommandArg>,
     release_on_drop: bool,
 }
 
 impl DaemonUpgradeHandoff {
     pub(crate) fn wait_for_installation_quiescence(&self) -> Result<()> {
-        wait_for_installation_daemon_quiescence(&self.handoff_id)?;
+        wait_for_installation_daemon_quiescence_for(
+            &self.installation_executable,
+            &self.handoff_id,
+        )?;
         pause_after_installation_quiescence_for_test()
     }
 
@@ -231,6 +235,34 @@ pub(crate) fn begin_daemon_upgrade_handoff(
     data_root: &Path,
     upgrade_attempt_id: &str,
 ) -> Result<DaemonUpgradeHandoff> {
+    let expected_executable = env::current_exe().context("resolve upgrading ctx executable")?;
+    begin_daemon_upgrade_handoff_for_executable(
+        data_root,
+        upgrade_attempt_id,
+        &expected_executable,
+        true,
+    )
+}
+
+pub(crate) fn begin_legacy_daemon_upgrade_handoff(
+    data_root: &Path,
+    upgrade_attempt_id: &str,
+    expected_executable: &Path,
+) -> Result<DaemonUpgradeHandoff> {
+    begin_daemon_upgrade_handoff_for_executable(
+        data_root,
+        upgrade_attempt_id,
+        expected_executable,
+        false,
+    )
+}
+
+fn begin_daemon_upgrade_handoff_for_executable(
+    data_root: &Path,
+    upgrade_attempt_id: &str,
+    expected_executable: &Path,
+    allow_cooperative_grace: bool,
+) -> Result<DaemonUpgradeHandoff> {
     if daemon_upgrade_handoff_is_active(data_root) {
         return Err(anyhow!(
             "another ctx upgrade owns the daemon lifecycle handoff"
@@ -262,19 +294,21 @@ pub(crate) fn begin_daemon_upgrade_handoff(
     let handoff = DaemonUpgradeHandoff {
         data_root: data_root.to_path_buf(),
         handoff_id,
+        installation_executable: expected_executable.to_path_buf(),
         restart_trigger,
         release_on_drop: true,
     };
+    if !allow_cooperative_grace && daemon_lock_is_active(data_root) {
+        terminate_identity_verified_residual_daemon(data_root, expected_executable)
+            .context("stop identity-verified legacy ctx daemon before automatic upgrade")?;
+    }
     let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
     while daemon_lock_is_active(data_root) {
         if Instant::now() >= deadline {
             #[cfg(any(unix, windows))]
             {
-                terminate_identity_verified_residual_daemon(
-                    data_root,
-                    &env::current_exe().context("resolve upgrading ctx executable")?,
-                )
-                .context("stop residual ctx daemon before upgrade")?;
+                terminate_identity_verified_residual_daemon(data_root, expected_executable)
+                    .context("stop residual ctx daemon before upgrade")?;
                 break;
             }
             #[cfg(not(any(unix, windows)))]
@@ -494,6 +528,8 @@ pub(crate) fn begin_current_daemon_upgrade_handoff(
         return Ok(DaemonUpgradeHandoff {
             data_root: data_root.to_path_buf(),
             handoff_id: upgrade_attempt_id.to_owned(),
+            installation_executable: env::current_exe()
+                .context("resolve upgrading ctx executable")?,
             restart_trigger: Some(restart_trigger),
             release_on_drop: true,
         });
@@ -503,6 +539,7 @@ pub(crate) fn begin_current_daemon_upgrade_handoff(
     Ok(DaemonUpgradeHandoff {
         data_root: data_root.to_path_buf(),
         handoff_id: upgrade_attempt_id.to_owned(),
+        installation_executable: env::current_exe().context("resolve upgrading ctx executable")?,
         restart_trigger: Some(restart_trigger),
         release_on_drop: true,
     })
@@ -651,6 +688,22 @@ pub(crate) fn finish_replacement_daemon_handoff(data_root: &Path, handoff_id: &s
         return Ok(());
     }
     write_daemon_upgrade_handoff(data_root, handoff_id, "completed", None)
+}
+
+pub(crate) fn replacement_helper_owns_daemon_handoff(
+    data_root: &Path,
+    handoff_id: &str,
+    helper_pid: u32,
+) -> bool {
+    read_daemon_upgrade_handoff(data_root).is_some_and(|value| {
+        value.get("handoff_id").and_then(Value::as_str) == Some(handoff_id)
+            && value.get("phase").and_then(Value::as_str) == Some("scheduled")
+            && value
+                .get("helper_pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                == Some(helper_pid)
+    })
 }
 
 pub(super) fn write_daemon_upgrade_handoff(

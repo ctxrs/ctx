@@ -2,6 +2,7 @@ mod command;
 mod diagnostics;
 mod download;
 mod install;
+mod legacy_automatic;
 mod metadata;
 mod path;
 mod state;
@@ -14,6 +15,7 @@ pub use command::{run, UpgradeArgs};
 pub(crate) use diagnostics::managed_install_executable;
 pub(crate) use diagnostics::upgrade_diagnostics;
 pub(crate) use install::is_valid_install_attempt_id;
+pub(crate) use legacy_automatic::run_legacy_automatic_upgrade_bridge;
 pub(crate) use state::{
     active_installation_upgrade_attempt_id, installation_daemon_coordination_paths,
     installation_daemon_coordination_paths_for, installation_executable_path,

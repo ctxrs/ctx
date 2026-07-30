@@ -141,8 +141,12 @@ pub(super) fn open_installation_daemon_quiescence_lock_at(path: &Path) -> Result
     Ok(file)
 }
 
-pub(super) fn wait_for_installation_daemon_quiescence(attempt_id: &str) -> Result<()> {
-    let (lock_path, registration_root) = crate::upgrade::installation_daemon_coordination_paths()?;
+pub(super) fn wait_for_installation_daemon_quiescence_for(
+    executable: &Path,
+    attempt_id: &str,
+) -> Result<()> {
+    let (lock_path, registration_root) =
+        crate::upgrade::installation_daemon_coordination_paths_for(executable);
     wait_for_installation_daemon_quiescence_at(
         &lock_path,
         &registration_root,
