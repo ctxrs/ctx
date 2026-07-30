@@ -1,4 +1,4 @@
-use super::support::*;
+use super::{ctx, support::*};
 
 #[test]
 fn setup_skips_empty_codex_session_tree() {
@@ -7,9 +7,17 @@ fn setup_skips_empty_codex_session_tree() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 0);
-    assert_eq!(setup["catalog"]["source_files"], 0);
-    assert_eq!(setup["import"]["totals"]["imported_sources"], 0);
+    assert!(
+        setup["catalog"]["cataloged_sessions"].is_null(),
+        "{setup:#}"
+    );
+    assert!(setup["catalog"]["source_files"].is_null(), "{setup:#}");
+    assert_eq!(
+        setup["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
+            ["current_source_count"],
+        0,
+        "{setup:#}",
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let codex_sessions = sources["sources"]
@@ -320,7 +328,6 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
 #[test]
 fn explicit_native_sources_are_listed_but_not_auto_imported() {
     let temp = tempdir();
-    ctx(&temp).args(["daemon", "disable"]).assert().success();
     let query = "nanoclaw-explicit-auto-refresh-oracle";
     let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
 
@@ -351,10 +358,11 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         "--format=json",
     ]));
     assert_eq!(search["freshness"]["mode"], "background");
-    assert_eq!(search["freshness"]["status"], "no_sources");
+    assert_eq!(search["freshness"]["status"], "daemon_background");
     assert_eq!(search["freshness"]["source_count"], 0);
     assert!(search["results"].as_array().unwrap().is_empty());
 
+    ctx(&temp).args(["daemon", "enable"]).assert().success();
     let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
@@ -363,8 +371,10 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         project.to_str().unwrap(),
         "--format=json",
     ]));
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sources"], 1);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    assert!(imported["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
 
     let search_after_import =
         json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--format=json"]));

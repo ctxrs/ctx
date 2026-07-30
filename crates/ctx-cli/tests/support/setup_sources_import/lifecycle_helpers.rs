@@ -113,7 +113,10 @@ pub(super) fn wait_for_relational_projection(temp: &TempDir, generation: &str) -
 }
 
 pub(super) fn ready_setup(temp: &TempDir) -> Value {
-    json_output(ctx(temp).args(["setup", "--wait", "--format=json", "--progress", "none"]))
+    let binary = copied_ctx_binary(temp);
+    let mut command = ctx_with_enabled_daemon(temp);
+    command.env("CTX_DAEMON_AUTOSTART_EXE", binary);
+    json_output(command.args(["setup", "--wait", "--format=json", "--progress", "none"]))
 }
 
 pub(super) fn write_large_codex_setup_sessions(

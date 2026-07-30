@@ -1,6 +1,13 @@
 mod support;
 
-use support::{ctx, fs, json, json_output, Duration, Instant, TempDir, Value};
+use support::{fs, json, json_output, Command, Duration, Instant, TempDir, Value};
+
+fn ctx(temp: &TempDir) -> Command {
+    let binary = support::copied_ctx_binary(temp);
+    let mut command = support::ctx_with_enabled_daemon(temp);
+    command.env("CTX_DAEMON_AUTOSTART_EXE", binary);
+    command
+}
 
 fn wait_for_daemon_status(
     temp: &TempDir,
@@ -61,7 +68,7 @@ fn write_codex_setup_session(temp: &TempDir) {
 }
 
 fn write_active_daemon_upgrade_handoff(temp: &TempDir) {
-    let daemon_root = temp.path().join("daemon");
+    let daemon_root = support::data_root(temp).join("daemon");
     fs::create_dir_all(&daemon_root).unwrap();
     fs::write(
         daemon_root.join("upgrade-handoff.json"),
@@ -79,8 +86,9 @@ fn write_active_daemon_upgrade_handoff(temp: &TempDir) {
 }
 
 fn assert_no_daemon_autostart_mutation(temp: &TempDir) {
-    assert!(!temp.path().join("daemon/status.json").exists());
-    assert!(!temp.path().join("daemon/upgrade-restart-requests").exists());
+    let root = support::data_root(temp);
+    assert!(!root.join("daemon/status.json").exists());
+    assert!(!root.join("daemon/upgrade-restart-requests").exists());
 }
 
 #[path = "setup_sources_import/import_orchestration.rs"]

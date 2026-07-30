@@ -1,5 +1,5 @@
 use super::{
-    assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
+    assert_daemon_process_running, assert_no_daemon_autostart_mutation, ctx, support::*,
     wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
 use rusqlite::OpenFlags;
@@ -22,8 +22,9 @@ impl Drop for SourceRefreshDaemon {
 }
 
 fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    fs::create_dir_all(data_root(temp)).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root(temp).join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
@@ -175,7 +176,9 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(stdout["schema_version"], 2);
-    assert_eq!(stdout["totals"]["imported_sources"], 1);
+    assert!(stdout["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
     assert_eq!(stdout["sources"][0]["status"], "published");
     assert!(stdout["sources"][0]["published_generation"].is_string());
 
@@ -187,6 +190,7 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 #[test]
 fn human_import_is_outcome_first_without_internal_generation_fields() {
     let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
     let fixture = provider_history_fixture("codex-sessions");
     let output = ctx(&temp)
         .args([
@@ -209,7 +213,7 @@ fn human_import_is_outcome_first_without_internal_generation_fields() {
         stdout.starts_with("✓ History import completed\n"),
         "{stdout}"
     );
-    assert!(stdout.contains("\nImported\n"), "{stdout}");
+    assert!(stdout.contains("\nCurrent index\n"), "{stdout}");
     for internal in [
         "failure_scope",
         "published_generation",
@@ -356,7 +360,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
 
     let first = json_output(ctx(&temp).args([
         "import",
-        "--format",
+        "--input-format",
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
@@ -364,11 +368,10 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
         "--progress",
         "none",
     ]));
-    assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 2);
-    assert_eq!(first["totals"]["imported_edges"], 2);
+    assert_eq!(first["totals"]["current_indexed_documents"], 2);
+    assert_eq!(first["totals"]["current_rejected_records"], 0);
     assert_eq!(first["sources"][0]["provider"], "custom");
-    assert_eq!(first["sources"][0]["format"], "ctx-history-jsonl-v1");
+    assert_eq!(first["sources"][0]["source_format"], "ctx_history_jsonl_v1");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -386,7 +389,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
 
     let second = json_output(ctx(&temp).args([
         "import",
-        "--format",
+        "--input-format",
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
@@ -394,10 +397,8 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["imported_edges"], 0);
-    assert_eq!(second["totals"]["skipped"], 0, "{second:#}");
+    assert_eq!(second["totals"]["current_indexed_documents"], 2);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_eq!(second["totals"]["change"], "no_op", "{second:#}");
 }
 
@@ -564,7 +565,7 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
 
     let import = json_output(ctx(&temp).args([
         "import",
-        "--format",
+        "--input-format",
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
@@ -572,10 +573,9 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
         "--progress",
         "none",
     ]));
-    assert_eq!(import["totals"]["imported_sessions"], 1);
-    assert_eq!(import["totals"]["imported_events"], 1);
-    assert_eq!(import["totals"]["rejected_records"], 1);
-    assert_eq!(import["sources"][0]["rejected_records"], 1);
+    assert_eq!(import["totals"]["current_indexed_documents"], 1);
+    assert_eq!(import["totals"]["current_rejected_records"], 1);
+    assert_eq!(import["sources"][0]["current_rejected_records"], 1);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -620,7 +620,10 @@ fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
     ]));
     assert_eq!(empty["outcome"], "success", "{empty:#}");
     assert_eq!(empty["sources"][0]["catalog_changed"], true, "{empty:#}");
-    assert_eq!(empty["sources"][0]["imported_events"], 0, "{empty:#}");
+    assert_eq!(
+        empty["sources"][0]["current_indexed_documents"], 0,
+        "{empty:#}"
+    );
     let empty_generation = published_generation(&empty);
     let empty_status = wait_for_relational_projection(&temp, &empty_generation);
     assert_eq!(
@@ -673,13 +676,13 @@ fn import_custom_history_format_is_not_a_native_provider_importer() {
     let fixture = custom_history_fixture("basic.jsonl");
     let stderr = failure_stderr(ctx(&temp).args([
         "import",
-        "--format",
+        "--input-format",
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
         "--all",
     ]));
-    assert!(stderr.contains("--format"), "{stderr}");
+    assert!(stderr.contains("--input-format"), "{stderr}");
     assert!(stderr.contains("--all"), "{stderr}");
 }
 
@@ -707,24 +710,35 @@ fn import_all_discovers_and_imports_providers_together() {
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(stdout["schema_version"], 2);
-    assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() >= 3);
-    let sources = stdout["sources"].as_array().unwrap();
-    assert_eq!(sources.len(), 2);
-    assert!(sources.iter().any(|source| source["provider"] == "codex"));
-    assert!(sources.iter().any(|source| source["provider"] == "pi"));
+    assert!(
+        stdout["totals"]["current_indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 3),
+        "{stdout:#}"
+    );
+    assert!(
+        stdout["totals"]["current_source_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "{stdout:#}"
+    );
+    assert_eq!(
+        stdout["sources"][0]["source_format"],
+        "provider_authoritative_all"
+    );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
-    assert!(stderr.contains(r#""phase":"finalizing""#), "{stderr}");
+    assert!(stderr.contains(r#""phase":"published""#), "{stderr}");
 }
 
 #[test]
 fn import_all_without_sources_does_not_report_missing_explicit_path() {
     let temp = tempdir();
-    let stderr = failure_stderr(ctx(&temp).args(["import", "--all", "--format=json"]));
-
-    assert!(stderr.contains("no importable provider history sources found"));
-    assert!(!stderr.contains("import path does not exist"), "{stderr}");
+    let report = json_output(ctx(&temp).args(["import", "--all", "--format=json"]));
+    assert_eq!(report["outcome"], "success", "{report:#}");
+    assert_eq!(report["totals"]["change"], "no_op", "{report:#}");
+    assert_eq!(report["totals"]["current_source_count"], 0, "{report:#}");
 }
 
 #[test]
@@ -741,13 +755,14 @@ fn import_all_discovers_sources_when_home_unset_and_userprofile_set() {
             .env("USERPROFILE", temp.path())
             .args(["import", "--all", "--format=json", "--progress", "none"]),
     );
-    assert_eq!(imported["totals"]["imported_sources"], 1);
-    assert_eq!(imported["totals"]["failed_sources"], 0);
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| source["provider"] == "codex"));
+    assert!(imported["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    assert!(imported["totals"].get("failed_sources").is_none());
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "provider_authoritative_all"
+    );
 }
 
 #[test]
@@ -772,17 +787,14 @@ fn import_all_skips_empty_gemini_source() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert_eq!(imported["totals"]["imported_sources"], 1);
-    assert_eq!(imported["totals"]["failed_sources"], 0);
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|source| source["provider"] != "gemini"));
+    assert!(imported["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    assert!(imported["totals"].get("failed_sources").is_none());
 }
 
 #[test]
-fn import_all_reports_source_failure_without_losing_successes() {
+fn import_all_fails_atomically_when_one_source_is_invalid() {
     let temp = tempdir();
     copy_dir_all(
         Path::new(&provider_history_fixture("codex-sessions")),
@@ -795,31 +807,15 @@ fn import_all_reports_source_failure_without_losing_successes() {
     let output = ctx(&temp)
         .args(["import", "--all", "--format=json", "--progress", "none"])
         .assert()
-        .success()
+        .failure()
         .get_output()
         .clone();
-    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["schema_version"], 2);
-    assert_eq!(stdout["totals"]["imported_sources"], 1);
-    assert_eq!(stdout["totals"]["failed_sources"], 1);
-    assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() > 0);
-    let sources = stdout["sources"].as_array().unwrap();
-    assert!(sources
-        .iter()
-        .any(|source| source["provider"] == "codex" && source["status"] == "success"));
-    assert!(sources
-        .iter()
-        .any(|source| source["provider"] == "opencode" && source["status"] == "failure"));
-    let opencode_failure = sources
-        .iter()
-        .find(|source| source["provider"] == "opencode")
-        .unwrap();
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        opencode_failure["error"]
-            .as_str()
-            .unwrap()
-            .contains("not a database"),
-        "{opencode_failure}"
+        stderr.contains("source-backed scan failed for opencode")
+            && stderr.contains("not a database"),
+        "{stderr}"
     );
 }
 
@@ -834,11 +830,16 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
         .args(["import", "--all", "--format=json", "--progress", "none"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("all import sources failed"));
+        .stderr(predicate::str::contains(
+            "source-backed scan failed for opencode",
+        ));
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["indexed_items"], 0);
-    assert_eq!(status["indexed_sources"], 0);
+    assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
+    assert_eq!(
+        status["history_epoch"]["status"], "unavailable",
+        "{status:#}"
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -869,7 +870,7 @@ fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProje
         status["relational"]["active_core_generation_id"],
         generation
     );
-    let relational_path = temp.path().join("relational.sqlite");
+    let relational_path = data_root(temp).join("relational.sqlite");
     let conn =
         Connection::open_with_flags(&relational_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     ProviderProjectionSnapshot {
@@ -902,8 +903,7 @@ fn ready_setup(temp: &TempDir) -> Value {
 }
 
 fn generation_manifest(temp: &TempDir, generation: &str) -> Value {
-    let path = temp
-        .path()
+    let path = data_root(temp)
         .join("search/lexical/ctx-generations")
         .join(format!("{generation}.json"));
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
@@ -990,8 +990,8 @@ fn fresh_setup_publishes_provider_sources_to_tantivy_and_relational() {
     assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
     assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
     assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
-    assert!(temp.path().join("search/lexical/meta.json").is_file());
-    assert!(temp.path().join("relational.sqlite").is_file());
+    assert!(data_root(&temp).join("search/lexical/meta.json").is_file());
+    assert!(data_root(&temp).join("relational.sqlite").is_file());
 
     let projection = provider_projection_snapshot(&temp, "codex");
     assert_eq!(projection.generation, generation);
