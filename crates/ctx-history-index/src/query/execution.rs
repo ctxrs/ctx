@@ -537,60 +537,40 @@ impl VerifiedIndex {
     ) -> Result<Vec<EventRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let source_term = Term::from_field_text(fields.source_key, &source_token(source));
-        let after_digest = after.map(|identity| hex(&identity.digest()));
+        let after_identity = after.map(StableEntityId::encode_canonical).transpose()?;
         let mut candidates = BinaryHeap::with_capacity(capacity);
 
         for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
             let source_inverted = segment.inverted_index(fields.source_key)?;
-            let Some(source_postings) =
+            let Some(mut source_postings) =
                 source_inverted.read_postings(&source_term, IndexRecordOption::Basic)?
             else {
                 continue;
             };
-            let identity_inverted = segment.inverted_index(fields.event_identity_digest)?;
-            let terms = identity_inverted.terms();
-            let mut stream = match after_digest.as_deref() {
-                Some(digest) => terms.range().gt(digest.as_bytes()).into_stream()?,
-                None => terms.stream()?,
-            };
-            while stream.advance() {
-                if candidates.len() == capacity
-                    && candidates
-                        .peek()
-                        .is_some_and(|largest: &EventIdentityCandidate| {
-                            stream.key() > largest.digest_term.as_bytes()
-                        })
-                {
-                    break;
-                }
-                let mut identity_postings = identity_inverted
-                    .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
-                let mut doc_id = identity_postings.doc();
-                while doc_id != TERMINATED {
-                    if !segment.is_deleted(doc_id) {
-                        let mut source_membership = source_postings.clone();
-                        let source_doc = source_membership.doc();
-                        let matches_source = source_doc == doc_id
-                            || (source_doc < doc_id && source_membership.seek(doc_id) == doc_id);
-                        if matches_source {
-                            let address = DocAddress::new(segment_ord as u32, doc_id);
-                            let event = self.event_record(address, fields)?;
-                            let digest_term = hex(&event.event_id.digest());
-                            if digest_term.as_bytes() != stream.key()
-                                || !event.locator.source().exact_descriptor_eq(source)
-                            {
-                                return Err(IndexError::InvalidStoredDocumentField(
-                                    EVENT_IDENTITY_DIGEST_FIELD,
-                                ));
-                            }
-                            candidates.push(EventIdentityCandidate::new(event, digest_term)?);
-                            if candidates.len() > capacity {
-                                candidates.pop();
-                            }
+
+            let mut doc_id = source_postings.doc();
+            while doc_id != TERMINATED {
+                if !segment.is_deleted(doc_id) {
+                    let address = DocAddress::new(segment_ord as u32, doc_id);
+                    let event = self.event_record(address, fields)?;
+                    if !event.locator.source().exact_descriptor_eq(source) {
+                        return Err(IndexError::InvalidStoredDocumentField(
+                            EVENT_IDENTITY_DIGEST_FIELD,
+                        ));
+                    }
+                    let identity = event.event_id.encode_canonical()?;
+                    if after_identity
+                        .as_ref()
+                        .is_none_or(|after| identity > *after)
+                    {
+                        let digest_term = hex(&event.event_id.digest());
+                        candidates.push(EventIdentityCandidate::new(event, digest_term)?);
+                        if candidates.len() > capacity {
+                            candidates.pop();
                         }
                     }
-                    doc_id = identity_postings.advance();
                 }
+                doc_id = source_postings.advance();
             }
         }
 
