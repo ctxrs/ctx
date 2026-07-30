@@ -34,12 +34,8 @@ pub(super) struct DaemonLock {
 impl DaemonLock {
     pub(super) fn acquire(data_root: &Path) -> Result<Option<Self>> {
         ctx_history_core::platform_security::establish_private_data_root(data_root)?;
-        let root = daemon_root_path(data_root);
-        create_private_dir_all(&root)?;
-        let payload = pid_lock_payload(json!({
-            "binary": env::current_exe().ok(),
-            "data_root": data_root,
-        }));
+        create_private_dir_all(&daemon_root_path(data_root))?;
+        let payload = current_daemon_lock_identity(data_root)?;
         Ok(PidFileLock::acquire(&daemon_lock_path(data_root), payload)?
             .map(|inner| Self { _inner: inner }))
     }
@@ -64,9 +60,6 @@ impl PidFileLock {
         }
 
         let previous = read_pid_lock_json(path);
-        // A legacy process may already be committed to unlinking this path and
-        // cannot see the guard file. A live or incomplete legacy owner wins;
-        // stale legacy metadata is reclaimable for supported upgrade handoff.
         if path.exists()
             && !previous
                 .as_ref()
@@ -454,7 +447,6 @@ fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    // SAFETY: both buffers are NUL-terminated and remain live for the call.
     let moved = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -597,6 +589,12 @@ pub(super) fn daemon_report_with_disabled_status(
             .as_ref()
             .and_then(|value| json_string(value, "owner_id")),
         "pid": lock_pid,
+        "binary": lock_value
+            .as_ref()
+            .and_then(|value| json_string(value, "binary")),
+        "binary_sha256": lock_value
+            .as_ref()
+            .and_then(|value| json_string(value, "binary_sha256")),
         "protocol": lock_value
             .as_ref()
             .and_then(|value| json_string(value, "lock_protocol")),
@@ -912,7 +910,7 @@ fn daemon_config_reload_report(
 }
 
 use std::{
-    env, fs,
+    fs,
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process,
@@ -942,6 +940,9 @@ use super::{
 
 #[cfg(unix)]
 use super::runtime_limits::DAEMON_QUERY_SOCKET_FILE;
+
+mod binary_identity;
+pub(super) use binary_identity::*;
 
 const PRIVATE_JSON_TEMP_ATTEMPTS: usize = 16;
 static PRIVATE_JSON_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);

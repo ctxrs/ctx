@@ -289,43 +289,122 @@ pub(crate) fn begin_daemon_upgrade_handoff(
 /// executable. Each phase is idempotent so an interrupted uninstaller can
 /// invoke it again safely.
 pub(crate) fn prepare_daemon_uninstall(data_root: &Path) -> Result<Value> {
-    crate::config::set_daemon_enabled(data_root, false)
-        .context("durably disable ctx daemon before uninstall")?;
+    let expected_executable =
+        env::current_exe().context("resolve installed ctx executable before uninstall")?;
+    let canonical_root =
+        ctx_history_core::managed_data_root().context("resolve canonical ctx data root")?;
+    let mut roots = BTreeSet::from([data_root.to_path_buf(), canonical_root.clone()]);
+    let mut disabled_roots = BTreeSet::new();
+    discover_and_disable_installation_roots(&mut roots, &mut disabled_roots)?;
     if cfg!(debug_assertions) && env::var_os(DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_ENV).is_some() {
         process::exit(89);
     }
 
-    request_disabled_daemon_shutdown(data_root);
-    let cooperative_deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
-    while daemon_lock_is_active(data_root) && Instant::now() < cooperative_deadline {
-        request_disabled_daemon_shutdown(data_root);
+    super::super::daemon_supervisor::disable_daemon_supervisor(&canonical_root)
+        .context("remove canonical ctx daemon supervisor before uninstall")?;
+
+    let installation_deadline = Instant::now() + DAEMON_INSTALLATION_QUIESCE_TIMEOUT;
+    let installation_quiescence = loop {
+        discover_and_disable_installation_roots(&mut roots, &mut disabled_roots)?;
+        quiesce_daemon_roots(&roots, &expected_executable)?;
+        if let Some(quiescence) = super::installation::try_acquire_installation_daemon_quiescence()?
+        {
+            break quiescence;
+        }
+        if Instant::now() >= installation_deadline {
+            return Err(anyhow!(
+                "timed out waiting for installation-wide ctx daemon quiescence; keep the ctx binary and retry `ctx daemon disable --prepare-uninstall`"
+            ));
+        }
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+    };
+
+    discover_and_disable_installation_roots(&mut roots, &mut disabled_roots)?;
+    for root in &roots {
+        if daemon_lock_is_active(root) {
+            return Err(anyhow!(
+                "ctx daemon lifecycle ownership appeared after installation quiescence for {}; keep the ctx binary and retry `ctx daemon disable --prepare-uninstall`",
+                root.display()
+            ));
+        }
     }
-    let expected_executable =
-        env::current_exe().context("resolve installed ctx executable before uninstall")?;
-    if daemon_lock_is_active(data_root) {
-        terminate_identity_verified_residual_daemon(data_root, &expected_executable)
-            .context("stop residual ctx daemon before uninstall")?;
+    super::installation::remove_installation_daemon_coordination()
+        .context("remove installation-wide ctx daemon coordination before uninstall")?;
+    for root in &roots {
+        remove_daemon_lifecycle_coordination(root)?;
     }
-    wait_for_daemon_lifecycle_release(data_root)?;
-    super::super::daemon_supervisor::disable_daemon_supervisor(data_root)
-        .context("remove ctx daemon supervisor before uninstall")?;
-    super::installation::remove_installation_daemon_coordination_for(data_root)
-        .context("remove ctx daemon upgrade coordination before uninstall")?;
-    remove_daemon_lifecycle_coordination(data_root)?;
+    drop(installation_quiescence);
+    let quiesced_roots = roots.into_iter().collect::<Vec<_>>();
+    let quiesced_root_count = quiesced_roots.len();
     Ok(compact_json(json!({
         "schema_version": 1,
         "command": "daemon_prepare_uninstall",
         "ok": true,
+        "scope": "installation",
+        "requested_data_root": data_root,
+        "canonical_data_root": canonical_root,
+        "quiesced_roots": quiesced_roots,
+        "quiesced_root_count": quiesced_root_count,
+        "installation_quiescent": true,
         "daemon_enabled": false,
         "daemon_running": false,
         "owner_lock_released": true,
         "endpoint_released": true,
         "supervisor_removed": true,
         "coordination_state_removed": true,
+        "binary_retained": true,
         "retry_safe": true,
         "local_only": true,
     })))
+}
+
+fn discover_and_disable_installation_roots(
+    roots: &mut BTreeSet<PathBuf>,
+    disabled_roots: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    roots.extend(super::installation::registered_installation_daemon_roots()?);
+    for root in roots.iter() {
+        if disabled_roots.insert(root.clone()) {
+            crate::config::set_daemon_enabled(root, false).with_context(|| {
+                format!(
+                    "durably disable ctx daemon root {} before uninstall",
+                    root.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn quiesce_daemon_roots(roots: &BTreeSet<PathBuf>, expected_executable: &Path) -> Result<()> {
+    for root in roots {
+        request_disabled_daemon_shutdown(root);
+    }
+    let cooperative_deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
+    while roots.iter().any(|root| daemon_lock_is_active(root))
+        && Instant::now() < cooperative_deadline
+    {
+        for root in roots {
+            if daemon_lock_is_active(root) {
+                request_disabled_daemon_shutdown(root);
+            }
+        }
+        std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+    }
+    for root in roots {
+        if daemon_lock_is_active(root) {
+            terminate_identity_verified_residual_daemon(root, expected_executable).with_context(
+                || {
+                    format!(
+                        "stop identity-verified residual ctx daemon for {} before uninstall",
+                        root.display()
+                    )
+                },
+            )?;
+        }
+        wait_for_daemon_lifecycle_release(root)?;
+    }
+    Ok(())
 }
 
 fn request_disabled_daemon_shutdown(data_root: &Path) {

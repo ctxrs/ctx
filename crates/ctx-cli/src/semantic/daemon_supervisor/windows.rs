@@ -1,19 +1,24 @@
 use super::*;
 
 #[cfg(windows)]
-pub(super) fn install_native_supervisor(data_root: &Path, executable: &Path) -> Result<PathBuf> {
+pub(super) fn install_native_supervisor(
+    data_root: &Path,
+    executable: &Path,
+    environment: &SupervisorEnvironmentSnapshot,
+) -> Result<PathBuf> {
     let path = daemon_root_path(data_root).join("windows-task.xml");
     let system_root =
         env::var_os("SystemRoot").ok_or_else(|| anyhow!("Windows SystemRoot is unavailable"))?;
     let sid = current_windows_user_sid()?;
     let task_name = windows_task_name(&sid);
-    let xml = windows_task_xml(
+    let xml = windows_task_xml_with_environment(
         executable,
         data_root,
         Path::new(&system_root),
         &sid,
         &task_name,
-    );
+        environment,
+    )?;
     write_atomic_file(&path, xml.as_bytes())?;
 
     let mut create = supervisor_command("schtasks");
@@ -74,39 +79,86 @@ pub(super) fn windows_task_xml(
     system_root: &Path,
     user_sid: &str,
     task_name: &str,
-) -> String {
+) -> Result<String> {
+    let environment = supervisor_environment_snapshot()?;
+    windows_task_xml_with_environment(
+        executable,
+        data_root,
+        system_root,
+        user_sid,
+        task_name,
+        &environment,
+    )
+}
+
+#[cfg(any(test, windows))]
+fn windows_task_xml_with_environment(
+    executable: &Path,
+    data_root: &Path,
+    system_root: &Path,
+    user_sid: &str,
+    task_name: &str,
+    environment: &SupervisorEnvironmentSnapshot,
+) -> Result<String> {
+    let user_sid = validated_supervisor_artifact_text("Windows user SID", user_sid)?;
+    let task_name = validated_supervisor_artifact_text("Windows task name", task_name)?;
     let powershell = system_root
         .join("System32")
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-    let script = windows_sanitized_daemon_script(executable, data_root);
+    let powershell_text =
+        validated_supervisor_artifact_path("Windows PowerShell path", &powershell)?;
+    let script =
+        windows_sanitized_daemon_script_with_environment(executable, data_root, environment)?;
     let encoded = BASE64.encode(
         script
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    format!(
+    Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n<RegistrationInfo><URI>{}</URI><Description>ctx persistent history daemon</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id=\"Author\"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT2S</Interval><Count>999</Count></RestartOnFailure></Settings>\n<Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}</Arguments></Exec></Actions>\n</Task>\n",
         xml_escape(task_name),
         xml_escape(user_sid),
         xml_escape(user_sid),
-        xml_escape(&powershell.to_string_lossy()),
+        xml_escape(powershell_text),
         encoded,
-    )
+    ))
 }
 
 #[cfg(any(test, windows))]
-pub(super) fn windows_sanitized_daemon_script(executable: &Path, data_root: &Path) -> String {
-    let allowlist = SUPERVISOR_ENV_ALLOWLIST
+pub(super) fn windows_sanitized_daemon_script(
+    executable: &Path,
+    data_root: &Path,
+) -> Result<String> {
+    let environment = supervisor_environment_snapshot()?;
+    windows_sanitized_daemon_script_with_environment(executable, data_root, &environment)
+}
+
+#[cfg(any(test, windows))]
+fn windows_sanitized_daemon_script_with_environment(
+    executable: &Path,
+    data_root: &Path,
+    snapshot: &SupervisorEnvironmentSnapshot,
+) -> Result<String> {
+    let executable = validated_supervisor_artifact_path("ctx executable", executable)?;
+    let data_root = validated_supervisor_artifact_path("ctx data root", data_root)?;
+    let environment = snapshot
+        .values
         .iter()
-        .map(|name| format!("'{}'", powershell_single_quote(name)))
+        .map(|(name, value)| {
+            format!(
+                "$p.EnvironmentVariables['{}']='{}';",
+                powershell_single_quote(name),
+                powershell_single_quote(value)
+            )
+        })
         .collect::<Vec<_>>()
-        .join(",");
+        .join("");
     let arguments = [
         "--data-root".to_owned(),
-        data_root.to_string_lossy().into_owned(),
+        data_root.to_owned(),
         "daemon".to_owned(),
         "run".to_owned(),
         "--format=json".to_owned(),
@@ -115,11 +167,11 @@ pub(super) fn windows_sanitized_daemon_script(executable: &Path, data_root: &Pat
     .map(|argument| windows_command_line_quote(argument))
     .collect::<Vec<_>>()
     .join(" ");
-    format!(
-        "$ErrorActionPreference='Stop';$p=New-Object System.Diagnostics.ProcessStartInfo;$p.FileName='{}';$p.UseShellExecute=$false;$p.CreateNoWindow=$true;$p.EnvironmentVariables.Clear();foreach($n in @({allowlist})){{$v=[Environment]::GetEnvironmentVariable($n);if($null -ne $v){{$p.EnvironmentVariables[$n]=$v}}}};$p.Arguments='{}';$c=[Diagnostics.Process]::Start($p);$c.WaitForExit();exit $c.ExitCode",
-        powershell_single_quote(&executable.to_string_lossy()),
+    Ok(format!(
+        "$ErrorActionPreference='Stop';$p=New-Object System.Diagnostics.ProcessStartInfo;$p.FileName='{}';$p.UseShellExecute=$false;$p.CreateNoWindow=$true;$p.EnvironmentVariables.Clear();{environment}$p.Arguments='{}';$c=[Diagnostics.Process]::Start($p);$c.WaitForExit();exit $c.ExitCode",
+        powershell_single_quote(executable),
         powershell_single_quote(&arguments),
-    )
+    ))
 }
 
 #[cfg(any(test, windows))]
@@ -206,7 +258,7 @@ pub(super) fn verify_native_supervisor_registration(
         Path::new(&system_root),
         &sid,
         &task_name,
-    ) {
+    )? {
         return Err(anyhow!(
             "ctx scheduled task registration does not match the maintained definition"
         ));
@@ -278,28 +330,30 @@ pub(super) fn windows_task_registration_matches(
     system_root: &Path,
     user_sid: &str,
     task_name: &str,
-) -> bool {
+) -> Result<bool> {
     let powershell = system_root
         .join("System32")
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-    let script = windows_sanitized_daemon_script(executable, data_root);
+    let script = windows_sanitized_daemon_script(executable, data_root)?;
     let encoded = BASE64.encode(
         script
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    xml.contains(&format!("<URI>{}</URI>", xml_escape(task_name)))
-        && xml.contains(&format!("<UserId>{}</UserId>", xml_escape(user_sid)))
-        && xml.contains(&format!(
-            "<Command>{}</Command>",
-            xml_escape(&powershell.to_string_lossy())
-        ))
-        && xml.contains(&format!("-EncodedCommand {encoded}"))
-        && xml.contains("-EncodedCommand")
-        && xml.contains("<LogonType>InteractiveToken</LogonType>")
+    Ok(
+        xml.contains(&format!("<URI>{}</URI>", xml_escape(task_name)))
+            && xml.contains(&format!("<UserId>{}</UserId>", xml_escape(user_sid)))
+            && xml.contains(&format!(
+                "<Command>{}</Command>",
+                xml_escape(&powershell.to_string_lossy())
+            ))
+            && xml.contains(&format!("-EncodedCommand {encoded}"))
+            && xml.contains("-EncodedCommand")
+            && xml.contains("<LogonType>InteractiveToken</LogonType>"),
+    )
 }
 
 #[cfg(any(test, windows))]

@@ -19,6 +19,50 @@ Unmanaged installs do not write the official installer marker. `ctx upgrade`
 and background self-upgrade will not apply; use the same tool or manual process
 that installed ctx to upgrade it.
 
+## Binary Lifecycle Handoff
+
+`ctx setup` enables a persistent background daemon. Before any package manager,
+manual installer, or source-install command replaces or removes the executable,
+run the currently installed executable:
+
+```bash
+ctx daemon disable --prepare-uninstall --format=json
+```
+
+This is an installation-wide handoff, even when `CTX_DATA_ROOT` or
+`--data-root` selects a custom root. It disables and quiesces every registered
+daemon root, removes the singleton native supervisor from the canonical root,
+releases owner locks and endpoints, and retains the executable and history
+data. Do not replace or remove the executable unless the command exits
+successfully and its JSON receipt reports all of these fields:
+
+```json
+{
+  "ok": true,
+  "scope": "installation",
+  "installation_quiescent": true,
+  "supervisor_removed": true,
+  "owner_lock_released": true,
+  "endpoint_released": true,
+  "coordination_state_removed": true,
+  "binary_retained": true
+}
+```
+
+If handoff fails, keep the installed executable in place so the command can be
+retried. ctx never falls back to a PID-only or process-name kill.
+
+After an upgrade or reinstall, restore the normal unmanaged installation:
+
+```bash
+ctx integrations install skills
+ctx daemon enable
+ctx setup
+```
+
+For an uninstall, omit those post-install commands. History data remains until
+you deliberately remove the selected data roots.
+
 ## Release Assets
 
 Stable releases publish prebuilt binaries on GitHub Releases:
@@ -120,8 +164,9 @@ For a pinned install, replace `latest` with a release version:
 mise use -g 'github:ctxrs/ctx[bin=ctx]@0.26.0'
 ```
 
-mise owns upgrades for this install. Re-run `ctx integrations install skills` after upgrading
-when you want to refresh the bundled agent skill.
+mise owns upgrades for this install. Run the binary lifecycle handoff above
+before asking mise to replace or remove ctx, then run the post-upgrade commands
+after the new executable is installed.
 
 ## Homebrew
 
@@ -131,8 +176,9 @@ The ctx org maintains a Homebrew tap:
 brew install ctxrs/tap/ctx
 ```
 
-Homebrew owns upgrades for this install. Run `ctx integrations install skills` and
-`ctx setup` after installing.
+Homebrew owns upgrades for this install. Run the binary lifecycle handoff above
+before `brew upgrade` or `brew uninstall`; after an upgrade, run the
+post-upgrade commands above.
 
 ## Source Builds
 
@@ -144,4 +190,6 @@ cargo install --path crates/ctx-cli
 ```
 
 Source builds are unmanaged. They do not use the official release metadata or
-installer-managed upgrade path.
+installer-managed upgrade path. Run the binary lifecycle handoff before
+`cargo install` overwrites an existing ctx executable or before deleting a
+source-installed executable.

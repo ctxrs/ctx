@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt;
 
 pub(crate) fn maybe_autostart_daemon(
     data_root: &Path,
@@ -30,9 +31,13 @@ pub(crate) fn autostart_daemon_and_wait(
             .context("establish persistent ctx daemon supervision")?;
     }
     let request = request_daemon_autostart(data_root, config, trigger).map_err(|error| {
-        anyhow!(
-            "ctx daemon did not start: {error:#}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
-        )
+        if error.is::<BinaryIdentityHandoffError>() {
+            error
+        } else {
+            anyhow!(
+                "ctx daemon did not start: {error:#}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
+            )
+        }
     })?;
     let (mut child, pending_restart_request) = match request {
         DaemonAutostartRequest::Existing => (None, None),
@@ -97,7 +102,17 @@ pub(super) fn request_daemon_autostart(
     // callers can intentionally provide an already-owned daemon while
     // forbidding any additional detached process.
     if config.daemon.enabled && daemon_lock_is_active(data_root) {
-        return Ok(DaemonAutostartRequest::Existing);
+        let executable = daemon_autostart_exe()?;
+        if daemon_lock_matches_executable(data_root, &executable)? {
+            return Ok(DaemonAutostartRequest::Existing);
+        }
+        if daemon_autostart_suppression_reason().is_some() {
+            return Err(binary_identity_handoff_error());
+        }
+        handoff_mismatched_daemon_owner(data_root, &executable)?;
+        if daemon_lock_is_active(data_root) {
+            return Ok(DaemonAutostartRequest::Existing);
+        }
     }
     if let Some(reason) = daemon_autostart_suppression_reason() {
         return Ok(DaemonAutostartRequest::Suppressed(reason));
@@ -117,7 +132,11 @@ pub(super) fn request_daemon_autostart(
     }
     let lock_path = daemon_lock_path(data_root);
     if lock_path.exists() && !daemon_lock_is_stale(&lock_path) {
-        return Ok(DaemonAutostartRequest::Existing);
+        let executable = daemon_autostart_exe()?;
+        handoff_mismatched_daemon_owner(data_root, &executable)?;
+        if daemon_lock_is_active(data_root) {
+            return Ok(DaemonAutostartRequest::Existing);
+        }
     }
     let exe = match daemon_autostart_exe() {
         Ok(exe) => exe,
@@ -149,6 +168,91 @@ pub(super) fn request_daemon_autostart(
         }
     }
 }
+
+pub(in crate::semantic) fn handoff_mismatched_daemon_owner(
+    data_root: &Path,
+    expected_executable: &Path,
+) -> Result<()> {
+    if !daemon_lock_is_active(data_root)
+        || daemon_lock_matches_executable(data_root, expected_executable)?
+    {
+        return Ok(());
+    }
+    let expected_canonical = fs::canonicalize(expected_executable)
+        .with_context(|| format!("resolve ctx executable {}", expected_executable.display()))?;
+    let expected_sha256 = executable_sha256(expected_executable)?;
+    let owner_pid = read_pid_lock_json(&daemon_lock_path(data_root))
+        .as_ref()
+        .and_then(pid_from_lock_json)
+        .ok_or_else(binary_identity_handoff_error)?;
+    let response = daemon_source_refresh_request(
+        data_root,
+        compact_json(json!({
+            "schema_version": 1,
+            "op": "supervisor_handoff",
+        })),
+        DAEMON_HEALTH_TIMEOUT,
+        DAEMON_HEALTH_RESPONSE_MAX_BYTES,
+    )
+    .map_err(|_| binary_identity_handoff_error())?;
+    let accepted = response.as_ref().is_some_and(|value| {
+        value.get("ok").and_then(Value::as_bool) == Some(true)
+            && value
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                == Some(owner_pid)
+    });
+    if !accepted {
+        return Err(binary_identity_handoff_error());
+    }
+
+    let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
+    while daemon_lock_is_active(data_root) {
+        if daemon_lock_matches_cached_identity(data_root, &expected_canonical, &expected_sha256) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(binary_identity_handoff_error());
+        }
+        std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+    }
+    Ok(())
+}
+
+fn daemon_lock_matches_cached_identity(
+    data_root: &Path,
+    expected_canonical: &Path,
+    expected_sha256: &str,
+) -> bool {
+    read_pid_lock_json(&daemon_lock_path(data_root)).is_some_and(|value| {
+        value
+            .get("binary")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .as_deref()
+            == Some(expected_canonical)
+            && value.get("binary_sha256").and_then(Value::as_str) == Some(expected_sha256)
+    })
+}
+
+fn binary_identity_handoff_error() -> anyhow::Error {
+    BinaryIdentityHandoffError.into()
+}
+
+#[derive(Debug)]
+struct BinaryIdentityHandoffError;
+
+impl fmt::Display for BinaryIdentityHandoffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "a live ctx daemon is owned by a different binary image; run `ctx daemon disable --prepare-uninstall`, then retry",
+        )
+    }
+}
+
+impl std::error::Error for BinaryIdentityHandoffError {}
 
 fn daemon_handoff_observation(
     data_root: &Path,

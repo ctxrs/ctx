@@ -125,6 +125,28 @@ fn running_status_is_outcome_first_and_omits_internal_details() {
 }
 
 #[test]
+fn changed_installed_supervisor_environment_is_a_restart_caveat() {
+    let mut report = running_report();
+    report["supervisor"]["environment_snapshot"] = json!({
+        "captured_at_ms": 1_725_000_000_000_i64,
+        "sha256": "installed-snapshot",
+        "current_sha256": "current-snapshot",
+        "restart_required": true,
+        "values_exposed": false
+    });
+    let rendered = render_status(&context(120), &report).render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(rendered.starts_with("! Daemon is partially healthy\n"));
+    assert!(rendered.contains("Persistence  not verified\n"));
+    assert!(normalized.contains(
+        "Caveat native supervisor environment changed; run `ctx daemon enable` to install the current nonsecret snapshot and restart"
+    ));
+    assert!(!rendered.contains("installed-snapshot"));
+    assert!(!rendered.contains("current-snapshot"));
+}
+
+#[test]
 fn status_preserves_installed_pro_state_and_omits_only_absent_pro() {
     let daemon = running_report();
     let installed = json!({"installed": true, "state": "ready"});
@@ -372,12 +394,15 @@ fn disable_receipt_confirms_stop_and_supervisor_removal_without_noise() {
 fn uninstall_receipt_preserves_binary_and_data_caveat() {
     let report = json!({
         "ok": true,
+        "scope": "installation",
+        "installation_quiescent": true,
         "daemon_enabled": false,
         "daemon_running": false,
         "owner_lock_released": true,
         "endpoint_released": true,
         "supervisor_removed": true,
         "coordination_state_removed": true,
+        "binary_retained": true,
         "retry_safe": true
     });
     let rendered = render_daemon_prepare_uninstall_receipt(&context(80), &report).render_plain();
@@ -385,8 +410,8 @@ fn uninstall_receipt_preserves_binary_and_data_caveat() {
     assert_eq!(
         rendered,
         "✓ Daemon prepared for uninstall\n\
-         The daemon is disabled and stopped, and its supervisor registration was\n\
-         removed.\n\
+         All registered daemon roots are disabled and stopped, and the singleton\n\
+         supervisor registration was removed.\n\
          \n\
          Caveat  The ctx binary and history data have not been removed.\n"
     );

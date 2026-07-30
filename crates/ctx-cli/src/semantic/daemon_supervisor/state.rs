@@ -133,6 +133,16 @@ pub(super) fn write_supervisor_receipt(
     data_root: &Path,
     receipt: &SupervisorReceipt,
 ) -> Result<()> {
+    let environment_snapshot = read_supervisor_receipt(data_root)
+        .and_then(|report| report.get("environment_snapshot").cloned());
+    write_supervisor_receipt_with_environment_snapshot(data_root, receipt, environment_snapshot)
+}
+
+pub(super) fn write_supervisor_receipt_with_environment_snapshot(
+    data_root: &Path,
+    receipt: &SupervisorReceipt,
+    environment_snapshot: Option<Value>,
+) -> Result<()> {
     let root = daemon_root_path(data_root);
     create_private_dir_all(&root)?;
     write_private_json_file(
@@ -148,27 +158,62 @@ pub(super) fn write_supervisor_receipt(
             "owner_pid": receipt.owner_pid,
             "artifact_path": receipt.artifact_path,
             "executable_path": receipt.executable_path,
+            "environment_snapshot": environment_snapshot.unwrap_or(Value::Null),
             "limitation": receipt.limitation,
             "last_error": receipt.last_error,
         })),
     )
 }
 
+pub(super) fn write_installed_receipt(
+    data_root: &Path,
+    executable: &Path,
+    artifact_path: Option<PathBuf>,
+    owner_pid: u32,
+    environment_snapshot: Option<Value>,
+) -> Result<()> {
+    let receipt = SupervisorReceipt {
+        kind: native_supervisor_kind().to_owned(),
+        status: "installed",
+        autostart_supported: true,
+        restart_supported: true,
+        registration_verified: true,
+        live_owner_verified: true,
+        owner_pid: Some(owner_pid),
+        artifact_path,
+        executable_path: Some(executable.to_path_buf()),
+        limitation: None,
+        last_error: None,
+    };
+    match environment_snapshot {
+        Some(environment_snapshot) => write_supervisor_receipt_with_environment_snapshot(
+            data_root,
+            &receipt,
+            Some(environment_snapshot),
+        ),
+        None => write_supervisor_receipt(data_root, &receipt),
+    }
+}
+
 pub(super) fn stored_supervisor_report(data_root: &Path) -> Value {
     let path = daemon_root_path(data_root).join(SUPERVISOR_RECEIPT_FILE);
-    fs::read_to_string(&path)
+    read_supervisor_receipt(data_root).unwrap_or_else(|| {
+        compact_json(json!({
+            "schema_version": 1,
+            "kind": "unconfigured",
+            "status": "unknown",
+            "autostart_supported": false,
+            "restart_supported": false,
+            "environment_snapshot": Value::Null,
+            "receipt_path": path,
+        }))
+    })
+}
+
+fn read_supervisor_receipt(data_root: &Path) -> Option<Value> {
+    fs::read_to_string(daemon_root_path(data_root).join(SUPERVISOR_RECEIPT_FILE))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| {
-            compact_json(json!({
-                "schema_version": 1,
-                "kind": "unconfigured",
-                "status": "unknown",
-                "autostart_supported": false,
-                "restart_supported": false,
-                "receipt_path": path,
-            }))
-        })
 }
 
 #[cfg(target_os = "linux")]
