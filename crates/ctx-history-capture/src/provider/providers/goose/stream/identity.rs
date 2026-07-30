@@ -70,7 +70,7 @@ pub(crate) fn goose_native_message_identity_at(
     ))
 }
 
-pub(super) fn goose_normalized_message_id_sql(message_id: &str) -> String {
+pub(in super::super) fn goose_normalized_message_id_sql(message_id: &str) -> String {
     format!(
         "case when typeof({message_id}) in ('null', 'text')
                    and {message_id} is not null
@@ -81,7 +81,7 @@ pub(super) fn goose_normalized_message_id_sql(message_id: &str) -> String {
     )
 }
 
-pub(super) fn goose_native_message_identity(
+pub(in super::super) fn goose_native_message_identity(
     native_message_id: Option<String>,
     message_id_uses: i64,
     native_order: i64,

@@ -224,8 +224,7 @@ fn hydrate_task_candidate(
         modified_value,
     ];
     let evidence_digest = source_row_digest(b"task\0", &source_values)?;
-    let complete_content_record_digest =
-        complete_content_record_digest(candidate.rowid, &source_values)?;
+    let complete_content_record_digest = complete_content_record_digest(&source_values)?;
     builder.record_source(b"task\0", evidence_digest)?;
 
     let task_id = required_text(task_id_value, "task_id")?.to_owned();

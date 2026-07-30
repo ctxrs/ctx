@@ -154,7 +154,6 @@ fn hash_event(hasher: &mut Sha256, event: &WarpNativeEvent) -> Result<()> {
     }
     hasher.update(event.native_order.provider_event_index.to_le_bytes());
     hash_optional_u64(hasher, event.native_order.legacy_provider_event_index);
-    hasher.update(event.native_order.task_rowid.to_le_bytes());
     hash_text(hasher, &event.native_order.task_key)?;
     hasher.update(event.native_order.message_ordinal.to_le_bytes());
     hash_text(hasher, event.event_type.as_str())?;

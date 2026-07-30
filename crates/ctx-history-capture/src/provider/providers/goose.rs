@@ -4,18 +4,12 @@ use crate::native_source::NativeSqliteValue;
 use crate::Result;
 
 mod content;
-mod lifecycle;
-mod metrics;
-mod native_path;
 mod normalization;
 mod position;
 mod schema;
-mod source;
 mod source_backed;
 mod stream;
 
-#[cfg(test)]
-pub(crate) use source_backed::GooseSourceBackedSnapshotV0;
 pub(crate) use source_backed::{
     GooseSourceBackedAdapterV0, GooseSourceBackedResolverV0, GooseSourceBackedSelectionV0,
     GooseSourceRouteV0,

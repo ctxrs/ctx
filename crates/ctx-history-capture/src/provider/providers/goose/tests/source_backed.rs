@@ -1,18 +1,22 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use ctx_history_core::{
-    ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeRecordCoordinate, SourceRecordLocator, TypedKey,
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
+    HydrationFailureKind,
 };
-use ctx_history_index::LexicalDocument;
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
 
-use super::super::{
-    GooseSourceBackedAdapterV0, GooseSourceBackedSelectionV0, GooseSourceBackedSnapshotV0,
-    GooseSourceRouteV0,
-};
 use super::{create_goose_tables, insert_message, insert_session};
-use crate::PROVIDER_MAX_TEXT_CHARS;
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
+        register_goose_source_backed_route, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection,
+    },
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+};
 
 fn create_database(path: &Path) -> Connection {
     let connection = Connection::open(path).unwrap();
@@ -21,262 +25,163 @@ fn create_database(path: &Path) -> Connection {
     connection
 }
 
-fn collect(
-    selection: GooseSourceBackedSelectionV0,
-) -> (Vec<LexicalDocument>, GooseSourceBackedSnapshotV0) {
-    let adapter = GooseSourceBackedAdapterV0::open(selection).unwrap();
-    let mut scan = adapter.scan().unwrap();
-    let mut documents = Vec::new();
-    while let Some(page) = scan.next_page().unwrap() {
-        assert!(page.documents().len() <= 64);
-        assert_eq!(
-            page.complete_records(),
-            page.retained_records() + page.rejected_records() + page.ignored_records()
-        );
-        documents.extend(page.into_documents());
-    }
-    let snapshot = scan.finish().unwrap();
-    assert!(adapter.revalidate(&snapshot));
-    (documents, snapshot)
-}
-
-#[test]
-fn goose_source_backed_cold_scan_is_bounded_stable_and_exactly_selected() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let selected_root = temp.path().join("selected-root");
-    let selected_database = selected_root.join("data/sessions/sessions.db");
-    std::fs::create_dir_all(selected_database.parent().unwrap()).unwrap();
-    let selected = create_database(&selected_database);
-    insert_session(&selected, "selected-session");
-    let complete_text = format!("selected source text {} goose-tail", "x".repeat(3_000));
-    insert_message(&selected, 1, "selected-session", &complete_text);
-    drop(selected);
-
-    let retained_root = temp.path().join("explicit-retained-root");
-    let retained_database = retained_root.join("data/sessions/sessions.db");
-    std::fs::create_dir_all(retained_database.parent().unwrap()).unwrap();
-    let retained = create_database(&retained_database);
-    insert_session(&retained, "retained-session");
-    insert_message(
-        &retained,
-        99,
-        "retained-session",
-        "EXPLICIT_RETAINED_ROUTE_MUST_NOT_BE_SCANNED",
-    );
-    drop(retained);
-
-    let selection = GooseSourceBackedSelectionV0::exact(&selected_database, &selected_root)
-        .with_explicit_retained_routes(vec![GooseSourceRouteV0::exact(
-            &retained_database,
-            &retained_root,
-        )])
-        .unwrap();
-    let (documents, snapshot) = collect(selection.clone());
-    assert_eq!(documents.len(), 1);
-    assert!(documents[0].body.starts_with("selected source text"));
-    assert!(!documents[0]
-        .body
-        .contains("EXPLICIT_RETAINED_ROUTE_MUST_NOT_BE_SCANNED"));
-    assert_eq!(documents[0].body, complete_text);
-    assert!(documents[0].body.ends_with("goose-tail"));
-    assert_eq!(
-        documents[0].provider_session_id.as_deref(),
-        Some("selected-session")
-    );
-    assert_eq!(documents[0].parent_session_id, None);
-    assert_eq!(documents[0].root_session_id, documents[0].session_id);
-    assert_eq!(documents[0].branch, None);
-    assert_eq!(
-        documents[0].source_path.as_deref(),
-        selected_database.to_str()
-    );
-    assert_eq!(documents[0].agent_type, "goose");
-    assert!(documents[0].is_primary);
-    assert_eq!(documents[0].cwd.as_deref(), Some("/workspace/goose"));
-    assert_eq!(
-        snapshot.selection().selected().selected_database(),
-        selected_database
-    );
-    assert_eq!(
-        snapshot.selection().selected().platform_root(),
-        selected_root
-    );
-    assert_eq!(snapshot.selection().retained(), selection.retained());
-    assert_eq!(snapshot.certificate().counts().complete_records, 2);
-    assert_eq!(snapshot.certificate().counts().retained_records, 1);
-    assert_eq!(snapshot.certificate().counts().ignored_records, 1);
-    assert_eq!(snapshot.certificate().counts().indexed_documents, 1);
-    assert!(snapshot.certificate().frontier().is_none());
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = documents[0].locator.coordinate()
-    else {
-        panic!("Goose document did not use a SQLite locator");
+fn registry(path: &Path) -> SourceBackedProviderRegistry {
+    let source = ProviderSource {
+        provider: CaptureProvider::Goose,
+        path: path.to_owned(),
+        exists: true,
+        source_format: GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
     };
-    assert_eq!(logical_relation, "goose-logical-row-v3");
-    assert!(matches!(primary_key, TypedKey::Bytes(value) if value.len() == 9));
-    assert!(
-        matches!(row_version, Some(TypedKey::Bytes(value)) if value.as_slice() == documents[0].locator.record_digest())
-    );
-
-    let relocated_root = temp.path().join("relocated-root");
-    let relocated_database = relocated_root.join("sessions.db");
-    std::fs::create_dir_all(&relocated_root).unwrap();
-    let relocated = create_database(&relocated_database);
-    insert_session(&relocated, "selected-session");
-    insert_message(&relocated, 1, "selected-session", &complete_text);
-    drop(relocated);
-    let (relocated_documents, relocated_snapshot) = collect(GooseSourceBackedSelectionV0::exact(
-        &relocated_database,
-        &relocated_root,
-    ));
-    assert_eq!(relocated_documents[0].session_id, documents[0].session_id);
-    assert_eq!(relocated_documents[0].event_id, documents[0].event_id);
-    assert_eq!(
-        relocated_snapshot
-            .certificate()
-            .observation()
-            .source()
-            .identity(),
-        snapshot.certificate().observation().source().identity()
-    );
-}
-
-#[test]
-fn goose_source_backed_exact_row_resolver_reopens_complete_content() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("goose-root");
-    let database = root.join("sessions.db");
-    std::fs::create_dir_all(&root).unwrap();
-    let connection = create_database(&database);
-    insert_session(&connection, "exact-session");
-    let complete_text = format!(
-        "{}goose-exact-tail-term{}",
-        "z".repeat(3_000),
-        "y".repeat(PROVIDER_MAX_TEXT_CHARS)
-    );
-    insert_message(&connection, 7, "exact-session", &complete_text);
-    drop(connection);
-
-    let selection = GooseSourceBackedSelectionV0::exact(&database, &root);
-    let (documents, _) = collect(selection.clone());
-    let document = &documents[0];
-    assert_eq!(document.body.chars().count(), PROVIDER_MAX_TEXT_CHARS);
-    assert!(document.body.contains("goose-exact-tail-term"));
-    let request = EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap();
-    let resolver = super::super::GooseSourceBackedResolverV0::new(selection).unwrap();
-    let hydrated = resolver.hydrate_event(&request).unwrap();
-    assert_eq!(hydrated.event_id, document.event_id);
-    assert_eq!(
-        String::from_utf8(hydrated.provider_bytes).unwrap(),
-        complete_text
-    );
-
-    let mut wrong_digest = *document.locator.record_digest();
-    wrong_digest[0] ^= 0xff;
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        ..
-    } = document.locator.coordinate()
-    else {
-        panic!("Goose document did not use a SQLite locator");
-    };
-    let tampered = SourceRecordLocator::new(
-        document.source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: logical_relation.clone(),
-            primary_key: primary_key.clone(),
-            row_version: Some(TypedKey::bytes(wrong_digest.to_vec()).unwrap()),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        document.locator.certified_source_revision_digest().copied(),
-        wrong_digest,
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_goose_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        path.parent().unwrap(),
+        Vec::new(),
     )
     .unwrap();
-    let tampered_request = EventHydrationRequest::new(document.event_id, tampered).unwrap();
-    assert_eq!(
-        resolver.hydrate_event(&tampered_request).unwrap_err().kind,
-        HydrationFailureKind::StaleRecordEvidence
-    );
+    registry
+}
+
+fn options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
 }
 
 #[test]
-fn goose_source_backed_snapshot_change_requires_exact_replacement() {
+fn goose_active_wal_noop_replace_delete_and_batch_hydration() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("goose-root");
-    let database = root.join("sessions.db");
-    std::fs::create_dir_all(&root).unwrap();
-    let connection = create_database(&database);
-    insert_session(&connection, "replacement-session");
-    insert_message(&connection, 11, "replacement-session", "before replacement");
+    let database = temp.path().join("sessions.db");
+    let index = temp.path().join("index");
+    let writer = create_database(&database);
+    writer
+        .query_row("pragma journal_mode = wal", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap();
+    insert_session(&writer, "session");
+    insert_message(&writer, 1, "session", "first logical body");
+    insert_message(&writer, 2, "session", "second logical body");
+    assert!(database.with_extension("db-wal").exists());
 
-    let selection = GooseSourceBackedSelectionV0::exact(&database, &root);
-    let (before_documents, before_snapshot) = collect(selection.clone());
-    connection
+    let registry = registry(&database);
+    let cold = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 2);
+    assert_eq!(cold.sources.len(), 1);
+    assert!(cold.sources[0].frontier().is_none());
+
+    writer
+        .execute_batch("pragma wal_checkpoint(truncate);")
+        .unwrap();
+    let noop = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+    assert_eq!(noop.sources, cold.sources);
+    assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
+
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let source = verified.manifest().sources[0]
+        .observation()
+        .source()
+        .clone();
+    let events = verified.source_event_page(&source, None, 10).unwrap().items;
+    let requests = events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
+    let resolver = registry.resolver_registry();
+    let mut bodies = resolver
+        .hydrate_batch(&batch)
+        .unwrap()
+        .into_records()
+        .into_iter()
+        .map(|record| String::from_utf8(record.provider_bytes).unwrap())
+        .collect::<Vec<_>>();
+    bodies.sort();
+    assert_eq!(bodies, ["first logical body", "second logical body"]);
+
+    writer
         .execute(
             "update messages
-             set content_json = '[{\"type\":\"text\",\"text\":\"after replacement\"}]'
-             where id = 11",
+             set content_json = '[{\"type\":\"text\",\"text\":\"replacement body\"}]'
+             where id = 1",
             [],
         )
         .unwrap();
-    drop(connection);
-    let (after_documents, after_snapshot) = collect(selection.clone());
+    let replacement = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+    assert_ne!(replacement.sources, noop.sources);
+    assert_eq!(replacement.commit.indexed_documents, 2);
+    assert_eq!(
+        resolver.hydrate_batch(&batch).unwrap_err().kind,
+        HydrationFailureKind::StaleRecordEvidence
+    );
 
-    assert_eq!(
-        before_documents[0].session_id,
-        after_documents[0].session_id
-    );
-    assert_eq!(before_documents[0].event_id, after_documents[0].event_id);
-    assert_ne!(
-        before_snapshot.certificate().observation().revision(),
-        after_snapshot.certificate().observation().revision()
-    );
-    assert_ne!(
-        before_snapshot.certificate().content_digest(),
-        after_snapshot.certificate().content_digest()
-    );
-    assert_ne!(
-        before_documents[0].locator.record_digest(),
-        after_documents[0].locator.record_digest()
-    );
-    assert_ne!(
-        before_documents[0]
-            .locator
-            .certified_source_revision_digest(),
-        after_documents[0]
-            .locator
-            .certified_source_revision_digest()
-    );
-    assert!(before_snapshot.certificate().frontier().is_none());
-    assert!(after_snapshot.certificate().frontier().is_none());
+    drop(writer);
+    for path in [
+        database.with_extension("db-wal"),
+        database.with_extension("db-shm"),
+        database.clone(),
+    ] {
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    let deleted = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+    assert!(deleted.sources.is_empty());
+    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+}
 
-    let resolver = super::super::GooseSourceBackedResolverV0::new(selection).unwrap();
-    let stale_request = EventHydrationRequest::new(
-        before_documents[0].event_id,
-        before_documents[0].locator.clone(),
-    )
-    .unwrap();
+#[test]
+fn goose_unavailable_and_commit_mutation_do_not_publish() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("sessions.db");
+    let index = temp.path().join("index");
+    let writer = create_database(&database);
+    insert_session(&writer, "session");
+    insert_message(&writer, 1, "session", "baseline");
+    let registry = registry(&database);
+    let baseline = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+
+    writer.execute_batch("begin immediate").unwrap();
+    writer
+        .execute("update messages set role = 'assistant' where id = 1", [])
+        .unwrap();
+    assert!(database.with_extension("db-journal").exists());
+    assert!(refresh_source_backed_generation(&index, &registry, options()).is_err());
+    writer.execute_batch("rollback").unwrap();
     assert_eq!(
-        resolver.hydrate_event(&stale_request).unwrap_err().kind,
-        HydrationFailureKind::StaleSourceEvidence
+        VerifiedIndex::open(&index).unwrap().generation_id(),
+        baseline.commit.generation_id
     );
-    let current_request = EventHydrationRequest::new(
-        after_documents[0].event_id,
-        after_documents[0].locator.clone(),
-    )
-    .unwrap();
+
+    writer
+        .query_row("pragma journal_mode = wal", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap();
+    let mut mutated = false;
+    let result =
+        refresh_source_backed_generation_with_progress(&index, &registry, options(), |progress| {
+            if progress.phase == "verifying" {
+                writer
+                    .execute("update messages set role = 'assistant' where id = 1", [])
+                    .unwrap();
+                mutated = true;
+            }
+            Ok(())
+        });
+    assert!(mutated);
+    assert!(result.is_err());
     assert_eq!(
-        String::from_utf8(
-            resolver
-                .hydrate_event(&current_request)
-                .unwrap()
-                .provider_bytes
-        )
-        .unwrap(),
-        "after replacement"
+        VerifiedIndex::open(&index).unwrap().generation_id(),
+        baseline.commit.generation_id
     );
 }
