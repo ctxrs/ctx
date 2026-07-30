@@ -386,6 +386,7 @@ esac
             ["pinned inspector static ABI gate", "pinned native runtime gate"],
         )
         runtime_call = calls[1][0]
+        self.assertIn("/tmp:rw,nosuid,nodev,exec", runtime_call)
         runtime_command = runtime_call[runtime_call.index("-c") + 1]
         self.assertIn(
             "install -m 0755 /candidate/ctx /tmp/candidate/ctx",
