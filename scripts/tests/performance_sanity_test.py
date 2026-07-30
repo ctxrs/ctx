@@ -20,14 +20,18 @@ from performance_sanity_support import (
     FORCE_SINGLE_CPU_ENV,
     MAX_COMMAND_SECONDS,
     MAX_PEAK_RSS_BYTES,
+    RefreshPerformanceSample,
     RefreshSnapshot,
+    SourceWorkerCpu,
     command_failure,
     isolated_env,
     published_file_state,
+    require_parallel_source_workers,
     refresh_snapshot,
     run_checked,
     run_json,
     run_json_timed,
+    run_refresh_measured,
     start_daemon,
     stop_daemon,
     task_binary,
@@ -96,14 +100,6 @@ class RepresentativeCorpus:
             "claude": self.claude_root,
             "cursor": self.cursor_root,
         }[provider]
-
-
-@dataclass(frozen=True)
-class RefreshSample:
-    packet: dict[str, object]
-    elapsed_seconds: float
-    cpu_seconds: float
-    cpu_per_wall: float
 
 
 def json_line(value: object) -> str:
@@ -365,34 +361,6 @@ def linux_peak_rss_bytes(pid: int) -> int | None:
     return values.get("VmHWM", values.get("VmRSS"))
 
 
-def linux_process_cpu_seconds(pid: int) -> float:
-    stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
-    fields = stat.rsplit(")", 1)[1].split()
-    clock_ticks = os.sysconf("SC_CLK_TCK")
-    return (int(fields[11]) + int(fields[12])) / clock_ticks
-
-
-def run_refresh_measured(
-    args: list[str],
-    env: dict[str, str],
-    cwd: Path,
-    daemon_pid: int,
-) -> RefreshSample:
-    started = time.monotonic()
-    initial_cpu = linux_process_cpu_seconds(daemon_pid)
-    packet = run_json(args, env, cwd)
-    finished = time.monotonic()
-    final_cpu = linux_process_cpu_seconds(daemon_pid)
-    elapsed_seconds = finished - started
-    cpu_seconds = final_cpu - initial_cpu
-    return RefreshSample(
-        packet=packet,
-        elapsed_seconds=elapsed_seconds,
-        cpu_seconds=cpu_seconds,
-        cpu_per_wall=cpu_seconds / elapsed_seconds,
-    )
-
-
 def run_measured(
     args: list[str], env: dict[str, str], cwd: Path
 ) -> CommandSample:
@@ -435,6 +403,49 @@ def run_measured(
     if not isinstance(packet, dict):
         raise RuntimeError(f"{' '.join(args)} did not return a JSON object")
     return CommandSample(packet, elapsed_seconds, peak_rss_bytes)
+
+
+class SourceWorkerParallelismOracleTest(unittest.TestCase):
+    @staticmethod
+    def sample(source_workers: tuple[SourceWorkerCpu, ...]) -> RefreshPerformanceSample:
+        return RefreshPerformanceSample(
+            packet={},
+            elapsed_seconds=2.0,
+            cpu_seconds=5.0,
+            cpu_per_wall=2.5,
+            baseline_open_fds=10,
+            peak_open_fds=20,
+            peak_rss_bytes=128 * 1024 * 1024,
+            source_workers=source_workers,
+        )
+
+    def test_repeated_single_scanner_cannot_borrow_tantivy_cpu(self) -> None:
+        sample = self.sample(
+            (
+                SourceWorkerCpu(101, "ctx-src-scan00", 12),
+                SourceWorkerCpu(102, "ctx-src-scan00", 9),
+                SourceWorkerCpu(103, "ctx-src-scan00", 7),
+            )
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, "at least two distinct named source-worker slots"
+        ):
+            require_parallel_source_workers(sample)
+
+    def test_two_scanners_with_meaningful_cpu_satisfy_the_oracle(self) -> None:
+        sample = self.sample(
+            (
+                SourceWorkerCpu(101, "ctx-src-scan00", 12),
+                SourceWorkerCpu(102, "ctx-src-scan01", 9),
+                SourceWorkerCpu(103, "ctx-src-scan02", 0),
+            )
+        )
+
+        self.assertEqual(
+            require_parallel_source_workers(sample),
+            sample.source_workers[:2],
+        )
 
 
 class SmallQueryShowPerformanceTest(unittest.TestCase):
@@ -692,6 +703,8 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
     "top-provider CPU overlap evidence requires Linux /proc and affinity",
 )
 class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
+    MIN_AVAILABLE_CPUS = 12
+
     def assert_representative_refresh(
         self,
         search: dict[str, object],
@@ -836,8 +849,9 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         available_cpus = set(os.sched_getaffinity(0))
         self.assertGreaterEqual(
             len(available_cpus),
-            2,
-            "nightly parallelism gate requires at least two available CPUs",
+            self.MIN_AVAILABLE_CPUS,
+            "nightly top-provider gate requires >=12 available CPUs: 8 Tantivy "
+            "indexers + 2 runtime threads + 2 source scanners",
         )
         forced_single_cpu = os.environ.get(FORCE_SINGLE_CPU_ENV) == "1"
         cold, snapshot, corpus = self.run_representative_top_provider_refresh(
@@ -846,6 +860,10 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
             verify_hydration=True,
         )
 
+        source_workers = require_parallel_source_workers(cold)
+        source_worker_ticks = ",".join(
+            f"{worker.name}:{worker.cpu_ticks}" for worker in source_workers
+        )
         self.assertGreaterEqual(
             cold.cpu_per_wall,
             MIN_COLD_CPU_PER_WALL,
@@ -879,6 +897,10 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
             f" speedup_over_serial={speedup}"
             f" daemon_cpu_seconds={cold.cpu_seconds:.3f}"
             f" cpu_per_wall={cold.cpu_per_wall:.3f}"
+            f" source_worker_slots="
+            f"{len({worker.name for worker in source_workers})}"
+            f" source_worker_cpu_ticks="
+            f"{source_worker_ticks}"
             f" forced_single_cpu={forced_single_cpu}"
         )
 
@@ -888,7 +910,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         *,
         force_single_cpu: bool,
         verify_hydration: bool,
-    ) -> tuple[RefreshSample, RefreshSnapshot, RepresentativeCorpus]:
+    ) -> tuple[RefreshPerformanceSample, RefreshSnapshot, RepresentativeCorpus]:
         daemon_affinity = {min(available_cpus)} if force_single_cpu else None
         with tempfile.TemporaryDirectory(
             prefix="ctx-top-provider-performance-"
