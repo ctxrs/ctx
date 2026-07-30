@@ -494,15 +494,19 @@ impl SqliteSourceDirectoryAuthority {
     }
 }
 
-/// A sealed physical fence over the exact retained SQLite family that backed
-/// one completed read snapshot.
+/// A sealed compact witness for the exact SQLite family that backed one
+/// completed read snapshot.
 ///
-/// Revalidation uses retained DB/WAL/SHM handles and approved relative names;
-/// it does not reopen SQLite or copy provider bytes.
+/// The witness retains no provider handles. Commit-time validation reopens the
+/// approved parent through the same no-follow capability path and compares the
+/// complete DB/WAL/SHM evidence, bounding live descriptors by active workers
+/// rather than total discovered databases.
 #[must_use = "revalidate the terminal fence before publishing snapshot observations"]
 #[derive(Debug)]
 struct SqliteSourceTerminalFenceInner {
-    family: SqliteSourceFamily,
+    data_root: PathBuf,
+    approved_parent_path: PathBuf,
+    database_name: OsString,
     native_evidence: SqliteFamilyEvidence,
     evidence: SqliteSourceEvidence,
     snapshot_context: Arc<SqliteSourceSnapshotContext>,
@@ -521,7 +525,23 @@ impl SqliteSourceTerminalFence {
     /// Revalidates the exact retained source family without opening SQLite or
     /// acquiring another source snapshot.
     pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
-        self.inner.family.revalidate(&self.inner.native_evidence)?;
+        let root = ProviderSourceRoot::open(&self.inner.approved_parent_path)
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let directory = root
+            .directory()
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let authority_handle = directory
+            .try_clone_authority_handle()
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let authority = SqliteSourceDirectoryAuthority::retain(
+            &self.inner.data_root,
+            &authority_handle,
+            &self.inner.approved_parent_path,
+        )
+        .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        family.revalidate(&self.inner.native_evidence)?;
         self.inner.snapshot_context.record_terminal_revalidation()
     }
 }
@@ -668,9 +688,15 @@ impl SqliteSourceReadSnapshot {
             .family
             .take()
             .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        let approved_parent_path = family.approved_parent_path().to_path_buf();
+        let database_name = family.database_name().to_os_string();
+        let data_root = self.snapshot_context.data_root.clone();
+        drop(family);
         let fence = SqliteSourceTerminalFence {
             inner: Arc::new(SqliteSourceTerminalFenceInner {
-                family,
+                data_root,
+                approved_parent_path,
+                database_name,
                 native_evidence: self.native_evidence.clone(),
                 evidence: self.evidence.clone(),
                 snapshot_context: Arc::clone(&self.snapshot_context),

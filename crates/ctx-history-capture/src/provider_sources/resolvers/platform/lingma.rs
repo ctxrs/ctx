@@ -82,8 +82,10 @@ fn resolve_lingma_vscode(
                 spec,
                 base.as_ref(),
                 &default_db,
-                client,
-                LingmaVscodeProfile::Base,
+                LingmaDatabaseCatalogLineage::VscodeSelected {
+                    client,
+                    profile: LingmaVscodeProfile::Base,
+                },
             );
         }
         let profiles = user_root.join("profiles");
@@ -149,8 +151,10 @@ fn resolve_lingma_vscode(
                 spec,
                 effective,
                 &default_db,
-                client,
-                profile_key,
+                LingmaDatabaseCatalogLineage::VscodeSelected {
+                    client,
+                    profile: profile_key,
+                },
             );
         }
     }
@@ -251,8 +255,7 @@ fn add_lingma_vscode_choice(
     spec: &ProviderSourceSpec,
     choice: Option<&LingmaRootChoice>,
     default_db: &Path,
-    client: LingmaVscodeClient,
-    profile: LingmaVscodeProfile,
+    selected_lineage: LingmaDatabaseCatalogLineage,
 ) {
     let (path, lineage) = match choice.unwrap_or(&LingmaRootChoice::Default) {
         LingmaRootChoice::Absent | LingmaRootChoice::Default => (
@@ -261,7 +264,7 @@ fn add_lingma_vscode_choice(
         ),
         LingmaRootChoice::Selected(root) => (
             root.join("sharedClientCache/cache/db/local.db"),
-            LingmaDatabaseCatalogLineage::VscodeSelected { client, profile },
+            selected_lineage,
         ),
         LingmaRootChoice::Unreconstructible(path) => {
             report.issues.push(issue(
