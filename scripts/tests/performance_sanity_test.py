@@ -203,6 +203,14 @@ def run_json(args: list[str], env: dict[str, str], cwd: Path) -> dict[str, objec
     return packet
 
 
+def run_json_timed(
+    args: list[str], env: dict[str, str], cwd: Path
+) -> tuple[dict[str, object], float]:
+    started = time.monotonic()
+    packet = run_json(args, env, cwd)
+    return packet, time.monotonic() - started
+
+
 def published_file_state(path: Path) -> PublishedFileState:
     metadata = path.stat()
     return PublishedFileState(
@@ -426,7 +434,7 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             )
             daemon, daemon_stdout, daemon_stderr = start_daemon(root, env)
             try:
-                initial_search = run_json(
+                initial_search, initial_refresh_seconds = run_json_timed(
                     [
                         "search",
                         QUERY,
@@ -443,7 +451,7 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                 initial = refresh_snapshot(initial_search, root, env)
                 self.assertTrue(initial.segments)
 
-                noop_search = run_json(
+                noop_search, noop_refresh_seconds = run_json_timed(
                     [
                         "search",
                         QUERY,
@@ -474,7 +482,7 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                 self.assertEqual(noop.index_bytes, initial.index_bytes)
 
                 append_bytes = append_codex_event(fixture_path)
-                appended_search = run_json(
+                appended_search, append_refresh_seconds = run_json_timed(
                     [
                         "search",
                         APPEND_QUERY,
@@ -492,6 +500,12 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                 self.assertEqual(len(appended_results), 1)
                 self.assertIn(APPEND_QUERY, appended_results[0].get("snippet", ""))
                 appended = refresh_snapshot(appended_search, root, env)
+                for refresh_seconds in (
+                    initial_refresh_seconds,
+                    noop_refresh_seconds,
+                    append_refresh_seconds,
+                ):
+                    self.assertLessEqual(refresh_seconds, MAX_COMMAND_SECONDS)
                 self.assertNotEqual(appended.request_id, noop.request_id)
                 self.assertTrue(appended.generation_changed)
                 self.assertEqual(appended.previous_generation, noop.generation_id)
@@ -623,6 +637,9 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             f" append_retained_record_delta={append_retained_delta}"
             f" append_source_bytes_delta={append_source_bytes_delta}"
             f" append_opstamp={appended.opstamp}"
+            f" initial_refresh_seconds={initial_refresh_seconds:.3f}"
+            f" noop_refresh_seconds={noop_refresh_seconds:.3f}"
+            f" append_refresh_seconds={append_refresh_seconds:.3f}"
             f" segments_before={len(noop.segments)}"
             f" segments_after={len(appended.segments)}"
             f" index_bytes_before={initial.index_bytes}"
