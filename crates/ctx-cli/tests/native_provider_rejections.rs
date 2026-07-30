@@ -174,6 +174,7 @@ fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
     .unwrap();
     drop(conn);
 
+    let mut mixed_generation = None;
     for resume in [false, true] {
         let mut command = ctx(&mixed_temp);
         command.args([
@@ -198,11 +199,33 @@ fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
         );
         assert_eq!(source["current_sources_with_rejections"], 1, "{report:#}");
         assert_eq!(source["current_indexed_documents"], 3, "{report:#}");
-        assert_eq!(
-            source["change"],
-            if resume { "no_op" } else { "changed" },
-            "{report:#}"
-        );
+        let published_generation = source["published_generation"]
+            .as_str()
+            .expect("published Firebender generation");
+        if resume {
+            assert_eq!(source["change"], "no_op", "{report:#}");
+            assert_eq!(source["generation_changed"], false, "{report:#}");
+            assert_eq!(
+                Some(published_generation),
+                mixed_generation.as_deref(),
+                "{report:#}"
+            );
+        } else {
+            let change = source["change"].as_str().expect("change classification");
+            assert!(matches!(change, "changed" | "no_op"), "{report:#}");
+            assert_eq!(
+                source["generation_changed"],
+                change == "changed",
+                "{report:#}"
+            );
+            if change == "no_op" {
+                assert_eq!(
+                    source["previous_generation"], source["published_generation"],
+                    "{report:#}"
+                );
+            }
+            mixed_generation = Some(published_generation.to_owned());
+        }
     }
 
     let invalid_temp = finite_daemon_test_root();
