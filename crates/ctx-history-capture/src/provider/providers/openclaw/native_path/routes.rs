@@ -6,7 +6,6 @@ use std::{
 
 use ctx_history_core::CaptureProvider;
 
-use super::OpenClawSessionObservation;
 use crate::Result;
 
 pub(super) struct Inventory {
@@ -42,8 +41,4 @@ pub(super) fn discover_inventory(root: &Path) -> Result<Inventory> {
 fn path_has_component(path: &Path, expected: &str) -> bool {
     path.components()
         .any(|component| component.as_os_str() == expected)
-}
-
-pub(super) fn source_revision(observation: &OpenClawSessionObservation) -> String {
-    observation.source_revision()
 }

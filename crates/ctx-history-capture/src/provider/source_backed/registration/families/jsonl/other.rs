@@ -275,87 +275,9 @@ pub(super) fn register_openclaw_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let adapter = openclaw_source_backed_adapter_v0();
-            for selected in adapter
-                .discover_selected(&capture_root)
-                .map_err(route_error)?
-            {
-                let base = sink.base_source(selected.source_key());
-                sink.begin(selected.source_key().clone())?;
-                let mut reader = adapter
-                    .open_source(&selected, DateTime::<Utc>::UNIX_EPOCH, base.as_ref())
-                    .map_err(route_error)?;
-                while let Some(page) = reader.next_page().map_err(route_error)? {
-                    for document in page.documents {
-                        sink.document(document)?;
-                    }
-                }
-                let scan = reader.finish().map_err(route_error)?;
-                if scan.disposition
-                    == crate::provider::providers::openclaw::OpenClawSourceBackedDispositionV0::Append
-                {
-                    let base = base.as_ref().ok_or_else(|| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            "OpenClaw append scan did not receive a base certificate",
-                        )
-                    })?;
-                    let prefix = scan.verified_base_prefix.ok_or_else(|| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            "OpenClaw append scan did not return verified prefix evidence",
-                        )
-                    })?;
-                    let append = CertifiedSourceAppend::certify(
-                        base,
-                        scan.certified_source,
-                        prefix.bytes,
-                        prefix.digest,
-                    )
-                    .map_err(route_error)?;
-                    sink.certify_append(append)?;
-                } else {
-                    sink.certify(scan.certified_source)?;
-                }
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::OpenClaw, "openclaw_session_jsonl_tree"),
-        move |request| {
-            let adapter = openclaw_source_backed_adapter_v0();
-            for selected in adapter
-                .discover_selected(&hydration_root)
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                })?
-            {
-                if selected
-                    .source_key()
-                    .exact_descriptor_eq(request.locator().source())
-                {
-                    let hydrated =
-                        adapter
-                            .hydrate(&selected, request.locator())
-                            .map_err(|error| {
-                                hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                            })?;
-                    return Ok(HydratedProviderRecord {
-                        event_id: request.event_id(),
-                        provider_bytes: hydrated.provider_bytes,
-                    });
-                }
-            }
-            Err(hydration_failure(
-                HydrationFailureKind::ConfirmedDeleted,
-                "the exact OpenClaw source is absent from the selected inventory",
-            ))
-        },
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        openclaw_source_backed_adapter_v0(),
+        source.path.clone(),
     );
     registry.register(executable_route(
         source,
