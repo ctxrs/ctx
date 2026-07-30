@@ -2,13 +2,15 @@
 
 History source plugins let local tools export their history into ctx without
 ctx owning those tools' storage schemas. The stable 1.0 route is intentionally
-narrow: a user explicitly selects one manifest source, the source command emits
-`ctx-history-jsonl-v1`, and the CLI publishes that provider export through the
-normal daemon-owned source-backed generation path.
+narrow: a manifest identifies a durable provider-owned
+`ctx-history-jsonl-v1` file, and the CLI registers that file with the normal
+daemon-owned source-backed generation path.
 
 ctx does not load plugin code in-process and does not provide a second history
-store for plugins. The managed provider export remains the exact-body
-authority; the source-backed index is a derived search structure.
+store for plugins. The declared provider file remains the exact-body authority;
+the source-backed index is a derived search structure. Command-only exporters
+are discoverable but unsupported in 1.0 because command stdout is not a durable
+provider source.
 
 ## Install And Discover
 
@@ -37,20 +39,25 @@ Manifest example:
       "id": "default",
       "provider_key": "example-agent",
       "source_id": "default",
-      "source_format": "example-agent-sqlite-v1",
+      "source_format": "example-agent-jsonl-v1",
+      "path": "/path/owned/by/example-agent/history.jsonl",
       "enabled": true,
-      "refresh": "manual",
-      "command": ["example-agent-to-ctx", "export"],
-      "timeout_seconds": 300
+      "refresh": "manual"
     }
   ]
 }
 ```
 
 `name`, `id`, `provider_key`, and `source_id` must be stable lowercase ASCII
-identifiers. `command` is an argv array; ctx never runs it through a shell.
-`working_dir` may be absolute or relative to the manifest directory. Explicit
-`env` entries are supported after manifest validation.
+identifiers. `path` may be absolute or relative to the manifest directory and
+must identify a regular provider-owned file. Its `ctx-history-jsonl-v1` source
+record must match the declared `provider_key`, `source_id`, and
+`source_format`.
+
+Legacy manifests may still declare a `command` argv array so users receive a
+typed compatibility diagnostic. They are not importable, are never executed by
+`ctx sources`, and are never copied into ctx-owned storage. A source cannot
+declare both `path` and command runtime options.
 
 `enabled` and `refresh` remain discovery metadata in the 1.0 explicit route.
 They do not opt a plugin into `ctx import --all`, `ctx setup`, or automatic
@@ -63,7 +70,6 @@ Select exactly one source:
 ```bash
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
-ctx import --history-source example-agent/default --reset-cursor
 ```
 
 Selectors match either `plugin/source` or `provider_key/source_id` and must
@@ -76,31 +82,29 @@ command. Without `--history-source`, the supplied manifest path must resolve to
 exactly one source.
 
 The 1.0 plugin route does not execute plugins from `ctx import --all` or
-automatic search refresh. Run an explicit plugin import when its native
-history changes, then search the published generation with refresh disabled or
-with the normal provider refresh behavior.
+automatic search refresh. Run an explicit plugin import after configuring its
+durable path; the persistent daemon then watches and refreshes the registered
+provider source normally. `--reset-cursor` is invalid because ctx owns no
+plugin cursor.
 
 ## Source-Backed Publication
 
 An accepted import has one authority path:
 
-1. ctx runs the selected command with bounded stdout, stderr, and runtime.
-2. The importer validates one `ctx-history-jsonl-v1` manifest and source
-   record, source identity, cursor identity, record references, and parent
-   relationships.
-3. Incremental records are merged idempotently into a private managed
-   provider-export JSONL source under
-   `$CTX_DATA_ROOT/history-source-plugin-sources`.
-4. ctx registers that file as the explicit custom
+1. ctx validates that the selected manifest identifies a regular
+   provider-owned file.
+2. A bounded header check verifies the `ctx-history-jsonl-v1` schema and exact
+   declared source identity without copying the body.
+3. ctx registers that same file as the explicit custom
    `ctx_history_jsonl_v1` source route.
-5. the normal source-refresh endpoint publishes a fresh source-backed
-   generation, or returns an authoritative no-op receipt;
-6. only after that receipt does ctx commit the plugin cursor.
+4. The normal source-refresh endpoint publishes a fresh source-backed
+   generation, or returns an authoritative no-op receipt.
 
-Cold imports, appends, rewrites, resets, and no-ops all use this path. There is
-no fallback to the old Store database or to a synthetic `NativePath` body.
+Cold imports, appends, rewrites, replacements, and no-ops all use the shared
+custom JSONL source-family path. There is no fallback to the old Store database,
+synthetic `NativePath` body, command-output snapshot, or local content pack.
 `ctx show ... --content complete` rehydrates exact event content from the
-managed provider export and fails closed if that source no longer verifies.
+provider-owned file and fails closed if that source no longer verifies.
 
 After import, `--history-source` uses the canonical
 `provider_key/source_id` route identity:
@@ -114,61 +118,10 @@ These filters imply `--provider custom`; combining them with another provider
 is an error. When plugin/source differs from provider_key/source_id, use the
 latter for search; the former remains the explicit import selector.
 
-## Runtime Environment
-
-ctx clears the inherited environment, restores a small allowlist, applies the
-manifest `env` object, and sets:
-
-- `CTX_DATA_ROOT`
-- `CTX_HISTORY_PLUGIN=1`
-- `CTX_HISTORY_PLUGIN_NAME`
-- `CTX_HISTORY_PLUGIN_MANIFEST`
-- `CTX_HISTORY_SOURCE`, such as `example-agent/default`
-- `CTX_HISTORY_SOURCE_ID`
-- `CTX_HISTORY_PROVIDER_KEY`
-- `CTX_HISTORY_SOURCE_FORMAT`
-- `CTX_HISTORY_CURSOR_STREAM`
-- `CTX_HISTORY_MACHINE_ID`
-- `CTX_HISTORY_FULL_RESCAN`, `1` or `0`
-- `CTX_HISTORY_CURSOR`, when a previous cursor is small enough for inline
-  handoff
-- `CTX_HISTORY_CURSOR_FILE`, a private temporary file when a previous cursor
-  exists
-
-The inherited allowlist covers `PATH`, home and user names, locale variables,
-temporary-directory variables, and XDG config/data/cache/state roots.
-
-The command must write only `ctx-history-jsonl-v1` JSONL to stdout. Diagnostics
-belong on stderr. stdout is capped at 64 MiB, stderr at 256 KiB, and
-`timeout_seconds` defaults to 300 seconds. A nonzero exit, timeout, oversized
-output, malformed stream, identity mismatch, or reference error fails before
-source registration and does not advance the cursor.
-
-## Cursor Contract
-
-The plugin owns the cursor string. It can be a byte offset, row id, JSON map,
-or opaque native token. ctx binds the cursor to:
-
-- `provider_key`
-- `source_id`
-- `source_format`
-- the local ctx machine identity
-
-Every run must emit a source record matching the manifest identity. When a
-previous cursor exists, a `source.cursor.before` value, if emitted, must match
-the supplied cursor and `CTX_HISTORY_CURSOR_STREAM`.
-`source.cursor.after` advances the private sidecar only after daemon
-publication. Transient cursor fields are not used as event-body storage.
-
-`--reset-cursor` withholds the old cursor and sets
-`CTX_HISTORY_FULL_RESCAN=1`. A reset run must emit a fresh
-`source.cursor.after` checkpoint; otherwise ctx rejects it rather than risking
-reuse of stale state.
-
-## Minimal Exporter Shape
+## Minimal Durable Source Shape
 
 ```python
-import json, os
+import json
 
 print(json.dumps({
     "record_type": "manifest",
@@ -176,19 +129,12 @@ print(json.dumps({
 }))
 print(json.dumps({
     "record_type": "source",
-    "source_id": os.environ["CTX_HISTORY_SOURCE_ID"],
-    "provider_key": os.environ["CTX_HISTORY_PROVIDER_KEY"],
-    "source_format": os.environ["CTX_HISTORY_SOURCE_FORMAT"],
-    "cursor": {
-        "after": {
-            "stream": os.environ["CTX_HISTORY_CURSOR_STREAM"],
-            "cursor": "{\"message_id\":1234}",
-            "observed_at": "2026-07-01T12:00:00Z",
-        }
-    },
+    "source_id": "default",
+    "provider_key": "example-agent",
+    "source_format": "example-agent-jsonl-v1",
 }))
 
-# Emit stable session, event, file_touch, and edge records for this increment.
+# Append stable session, event, file_touch, and edge records to the provider file.
 ```
 
 The complete record schema is documented in

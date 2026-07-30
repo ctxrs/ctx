@@ -209,29 +209,19 @@ Example:
 
 ## Incremental Semantics
 
-v1 imports are explicit, local, and idempotent. On each file import, ctx rescans
-the file through its explicit source-backed route. On each selected plugin
-import, ctx invokes the plugin, validates stdout as one delta, and merges stable
-record identities into a private managed provider-export JSONL source.
+v1 imports are explicit, local, and idempotent. On each file import, ctx
+rescans the file through its explicit source-backed route. A selected plugin
+manifest may point at the same kind of durable provider-owned file; ctx
+validates the declared source identity, registers the path in place, and waits
+for an authoritative daemon-owned publication receipt.
 
-Plugin imports register the managed export as a custom
-`ctx_history_jsonl_v1` route and wait for an authoritative daemon-owned
-source-backed publication receipt. The managed export remains exact-body
-authority for complete-content hydration; plugin imports do not write the old
-Store database or synthesize a `NativePath` body.
+That provider file remains exact-body authority for complete-content
+hydration. Plugin imports do not invoke exporters, copy command output, write
+the old Store database, synthesize a `NativePath` body, or create a local
+content pack. Command-only plugin manifests are typed unsupported in 1.0.
 
-For plugin imports, ctx passes the previously stored source cursor to the next
-command through `CTX_HISTORY_CURSOR` for small cursors and always through
-`CTX_HISTORY_CURSOR_FILE` when a previous cursor exists. The cursor string
-remains exporter-owned, so it can encode byte offsets, SQLite row ids, session
-sequence maps, or another native high-water mark. ctx stores this transient
-cursor in a private sidecar, separate from the managed provider export, and
-commits it only after source-backed publication succeeds. Event
-`native_cursor` values remain part of the provider export.
-
-If an import is interrupted, run the same command again. File imports perform
-another idempotent rescan. Plugin imports receive the last successfully
-published cursor; failed validation or publication does not advance it.
+If an import is interrupted, run the same command again. The shared custom
+JSONL route performs another idempotent scan of the provider-owned source.
 
 ## Compact Example
 

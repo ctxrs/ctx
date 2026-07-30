@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Instant};
 
 use anyhow::{bail, Context, Result};
-use ctx_history_capture::ProviderImportSummary;
+use ctx_history_capture::{ProviderImportSummary, ProviderImportWorkResult};
 use ctx_history_core::{platform_security::establish_private_data_root, CaptureProvider};
 use serde_json::json;
 
@@ -51,25 +51,21 @@ pub(crate) fn run_history_source_plugin_import(
         0,
     );
     progress.message(
-        "exporting",
+        "cataloging",
         format!(
-            "Exporting history source plugin {} for daemon-owned source refresh.",
+            "Cataloging provider-owned history source plugin path for {}.",
             source.label()
         ),
     );
 
     let started = Instant::now();
     establish_private_data_root(&context.data_root)
-        .context("protect ctx data root before history-source export")?;
-    let prepared = prepare_source_backed_history_source(
-        source,
-        &context.data_root,
-        context.args.reset_cursor,
-    )?;
-    let stats = source_stats(prepared.snapshot_path()).with_context(|| {
+        .context("protect ctx data root before history-source registration")?;
+    let prepared = prepare_source_backed_history_source(source, context.args.reset_cursor)?;
+    let stats = source_stats(prepared.source_path()).with_context(|| {
         format!(
-            "inspect managed history source plugin snapshot {}",
-            prepared.snapshot_path().display()
+            "inspect provider-owned history source plugin path {}",
+            prepared.source_path().display()
         )
     })?;
     let upsert = upsert_explicit_source(&context.data_root, prepared.provider_source())?;
@@ -88,25 +84,12 @@ pub(crate) fn run_history_source_plugin_import(
         .as_ref()
         .context("history source plugin refresh has no authoritative terminal receipt")?;
     let published_generation = refresh.pin.generation_id().to_owned();
-    prepared.commit_cursor()?;
 
-    let mut summary = ProviderImportSummary {
-        imported: usize::from(prepared.work_kind.changed()),
-        skipped: prepared
-            .skipped_records
-            .saturating_add(usize::from(!prepared.work_kind.changed())),
-        imported_sessions: prepared.imported_sessions,
-        imported_events: prepared.imported_events,
-        imported_edges: prepared.imported_edges,
+    let summary = ProviderImportSummary {
+        imported: usize::from(receipt.generation_changed),
+        skipped: usize::from(!receipt.generation_changed),
         ..ProviderImportSummary::default()
     };
-    if prepared.work_kind.changed()
-        && summary.imported_sessions == 0
-        && summary.imported_events == 0
-        && summary.imported_edges == 0
-    {
-        summary.imported = 1;
-    }
     context.provider_refreshes.record_success_with_facts(
         CaptureProvider::Custom,
         context.refresh_trigger,
@@ -120,27 +103,34 @@ pub(crate) fn run_history_source_plugin_import(
         receipt.generation_changed,
     );
 
-    let mut totals = ImportTotals::default();
-    totals.add(&summary, &stats);
-    totals.current_source_count = Some(receipt.current.source_count);
-    totals.current_indexed_documents = Some(receipt.current.indexed_documents);
-    totals.current_complete_records = Some(receipt.current.complete_records);
-    totals.current_retained_records = Some(receipt.current.retained_records);
-    totals.current_rejected_records = Some(receipt.current.rejected_records);
-    totals.current_ignored_records = Some(receipt.current.ignored_records);
-    totals.current_certified_source_bytes = Some(receipt.current.certified_source_bytes);
-    totals.current_sources_with_rejections = Some(receipt.current.sources_with_rejections);
-    totals.removed_source_count = Some(receipt.current.removed_source_count);
+    let current = &receipt.current;
+    let totals = ImportTotals {
+        current_source_count: Some(current.source_count),
+        current_indexed_documents: Some(current.indexed_documents),
+        current_complete_records: Some(current.complete_records),
+        current_retained_records: Some(current.retained_records),
+        current_rejected_records: Some(current.rejected_records),
+        current_ignored_records: Some(current.ignored_records),
+        current_certified_source_bytes: Some(current.certified_source_bytes),
+        current_sources_with_rejections: Some(current.sources_with_rejections),
+        removed_source_count: Some(current.removed_source_count),
+        work_result: if receipt.generation_changed {
+            ProviderImportWorkResult::Changed
+        } else {
+            ProviderImportWorkResult::NoOp
+        },
+        ..ImportTotals::default()
+    };
 
     context.telemetry.sources_seen = Some(count_bucket(1));
     context.telemetry.source_files = Some(count_bucket(stats.files as u64));
     context.telemetry.source_bytes = Some(bytes_bucket(stats.bytes));
     context.telemetry.failed_sources = Some(count_bucket(0));
-    context.telemetry.sessions_imported = Some(count_bucket(summary.imported_sessions as u64));
-    context.telemetry.events_imported = Some(count_bucket(summary.imported_events as u64));
-    context.telemetry.edges_imported = Some(count_bucket(summary.imported_edges as u64));
-    context.telemetry.skipped = Some(count_bucket(summary.skipped as u64));
-    context.telemetry.rejected_records = Some(count_bucket(0));
+    context.telemetry.sessions_imported = None;
+    context.telemetry.events_imported = None;
+    context.telemetry.edges_imported = None;
+    context.telemetry.skipped = None;
+    context.telemetry.rejected_records = None;
 
     let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
@@ -159,7 +149,7 @@ pub(crate) fn run_history_source_plugin_import(
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        sources: vec![json!({
+        sources: vec![crate::compact_json(json!({
             "status": "published",
             "failure_scope": "none",
             "failure_type": "none",
@@ -172,12 +162,13 @@ pub(crate) fn run_history_source_plugin_import(
             "source_id": prepared.source().source_id,
             "source_format": prepared.source().source_format,
             "route_source_format": prepared.provider_source().source_format,
-            "path": prepared.snapshot_path(),
+            "path": prepared.source_path(),
             "source_files": stats.files,
             "source_bytes": stats.bytes,
             "catalog_changed": upsert.changed,
             "catalog_lineage": upsert.catalog_lineage_hex(),
             "catalog_authority": upsert.authority.to_json(),
+            "previous_generation": receipt.previous_generation,
             "published_generation": published_generation,
             "generation_changed": receipt.generation_changed,
             "daemon_request_id": refresh.request_id,
@@ -187,20 +178,18 @@ pub(crate) fn run_history_source_plugin_import(
                 "trigger_provenance": "history_source_plugin",
             },
             "change": if receipt.generation_changed { "changed" } else { "no_op" },
-            "work_kind": prepared.work_kind.as_str(),
-            "imported_sessions": summary.imported_sessions,
-            "imported_events": summary.imported_events,
-            "imported_edges": summary.imported_edges,
-            "skipped_sessions": summary.skipped_sessions,
-            "skipped_events": summary.skipped_events,
-            "skipped_edges": summary.skipped_edges,
-            "skipped": summary.skipped,
-            "rejected_records": 0,
-            "rejections": [],
+            "current_source_count": current.source_count,
+            "current_indexed_documents": current.indexed_documents,
+            "current_complete_records": current.complete_records,
+            "current_retained_records": current.retained_records,
+            "current_rejected_records": current.rejected_records,
+            "current_ignored_records": current.ignored_records,
+            "current_certified_source_bytes": current.certified_source_bytes,
+            "current_sources_with_rejections": current.sources_with_rejections,
+            "removed_source_count": current.removed_source_count,
             "provider_source_authority": true,
-            "plugin_stderr_bytes": prepared.plugin_stderr.len(),
             "display_source_bytes": format_bytes(stats.bytes),
-        })],
+        }))],
     })
 }
 
