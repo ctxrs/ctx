@@ -208,6 +208,7 @@ pub(crate) struct CodexNativeScanner {
     source: CodexCatalogSource,
     opened: Arc<OpenedProviderSourceFile>,
     before: CodexFileObservation,
+    frozen_len: u64,
     reader: BufReader<File>,
     disposition: CodexParseDisposition,
     offset: u64,

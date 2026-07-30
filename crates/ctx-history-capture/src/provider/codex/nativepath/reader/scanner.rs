@@ -20,6 +20,7 @@ impl CodexNativeScanner {
         }
 
         let before = observed_opened_file(&source, &opened)?;
+        source.catalog_observation = before.clone();
         let file = opened.file().try_clone()?;
         let mut reader = BufReader::new(file);
         let validated = if let Some(proof) = proof {
@@ -78,6 +79,7 @@ impl CodexNativeScanner {
             return Ok(Self {
                 source,
                 opened,
+                frozen_len: before.len,
                 before,
                 reader,
                 disposition: CodexParseDisposition::ObservationReplay,
@@ -161,6 +163,7 @@ impl CodexNativeScanner {
         Ok(Self {
             source,
             opened,
+            frozen_len: before.len,
             before,
             reader,
             disposition,
@@ -217,7 +220,13 @@ impl CodexNativeScanner {
                 let record_buffer = &mut self.record_buffer;
                 let full_hasher = &mut self.full_hasher;
                 let complete_hasher = &mut self.complete_hasher;
-                read_bounded_record(reader, record_buffer, full_hasher, complete_hasher)?
+                read_bounded_record(
+                    reader,
+                    record_buffer,
+                    full_hasher,
+                    complete_hasher,
+                    self.frozen_len.saturating_sub(self.offset),
+                )?
             };
             let Some(record_read) = record_read else {
                 self.exhausted = true;

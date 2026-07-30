@@ -66,6 +66,10 @@ pub(super) fn object_fingerprint(_stamp: &ObjectStamp) -> [u8; 32] {
     [0; 32]
 }
 
+pub(super) fn same_object(_left: &ObjectStamp, _right: &ObjectStamp) -> bool {
+    false
+}
+
 pub(super) fn object_change_token(_stamp: &ObjectStamp) -> [u8; 32] {
     [0; 32]
 }

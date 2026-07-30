@@ -705,3 +705,56 @@ fn source_backed_final_inventory_revalidation_blocks_partial_publication() {
     );
     assert!(search_event_ids(&after, "lateinventorymarker").is_empty());
 }
+
+#[test]
+fn source_backed_commit_accepts_a_post_scan_append_as_next_generation_work() {
+    fn append_after_scan(session_root: &Path) {
+        let path = fs::read_dir(session_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
+            .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(format!("{}\n", message("assistant", "postcommitappendmarker")).as_bytes())
+            .unwrap();
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000047";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "frozen generation sentinel")],
+    );
+
+    let frozen = ingest_codex_source_backed_inner_v0(
+        &sessions,
+        &index,
+        ColdParallelOptionsV0 {
+            before_commit_revalidation: Some(append_after_scan),
+            ..ColdParallelOptionsV0::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(frozen.commit.indexed_documents, 1);
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        search_event_ids(&verified, "frozen generation sentinel").len(),
+        1
+    );
+    assert!(search_event_ids(&verified, "postcommitappendmarker").is_empty());
+
+    let appended = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(appended.counters.appended_sources, 1);
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        search_event_ids(&verified, "postcommitappendmarker").len(),
+        1
+    );
+}

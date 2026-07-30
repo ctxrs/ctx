@@ -154,6 +154,87 @@ fn append_resumes_at_complete_prefix_and_preserves_suffix_ordinal() {
 }
 
 #[test]
+fn append_after_catalog_is_admitted_at_one_current_frozen_eof() {
+    let initial = [
+        session_meta("moving-catalog-owner"),
+        message("user", "captured prefix"),
+    ]
+    .concat();
+    let appended = message("assistant", "deferred append");
+    let (_temp, path) = write_source(&initial);
+    let catalog_source = discover_one(&path, "moving-catalog-owner");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+
+    let (frozen, frozen_rows) = scan_collect(catalog_source, None);
+    assert_eq!(
+        frozen.before_observation.len,
+        (initial.len() + appended.len()) as u64
+    );
+    assert_eq!(frozen.after_observation, frozen.before_observation);
+    assert_eq!(
+        frozen.complete_prefix_end,
+        (initial.len() + appended.len()) as u64
+    );
+    assert_eq!(frozen_rows.rows.len(), 2);
+    assert_eq!(frozen_rows.rows[0].lexical_body, "captured prefix");
+    assert_eq!(frozen_rows.rows[1].lexical_body, "deferred append");
+
+    let proof = frozen
+        .bind_checkpoint("moving-catalog-source", CodexCheckpointGeneration::new(91))
+        .unwrap()
+        .unwrap();
+    let (replay, replay_rows) =
+        scan_collect(discover_one(&path, "moving-catalog-owner"), Some(&proof));
+    assert_eq!(replay.disposition, CodexParseDisposition::ObservationReplay);
+    assert!(replay_rows.rows.is_empty());
+}
+
+#[test]
+fn rewrite_or_truncate_after_catalog_still_fails_admission() {
+    let initial = [
+        session_meta("moving-rewrite-owner"),
+        message("user", "original body"),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&initial);
+    let rewrite_source = discover_one(&path, "moving-rewrite-owner");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut rewritten = initial.clone().into_bytes();
+    let marker = b"original body";
+    let start = rewritten
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .unwrap();
+    rewritten[start..start + marker.len()].copy_from_slice(b"rewritten bod");
+    fs::write(&path, rewritten).unwrap();
+    let rewrite_error = CodexNativeScanner::new_source_backed_v0(rewrite_source, None).unwrap_err();
+    assert!(
+        format!("{rewrite_error}").contains("changed before NativePath admission"),
+        "{rewrite_error}"
+    );
+
+    let truncate_source = discover_one(&path, "moving-rewrite-owner");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len((initial.len() / 2) as u64)
+        .unwrap();
+    let truncate_error =
+        CodexNativeScanner::new_source_backed_v0(truncate_source, None).unwrap_err();
+    assert!(
+        format!("{truncate_error}").contains("changed before NativePath admission"),
+        "{truncate_error}"
+    );
+}
+
+#[test]
 fn append_restarts_at_an_incomplete_records_original_ordinal() {
     let complete_prefix = [
         session_meta("partial-append-owner"),
@@ -247,7 +328,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert!(!wire.contains("command"));
     assert!(!wire.contains("arguments_preview"));
     let decoded_wire = serde_json::from_str::<Value>(&wire).unwrap();
-    assert_eq!(decoded_wire["version"], 4);
+    assert_eq!(decoded_wire["version"], 5);
     assert_eq!(
         decoded_wire["pending_tool_authorities"]
             .as_array()

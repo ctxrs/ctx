@@ -161,9 +161,12 @@ impl CodexLocatorResolverV0 {
         let opening_observation =
             opened_codex_file_observation(&source.source_path, opened.file())?;
         opened
-            .revalidate()
+            .revalidate_same_object()
             .map_err(normalize_codex_hydration_capture_error)?;
-        if opening_observation != source.catalog_observation {
+        if !source
+            .catalog_observation
+            .admits_append_only_growth(&opening_observation)
+        {
             return Err(CodexSourceBackedErrorV0::Capture(
                 CaptureError::SourceChangedDuringCapture,
             ));
@@ -193,7 +196,7 @@ impl CodexLocatorResolverV0 {
             });
         }
         opened
-            .revalidate()
+            .revalidate_same_object()
             .map_err(normalize_codex_hydration_capture_error)?;
         let records = ordered
             .into_iter()
@@ -250,13 +253,13 @@ fn hydrate_codex_source_record(
         usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
     let opened = open_codex_hydration_source(source)?;
     if byte_offset != 0 {
-        let boundary = opened.read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
+        let boundary = opened.read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
         if boundary != *b"\n" {
             return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
         }
     }
     let provider_bytes = opened
-        .read_exact_range(
+        .read_exact_range_allow_append(
             byte_offset,
             byte_length,
             MAX_HYDRATED_CODEX_RECORD_BYTES as usize,

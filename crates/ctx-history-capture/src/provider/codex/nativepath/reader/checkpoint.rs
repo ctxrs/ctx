@@ -15,7 +15,11 @@ pub(super) fn read_bounded_record(
     storage: &mut Vec<u8>,
     full_hasher: &mut Sha256,
     complete_hasher: &mut Sha256,
+    maximum_bytes: u64,
 ) -> Result<Option<BoundedRecordRead>> {
+    if maximum_bytes == 0 {
+        return Ok(None);
+    }
     storage.clear();
     let complete_before_record = complete_hasher.clone();
     let mut record_hasher = Sha256::new();
@@ -28,7 +32,7 @@ pub(super) fn read_bounded_record(
             let available = reader.fill_buf()?;
             if available.is_empty() {
                 if byte_len == 0 {
-                    return Ok(None);
+                    return Err(source_changed_during_scan());
                 }
                 if all_nul {
                     return Ok(Some(BoundedRecordRead {
@@ -51,8 +55,11 @@ pub(super) fn read_bounded_record(
                 }));
             }
 
-            let newline = available.iter().position(|byte| *byte == b'\n');
-            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let remaining = maximum_bytes.saturating_sub(byte_len);
+            let bounded = usize::try_from(remaining.min(available.len() as u64))
+                .map_err(|_| CaptureError::SystemInvariant("Codex record bound exceeds usize"))?;
+            let newline = available[..bounded].iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(bounded, |index| index + 1);
             let chunk = &available[..consumed];
             full_hasher.update(chunk);
             complete_hasher.update(chunk);
@@ -77,6 +84,27 @@ pub(super) fn read_bounded_record(
             storage.extend_from_slice(&chunk[..copied]);
             if copied != content_len {
                 oversized = true;
+            }
+            if newline.is_none() && byte_len == maximum_bytes {
+                if all_nul {
+                    return Ok(Some(BoundedRecordRead {
+                        complete: true,
+                        terminal_nul_padding: true,
+                        oversized,
+                        stored_len: storage.len(),
+                        byte_len,
+                        sha256: [0; 32],
+                    }));
+                }
+                *complete_hasher = complete_before_record;
+                return Ok(Some(BoundedRecordRead {
+                    complete: false,
+                    terminal_nul_padding: false,
+                    oversized,
+                    stored_len: storage.len(),
+                    byte_len,
+                    sha256: record_hasher.finalize().into(),
+                }));
             }
             (consumed, newline.is_some())
         };
@@ -336,23 +364,47 @@ pub(super) fn observed_opened_file(
     source: &CodexCatalogSource,
     opened: &OpenedProviderSourceFile,
 ) -> Result<CodexFileObservation> {
-    let observed = opened_file_observation(&source.source_path, opened.file())?;
-    opened.revalidate()?;
-    if observed != source.catalog_observation {
+    let current = opened_file_observation(&source.source_path, opened.file())?;
+    opened.revalidate_same_object()?;
+    if !source
+        .catalog_observation
+        .admits_append_only_growth(&current)
+    {
         return Err(CaptureError::InvalidPayload(
             "Codex catalog observation changed before NativePath admission".to_owned(),
         ));
     }
-    Ok(observed)
+    Ok(current)
 }
 
 pub(crate) fn revalidate_codex_source_observation(
     source: &CodexCatalogSource,
     certified: &CodexFileObservation,
+    certified_len: u64,
+    certified_sha256: [u8; 32],
 ) -> Result<()> {
     let opened = open_codex_source_capability(source)?;
-    let observed = observed_opened_file(source, &opened)?;
-    if &observed != certified {
+    let current = opened_file_observation(&source.source_path, opened.file())?;
+    opened.revalidate_same_object()?;
+    if !certified.admits_append_only_growth(&current) {
+        return Err(source_changed_during_scan());
+    }
+    if current != *certified {
+        revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
+        opened.revalidate_same_object()?;
+    }
+    Ok(())
+}
+
+pub(super) fn revalidate_opened_prefix(
+    file: &File,
+    len: u64,
+    expected_sha256: [u8; 32],
+) -> Result<()> {
+    let mut hasher = Sha256::new();
+    let mut reader = file.try_clone()?;
+    hash_opened_file_range(&mut reader, 0, len, &mut hasher)?;
+    if <[u8; 32]>::from(hasher.finalize()) != expected_sha256 {
         return Err(source_changed_during_scan());
     }
     Ok(())
@@ -384,14 +436,14 @@ pub(crate) fn opened_file_observation(path: &Path, file: &File) -> Result<CodexF
     if !metadata.file_type().is_file() {
         return Err(source_changed_during_scan());
     }
-    let platform_before = opened_file_platform_token(path, file, &metadata)?;
+    let platform_before = opened_file_platform_tokens(path, file, &metadata)?;
     let content_fingerprint = if platform_before.is_some() {
         None
     } else {
         Some(opened_file_content_fingerprint(file, &metadata)?)
     };
     let current = file.metadata()?;
-    let platform_after = opened_file_platform_token(path, file, &current)?;
+    let platform_after = opened_file_platform_tokens(path, file, &current)?;
     if current.len() != metadata.len()
         || current.modified().ok() != metadata.modified().ok()
         || platform_after != platform_before
@@ -401,34 +453,53 @@ pub(crate) fn opened_file_observation(path: &Path, file: &File) -> Result<CodexF
     Ok(CodexFileObservation::from_parts(
         metadata.len(),
         metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
-        combine_opened_file_token(platform_before, content_fingerprint),
+        platform_before.map(|tokens| tokens.stable),
+        combine_opened_file_token(
+            platform_before.map(|tokens| tokens.change),
+            content_fingerprint,
+        ),
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenedFilePlatformTokens {
+    stable: [u8; 32],
+    change: [u8; 32],
+}
+
 #[cfg(unix)]
-fn opened_file_platform_token(
+fn opened_file_platform_tokens(
     _path: &Path,
     _file: &File,
     metadata: &std::fs::Metadata,
-) -> Result<Option<[u8; 32]>> {
+) -> Result<Option<OpenedFilePlatformTokens>> {
     use std::os::unix::fs::MetadataExt;
 
-    let mut hasher = Sha256::new();
-    hasher.update(ORDINARY_FILE_TOKEN_DOMAIN);
-    hasher.update(b"unix\0");
-    hasher.update(metadata.dev().to_le_bytes());
-    hasher.update(metadata.ino().to_le_bytes());
-    hasher.update(metadata.ctime().to_le_bytes());
-    hasher.update(metadata.ctime_nsec().to_le_bytes());
-    Ok(Some(hasher.finalize().into()))
+    let mut stable = Sha256::new();
+    stable.update(ORDINARY_FILE_TOKEN_DOMAIN);
+    stable.update(b"unix-stable\0");
+    stable.update(metadata.dev().to_le_bytes());
+    stable.update(metadata.ino().to_le_bytes());
+    stable.update(metadata.mode().to_le_bytes());
+    let mut change = Sha256::new();
+    change.update(ORDINARY_FILE_TOKEN_DOMAIN);
+    change.update(b"unix-change\0");
+    change.update(metadata.dev().to_le_bytes());
+    change.update(metadata.ino().to_le_bytes());
+    change.update(metadata.ctime().to_le_bytes());
+    change.update(metadata.ctime_nsec().to_le_bytes());
+    Ok(Some(OpenedFilePlatformTokens {
+        stable: stable.finalize().into(),
+        change: change.finalize().into(),
+    }))
 }
 
 #[cfg(target_os = "windows")]
-fn opened_file_platform_token(
+fn opened_file_platform_tokens(
     path: &Path,
     file: &File,
     metadata: &std::fs::Metadata,
-) -> Result<Option<[u8; 32]>> {
+) -> Result<Option<OpenedFilePlatformTokens>> {
     use std::{mem::size_of, os::windows::io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
         FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -468,23 +539,32 @@ fn opened_file_platform_token(
         return Err(std::io::Error::last_os_error().into());
     }
 
-    let mut hasher = Sha256::new();
-    hasher.update(ORDINARY_FILE_TOKEN_DOMAIN);
-    hasher.update(b"windows\0");
-    hasher.update(id_info.VolumeSerialNumber.to_le_bytes());
-    hasher.update(id_info.FileId.Identifier);
-    hasher.update(basic_info.ChangeTime.to_le_bytes());
-    hasher.update(basic_info.LastWriteTime.to_le_bytes());
-    hasher.update(metadata.len().to_le_bytes());
-    Ok(Some(hasher.finalize().into()))
+    let mut stable = Sha256::new();
+    stable.update(ORDINARY_FILE_TOKEN_DOMAIN);
+    stable.update(b"windows-stable\0");
+    stable.update(id_info.VolumeSerialNumber.to_le_bytes());
+    stable.update(id_info.FileId.Identifier);
+    stable.update(basic_info.CreationTime.to_le_bytes());
+    let mut change = Sha256::new();
+    change.update(ORDINARY_FILE_TOKEN_DOMAIN);
+    change.update(b"windows-change\0");
+    change.update(id_info.VolumeSerialNumber.to_le_bytes());
+    change.update(id_info.FileId.Identifier);
+    change.update(basic_info.ChangeTime.to_le_bytes());
+    change.update(basic_info.LastWriteTime.to_le_bytes());
+    change.update(metadata.len().to_le_bytes());
+    Ok(Some(OpenedFilePlatformTokens {
+        stable: stable.finalize().into(),
+        change: change.finalize().into(),
+    }))
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn opened_file_platform_token(
+fn opened_file_platform_tokens(
     _path: &Path,
     _file: &File,
     _metadata: &std::fs::Metadata,
-) -> Result<Option<[u8; 32]>> {
+) -> Result<Option<OpenedFilePlatformTokens>> {
     Ok(None)
 }
 

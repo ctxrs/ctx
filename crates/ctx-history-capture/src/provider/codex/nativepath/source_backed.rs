@@ -64,12 +64,12 @@ const CODEX_NATIVE_EVENT_POSITION_KIND: &str = "codex.jsonl.raw-ordinal";
 const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
-const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v0";
-const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v4";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v1";
+const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
+const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v5";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v2";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
-const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v0";
-const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v0";
+const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
+const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
 const CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.explicit-session-file";
 const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inventory-v0";
 const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v0";
@@ -155,6 +155,26 @@ pub enum CodexSourceBackedErrorV0 {
     ExplicitSourceIdentityChanged,
     #[error("explicit Codex session inventory changed while it was being certified")]
     ExplicitInventoryChanged,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodexTerminalSourceEvidenceV0 {
+    pub(crate) source: CodexCatalogSource,
+    pub(crate) observation: CodexFileObservation,
+    pub(crate) certified_len: u64,
+    pub(crate) full_revision_sha256: [u8; 32],
+}
+
+impl CodexTerminalSourceEvidenceV0 {
+    pub(crate) fn revalidate(&self) -> bool {
+        revalidate_codex_source_observation(
+            &self.source,
+            &self.observation,
+            self.certified_len,
+            self.full_revision_sha256,
+        )
+        .is_ok()
+    }
 }
 
 pub type CodexSourceBackedResultV0<T> = Result<T, CodexSourceBackedErrorV0>;

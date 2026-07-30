@@ -189,10 +189,7 @@ fn codex_explicit_inventory_observation_v0(
     revision.update(CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN);
     revision.update(input.source.exact_descriptor_digest());
     match state {
-        CodexExplicitSessionInventoryStateV0::Present { plan } => {
-            revision.update(b"present\0");
-            revision.update(serde_json::to_vec(&plan.0.catalog_observation)?);
-        }
+        CodexExplicitSessionInventoryStateV0::Present { .. } => revision.update(b"present\0"),
         CodexExplicitSessionInventoryStateV0::Missing => revision.update(b"missing\0"),
     }
     Ok(SourceInventoryObservation::new(
@@ -325,7 +322,7 @@ fn codex_inventory_observation_v0(
     ordered.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
 
     let mut revision = Sha256::new();
-    revision.update(b"ctx.codex-session-tree-inventory-v0\0");
+    revision.update(b"ctx.codex-session-tree-inventory-v1\0");
     revision.update(root_revision);
     hash_inventory_field(&mut revision, root_identity.as_bytes());
     revision.update((ordered.len() as u64).to_be_bytes());
@@ -336,10 +333,6 @@ fn codex_inventory_observation_v0(
         let path_identity = crate::provider::provider_path_identity(&source.source_path)?;
         hash_inventory_field(&mut revision, path_identity.as_bytes());
         hash_inventory_field(&mut revision, native_session_id.as_bytes());
-        hash_inventory_field(
-            &mut revision,
-            &serde_json::to_vec(&source.catalog_observation)?,
-        );
     }
     Ok(SourceInventoryObservation::new(
         CaptureProvider::Codex.as_str(),

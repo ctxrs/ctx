@@ -35,6 +35,7 @@ use super::codex::nativepath::{
     CodexHydratedRecordV0, CodexLocatorResolverV0, CodexPromptHistorySourceBackedDispositionV0,
     CodexPromptHistorySourceBackedInputV0, CodexPromptHistorySourceBackedResolverV0,
     CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedPhaseTimingsV0,
+    CodexTerminalSourceEvidenceV0,
 };
 use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
