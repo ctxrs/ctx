@@ -31,6 +31,7 @@ pub use protocol::{
 const MAX_PARALLEL_LEAF_WORKERS: usize = 16;
 const INDEXER_THREAD_CAP: usize = 8;
 const RUNTIME_THREAD_RESERVATION: usize = 2;
+const SOURCE_WORKER_THREAD_PREFIX: &str = "ctx-src-scan";
 
 pub(crate) fn source_backed_leaf_worker_budget(indexer_threads: usize) -> usize {
     let available_parallelism = thread::available_parallelism()
@@ -49,6 +50,17 @@ fn leaf_worker_budget_for_parallelism(
     available_parallelism
         .saturating_sub(reserved)
         .clamp(1, MAX_PARALLEL_LEAF_WORKERS)
+}
+
+fn bounded_leaf_worker_count(job_count: usize, requested_workers: usize) -> usize {
+    requested_workers
+        .min(job_count)
+        .min(MAX_PARALLEL_LEAF_WORKERS)
+}
+
+fn source_worker_thread_name(worker_index: usize) -> String {
+    debug_assert!(worker_index < MAX_PARALLEL_LEAF_WORKERS);
+    format!("{SOURCE_WORKER_THREAD_PREFIX}{worker_index:02}")
 }
 
 impl SourceBackedGenerationSink<'_> {
@@ -133,7 +145,7 @@ impl SourceBackedGenerationSink<'_> {
             });
         }
 
-        let worker_count = worker_count.min(jobs.len());
+        let worker_count = bounded_leaf_worker_count(jobs.len(), worker_count);
         let mut states = jobs
             .iter()
             .enumerate()
@@ -158,9 +170,10 @@ impl SourceBackedGenerationSink<'_> {
                 let worker_sender = sender.clone();
                 let worker_cancellation = Arc::clone(&cancellation);
                 let scan = &scan;
-                handles.push((
-                    worker_index,
-                    scope.spawn(move || {
+                let worker_name = source_worker_thread_name(worker_index);
+                let handle = thread::Builder::new()
+                    .name(worker_name)
+                    .spawn_scoped(scope, move || {
                         run_leaf_worker(
                             worker_index,
                             jobs,
@@ -168,8 +181,11 @@ impl SourceBackedGenerationSink<'_> {
                             &worker_cancellation,
                             scan,
                         );
-                    }),
-                ));
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!("failed to spawn parallel source worker {worker_index}: {error}")
+                    });
+                handles.push((worker_index, handle));
             }
             drop(sender);
 
