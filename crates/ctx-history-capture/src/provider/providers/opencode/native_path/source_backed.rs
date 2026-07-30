@@ -1,8 +1,8 @@
 //! Shared source-backed projection for the OpenCode SQLite dialect family.
 //!
-//! This module deliberately stops at provider-local discovery, parsing,
-//! certification, lexical projection, and exact-row hydration. Publication and
-//! lifecycle policy remain owned by the shared coordinator.
+//! This module owns provider-local discovery, parsing, certification, lexical
+//! projection, replacement streaming, and exact-row hydration. Atomic
+//! publication remains owned by the shared coordinator.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -41,10 +41,9 @@ use crate::{
         providers::opencode::OpenCodeSqliteDialect,
     },
     provider_sources::{
-        discover_provider_sources_for_provider_with_context,
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        DiscoveryContext, DiscoveryReport, SqliteLogicalSnapshot, SqliteSourceAccessError,
-        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -84,9 +83,11 @@ pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedEr
 
 mod hydration;
 mod projection;
+mod registration;
 
 pub(crate) use hydration::OpenCodeSourceBackedExactResolver;
 use projection::{decode_source_event_row, lexical_document, retained_projection};
+pub(crate) use registration::register_source_backed_route;
 
 /// Provider-local hook consumed later by the shared registration layer.
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +97,9 @@ pub(crate) struct OpenCodeSourceBackedRegistration {
 
 impl OpenCodeSourceBackedRegistration {
     pub(crate) const fn new(dialect: &'static OpenCodeSqliteDialect) -> Self {
+        // Keep route construction bound to the same family registration type
+        // as scanning, fencing, and hydration.
+        let _ = register_source_backed_route;
         Self { dialect }
     }
 
@@ -105,13 +109,6 @@ impl OpenCodeSourceBackedRegistration {
 
     pub(crate) const fn source_format(self) -> &'static str {
         self.dialect.source_format
-    }
-
-    // Retain provider-scoped discovery on the registration boundary even while
-    // the shared registry supplies the selected source directly.
-    #[allow(dead_code)]
-    pub(crate) fn discover(self, context: &DiscoveryContext) -> DiscoveryReport {
-        discover_provider_sources_for_provider_with_context(context, self.provider())
     }
 
     pub(crate) fn scan(
@@ -126,7 +123,6 @@ impl OpenCodeSourceBackedRegistration {
     ///
     /// The evidence is transient runtime state and is never part of the
     /// logical certificate or locator revision.
-    #[allow(dead_code, reason = "narrow seam for the pending coordinator hookup")]
     pub(crate) fn terminal_fence(
         self,
         path: &Path,
@@ -150,7 +146,6 @@ impl OpenCodeSourceBackedRegistration {
 
     // No append frontier is asserted: a matching logical snapshot is unchanged
     // and every other accepted snapshot is a full replacement.
-    #[allow(dead_code)]
     pub(crate) const fn mutation_policy(self) -> OpenCodeSourceMutationPolicy {
         OpenCodeSourceMutationPolicy::UnchangedOrReplace
     }
@@ -168,8 +163,6 @@ pub(crate) const fn mimocode_source_backed_registration() -> OpenCodeSourceBacke
     OpenCodeSourceBackedRegistration::new(&super::super::MIMOCODE_SQLITE_DIALECT)
 }
 
-// This family aggregate is retained for cross-provider conformance checks.
-#[allow(dead_code)]
 pub(crate) const fn opencode_family_source_backed_registrations(
 ) -> [OpenCodeSourceBackedRegistration; 3] {
     [
@@ -180,7 +173,6 @@ pub(crate) const fn opencode_family_source_backed_registrations(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum OpenCodeSourceMutationPolicy {
     UnchangedOrReplace,
 }
@@ -189,23 +181,15 @@ pub(crate) enum OpenCodeSourceMutationPolicy {
 pub(crate) struct OpenCodeSourceBackedScan {
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
-    #[allow(dead_code, reason = "narrow seam for the pending coordinator hookup")]
     pub(crate) terminal_fence: OpenCodeSourceTerminalFence,
-    // Schema and page-count evidence remain attached to release scan receipts.
-    #[allow(dead_code)]
     pub(crate) schema_family: &'static str,
-    #[allow(dead_code)]
     pub(crate) emitted_pages: u64,
-    #[allow(dead_code)]
     pub(crate) row_decode_passes: u64,
-    #[allow(dead_code)]
     pub(crate) decoded_rows: u64,
-    #[allow(dead_code)]
     pub(crate) peak_buffered_rows: u64,
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code, reason = "narrow seam for the pending coordinator hookup")]
 pub(crate) struct OpenCodeSourceTerminalFence {
     provider: CaptureProvider,
     physical_evidence: SqliteSourceEvidence,
