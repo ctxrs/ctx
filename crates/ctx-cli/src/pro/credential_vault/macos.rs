@@ -571,7 +571,12 @@ mod tests {
     }
 
     fn private_root() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
+        // Darwin's default temporary directory is spelled through the `/var`
+        // compatibility symlink. The vault intentionally rejects symlinked
+        // path components, so exercise it through the canonical native path.
+        let root = tempfile::Builder::new()
+            .prefix("ctx-credential-vault-")
+            .tempdir_in("/private/tmp")?;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
         let pro = root.path().join("pro");
         fs::create_dir(&pro)?;
