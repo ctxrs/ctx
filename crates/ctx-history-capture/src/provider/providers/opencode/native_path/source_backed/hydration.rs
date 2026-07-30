@@ -1,11 +1,14 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use ctx_history_core::{
-    ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SessionHydrationRequest,
-    SourceKey, SourceRecordLocator, TypedKey,
+    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, EventHydrationRequest,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+    NativeRecordCoordinate, SessionHydrationRequest, SourceKey, SourceRecordLocator, TypedKey,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{types::Value, Connection};
 
 use super::{
     open_root_authorized_snapshot,
@@ -29,11 +32,17 @@ use crate::{
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
+pub(super) const HYDRATION_NATIVE_KEY_BATCH: usize = 256;
+
 /// Exact-row resolver bound to one already-discovered provider database.
 #[derive(Debug)]
 pub(crate) struct OpenCodeSourceBackedExactResolver {
     registration: OpenCodeSourceBackedRegistration,
     path: PathBuf,
+    #[cfg(test)]
+    snapshot_opens: Cell<u64>,
+    #[cfg(test)]
+    native_key_batches: Cell<u64>,
 }
 
 impl OpenCodeSourceBackedExactResolver {
@@ -44,7 +53,16 @@ impl OpenCodeSourceBackedExactResolver {
         Self {
             registration,
             path: path.into(),
+            #[cfg(test)]
+            snapshot_opens: Cell::new(0),
+            #[cfg(test)]
+            native_key_batches: Cell::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn hydration_counters(&self) -> (u64, u64) {
+        (self.snapshot_opens.get(), self.native_key_batches.get())
     }
 }
 
@@ -60,17 +78,17 @@ impl ContentSourceResolver for OpenCodeSourceBackedExactResolver {
         })
     }
 
-    fn hydrate_session(
+    fn hydrate_batch(
         &self,
-        request: &SessionHydrationRequest,
-    ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        request: &BatchHydrationRequest,
+    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
         let locators = request
             .events()
             .iter()
             .map(EventHydrationRequest::locator)
             .collect::<Vec<_>>();
         let provider_bytes = self.hydrate_locators(&locators)?;
-        Ok(request
+        let records = request
             .events()
             .iter()
             .zip(provider_bytes)
@@ -78,7 +96,23 @@ impl ContentSourceResolver for OpenCodeSourceBackedExactResolver {
                 event_id: event.event_id(),
                 provider_bytes,
             })
-            .collect())
+            .collect();
+        let result = BatchHydrationResult::new(records).map_err(|error| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                format!("invalid OpenCode-family batch hydration result: {error}"),
+            )
+        })?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
+
+    fn hydrate_session(
+        &self,
+        request: &SessionHydrationRequest,
+    ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        self.hydrate_batch(request.batch())
+            .map(BatchHydrationResult::into_records)
     }
 }
 
@@ -117,6 +151,9 @@ impl OpenCodeSourceBackedExactResolver {
             })?;
         let (source_root, sqlite_snapshot) =
             open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
+        #[cfg(test)]
+        self.snapshot_opens
+            .set(self.snapshot_opens.get().saturating_add(1));
         let resolved = (|| {
             let connection = sqlite_snapshot
                 .connection()
@@ -142,12 +179,15 @@ impl OpenCodeSourceBackedExactResolver {
                     "provider SQLite schema family no longer matches the certified source",
                 ));
             }
-            locators
-                .iter()
-                .map(|locator| {
-                    hydrate_exact_row(connection, self.registration.dialect, &schema, locator)
-                })
-                .collect()
+            let (provider_bytes, _native_key_batches) =
+                hydrate_exact_rows(connection, self.registration.dialect, &schema, locators)?;
+            #[cfg(test)]
+            self.native_key_batches.set(
+                self.native_key_batches
+                    .get()
+                    .saturating_add(_native_key_batches),
+            );
+            Ok(provider_bytes)
         })();
         let snapshot_finish = sqlite_snapshot.finish();
         let root_finish = source_root.revalidate();
@@ -308,16 +348,109 @@ fn validate_hydration_column<'a>(
     Ok(capability)
 }
 
-fn hydrate_exact_row(
+fn hydrate_exact_rows(
     connection: &Connection,
     dialect: &OpenCodeSqliteDialect,
     schema: &OpenCodeNativeSchema,
-    locator: &SourceRecordLocator,
-) -> std::result::Result<Vec<u8>, HydrationFailure> {
+    locators: &[&SourceRecordLocator],
+) -> std::result::Result<(Vec<Vec<u8>>, u64), HydrationFailure> {
+    let mut positions_by_key = BTreeMap::<&str, Vec<usize>>::new();
+    for (position, locator) in locators.iter().enumerate() {
+        positions_by_key
+            .entry(provider_sqlite_native_key(locator, schema)?)
+            .or_default()
+            .push(position);
+    }
+    let native_keys = positions_by_key.keys().copied().collect::<Vec<_>>();
+    let mut hydrated = (0..locators.len())
+        .map(|_| None)
+        .collect::<Vec<Option<Vec<u8>>>>();
+    let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
+        hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            "provider SQLite value limit is unrepresentable",
+        )
+    })?;
+    let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
+        "p"
+    } else {
+        "x"
+    };
+    let mut batch_count = 0_u64;
+
+    for native_key_batch in native_keys.chunks(HYDRATION_NATIVE_KEY_BATCH) {
+        let mut sql = source_backed_event_sql(schema);
+        let placeholders = (2..native_key_batch.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(
+            " where {alias}.id in ({placeholders}) order by {alias}.id"
+        ));
+        let mut parameters = Vec::with_capacity(native_key_batch.len() + 1);
+        parameters.push(Value::Integer(max_json_bytes));
+        parameters.extend(
+            native_key_batch
+                .iter()
+                .map(|native_key| Value::Text((*native_key).to_owned())),
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(temporary_hydration_failure)?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(parameters.iter()))
+            .map_err(temporary_hydration_failure)?;
+        while let Some(row) = rows.next().map_err(temporary_hydration_failure)? {
+            let event = decode_source_event_row(row, schema, dialect).map_err(|error| {
+                hydration_failure(HydrationFailureKind::StaleRecordEvidence, error.to_string())
+            })?;
+            let positions = positions_by_key
+                .get(event.native_identity.as_str())
+                .ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::StaleRecordEvidence,
+                        "provider SQLite native-key batch returned an unrequested row",
+                    )
+                })?;
+            for position in positions {
+                let output = hydrated.get_mut(*position).ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "provider SQLite batch position is out of range",
+                    )
+                })?;
+                if output.is_some() {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::StaleRecordEvidence,
+                        "provider SQLite native-key batch returned a duplicate row",
+                    ));
+                }
+                *output = Some(validate_exact_event(&event, schema, locators[*position])?);
+            }
+        }
+        batch_count = batch_count.saturating_add(1);
+    }
+
+    let hydrated = hydrated
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "one or more provider SQLite rows no longer exist",
+            )
+        })?;
+    Ok((hydrated, batch_count))
+}
+
+fn provider_sqlite_native_key<'a>(
+    locator: &'a SourceRecordLocator,
+    schema: &OpenCodeNativeSchema,
+) -> std::result::Result<&'a str, HydrationFailure> {
     let NativeRecordCoordinate::ProviderSqlite {
         logical_relation,
         primary_key,
-        row_version,
+        ..
     } = locator.coordinate()
     else {
         return Err(hydration_failure(
@@ -337,45 +470,38 @@ fn hydrate_exact_row(
             "OpenCode-family logical relation does not match the selected schema",
         ));
     }
+    Ok(native_identity)
+}
 
-    let mut sql = source_backed_event_sql(schema);
-    let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
-        "p"
-    } else {
-        "x"
+fn validate_exact_event(
+    event: &super::SourceEventRow,
+    schema: &OpenCodeNativeSchema,
+    locator: &SourceRecordLocator,
+) -> std::result::Result<Vec<u8>, HydrationFailure> {
+    let NativeRecordCoordinate::ProviderSqlite {
+        primary_key,
+        row_version,
+        ..
+    } = locator.coordinate()
+    else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "locator is not a provider SQLite coordinate",
+        ));
     };
-    sql.push_str(&format!(" where {alias}.id = ?2 limit 2"));
-    let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
-        hydration_failure(
-            HydrationFailureKind::UnsupportedParserRevision,
-            "provider SQLite value limit is unrepresentable",
-        )
-    })?;
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(temporary_hydration_failure)?;
-    let mut rows = statement
-        .query(params![max_json_bytes, native_identity])
-        .map_err(temporary_hydration_failure)?;
-    let row = rows
-        .next()
-        .map_err(temporary_hydration_failure)?
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::MissingRecord,
-                "provider SQLite row no longer exists",
-            )
-        })?;
-    let event = decode_source_event_row(row, schema, dialect).map_err(|error| {
-        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error.to_string())
-    })?;
+    let TypedKey::Utf8(native_identity) = primary_key else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "OpenCode-family primary key is not typed UTF-8",
+        ));
+    };
     if &event.native_identity != native_identity {
         return Err(hydration_failure(
             HydrationFailureKind::StaleRecordEvidence,
             "provider SQLite native row key no longer matches",
         ));
     }
-    let record_digest = source_event_row_digest(&event);
+    let record_digest = source_event_row_digest(event);
     if &record_digest != locator.record_digest() {
         return Err(hydration_failure(
             HydrationFailureKind::StaleRecordEvidence,

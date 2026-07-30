@@ -1,8 +1,16 @@
-use std::{ffi::OsString, fs};
+use std::{
+    ffi::OsString,
+    fs,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Barrier, Mutex,
+    },
+    thread,
+};
 
 use ctx_history_core::{
-    ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeRecordCoordinate, TypedKey,
+    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
 };
 use ctx_history_index::WriterOptions;
 use rusqlite::{params, Connection};
@@ -11,11 +19,11 @@ use serde_json::json;
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, register_landed_source_backed_route,
-        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     provider_sources::{
-        provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus,
+        discover_provider_sources_for_provider_with_context, provider_source_for_path,
+        DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus,
     },
 };
 
@@ -139,6 +147,22 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
             assert_eq!(hydrated.provider_bytes, document.body.as_bytes());
         }
 
+        let batch_events = documents
+            .iter()
+            .rev()
+            .map(|document| {
+                EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
+            })
+            .collect();
+        let batch_request = BatchHydrationRequest::new(batch_events).unwrap();
+        let batch_resolver = registration.exact_resolver(&path);
+        let hydrated_batch = batch_resolver.hydrate_batch(&batch_request).unwrap();
+        assert_eq!(batch_resolver.hydration_counters(), (1, 1));
+        for (hydrated, document) in hydrated_batch.records().iter().zip(documents.iter().rev()) {
+            assert_eq!(hydrated.event_id, document.event_id);
+            assert_eq!(hydrated.provider_bytes, document.body.as_bytes());
+        }
+
         let conn = Connection::open(&path).unwrap();
         conn.execute(
             "update session_message
@@ -169,6 +193,8 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         assert!(replacement.certificate.frontier().is_none());
         let stale = resolver.hydrate_event(&request).unwrap_err();
         assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+        let stale_batch = batch_resolver.hydrate_batch(&batch_request).unwrap_err();
+        assert_eq!(stale_batch.kind, HydrationFailureKind::StaleRecordEvidence);
     }
 }
 
@@ -202,6 +228,35 @@ fn exact_hydration_does_not_scan_unrelated_provider_rows() {
             .hydrate_event(&request)
             .unwrap();
         assert_eq!(hydrated.provider_bytes, documents[0].body.as_bytes());
+    }
+}
+
+#[test]
+fn grouped_batch_hydration_uses_one_snapshot_and_bounded_native_key_queries() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    create_fixture(&path, "opencode", hydration::HYDRATION_NATIVE_KEY_BATCH + 1);
+    let (_, documents) = collect_scan(registration, &path);
+    let request = BatchHydrationRequest::new(
+        documents
+            .iter()
+            .rev()
+            .map(|document| {
+                EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let resolver = registration.exact_resolver(&path);
+
+    let hydrated = resolver.hydrate_batch(&request).unwrap();
+
+    assert_eq!(resolver.hydration_counters(), (1, 2));
+    assert_eq!(hydrated.records().len(), documents.len());
+    for (record, document) in hydrated.records().iter().zip(documents.iter().rev()) {
+        assert_eq!(record.event_id, document.event_id);
+        assert_eq!(record.provider_bytes, document.body.as_bytes());
     }
 }
 
@@ -487,7 +542,7 @@ fn active_wal_read_only_provider_directory_is_byte_and_name_unchanged() {
 }
 
 #[test]
-fn unchanged_route_replay_stages_no_replacement_generation() {
+fn logical_same_route_replacement_preserves_the_certificate_without_append() {
     for registration in opencode_family_source_backed_registrations() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp
@@ -495,10 +550,10 @@ fn unchanged_route_replay_stages_no_replacement_generation() {
             .join(format!("{}.sqlite", registration.provider().as_str()));
         let index = temp.path().join("index");
         create_fixture(&path, registration.provider().as_str(), 2);
-        let source = provider_source_for_path(registration.provider(), path);
+        let source = provider_source_for_path(registration.provider(), path.clone());
         assert_eq!(source.status, ProviderSourceStatus::Available);
         let mut registry = SourceBackedProviderRegistry::new();
-        register_landed_source_backed_route(
+        register_source_backed_route(
             &mut registry,
             source,
             SourceBackedRouteSelection::ExplicitManual,
@@ -509,12 +564,61 @@ fn unchanged_route_replay_stages_no_replacement_generation() {
             memory_bytes: 15_000_000,
         };
         let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("vacuum").unwrap();
+        drop(connection);
         let replay = refresh_source_backed_generation(&index, &registry, options).unwrap();
 
-        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
-        assert_eq!(replay.commit.opstamp, cold.commit.opstamp);
         assert_eq!(replay.commit.indexed_documents, 2);
         assert_eq!(replay.sources, cold.sources);
+        assert!(cold.removals.is_empty());
+        assert!(replay.removals.is_empty());
+        assert!(replay
+            .sources
+            .iter()
+            .all(|certificate| certificate.frontier().is_none()));
+    }
+}
+
+#[test]
+fn provider_local_route_is_one_pass_replacement_only_and_batch_hydrated() {
+    let route = include_str!("registration.rs");
+    assert!(route.contains("scan_replacement("));
+    assert!(route.contains(".with_batch_hydration("));
+    assert!(route.contains("certify_complete_inventory("));
+    assert!(!route.contains(concat!("captured_route_", "driver")));
+    assert!(!route.contains(concat!("begin_source_", "append")));
+    assert!(!route.contains(concat!("certify_source_", "append")));
+}
+
+#[test]
+fn terminal_fence_verdict_is_computed_once_and_false_stays_fail_closed() {
+    for verdict in [true, false] {
+        let cached = Arc::new(Mutex::new(None));
+        let calls = Arc::new(AtomicU64::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let cached = Arc::clone(&cached);
+                let calls = Arc::clone(&calls);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let mut cached = cached.lock().unwrap();
+                    registration::cache_terminal_fence_result(&mut cached, || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        verdict
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(results, vec![verdict; 8]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -541,12 +645,13 @@ fn registration_discovery_preserves_winners_and_inactive_exclusions() {
     let context = DiscoveryContext::new(&home, &cwd, DiscoveryPlatform::Linux, dirs.clone())
         .with_env("XDG_DATA_HOME", &xdg);
 
-    let kilo = kilo_source_backed_registration().discover(&context);
+    let kilo = discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Kilo);
     assert_eq!(kilo.sources.len(), 1);
     assert_eq!(kilo.sources[0].path, xdg.join("kilo/kilo.db"));
     assert_eq!(kilo.sources[0].status, ProviderSourceStatus::Available);
 
-    let mimo = mimocode_source_backed_registration().discover(&context);
+    let mimo =
+        discover_provider_sources_for_provider_with_context(&context, CaptureProvider::MiMoCode);
     assert_eq!(mimo.sources.len(), 1);
     assert_eq!(mimo.sources[0].path, xdg.join("mimocode/mimocode.db"));
     assert_eq!(mimo.sources[0].status, ProviderSourceStatus::Missing);
@@ -555,15 +660,15 @@ fn registration_discovery_preserves_winners_and_inactive_exclusions() {
         .iter()
         .all(|source| !source.path.to_string_lossy().contains("preview")));
 
-    for (registration, env_name) in [
-        (opencode_source_backed_registration(), "OPENCODE_DB"),
-        (kilo_source_backed_registration(), "KILO_DB"),
-        (mimocode_source_backed_registration(), "MIMOCODE_DB"),
+    for (provider, env_name) in [
+        (CaptureProvider::OpenCode, "OPENCODE_DB"),
+        (CaptureProvider::Kilo, "KILO_DB"),
+        (CaptureProvider::MiMoCode, "MIMOCODE_DB"),
     ] {
         let memory = DiscoveryContext::new(&home, &cwd, DiscoveryPlatform::Linux, dirs.clone())
             .with_env("XDG_DATA_HOME", &xdg)
             .with_env(env_name, ":memory:");
-        let report = registration.discover(&memory);
+        let report = discover_provider_sources_for_provider_with_context(&memory, provider);
         assert!(report.sources.is_empty());
         assert_eq!(report.issues.len(), 1);
     }
