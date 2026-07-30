@@ -183,22 +183,35 @@ pub(super) fn certify_scan(
     let counts = cumulative_counts(base, scan, staged_documents, scan_counters)?;
     let opening = source_observation(source_key, &scan.before_observation)?;
     let closing = source_observation(source_key, &scan.after_observation)?;
-    let checkpoint = scan
-        .checkpoint()
-        .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
-    let frontier = SourceFrontier::new(
-        CODEX_FRONTIER_KIND,
-        TypedKey::bytes(checkpoint.encode()?)?,
-        scan.complete_prefix_end,
-        scan.complete_prefix_sha256,
-    )?;
+    let frontier = match scan.checkpoint() {
+        Some(checkpoint) => Some(SourceFrontier::new(
+            CODEX_FRONTIER_KIND,
+            TypedKey::bytes(checkpoint.encode()?)?,
+            scan.complete_prefix_end,
+            scan.complete_prefix_sha256,
+        )?),
+        None if scan.owner.is_none()
+            && staged_documents == 0
+            && scan_counters.retained_records == 0
+            && scan.disposition == CodexParseDisposition::FullGeneration =>
+        {
+            // A malformed or missing session_meta makes every otherwise
+            // retainable row in this source ineligible: there is no exact
+            // native session owner from which stable identities or locators
+            // can be derived. Certify the physical scan and its rejection
+            // counts, but publish no documents and no append frontier. A
+            // later source change is therefore reparsed as a replacement.
+            None
+        }
+        None => return Err(CodexSourceBackedErrorV0::MissingCheckpoint),
+    };
     Ok(CertifiedSource::certify_with_frontier(
         opening,
         closing,
         CODEX_PARSER_REVISION,
         scan.complete_prefix_sha256,
         counts,
-        Some(frontier),
+        frontier,
     )?)
 }
 

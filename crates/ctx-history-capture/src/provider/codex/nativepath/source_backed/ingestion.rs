@@ -237,6 +237,9 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             if !page.core_rows.is_empty() {
                 return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
             }
+            if page.source_backed_rows.is_empty() {
+                continue;
+            }
             let owner = page
                 .owner
                 .as_ref()
