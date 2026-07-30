@@ -140,12 +140,70 @@ fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
     assert_eq!(projection.documents[0].role.as_deref(), Some("assistant"));
     assert_eq!(
         projection.source.parser_revision(),
-        "openhands-source-backed-v1"
+        "openhands-source-backed-v2"
     );
     assert_eq!(
         projection.source.observation().revision_kind(),
         "openhands-v1-conversation-leaves-v2"
     );
+}
+
+#[test]
+fn file_touched_result_policy_hides_success_body_and_retains_meaningful_failure() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    write_event(
+        &root,
+        "conversation-file-policy",
+        "0001-success.json",
+        json!({
+            "id": "file-success",
+            "timestamp": "2026-07-28T12:00:00Z",
+            "kind": "ObservationEvent",
+            "source": "environment",
+            "observation": {
+                "kind": "FileEditorObservation",
+                "output": "successful editor output must not be searchable",
+                "path": "src/success.rs",
+                "error": null
+            }
+        }),
+    );
+    write_event(
+        &root,
+        "conversation-file-policy",
+        "0002-failure.json",
+        json!({
+            "id": "file-failure",
+            "timestamp": "2026-07-28T12:00:01Z",
+            "kind": "ObservationEvent",
+            "source": "environment",
+            "observation": {
+                "kind": "FileEditorObservation",
+                "content": "meaningful editor failure remains searchable",
+                "path": "src/failure.rs",
+                "error": "write failed"
+            }
+        }),
+    );
+
+    let projection = project(&root).unwrap().remove(0);
+    assert_eq!(projection.source.counts().complete_records, 2);
+    assert_eq!(projection.source.counts().ignored_records, 1);
+    assert_eq!(projection.source.counts().retained_records, 1);
+    assert_eq!(projection.documents.len(), 1);
+    assert_eq!(projection.documents[0].event_type, "file_touched");
+    assert_eq!(
+        projection.documents[0].body,
+        "meaningful editor failure remains searchable"
+    );
+    assert_eq!(
+        projection.documents[0].touched_files,
+        vec!["src/failure.rs".to_owned()]
+    );
+    assert!(!projection.documents[0]
+        .body
+        .contains("successful editor output"));
 }
 
 #[test]
