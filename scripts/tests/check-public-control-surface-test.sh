@@ -11,7 +11,10 @@ mkdir -p \
   "${fixture}/contracts" \
   "${fixture}/contracts/stable-defaults" \
   "${fixture}/crates/ctx-cli/src/analytics" \
+  "${fixture}/crates/ctx-cli/src/upgrade" \
   "${fixture}/crates/ctx-cli/src" \
+  "${fixture}/crates/ctx-cli/tests" \
+  "${fixture}/scripts" \
   "${fixture}/docs"
 cp "${repo_root}/contracts/public-control-surface-v1.json" "${fixture}/contracts/"
 cp "${repo_root}/contracts/stable-defaults/v0.25.0.json" \
@@ -20,6 +23,13 @@ cp "${repo_root}/crates/ctx-cli/src/config.rs" "${fixture}/crates/ctx-cli/src/"
 cp "${repo_root}/crates/ctx-cli/src/deprecated_controls.rs" "${fixture}/crates/ctx-cli/src/"
 cp "${repo_root}/crates/ctx-cli/src/analytics/operation.rs" \
   "${fixture}/crates/ctx-cli/src/analytics/"
+cp "${repo_root}/crates/ctx-cli/src/config_tests.rs" "${fixture}/crates/ctx-cli/src/"
+cp "${repo_root}/crates/ctx-cli/src/process_environment.rs" "${fixture}/crates/ctx-cli/src/"
+cp "${repo_root}/crates/ctx-cli/src/upgrade/metadata.rs" \
+  "${fixture}/crates/ctx-cli/src/upgrade/"
+cp "${repo_root}/crates/ctx-cli/tests/upgrade.rs" "${fixture}/crates/ctx-cli/tests/"
+cp "${repo_root}/scripts/smoke-daemon-semantic-release.ps1" "${fixture}/scripts/"
+cp "${repo_root}/scripts/smoke-daemon-semantic-release.sh" "${fixture}/scripts/"
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"
@@ -142,6 +152,17 @@ add_undocumented_helper_env() {
     "$1/crates/ctx-cli/src/config.rs"
 }
 
+add_uncontained_retired_control() {
+  python3 - "$1/scripts/uncontained.rs" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+control = "CTX_" + "FUNCTIONS_BASE"
+path.write_text(f'const RETIRED: &str = "{control}";\n')
+PY
+}
+
 expect_fail inventory-default \
   'analytics delivery released default differs from empty-config runtime' \
   change_inventory_default
@@ -163,5 +184,8 @@ expect_fail rewritten-pinned-history \
 expect_fail undocumented-helper-env \
   'config environment variables differ from contract' \
   add_undocumented_helper_env
+expect_fail uncontained-retired-control \
+  'retired controls remain' \
+  add_uncontained_retired_control
 
 printf 'public control surface checker tests passed\n'
