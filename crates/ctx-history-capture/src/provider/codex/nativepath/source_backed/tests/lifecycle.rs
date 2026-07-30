@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn malformed_session_owner_quarantines_only_that_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let valid_id = "019fa000-0000-7000-8000-000000000009";
+    let malformed_id = "019fa000-0000-7000-8000-000000000010";
+    write_session(
+        &sessions,
+        valid_id,
+        &[message("assistant", "valid source remains searchable")],
+    );
+    fs::write(
+        session_path(&sessions, malformed_id),
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{malformed_id}\"}}\n{}\n",
+            message("assistant", "must not be published without an exact owner")
+        ),
+    )
+    .unwrap();
+
+    let cold = ingest_codex_source_backed_inner_v0(
+        &sessions,
+        &index,
+        ColdParallelOptionsV0 {
+            scanner_workers: Some(2),
+            ..ColdParallelOptionsV0::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cold.commit.indexed_documents, 1);
+    assert_eq!(cold.counters.staged_documents, 1);
+    assert_eq!(cold.counters.rejected_records_scanned, 2);
+
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(verified.document_count(), 1);
+    assert_eq!(
+        search_event_ids(&verified, "valid source remains searchable").len(),
+        1
+    );
+    assert!(search_event_ids(&verified, "must not be published without an exact owner").is_empty());
+    let malformed_source = codex_source_key(malformed_id).unwrap();
+    let malformed_certificate = verified
+        .manifest()
+        .sources
+        .iter()
+        .find(|source| {
+            source
+                .observation()
+                .source()
+                .exact_descriptor_eq(&malformed_source)
+        })
+        .unwrap();
+    assert_eq!(malformed_certificate.counts().complete_records, 2);
+    assert_eq!(malformed_certificate.counts().rejected_records, 2);
+    assert_eq!(malformed_certificate.counts().indexed_documents, 0);
+    assert!(malformed_certificate.frontier().is_none());
+
+    let before_generation = verified.generation_id().to_owned();
+    let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(replay.commit.generation_id, before_generation);
+    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 1);
+}
+
+#[test]
 fn source_backed_cold_parallel_matches_single_lane_semantics() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

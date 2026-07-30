@@ -261,23 +261,25 @@ fn run_cold_scan_lane_v0(
             if !page.core_rows.is_empty() {
                 return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
             }
-            let owner = page
-                .owner
-                .as_ref()
-                .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
-            validate_owner(owner, &job.native_session_id)?;
             let mut documents = Vec::with_capacity(page.source_backed_rows.len());
-            for row in page.source_backed_rows {
-                documents.push(codex_lexical_document(
-                    &job.source,
-                    &job.source_key,
-                    job.session_id,
-                    owner,
-                    row,
-                )?);
-                staged_documents = staged_documents
-                    .checked_add(1)
-                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+            if !page.source_backed_rows.is_empty() {
+                let owner = page
+                    .owner
+                    .as_ref()
+                    .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
+                validate_owner(owner, &job.native_session_id)?;
+                for row in page.source_backed_rows {
+                    documents.push(codex_lexical_document(
+                        &job.source,
+                        &job.source_key,
+                        job.session_id,
+                        owner,
+                        row,
+                    )?);
+                    staged_documents = staged_documents
+                        .checked_add(1)
+                        .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+                }
             }
             scanner.release_transient_record_buffer();
             worker_busy += busy_started.elapsed();
