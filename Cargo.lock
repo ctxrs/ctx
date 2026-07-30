@@ -774,6 +774,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokenizers",
  "toml_edit 0.22.27",
+ "unicode-segmentation",
  "unicode-width",
  "ureq 2.12.1",
  "url",

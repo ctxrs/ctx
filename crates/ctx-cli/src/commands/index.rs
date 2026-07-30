@@ -128,9 +128,8 @@ fn run_index_watch(
     ui: &mut Ui,
 ) -> Result<()> {
     let interval = Duration::from_secs(args.interval_seconds);
-    let stdout = io::stdout();
     let jsonl_output = args.format == IndexWatchFormat::Jsonl;
-    let mut output = IndexWatchOutput::new(stdout.lock(), *ui.stdout_context());
+    let mut output = index_watch_output(ui);
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = IndexSelection::default_for(&status);
@@ -149,6 +148,11 @@ fn run_index_watch(
         thread::sleep(interval);
     }
     Ok(())
+}
+
+fn index_watch_output(ui: &mut Ui) -> IndexWatchOutput<&mut (dyn io::Write + Send)> {
+    let context = *ui.stdout_context();
+    IndexWatchOutput::new(ui.stdout_writer(), context)
 }
 
 struct IndexWatchOutput<W> {

@@ -1,4 +1,7 @@
-use std::io::Write as _;
+use std::{
+    io::{self, Write as _},
+    sync::{Arc, Mutex},
+};
 
 use unicode_width::UnicodeWidthStr as _;
 
@@ -39,6 +42,26 @@ fn strip_ansi(rendered: &str) -> String {
     let mut stream = anstream::StripStream::new(Vec::new());
     stream.write_all(rendered.as_bytes()).unwrap();
     String::from_utf8(stream.into_inner()).unwrap()
+}
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl SharedWriter {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -182,11 +205,60 @@ fn modified_target_has_a_force_recovery_command() {
         &[install_result(SlashCommandInstallStatus::Modified)],
     );
     let rendered = document.render_plain();
-    let compact = rendered.split_whitespace().collect::<String>();
     assert!(rendered.starts_with("! 1 slash-command target needs attention\n"));
-    assert!(rendered.contains("local command edits detected"));
+    assert!(!rendered.contains("local command edits detected"));
+
+    let diagnostic = render_install_failures(
+        &context,
+        &[install_result(SlashCommandInstallStatus::Modified)],
+    )
+    .unwrap()
+    .render_plain();
+    let compact = diagnostic.split_whitespace().collect::<String>();
+    assert!(diagnostic.contains("local command edits detected"));
     assert!(compact.contains("ctxintegrationsinstallslash-commands--agentopencode--force"));
     assert_fits(&document, &context);
+}
+
+#[test]
+fn failed_target_details_and_recovery_are_written_to_stderr() {
+    let temp = tempdir().unwrap();
+    let context = PathContext::for_tests(temp.path().to_owned(), temp.path().to_owned());
+    let target = match SlashCommandAgentArg::GeminiCli.install_plan(true, &context) {
+        SlashCommandPlan::File(target) => target,
+        _ => panic!("expected file target"),
+    };
+    fs::create_dir_all(&target.base_dir).unwrap();
+    fs::write(target.command_path(), "prompt = 'local'\n").unwrap();
+
+    let stdout = SharedWriter::default();
+    let stdout_copy = stdout.clone();
+    let stderr = SharedWriter::default();
+    let stderr_copy = stderr.clone();
+    let stdout_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    let mut ui = Ui::with_writers(stdout, stdout_context, stderr, stderr_context);
+    let mut telemetry = IntegrationTelemetry::default();
+    let result = run_install(
+        SlashCommandInstallArgs {
+            agent: vec![SlashCommandAgentArg::GeminiCli],
+            all_agents: false,
+            project: true,
+            format: JsonOutputFormat::Text,
+            force: false,
+        },
+        &context,
+        &mut telemetry,
+        &mut ui,
+    );
+
+    assert!(result.is_err());
+    let stdout = stdout_copy.text();
+    let stderr = stderr_copy.text();
+    assert!(stdout.contains("Targets"));
+    assert!(!stdout.contains("local command edits detected"));
+    assert!(stderr.contains("local command edits detected"));
+    assert!(stderr.contains("--agent gemini-cli --force"));
 }
 
 #[test]

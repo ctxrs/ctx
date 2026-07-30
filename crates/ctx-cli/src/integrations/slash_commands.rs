@@ -539,6 +539,9 @@ pub(crate) fn run_install(
     } else {
         let document = render_install_results(ui.stdout_context(), &results);
         ui.write_stdout(&document)?;
+        if let Some(diagnostics) = render_install_failures(ui.stderr_context(), &results) {
+            ui.write_stderr(&diagnostics)?;
+        }
     }
     if failed > 0 {
         if !args.format.is_json() {
@@ -797,26 +800,6 @@ fn render_install_results(context: &RenderContext, results: &[InstallResult]) ->
     document.push_blank();
     document.append(section("Targets", table(context, &targets)));
 
-    for result in results.iter().filter(|result| !result.success) {
-        let summary = format!("{} was not changed", result.agent.display_name());
-        let command = format!(
-            "ctx integrations install slash-commands --agent {} --force",
-            result.agent.id()
-        );
-        document.push_blank();
-        document.append(diagnostic(
-            context,
-            Diagnostic {
-                level: DiagnosticLevel::Warning,
-                summary: &summary,
-                detail: result.error.as_deref(),
-                fields: &[],
-                action: (result.status == SlashCommandInstallStatus::Modified)
-                    .then_some(Action { command: &command }),
-            },
-        ));
-    }
-
     if results
         .iter()
         .any(|result| result.status == SlashCommandInstallStatus::SkillOnly)
@@ -851,6 +834,32 @@ fn render_install_results(context: &RenderContext, results: &[InstallResult]) ->
         document.append(section("Manual setup", fields(context, &guidance)));
     }
     document
+}
+
+fn render_install_failures(context: &RenderContext, results: &[InstallResult]) -> Option<Document> {
+    let mut document = Document::new();
+    for result in results.iter().filter(|result| !result.success) {
+        let summary = format!("{} was not changed", result.agent.display_name());
+        let command = format!(
+            "ctx integrations install slash-commands --agent {} --force",
+            result.agent.id()
+        );
+        if !document.is_empty() {
+            document.push_blank();
+        }
+        document.append(diagnostic(
+            context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: &summary,
+                detail: result.error.as_deref(),
+                fields: &[],
+                action: (result.status == SlashCommandInstallStatus::Modified)
+                    .then_some(Action { command: &command }),
+            },
+        ));
+    }
+    (!document.is_empty()).then_some(document)
 }
 
 fn install_result_verb(result: &InstallResult) -> &'static str {
