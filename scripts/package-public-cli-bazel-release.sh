@@ -3,11 +3,13 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: bazel run --config=release //:ctx_release_<target> -- [--output-dir PATH] [--build-info PATH]
+Usage: bazel run --config=release //:ctx_release_<target> -- [--output-dir PATH] [--private-symbols-dir PATH] [--build-info PATH]
 
 Packages the exact target-configured //crates/ctx-cli:ctx Bazel output declared
 by the selected release route. The tool never builds, publishes, or invokes
-Cargo. Linux requires build-info from the pinned builder because only that
+Cargo. It extracts detached symbols from the exact linked artifact, strips and
+signs the shipping copy, and writes symbols outside the public candidate
+directory. Linux requires build-info from the pinned builder because only that
 builder can author its provenance.
 USAGE
 }
@@ -129,6 +131,7 @@ cargo_lock_runfile=""
 target_matrix_runfile=""
 target_id=""
 output_dir="target/public-cli-artifacts"
+private_symbols_dir=""
 build_info=""
 seen_advisory_gate=0
 seen_artifact=0
@@ -141,6 +144,7 @@ seen_cargo_lock=0
 seen_target_matrix=0
 seen_target=0
 seen_output=0
+seen_private_symbols=0
 seen_build_info=0
 
 while [[ $# -gt 0 ]]; do
@@ -232,6 +236,14 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
       output_dir="$1"
+      ;;
+    --private-symbols-dir)
+      seen_private_symbols=$((seen_private_symbols + 1))
+      [[ "${seen_private_symbols}" == "1" ]] \
+        || usage_error "duplicate argument: ${option}"
+      shift
+      [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
+      private_symbols_dir="$1"
       ;;
     --build-info)
       seen_build_info=$((seen_build_info + 1))
@@ -347,10 +359,34 @@ import sys
 print(os.path.abspath(sys.argv[1]))
 PY
 )"
+if [[ -z "${private_symbols_dir}" ]]; then
+  private_symbols_dir="${output_dir}.private-debug-symbols"
+elif [[ "${private_symbols_dir}" != /* ]]; then
+  private_symbols_dir="${source_repo}/${private_symbols_dir}"
+fi
+private_symbols_dir="$(python3 - "${private_symbols_dir}" <<'PY'
+import os
+import sys
+print(os.path.abspath(sys.argv[1]))
+PY
+)"
+case "${private_symbols_dir}/" in
+  "${output_dir}/"*)
+    die "private symbol output must be outside the public candidate directory"
+    ;;
+esac
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output must not already exist: ${private_symbols_dir}"
 case "${output_dir}/" in
   "${source_repo}/"*)
     git -C "${source_repo}" check-ignore -q -- "${output_dir}/.ctx-release-output" \
       || die "release output inside the checkout must be ignored by Git: ${output_dir}"
+    ;;
+esac
+case "${private_symbols_dir}/" in
+  "${source_repo}/"*)
+    git -C "${source_repo}" check-ignore -q -- "${private_symbols_dir}/.ctx-symbols-output" \
+      || die "private symbol output inside the checkout must be ignored by Git: ${private_symbols_dir}"
     ;;
 esac
 
@@ -396,6 +432,12 @@ cleanup() {
     && -d "${stage_dir}" ]]; then
     rm -rf -- "${stage_dir}"
   fi
+  if [[ -n "${symbols_install:-}" \
+    && -n "${symbols_parent:-}" \
+    && "${symbols_install}" == "${symbols_parent}/.ctx-private-symbols."* \
+    && -d "${symbols_install}" && ! -L "${symbols_install}" ]]; then
+    rm -rf -- "${symbols_install}"
+  fi
 }
 trap cleanup EXIT
 
@@ -415,6 +457,17 @@ staged="${stage_dir}/${binary_name}"
 install -m 0755 "${artifact}" "${staged}"
 [[ "$(sha256_file "${staged}")" == "${artifact_sha_before}" ]] \
   || die "staged artifact does not match the declared Bazel output"
+staged_symbols="${stage_dir}/private-debug-symbols"
+python3 -B "${repo_root}/scripts/release/detached-debug-symbols.py" prepare \
+  --artifact "${staged}" \
+  --output-dir "${staged_symbols}" \
+  --platform "${target_id}" \
+  --product ctx
+python3 -B "${repo_root}/scripts/release/detached-debug-symbols.py" verify-prepared \
+  --artifact "${staged}" \
+  --output-dir "${staged_symbols}" \
+  --platform "${target_id}" \
+  --product ctx
 
 macos_signing_mode="${CTX_MACOS_RELEASE_SIGNING:-optional}"
 if [[ "${CTX_PUBLIC_CLI_ARTIFACT_MATRIX:-0}" == "1" \
@@ -447,6 +500,17 @@ staged_identity_output="$("${identity_env[@]}" "${staged}" _release-build-identi
 
 packaged_sha="$(sha256_file "${staged}")"
 printf '%s\n' "${packaged_sha}" >"${staged}.sha256"
+python3 -B "${repo_root}/scripts/release/detached-debug-symbols.py" finalize \
+  --artifact "${staged}" \
+  --output-dir "${staged_symbols}" \
+  --platform "${target_id}" \
+  --product ctx \
+  --source-commit "${source_commit}"
+python3 -B "${repo_root}/scripts/release/detached-debug-symbols.py" verify \
+  --artifact "${staged}" \
+  --output-dir "${staged_symbols}" \
+  --platform "${target_id}" \
+  --product ctx
 
 host_os="$(uname -s 2>/dev/null || true)"
 host_arch="$(uname -m 2>/dev/null || true)"
@@ -667,6 +731,7 @@ for name in "${reserved_leaves[@]}"; do
 done
 for path in "${stage_dir}"/*; do
   [[ -e "${path}" ]] || continue
+  [[ "${path}" == "${staged_symbols}" ]] && continue
   [[ -f "${path}" && ! -L "${path}" ]] \
     || die "staged candidate output is not a regular file: ${path}"
   install_args+=(--file "$(basename "${path}")")
@@ -674,9 +739,26 @@ done
 python3 -B "${repo_root}/scripts/install-public-cli-candidate.py" \
   "${install_args[@]}"
 
+symbols_parent="$(dirname "${private_symbols_dir}")"
+mkdir -p "${symbols_parent}"
+symbols_install="$(mktemp -d "${symbols_parent}/.ctx-private-symbols.XXXXXX")"
+chmod 0700 "${symbols_install}"
+install -m 0600 "${staged_symbols}/symbols.tar.gz" "${symbols_install}/symbols.tar.gz"
+install -m 0600 "${staged_symbols}/manifest.json" "${symbols_install}/manifest.json"
+python3 -B "${repo_root}/scripts/release/detached-debug-symbols.py" verify \
+  --artifact "${output_dir}/${binary_name}" \
+  --output-dir "${symbols_install}" \
+  --platform "${target_id}" \
+  --product ctx
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output appeared during packaging: ${private_symbols_dir}"
+mv "${symbols_install}" "${private_symbols_dir}"
+symbols_install=""
+
 trap - EXIT
 cleanup
 printf 'public CLI Bazel candidate: %s\n' "${output_dir}/${binary_name}"
+printf 'public CLI private debug symbols: %s\n' "${private_symbols_dir}"
 printf 'public CLI distribution artifact: %s\n' "${CTX_PUBLIC_TARGET_ARTIFACT}"
 printf 'public CLI source commit: %s\n' "${source_commit}"
 printf 'public CLI sha256: %s\n' "${packaged_sha}"

@@ -45,6 +45,8 @@ cp "${source_root}/scripts/check-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/install-public-cli-candidate.py" "${repo}/scripts/"
 cp "${source_root}/scripts/release/public-cli-bazel-build-info.py" \
   "${repo}/scripts/release/"
+cp "${source_root}/scripts/release/detached-debug-symbols.py" \
+  "${repo}/scripts/release/"
 cp "${source_root}/scripts/release/linux-bazel-release.Dockerfile" \
   "${repo}/scripts/release/"
 cp "${source_root}/.bazelversion" "${repo}/.bazelversion"
@@ -226,24 +228,6 @@ exit 99
 EOF
 done
 
-cat >"${repo}/bazel-out/k8-opt/bin/crates/ctx-cli/ctx" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-case "${1:-}" in
-  _release-build-identity)
-    printf 'CTX_RELEASE_BUILD_SOURCE_COMMIT=@SOURCE_COMMIT@\n'
-    printf 'CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=@CARGO_LOCK_SHA256@\n'
-    printf 'CTX_RELEASE_BUILD_TARGET=x86_64-unknown-linux-gnu\n'
-    ;;
-  --version)
-    printf 'ctx 1.0.0\n'
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-EOF
-
 cat >"${repo}/inputs/rustc" <<'EOF'
 #!/usr/bin/env sh
 printf 'rustc 1.97.1 (8bab26f4f 2026-07-10)\n'
@@ -252,7 +236,6 @@ EOF
 chmod 0755 \
   "${repo}/scripts/fake-osv-scanner.py" \
   "${repo}/scripts/"*.sh \
-  "${repo}/bazel-out/k8-opt/bin/crates/ctx-cli/ctx" \
   "${repo}/inputs/rustc"
 
 python3 - \
@@ -307,17 +290,51 @@ git -C "${repo}" add .
 git -C "${repo}" commit -qm baseline
 source_commit="$(git -C "${repo}" rev-parse HEAD)"
 artifact="${repo}/bazel-out/k8-opt/bin/crates/ctx-cli/ctx"
-python3 - "${artifact}" "${source_commit}" "$(sha256sum "${repo}/Cargo.lock" | awk '{print $1}')" <<'PY'
-from pathlib import Path
-import sys
+cargo_lock_sha256="$(sha256sum "${repo}/Cargo.lock" | awk '{print $1}')"
+compile_fixture() {
+  local destination="$1"
+  local embedded_commit="$2"
+  local embedded_target="$3"
+  local fixture_source="${test_root}/ctx-fixture.c"
+  mkdir -p "$(dirname "${destination}")"
+  cat >"${fixture_source}" <<EOF
+#include <stdio.h>
+#include <string.h>
 
-path = Path(sys.argv[1])
-value = path.read_text(encoding="utf-8")
-value = value.replace("@SOURCE_COMMIT@", sys.argv[2])
-value = value.replace("@CARGO_LOCK_SHA256@", sys.argv[3])
-path.write_text(value, encoding="utf-8")
-PY
-chmod 0755 "${artifact}"
+static int identity(void) {
+  puts("CTX_RELEASE_BUILD_SOURCE_COMMIT=${embedded_commit}");
+  puts("CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}");
+  puts("CTX_RELEASE_BUILD_TARGET=${embedded_target}");
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "_release-build-identity") == 0) {
+    return identity();
+  }
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    puts("ctx 1.0.0");
+    return 0;
+  }
+  return 1;
+}
+EOF
+  cc -g -O2 -Wl,--build-id=sha1 -o "${destination}" "${fixture_source}"
+  chmod 0755 "${destination}"
+}
+compile_fixture \
+  "${artifact}" \
+  "${source_commit}" \
+  x86_64-unknown-linux-gnu
+build_input_artifact="${repo}/inputs/ctx"
+cp "${artifact}" "${build_input_artifact}"
+chmod 0755 "${build_input_artifact}"
+prepared_symbols="${repo}/inputs/private-debug-symbols"
+python3 "${repo}/scripts/release/detached-debug-symbols.py" prepare \
+  --artifact "${build_input_artifact}" \
+  --output-dir "${prepared_symbols}" \
+  --platform linux-x64 \
+  --product ctx
 build_info="${repo}/inputs/linux-x64.build-info.json"
 builder_digest="sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982"
 builder_recipe_sha256="$(
@@ -327,7 +344,7 @@ builder_recipe_sha256="$(
 
 python3 "${repo}/scripts/write-public-cli-build-info.py" \
   --output "${build_info}" \
-  --artifact "${artifact}" \
+  --artifact "${build_input_artifact}" \
   --cargo-lock "${repo}/Cargo.lock" \
   --platform linux-x64 \
   --target x86_64-unknown-linux-gnu \
@@ -440,6 +457,14 @@ test -s "${repo}/out-success/ctx.third-party-notices.txt.sha256"
 test -s "${repo}/out-success/ctx.size.json"
 test -s "${repo}/out-success/ctx.candidate.json"
 test -s "${repo}/out-success/ctx.dependency-advisory.json"
+test -s "${repo}/out-success.private-debug-symbols/symbols.tar.gz"
+test -s "${repo}/out-success.private-debug-symbols/manifest.json"
+test ! -e "${repo}/out-success.private-debug-symbols/prepared.json"
+python3 "${repo}/scripts/release/detached-debug-symbols.py" verify \
+  --artifact "${repo}/out-success/ctx" \
+  --output-dir "${repo}/out-success.private-debug-symbols" \
+  --platform linux-x64 \
+  --product ctx
 grep -Fq '"status": "clean"' \
   "${repo}/out-success/ctx.dependency-advisory.json"
 test "$(sha256sum "${repo}/out-success/ctx.cdx.json" | awk '{print $1}')" \
@@ -556,10 +581,10 @@ fi
 grep -Fq -- '--rustc is route-owned' "${test_root}/caller-rustc.stderr"
 
 foreign="${repo}/bazel-out/foreign/bin/crates/ctx-cli/ctx"
-mkdir -p "$(dirname "${foreign}")"
-sed 's/CTX_RELEASE_BUILD_TARGET=x86_64-unknown-linux-gnu/CTX_RELEASE_BUILD_TARGET=aarch64-unknown-linux-gnu/' \
-  "${artifact}" >"${foreign}"
-chmod 0755 "${foreign}"
+compile_fixture \
+  "${foreign}" \
+  "${source_commit}" \
+  aarch64-unknown-linux-gnu
 ln -sfn "${foreign}" "${route_runfiles}/artifact"
 if package --output-dir out-foreign \
   >"${test_root}/foreign.stdout" 2>"${test_root}/foreign.stderr"; then
@@ -569,10 +594,10 @@ fi
 grep -Fq 'artifact identity does not match' "${test_root}/foreign.stderr"
 
 stale="${repo}/bazel-out/stale/bin/crates/ctx-cli/ctx"
-mkdir -p "$(dirname "${stale}")"
-sed "s/${source_commit}/ffffffffffffffffffffffffffffffffffffffff/" \
-  "${artifact}" >"${stale}"
-chmod 0755 "${stale}"
+compile_fixture \
+  "${stale}" \
+  ffffffffffffffffffffffffffffffffffffffff \
+  x86_64-unknown-linux-gnu
 ln -sfn "${stale}" "${route_runfiles}/artifact"
 if package --output-dir out-stale \
   >"${test_root}/stale.stdout" 2>"${test_root}/stale.stderr"; then

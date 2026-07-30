@@ -41,11 +41,10 @@ test:ci --test_timeout=300,900,1800,3600
 
 build:release --compilation_mode=opt
 build:release --stamp=true
-# Bazel's generic strip setting does not propagate Cargo's release-profile
-# policy into rules_rust link actions. Keep both settings: --strip covers
-# native rules, while rustc owns symbol stripping for every Rust release binary.
-build:release --strip=always
-build:release --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols
+# Release packaging extracts private detached symbols and strips the exact same
+# linked artifact before signing. Keep the Bazel intermediate symbol-bearing.
+build:release --strip=never
+build:release --@rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=1
 # Freeze the Apple deployment policy inside the release action environment so
 # native SDK upgrades cannot silently raise the minimum supported macOS.
 build:release --action_env=MACOSX_DEPLOYMENT_TARGET=13.0

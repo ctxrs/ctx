@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: build-linux-x64-bazel-dogfood.sh --staging-dogfood --source-commit SHA --version VERSION --output-dir PATH
+Usage: build-linux-x64-bazel-dogfood.sh --staging-dogfood --source-commit SHA --version VERSION --output-dir PATH [--private-symbols-dir PATH]
 
 Builds and packages one staging-only Linux x64 Core dogfood candidate through
 //:ctx_release_linux_x64 --config=release. This command does not sign, upload,
@@ -22,6 +22,7 @@ die() {
 source_commit=""
 version=""
 output_dir=""
+private_symbols_dir=""
 staging_dogfood=0
 while (( $# > 0 )); do
   case "$1" in
@@ -39,6 +40,10 @@ while (( $# > 0 )); do
     --output-dir)
       shift
       output_dir="${1:-}"
+      ;;
+    --private-symbols-dir)
+      shift
+      private_symbols_dir="${1:-}"
       ;;
     -h|--help)
       usage
@@ -70,6 +75,16 @@ done
   echo "error: --output-dir is required" >&2
   exit 64
 }
+if [[ -z "${private_symbols_dir}" ]]; then
+  private_symbols_dir="${output_dir}.private-debug-symbols"
+fi
+[[ "${private_symbols_dir}" == /* ]] \
+  || die "--private-symbols-dir must be absolute"
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output must not already exist"
+private_symbols_parent="$(dirname "${private_symbols_dir}")"
+mkdir -p "${private_symbols_parent}"
+symbols_stage_parent=""
 [[ "$(uname -s)" == "Linux" ]] \
   || die "Linux x64 Bazel dogfood construction requires Linux"
 case "$(uname -m)" in
@@ -270,8 +285,14 @@ cleanup() {
     chmod -R u+w -- "${task_root}" 2>/dev/null || true
     rm -rf -- "${task_root}"
   fi
+  if [[ -n "${symbols_stage_parent:-}" \
+    && "${symbols_stage_parent}" == "${private_symbols_parent}/.ctx-symbol-stage."* \
+    && -d "${symbols_stage_parent}" && ! -L "${symbols_stage_parent}" ]]; then
+    rm -rf -- "${symbols_stage_parent}"
+  fi
 }
 trap cleanup EXIT
+symbols_stage_parent="$(mktemp -d "${private_symbols_parent}/.ctx-symbol-stage.XXXXXX")"
 install -d -m 0700 \
   "${task_root}/release-input" \
   "${task_root}/cache"
@@ -298,6 +319,7 @@ docker_run_args=(
   -v "${osv_scanner_input}:/release-advisory/osv-scanner:ro"
   -v "${osv_database_input}:/release-advisory/database:ro"
   -v "${osv_metadata_input}:/release-advisory/database-metadata.json:ro"
+  -v "${symbols_stage_parent}:/release-symbol-output:rw"
   -w "${repo_root}"
 )
 git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
@@ -352,6 +374,11 @@ docker run "${docker_run_args[@]}" \
     test -f "$artifact_runfile" -a -x "$artifact_runfile"
     test -f "$rustc_runfile" -a -x "$rustc_runfile"
     install -m 0755 "$artifact_runfile" /build/release-input/ctx
+    python3 scripts/release/detached-debug-symbols.py prepare \
+      --artifact /build/release-input/ctx \
+      --output-dir /build/release-input/private-debug-symbols \
+      --platform linux-x64 \
+      --product ctx
     "$rustc_runfile" --version > /build/release-input/rustc.version
   '
 
@@ -405,8 +432,15 @@ docker run "${docker_run_args[@]}" \
     TEST_WORKSPACE=_main \
     "$route" \
       --build-info /build/release-input/ctx.build-info.json \
-      --output-dir /release-output
+      --output-dir /release-output \
+      --private-symbols-dir /release-symbol-output/bundle
   '
+
+[[ -d "${symbols_stage_parent}/bundle" ]] \
+  || die "packaged dogfood output is missing private debug symbols"
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output appeared during construction"
+mv "${symbols_stage_parent}/bundle" "${private_symbols_dir}"
 
 [[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
   || die "source commit changed during Linux x64 Bazel dogfood construction"

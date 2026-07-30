@@ -6,12 +6,20 @@ checker="${repo_root}/scripts/check-release-binary-compat.sh"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-binary-compat-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 
-rust_strip_setting='build:release --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols'
-if [[ "$(grep -Fxc "${rust_strip_setting}" "${repo_root}/.bazelrc")" != 1 ]]; then
-  printf 'Bazel release configuration must contain exactly: %s\n' \
-    "${rust_strip_setting}" >&2
+for symbol_setting in \
+  'build:release --strip=never' \
+  'build:release --@rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=1'; do
+  if [[ "$(grep -Fxc "${symbol_setting}" "${repo_root}/.bazelrc")" != 1 ]]; then
+    printf 'Bazel release configuration must contain exactly: %s\n' \
+      "${symbol_setting}" >&2
+    exit 1
+  fi
+done
+grep -Fq 'detached-debug-symbols.py" prepare' \
+  "${repo_root}/scripts/package-public-cli-bazel-release.sh" || {
+  echo "release packaging does not extract and strip detached symbols" >&2
   exit 1
-fi
+}
 macos_deployment_setting='build:release --action_env=MACOSX_DEPLOYMENT_TARGET=13.0'
 if [[ "$(grep -Fxc "${macos_deployment_setting}" "${repo_root}/.bazelrc")" != 1 ]]; then
   printf 'Bazel release configuration must contain exactly: %s\n' \

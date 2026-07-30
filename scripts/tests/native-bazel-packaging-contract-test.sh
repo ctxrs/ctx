@@ -27,6 +27,9 @@ for required in \
   'scripts/public-cli-host-runtime-evidence.sh' \
   'scripts/public-cli-runtime-authority.sh' \
   '/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json' \
+  '--private-symbols-dir' \
+  'scripts/release/detached-debug-symbols.py prepare' \
+  '/release-symbol-output/bundle' \
   '--network none' \
   '--lockfile_mode=error' \
   '${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256' \
@@ -40,6 +43,21 @@ for required in \
     exit 1
   }
 done
+
+for required in \
+  'detached-debug-symbols.py" prepare' \
+  'detached-debug-symbols.py" finalize' \
+  'public CLI private debug symbols:'; do
+  grep -Fq -- "${required}" "${packager}" || {
+    printf 'native release packager omits detached symbols: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+if grep -Fq 'private-debug-symbols' "${pipeline}"; then
+  echo "private debug symbols must not be uploaded as Buildkite artifacts" >&2
+  exit 1
+fi
 
 for required in \
   '--declared-advisory-gate-runfile' \
