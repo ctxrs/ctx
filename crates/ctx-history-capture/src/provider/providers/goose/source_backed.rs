@@ -60,7 +60,7 @@ pub(crate) use hydration::GooseSourceBackedResolverV0;
 const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
 const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
 const GOOSE_SOURCE_SCHEMA_VARIANT: &str = "goose-sessions-sqlite-v0";
-const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v2";
+const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v3";
 const GOOSE_NATIVE_SESSION_NAMESPACE: &str = "goose.session";
 const GOOSE_NATIVE_EVENT_NAMESPACE: &str = "goose.message";
 const GOOSE_LOGICAL_SESSION_KIND: &str = "goose-session";
@@ -413,6 +413,7 @@ fn scan_goose_logical_snapshot(
     let mut retained_records = 0_u64;
     let mut rejected_records = 0_u64;
     let mut certified_bytes = 0_u64;
+    let mut next_event_sequence = 0_u64;
 
     let mut keyset = GooseNativeRowKeyset::Unstarted;
     loop {
@@ -485,8 +486,15 @@ fn scan_goose_logical_snapshot(
                 .ok_or(CaptureError::SystemInvariant(
                     "Goose retained event omitted its accepted session owner",
                 ))?;
-            sink.emit_document(goose_lexical_document(source, selected, session, event)?)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            let event_sequence = goose_event_sequence(&mut next_event_sequence)?;
+            sink.emit_document(goose_lexical_document(
+                source,
+                selected,
+                session,
+                event,
+                event_sequence,
+            )?)
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
             retained_records = checked_add(retained_records, 1)?;
         }
     }
@@ -659,6 +667,7 @@ fn goose_lexical_document(
     selected_route: &GooseSourceRouteV0,
     session: &GooseSessionProjection,
     event: GooseNativeEvent,
+    event_sequence: u64,
 ) -> GooseSourceBackedResultV0<LexicalDocument> {
     let native_item_key = NativeItemKey::native_id(
         GOOSE_NATIVE_EVENT_NAMESPACE,
@@ -698,7 +707,6 @@ fn goose_lexical_document(
     if body.is_empty() {
         return Err(GooseSourceBackedErrorV0::EmptyLexicalBody);
     }
-    let event_sequence = (event.native_order as u64) ^ (1_u64 << 63);
     let occurred_at_unix_ms = event.created_timestamp.map_or_else(
         || {
             event.timestamp.as_deref().map(|timestamp| {
@@ -745,6 +753,17 @@ fn goose_lexical_document(
         cwd: session.cwd.clone(),
         touched_files,
     })
+}
+
+fn goose_event_sequence(next: &mut u64) -> GooseSourceBackedResultV0<u64> {
+    let sequence = *next;
+    if sequence > i64::MAX as u64 {
+        return Err(GooseSourceBackedErrorV0::CountOverflow);
+    }
+    *next = sequence
+        .checked_add(1)
+        .ok_or(GooseSourceBackedErrorV0::CountOverflow)?;
+    Ok(sequence)
 }
 
 fn event_type(event: &GooseNativeEvent) -> EventType {
