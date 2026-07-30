@@ -3,6 +3,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "linux")]
+use std::{
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+};
+
 use ctx_history_core::{
     BatchHydrationRequest, CaptureProvider, CertifiedSource, ContentSourceResolver,
     EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
@@ -37,6 +47,16 @@ use crate::{
 };
 
 const SOURCE_BACKED_LINEAGE: [u8; 32] = [0x4a; 32];
+
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_ROOT: &str = "CTX_NANOCLAW_FD_PROBE_ROOT";
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_SESSIONS: &str = "CTX_NANOCLAW_FD_PROBE_SESSIONS";
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_TEST: &str =
+    "provider::providers::nanoclaw::tests::compound_inventory_peak_fds_are_bounded_independent_of_snapshot_count";
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_OUTPUT: &str = "nanoclaw_fd_peak=";
 
 fn create_project(temp: &TempDir, name: &str, sessions: usize) -> PathBuf {
     let root = temp.path().join(name);
@@ -819,6 +839,106 @@ fn compound_inventory_is_metadata_only_across_many_databases() {
     );
     assert_eq!(project.snapshot().component_database_count(), 128);
     project.finish().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn run_compound_inventory_fd_probe(root: &Path, sessions: u64) {
+    let sampling = Arc::new(AtomicBool::new(true));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let sampler = {
+        let sampling = Arc::clone(&sampling);
+        let peak = Arc::clone(&peak);
+        thread::spawn(move || {
+            while sampling.load(Ordering::Relaxed) {
+                peak.fetch_max(
+                    fs::read_dir("/proc/self/fd").unwrap().count(),
+                    Ordering::Relaxed,
+                );
+                thread::yield_now();
+            }
+        })
+    };
+    let mut project =
+        NanoClawSourceBackedProject::open(crate::test_provider_sqlite_data_root(), root).unwrap();
+    assert_eq!(project.snapshot().selected_component_count(), sessions * 2);
+    thread::yield_now();
+    project.finish().unwrap();
+    sampling.store(false, Ordering::Relaxed);
+    sampler.join().unwrap();
+    println!("{NANOCLAW_FD_PROBE_OUTPUT}{}", peak.load(Ordering::Relaxed));
+}
+
+#[cfg(target_os = "linux")]
+fn isolated_compound_inventory_peak_fds(root: &Path, sessions: usize) -> usize {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg(NANOCLAW_FD_PROBE_TEST)
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .arg("--nocapture")
+        .env(NANOCLAW_FD_PROBE_ROOT, root)
+        .env(NANOCLAW_FD_PROBE_SESSIONS, sessions.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "NanoClaw FD probe child failed: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(NANOCLAW_FD_PROBE_OUTPUT))
+        .unwrap_or_else(|| panic!("NanoClaw FD probe did not report a peak:\n{stdout}"))
+        .parse()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compound_inventory_peak_fds_are_bounded_independent_of_snapshot_count() {
+    const SMALL_INVENTORY: usize = 64;
+    const MAXIMUM_PEAK_FDS: usize = 96;
+    const MAXIMUM_GROWTH_FDS: usize = 8;
+
+    if let Some(root) = std::env::var_os(NANOCLAW_FD_PROBE_ROOT) {
+        let sessions = std::env::var(NANOCLAW_FD_PROBE_SESSIONS)
+            .unwrap()
+            .parse()
+            .unwrap();
+        run_compound_inventory_fd_probe(Path::new(&root), sessions);
+        return;
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let small = create_project(&temp, "fd-small", SMALL_INVENTORY);
+    let large = create_project(&temp, "fd-large", NANOCLAW_MAX_SESSION_SNAPSHOTS);
+    for (root, sessions) in [
+        (&small, SMALL_INVENTORY),
+        (&large, NANOCLAW_MAX_SESSION_SNAPSHOTS),
+    ] {
+        for index in 0..sessions {
+            fs::create_dir_all(
+                root.join("data")
+                    .join("v2-sessions")
+                    .join("ag-1")
+                    .join(format!("session-{index:04}")),
+            )
+            .unwrap();
+        }
+    }
+
+    let small_peak = isolated_compound_inventory_peak_fds(&small, SMALL_INVENTORY);
+    let large_peak = isolated_compound_inventory_peak_fds(&large, NANOCLAW_MAX_SESSION_SNAPSHOTS);
+    eprintln!("NanoClaw isolated FD peaks: small={small_peak}, large={large_peak}");
+    assert!(
+        large_peak <= MAXIMUM_PEAK_FDS,
+        "NanoClaw inventory FD peak exceeded its process budget: peak={large_peak}, maximum={MAXIMUM_PEAK_FDS}"
+    );
+    assert!(
+        large_peak <= small_peak + MAXIMUM_GROWTH_FDS,
+        "NanoClaw inventory FD peak scaled with snapshots: small={small_peak}, large={large_peak}, allowed_growth={MAXIMUM_GROWTH_FDS}"
+    );
 }
 
 #[test]
