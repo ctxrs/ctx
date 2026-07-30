@@ -14,7 +14,6 @@ from performance_family_fixtures import (
     FAMILY_MAX_FIXTURE_BYTES,
     FAMILY_MIN_FIXTURE_BYTES,
     FamilyCorpus,
-    run_family_refresh_measured,
 )
 from performance_sanity_support import (
     COMMAND_TIMEOUT_SECONDS,
@@ -23,7 +22,9 @@ from performance_sanity_support import (
     MAX_PEAK_RSS_BYTES,
     RefreshSnapshot,
     isolated_env,
+    require_parallel_source_workers,
     refresh_snapshot,
+    run_refresh_measured,
     run_checked,
     run_json,
     run_json_timed,
@@ -40,6 +41,7 @@ from performance_sanity_support import (
     "source-family overlap and FD evidence requires Linux /proc and affinity",
 )
 class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
+    MIN_AVAILABLE_CPUS = 12
     MIN_CPU_PER_WALL = 1.10
     MAX_OPEN_FD_DELTA = 96
 
@@ -175,8 +177,9 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
         available_cpus = set(os.sched_getaffinity(0))
         self.assertGreaterEqual(
             len(available_cpus),
-            2,
-            "nightly family gate requires at least two available CPUs",
+            self.MIN_AVAILABLE_CPUS,
+            "nightly family gate requires >=12 available CPUs: 8 Tantivy "
+            "indexers + 2 runtime threads + 2 source scanners",
         )
         forced_single_cpu = os.environ.get(FORCE_SINGLE_CPU_ENV) == "1"
         daemon_affinity = {min(available_cpus)} if forced_single_cpu else None
@@ -214,7 +217,7 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                         root, env, daemon_affinity
                     )
                     try:
-                        cold = run_family_refresh_measured(
+                        cold = run_refresh_measured(
                             self.refresh_args(corpus.cold_query),
                             env,
                             root,
@@ -297,6 +300,11 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                     self.assertLessEqual(
                         replacement_seconds, MAX_COMMAND_SECONDS
                     )
+                    source_workers = require_parallel_source_workers(cold)
+                    source_worker_ticks = ",".join(
+                        f"{worker.name}:{worker.cpu_ticks}"
+                        for worker in source_workers
+                    )
                     self.assertGreaterEqual(
                         cold.cpu_per_wall,
                         self.MIN_CPU_PER_WALL,
@@ -322,6 +330,10 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                         f" cold_seconds={cold.elapsed_seconds:.3f}"
                         f" daemon_cpu_seconds={cold.cpu_seconds:.3f}"
                         f" cpu_per_wall={cold.cpu_per_wall:.3f}"
+                        f" source_worker_slots="
+                        f"{len({worker.name for worker in source_workers})}"
+                        f" source_worker_cpu_ticks="
+                        f"{source_worker_ticks}"
                         f" peak_fd_delta="
                         f"{cold.peak_open_fds - cold.baseline_open_fds}"
                         f" peak_rss_bytes={cold.peak_rss_bytes}"
