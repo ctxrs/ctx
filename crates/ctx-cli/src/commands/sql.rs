@@ -261,7 +261,7 @@ pub(crate) fn print_sql_raw(result: &RawSqlResult) -> Result<usize> {
 }
 
 fn write_sql_stdout(body: String, result: &RawSqlResult) -> Result<usize> {
-    std::io::stdout().lock().write_all(body.as_bytes())?;
+    crate::output::stdout_writer().write_all(body.as_bytes())?;
     print_sql_truncation_notice(result);
     Ok(body.len())
 }

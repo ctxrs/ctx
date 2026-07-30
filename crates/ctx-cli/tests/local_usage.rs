@@ -26,10 +26,13 @@ fn definition(report: &Value, version: i64) -> &Value {
 #[test]
 fn default_on_usage_is_independent_of_commercial_telemetry_and_reports_definition_two() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor"]))
+    let output = enabled(ctx(&temp).args(["doctor"]))
         .env("CTX_ANALYTICS_ENABLED", "false")
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .clone();
+    let delivered_output_bytes = output.stdout.len() + output.stderr.len();
 
     assert!(usage_db_path(&temp).exists());
     assert!(!temp.path().join("install.json").exists());
@@ -54,9 +57,11 @@ fn default_on_usage_is_independent_of_commercial_telemetry_and_reports_definitio
     assert_eq!(current["summary"]["failed_calls"], 0);
     assert_eq!(current["summary"]["not_applicable_calls"], 1);
     assert_eq!(
-        current["summary"]["delivered_output_bytes"], 0,
-        "unmeasured CLI output must not be inferred"
+        current["summary"]["delivered_output_bytes"],
+        u64::try_from(delivered_output_bytes).unwrap(),
+        "the aggregate must use the final delivered stdout + stderr bytes"
     );
+    assert!(delivered_output_bytes > 0);
     assert_eq!(current["summary"]["complete_context_eligible_calls"], 0);
     assert_eq!(current["by_operation"][0]["operation"], "doctor");
     assert!(report["estimates"].is_null());
@@ -83,6 +88,31 @@ fn docs_records_the_exact_rendered_stdout_bytes() {
         .unwrap();
     assert_eq!(delivered_output_bytes, i64::try_from(stdout.len()).unwrap());
     assert!(delivered_output_bytes > 0);
+}
+
+#[test]
+fn failed_cli_records_the_exact_rendered_stderr_bytes() {
+    let temp = tempdir();
+    let output = enabled(ctx(&temp).args(["docs", "show", "missing-topic"]))
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
+    let row: (String, i64, i64) = connection
+        .query_row(
+            "SELECT outcome, calls, delivered_output_bytes FROM daily_usage \
+             WHERE surface = 'cli' AND operation = 'docs'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "failure");
+    assert_eq!(row.1, 1);
+    assert_eq!(row.2, i64::try_from(output.stderr.len()).unwrap());
 }
 
 #[test]
@@ -122,7 +152,7 @@ fn report_is_content_free_and_stats_emit_no_commercial_analytics() {
             .env("CTX_ANALYTICS_ENABLED", "true")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path)),
     ));
-    assert_eq!(report["state"], "ready");
+    assert_eq!(report["state"], "ready", "{report:#}");
 
     let encoded = serde_json::to_string(&report).unwrap();
     for forbidden in [
@@ -242,6 +272,7 @@ fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
         "--detail",
         "--format=json",
     ])));
+    assert_eq!(report["state"], "ready", "{report:#}");
     let current = definition(&report, 2);
     assert_eq!(current["summary"]["calls"], 1);
     assert_eq!(current["summary"]["failed_calls"], 1);

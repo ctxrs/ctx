@@ -227,35 +227,64 @@ not create `usage.sqlite` on a pristine root. Its top-level
 `schema_version` is 2. The top-level object contains:
 
 - `schema_version`;
-- `local_usage`, including `enabled` and state (`disabled`, `empty`, `ready`,
-  or `error`);
-- `measured`, with `history_retrieval`, `code_provenance`, and `delivery`;
-- `estimated`, separate from measured facts and carrying the authoritative
-  estimate model/coefficient version when estimates are available;
 - `local_only: true`;
-- `read_only: true`.
+- `read_only: true`;
+- `enabled`;
+- `state`, one of `disabled`, `empty`, `ready`, or `error`;
+- `retention_days`;
+- optional `definitions[]`;
+- optional `estimates`;
+- optional content-free `error`, with `code` and `message`.
 
-History retrieval reports searches, sessions/events opened, and records
-located. Code provenance reports blame investigations, origins identified,
-possible leads, no-attribution outcomes, errors, and citations. Measured
-delivery reports results, citations, output bytes, response transport bytes,
-one-copy semantic/context bytes, the result-bearing search byte subset,
-approximate context tokens, latency, and active days according to their
-explicit coverage. Approximate context tokens use semantic/context bytes.
-Transport response bytes are never used as context bytes, search-result bytes,
-or the basis for token savings.
+`definitions` is absent when measurement is disabled or unavailable, an empty
+array when no rows exist, and otherwise contains one object per retained
+measurement definition. Each object contains:
 
-JSON includes the CLI/MCP and operation breakdown; human output shows that
-breakdown only with `--detail`. Estimated token savings consume the
-authoritative versioned model and apply its avoided-token coefficient only to
-the result-bearing search byte subset. Estimated time uses the same model. An
-unavailable store returns stable content-free error fields rather than
-fabricated zeros.
+- `definition_version`;
+- `ctx_versions[]`;
+- `first_day_utc`;
+- `last_day_utc`;
+- `active_days`;
+- `summary`;
+- optional nonempty `by_operation[]`;
+- optional nonempty `duration_buckets[]`.
 
-Byte-derived token values are nullable and carry `complete`, `partial`, or
-`unavailable_legacy` coverage plus measured/eligible sample counts. Migrated
-rows without byte samples never become zero-token measurements. Count-derived
-time estimates may remain available when token estimates are unavailable.
+`summary` contains `calls`, `successful_calls`, `failed_calls`,
+`result_bearing_calls`, `empty_calls`, `not_applicable_calls`, `result_count`,
+`citation_count`, `delivered_output_bytes`, `delivered_context_bytes`,
+`matched_normalized_session_bytes`, `complete_context_eligible_calls`,
+`unavailable_context_eligible_calls`, and `pro_blame`. `pro_blame` contains
+`requests`, `produced_attribution_requests`, `possible_only_requests`,
+`none_requests`, `error_requests`, and `by_target[]`. Each target row contains
+`target_type`, `requests`, `produced`, `possible`, `none`, and `error`.
+
+Each `by_operation` row contains `ctx_version`, `surface`, `operation`, `calls`,
+`successful_calls`, `failed_calls`, `result_bearing_calls`, `empty_calls`,
+`not_applicable_calls`, `result_count`, `citation_count`,
+`delivered_output_bytes`, `delivered_context_bytes`,
+`matched_normalized_session_bytes`, `complete_context_eligible_calls`, and
+`unavailable_context_eligible_calls`. Each `duration_buckets` row contains
+`duration_bucket` and `calls`.
+
+CLI `delivered_output_bytes` counts the actual final stdout and stderr bytes
+accepted for delivery, including the selected terminal wrapping and ANSI mode.
+MCP output bytes count the serialized response transport. These are delivery
+measurements, not context measurements.
+
+When complete search-context measurements are available, `estimates` contains
+`approximate_context_tokens` with `coefficient_version`,
+`delivered_context_bytes`, `low`, `central`, and `high`, plus
+`estimated_context_reduction` with `estimate_model_version`,
+`coefficient_version`, `covered_calls`, `unavailable_calls`,
+`comparison_baseline_bytes`, `observed_delivered_context_bytes`,
+`estimated_avoided_context_bytes`, `low`, `central`, and `high`. Estimates are
+absent when the required complete measurements are unavailable.
+
+Transport response bytes are never used as context bytes or as the basis for
+context-reduction estimates. Migrated rows without byte samples never become
+zero-byte measurements. An unavailable store returns the stable content-free
+`error` object rather than fabricated aggregates. All report fields remain
+aggregate-only and content-free.
 
 Enable, disable, and reset remain explicit `ctx status --usage` controls.
 Successful enable/disable controls report `persisted_enabled`,

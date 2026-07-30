@@ -2,6 +2,33 @@ use std::process::ExitCode;
 
 use ctx_history_core::CaptureProvider;
 
+// Keep every direct CLI write on the same measured stdout/stderr seam as the
+// structured terminal UI. These preserve the standard print macro behavior;
+// `output` only adds content-free byte accounting while a command is active.
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        $crate::output::write_stdout(format_args!($($arg)*));
+    }};
+}
+
+macro_rules! println {
+    () => {{
+        $crate::output::write_stdout_line(format_args!(""));
+    }};
+    ($($arg:tt)*) => {{
+        $crate::output::write_stdout_line(format_args!($($arg)*));
+    }};
+}
+
+macro_rules! eprintln {
+    () => {{
+        $crate::output::write_stderr_line(format_args!(""));
+    }};
+    ($($arg:tt)*) => {{
+        $crate::output::write_stderr_line(format_args!($($arg)*));
+    }};
+}
+
 mod analytics;
 mod cli;
 mod commands;
