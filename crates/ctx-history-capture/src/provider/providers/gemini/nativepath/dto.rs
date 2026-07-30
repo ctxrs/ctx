@@ -8,7 +8,9 @@ use thiserror::Error;
 
 use crate::{common::io::ProviderSourceRoot, CaptureError};
 
+#[cfg(test)]
 pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 6;
+#[cfg(test)]
 pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,7 +22,7 @@ pub(crate) struct GeminiFileObservation {
     pub(crate) inode: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum GeminiTranscriptLayout {
     Primary,
     Subagent {
@@ -164,6 +166,7 @@ pub(crate) struct GeminiSourceLocator {
 /// The certified scanner position immediately before or after a page. It only
 /// covers records actually contained by that page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(test)]
 pub(crate) struct GeminiPageFrontier {
     pub(crate) parser_revision: u32,
     pub(crate) policy_revision: u32,
@@ -183,8 +186,10 @@ pub(crate) struct GeminiPageFrontier {
 /// Stable scanner-local identity for one provider-owned Core page. It binds
 /// only the safe frontiers and Core payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(test)]
 pub(crate) struct GeminiPageIdentity(pub(crate) [u8; 32]);
 
+#[cfg(test)]
 impl GeminiPageIdentity {
     pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -213,11 +218,13 @@ impl std::fmt::Display for GeminiTouchOverflow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum GeminiRejectionKind {
     InvalidRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct GeminiRejection {
     pub(crate) raw_ordinal: u64,
     pub(crate) byte_start: u64,
@@ -227,6 +234,7 @@ pub(crate) struct GeminiRejection {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct GeminiParserMetrics {
     pub(crate) native_records_observed: u64,
     pub(crate) native_record_bytes_observed: u64,
@@ -247,6 +255,7 @@ pub(crate) struct GeminiParserMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(test)]
 pub(crate) struct GeminiCheckpoint {
     pub(crate) parser_revision: u32,
     pub(crate) policy_revision: u32,
@@ -264,6 +273,7 @@ pub(crate) struct GeminiCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct GeminiPreviousSource {
     pub(crate) checkpoint: GeminiCheckpoint,
     /// True only when a completed current root inventory still contains the
@@ -272,6 +282,7 @@ pub(crate) struct GeminiPreviousSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum GeminiSourceChange {
     Fresh,
     Unchanged,
@@ -285,6 +296,7 @@ pub(crate) enum GeminiSourceChange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum GeminiPublicationShape {
     ObservationOnly,
     AppendDelta,
@@ -292,12 +304,14 @@ pub(crate) enum GeminiPublicationShape {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum GeminiCompleteness {
     TerminalSnapshot,
     NonterminalCompletePrefix { end: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct GeminiLifecycleSignals {
     pub(crate) source_change: GeminiSourceChange,
     pub(crate) publication_shape: GeminiPublicationShape,
@@ -309,6 +323,7 @@ pub(crate) struct GeminiLifecycleSignals {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct GeminiScanOutcome {
     pub(crate) checkpoint: GeminiCheckpoint,
     pub(crate) signals: GeminiLifecycleSignals,

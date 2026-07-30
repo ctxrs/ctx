@@ -74,10 +74,12 @@ pub(super) fn new_prefix_hasher() -> Sha256 {
     hasher
 }
 
+#[cfg(test)]
 pub(super) fn prefix_digest(hasher: &Sha256) -> [u8; 32] {
     hasher.clone().finalize().into()
 }
 
+#[cfg(test)]
 pub(super) fn hash_gemini_prefix(
     file: &mut File,
     complete_prefix_end: u64,
@@ -107,6 +109,7 @@ pub(super) fn hash_gemini_prefix(
     Ok(hasher)
 }
 
+#[cfg(test)]
 pub(super) fn same_physical_file(
     previous: &GeminiFileObservation,
     current: &GeminiFileObservation,
@@ -121,6 +124,7 @@ pub(super) fn same_physical_file(
     }
 }
 
+#[cfg(test)]
 pub(super) fn frontier_file_identity_matches(
     frontier: &GeminiPageFrontier,
     current: &GeminiFileObservation,
@@ -135,6 +139,7 @@ pub(super) fn frontier_file_identity_matches(
     }
 }
 
+#[cfg(test)]
 pub(super) fn lifecycle_signals(
     checkpoint: &GeminiCheckpoint,
     previous: Option<&GeminiPreviousSource>,
@@ -175,6 +180,7 @@ pub(super) fn lifecycle_signals(
     }
 }
 
+#[cfg(test)]
 pub(super) fn classify_cross_path_source(
     checkpoint: &GeminiCheckpoint,
     previous: Option<&GeminiPreviousSource>,
@@ -206,6 +212,7 @@ pub(super) fn classify_cross_path_source(
     Some(GeminiSourceChange::Replacement)
 }
 
+#[cfg(test)]
 pub(super) fn classify_source_change(
     checkpoint: &GeminiCheckpoint,
     previous: Option<&GeminiPreviousSource>,

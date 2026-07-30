@@ -1,23 +1,42 @@
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
+    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::dto::GeminiEventBody;
-use super::parser::read_gemini_transcript_pages;
+use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
+use super::parser::{read_gemini_session_header, GeminiBorrowedRecordParser};
 use super::{
-    GeminiEventIdentity, GeminiFileObservation, GeminiNativePage, GeminiNativePageReader,
-    GeminiRetainedEvent, GeminiScanError, GeminiSession, GeminiTranscriptSource,
+    discover_gemini_transcripts, GeminiEventIdentity, GeminiFileObservation, GeminiScanError,
+    GeminiSession, GeminiTranscriptSource,
 };
-use crate::{CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES};
+use crate::{
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    provider::source_backed::{
+        executable_route,
+        family::jsonl::{
+            jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
+            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+        },
+        SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        SourceBackedSelectorAuthority,
+    },
+    CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
+};
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
 const GEMINI_NATIVE_SESSION_NAMESPACE: &str = "gemini.session";
@@ -25,53 +44,19 @@ const GEMINI_NATIVE_EVENT_NAMESPACE: &str = "gemini.event";
 const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
-const GEMINI_SOURCE_REVISION_KIND: &str = "gemini-ordinary-file-observation-v0";
-const GEMINI_FRONTIER_KIND: &str = "gemini-nativepath-checkpoint-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str = "gemini-nativepath-source-backed-v0-p6-p4";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 
 pub(crate) mod registration {
-    use std::path::Path;
-
-    use ctx_history_core::{
-        CaptureProvider, CertifiedSource, EventHydrationRequest, HydratedProviderRecord,
-        HydrationFailure, HydrationFailureKind,
-    };
-
-    use super::super::discover_gemini_transcripts;
-    use super::{hydrate_gemini_source_backed_record, GeminiSourceBackedLeafReader};
-    use crate::provider::source_backed::{
-        executable_route, hydration_failure, route_capture_error, route_coordinator_error,
-        route_error, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
-        SourceBackedProviderRegistry, SourceBackedRevalidationTarget, SourceBackedRouteDriver,
-        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
-        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
-    };
-    use crate::{ProviderSource, GEMINI_CLI_SOURCE_FORMAT};
+    use super::*;
+    use crate::ProviderSource;
 
     pub(crate) fn register(
         registry: &mut SourceBackedProviderRegistry,
         source: ProviderSource,
         selection: SourceBackedRouteSelection,
     ) -> SourceBackedCoordinatorResult<()> {
-        let root = source.path.clone();
-        let scan_root = root.clone();
-        let revalidation_root = root.clone();
-        let hydration_root = root;
-        let driver = SourceBackedRouteDriver::new(
-            move |sink| scan(&scan_root, sink),
-            |source| {
-                source.provider() == CaptureProvider::Gemini.as_str()
-                    && source.source_format() == GEMINI_CLI_SOURCE_FORMAT
-            },
-            move |target| match target {
-                SourceBackedRevalidationTarget::Source(expected) => {
-                    revalidate(&revalidation_root, expected)
-                }
-                SourceBackedRevalidationTarget::Deletion(_) => false,
-            },
-            move |request| hydrate(&hydration_root, request),
-        );
+        let driver = jsonl_family_driver(gemini_jsonl_adapter(), source.path.clone());
         registry.register(executable_route(
             source,
             selection,
@@ -79,94 +64,6 @@ pub(crate) mod registration {
             driver,
         )?);
         Ok(())
-    }
-
-    fn scan(root: &Path, sink: &mut SourceBackedGenerationSink<'_>) -> SourceBackedRouteResult<()> {
-        let discovery = discover_gemini_transcripts(root).map_err(route_capture_error)?;
-        if !discovery.completed_inventory {
-            return Err(SourceBackedRouteError::new(
-                SourceBackedRouteErrorKind::Unavailable,
-                "Gemini discovery did not produce a complete inventory",
-            ));
-        }
-        for source in &discovery.transcripts {
-            let mut reader = GeminiSourceBackedLeafReader::open(source).map_err(route_error)?;
-            sink.begin_source(reader.source().clone())
-                .map_err(route_coordinator_error)?;
-            while let Some(page) = reader.next_page().map_err(route_error)? {
-                for document in page.documents {
-                    sink.add_document(document)
-                        .map_err(route_coordinator_error)?;
-                }
-            }
-            let leaf = reader.finish().map_err(route_error)?;
-            sink.certify_source(leaf.certificate)
-                .map_err(route_coordinator_error)?;
-        }
-        Ok(())
-    }
-
-    fn revalidate(root: &Path, expected: &CertifiedSource) -> bool {
-        let Ok(discovery) = discover_gemini_transcripts(root) else {
-            return false;
-        };
-        if !discovery.completed_inventory {
-            return false;
-        }
-        for source in &discovery.transcripts {
-            let Ok(mut reader) = GeminiSourceBackedLeafReader::open(source) else {
-                return false;
-            };
-            if !reader
-                .source()
-                .exact_descriptor_eq(expected.observation().source())
-            {
-                continue;
-            }
-            while let Ok(Some(_)) = reader.next_page() {}
-            return reader
-                .finish()
-                .is_ok_and(|leaf| leaf.certificate == *expected);
-        }
-        false
-    }
-
-    fn hydrate(
-        root: &Path,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        let discovery = discover_gemini_transcripts(root).map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        if !discovery.completed_inventory {
-            return Err(hydration_failure(
-                HydrationFailureKind::TemporarilyUnavailable,
-                "Gemini discovery did not complete",
-            ));
-        }
-        for source in &discovery.transcripts {
-            let reader = GeminiSourceBackedLeafReader::open(source).map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            let owned = reader
-                .source()
-                .exact_descriptor_eq(request.locator().source());
-            drop(reader);
-            if owned {
-                let hydrated = hydrate_gemini_source_backed_record(source, request.locator())
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                    })?;
-                return Ok(HydratedProviderRecord {
-                    event_id: request.event_id(),
-                    provider_bytes: hydrated.provider_bytes,
-                });
-            }
-        }
-        Err(hydration_failure(
-            HydrationFailureKind::ConfirmedDeleted,
-            "the exact Gemini source is absent from the complete inventory",
-        ))
     }
 }
 
@@ -184,16 +81,6 @@ pub(crate) enum GeminiSourceBackedError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error("Gemini source has no importable native session header")]
-    MissingSession,
-    #[error("Gemini source-backed reader must be drained before certification")]
-    ReaderNotDrained,
-    #[error("Gemini source-backed page changed its native session")]
-    SessionChanged,
-    #[error("Gemini source-backed scan counts do not reconcile")]
-    CountMismatch,
-    #[error("Gemini source-backed count or byte range overflowed")]
-    CountOverflow,
     #[error("locator is not a Gemini NativePath JSONL record")]
     InvalidLocator,
     #[error("Gemini locator byte range exceeds the bounded JSONL record size")]
@@ -208,241 +95,259 @@ pub(crate) enum GeminiSourceBackedError {
 
 pub(crate) type GeminiSourceBackedResult<T> = Result<T, GeminiSourceBackedError>;
 
-/// One provider-owned, independently bounded page for the shared coordinator.
-#[derive(Debug)]
-pub(crate) struct GeminiSourceBackedPage {
-    // Paging identity and prefix bounds remain provider-owned resume evidence.
-    #[allow(dead_code)]
-    pub(crate) page_identity: [u8; 32],
-    #[allow(dead_code)]
-    pub(crate) expected_prefix_bytes: u64,
-    #[allow(dead_code)]
-    pub(crate) next_prefix_bytes: u64,
-    pub(crate) documents: Vec<LexicalDocument>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiFamilyBinding {
+    relative_path: PathBuf,
+    layout: GeminiTranscriptLayout,
+    observation: GeminiFileObservation,
+    ordinary_file_token: [u8; 32],
+    authority_relative_path: PathBuf,
+    session: GeminiSession,
 }
 
-/// Terminal leaf evidence. Publication and generation lifecycle remain shared
-/// coordinator responsibilities.
-#[derive(Debug)]
-pub(crate) struct GeminiSourceBackedLeaf {
-    // Terminal source/session lineage remains coupled to the certificate for
-    // exact hydration and non-Core materialization.
-    #[allow(dead_code)]
-    pub(crate) source: SourceKey,
-    #[allow(dead_code)]
-    pub(crate) session: GeminiSession,
-    #[allow(dead_code)]
-    pub(crate) session_id: StableEntityId,
-    #[allow(dead_code)]
-    pub(crate) parent_session_id: Option<StableEntityId>,
-    #[allow(dead_code)]
-    pub(crate) root_session_id: StableEntityId,
-    pub(crate) certificate: CertifiedSource,
+impl GeminiFamilyBinding {
+    fn transcript(&self, leaf: &JsonlFamilyLeaf) -> GeminiTranscriptSource {
+        GeminiTranscriptSource {
+            path: leaf.source_path().to_path_buf(),
+            relative_path: self.relative_path.clone(),
+            layout: self.layout.clone(),
+            observation: self.observation.clone(),
+            ordinary_file_token: self.ordinary_file_token,
+            authority_relative_path: self.authority_relative_path.clone(),
+            authority: leaf.authority().as_ref().clone(),
+        }
+    }
 }
 
-/// Cold-source Gemini adapter. It buffers at most one already-bounded native
-/// page while deriving path-independent source and session identities.
-pub(crate) struct GeminiSourceBackedLeafReader<'a> {
-    native: GeminiNativePageReader<'a>,
-    pending: Option<GeminiNativePage>,
+#[derive(Debug, Clone, Copy)]
+struct GeminiJsonlAdapter;
+
+fn gemini_jsonl_adapter() -> Arc<dyn JsonlFamilyAdapter> {
+    Arc::new(GeminiJsonlAdapter)
+}
+
+impl JsonlFamilyAdapter for GeminiJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Gemini
+    }
+
+    fn source_format(&self) -> &'static str {
+        GEMINI_CLI_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        GEMINI_SOURCE_SCHEMA_VARIANT
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        GEMINI_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {
+        let metadata = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return JsonlFamilyInventory::missing(self.provider(), root);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let discovery = discover_gemini_transcripts(root)?;
+        if !discovery.completed_inventory {
+            return Err(CaptureError::InvalidPayload(
+                "Gemini discovery did not produce a complete inventory".to_owned(),
+            ));
+        }
+        let authority = shared_authority(root, &metadata, &discovery.transcripts)?;
+        let mut leaves = Vec::with_capacity(discovery.transcripts.len());
+        for transcript in discovery.transcripts {
+            if transcript.authority.named_path() != authority.named_path()
+                || transcript.authority.authority_fingerprint() != authority.authority_fingerprint()
+            {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            let session = read_gemini_session_header(&transcript).map_err(capture_scan_error)?;
+            let source = gemini_source_key(&session.native_session_id).map_err(capture_error)?;
+            let binding = GeminiFamilyBinding {
+                relative_path: transcript.relative_path.clone(),
+                layout: transcript.layout.clone(),
+                observation: transcript.observation.clone(),
+                ordinary_file_token: transcript.ordinary_file_token,
+                authority_relative_path: transcript.authority_relative_path.clone(),
+                session,
+            };
+            leaves.push(JsonlFamilyLeaf::observe(
+                source,
+                transcript.path,
+                Arc::clone(&authority),
+                transcript.authority_relative_path,
+                TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract_error)?,
+            )?);
+        }
+        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+    }
+
+    fn projector(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> crate::Result<Box<dyn JsonlFamilyProjector>> {
+        let binding = decode_binding(leaf)?;
+        if source_file.ordinary_file_token() != binding.ordinary_file_token {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let expected_source =
+            gemini_source_key(&binding.session.native_session_id).map_err(capture_error)?;
+        if !expected_source.exact_descriptor_eq(leaf.source()) {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let session_id = gemini_session_id(leaf.source(), &binding.session.native_session_id)
+            .map_err(capture_error)?;
+        let parent_session_id = binding
+            .session
+            .parent_native_session_id
+            .as_deref()
+            .map(|parent_native_session_id| {
+                let parent_source =
+                    gemini_source_key(parent_native_session_id).map_err(capture_error)?;
+                gemini_session_id(&parent_source, parent_native_session_id).map_err(capture_error)
+            })
+            .transpose()?;
+        let root_session_id = parent_session_id.unwrap_or(session_id);
+        let transcript = binding.transcript(leaf);
+        Ok(Box::new(GeminiProjector {
+            parser: GeminiBorrowedRecordParser::new(transcript, binding.session.clone()),
+            source: leaf.source().clone(),
+            source_path: leaf.source_path().display().to_string(),
+            session: binding.session,
+            session_id,
+            parent_session_id,
+            root_session_id,
+            source_file,
+            authority: Arc::clone(leaf.authority()),
+        }))
+    }
+
+    fn hydrator(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
+        let binding = decode_binding(leaf).map_err(unavailable)?;
+        if source_file.ordinary_file_token() != binding.ordinary_file_token {
+            return Err(stale("Gemini source identity changed before hydration"));
+        }
+        Ok(Box::new(GeminiHydrator {
+            source: leaf.source().clone(),
+            source_file,
+        }))
+    }
+}
+
+struct GeminiProjector {
+    parser: GeminiBorrowedRecordParser,
     source: SourceKey,
-    source_observation: GeminiFileObservation,
     source_path: String,
     session: GeminiSession,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
-    emitted_documents: u64,
+    source_file: Arc<OpenedProviderSourceFile>,
+    authority: Arc<ProviderSourceRoot>,
 }
 
-impl<'a> GeminiSourceBackedLeafReader<'a> {
-    pub(crate) fn open(source: &'a GeminiTranscriptSource) -> GeminiSourceBackedResult<Self> {
-        let mut native = read_gemini_transcript_pages(source, None)?;
-        let pending = loop {
-            let Some(page) = native.next_page()? else {
-                return Err(GeminiSourceBackedError::MissingSession);
-            };
-            if page.next_safe_frontier.session.is_some() {
-                break page;
-            }
-            if !page.events.is_empty() {
-                return Err(GeminiSourceBackedError::MissingSession);
-            }
-        };
-        let session = pending
-            .next_safe_frontier
-            .session
-            .clone()
-            .ok_or(GeminiSourceBackedError::MissingSession)?;
-        let source_observation = source.observation.clone();
-        let source_key = gemini_source_key(&session.native_session_id)?;
-        let session_id = gemini_session_id(&source_key, &session.native_session_id)?;
-        let parent_session_id = session
-            .parent_native_session_id
-            .as_deref()
-            .map(|parent_native_session_id| {
-                let parent_source = gemini_source_key(parent_native_session_id)?;
-                gemini_session_id(&parent_source, parent_native_session_id)
-            })
-            .transpose()?;
-        let root_session_id = parent_session_id.unwrap_or(session_id);
-        Ok(Self {
-            native,
-            pending: Some(pending),
-            source: source_key,
-            source_observation,
-            source_path: source.path.display().to_string(),
-            session,
-            session_id,
-            parent_session_id,
-            root_session_id,
-            emitted_documents: 0,
-        })
-    }
-
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
-    #[cfg(test)]
-    pub(crate) fn session(&self) -> &GeminiSession {
-        &self.session
-    }
-
-    #[cfg(test)]
-    pub(crate) fn session_id(&self) -> StableEntityId {
-        self.session_id
-    }
-
-    pub(crate) fn next_page(&mut self) -> GeminiSourceBackedResult<Option<GeminiSourceBackedPage>> {
-        let page = match self.pending.take() {
-            Some(page) => Some(page),
-            None => self.native.next_page()?,
-        };
-        let Some(page) = page else {
-            return Ok(None);
-        };
-        let page_session = page
-            .next_safe_frontier
-            .session
-            .as_ref()
-            .ok_or(GeminiSourceBackedError::MissingSession)?;
-        if page_session.native_session_id != self.session.native_session_id {
-            return Err(GeminiSourceBackedError::SessionChanged);
-        }
-        let projected = project_page(
-            &self.source,
-            self.session_id,
-            self.parent_session_id,
-            self.root_session_id,
-            &self.source_path,
-            &self.session,
-            page,
-        )?;
-        self.emitted_documents = self
-            .emitted_documents
-            .checked_add(
-                u64::try_from(projected.documents.len())
-                    .map_err(|_| GeminiSourceBackedError::CountOverflow)?,
+impl JsonlFamilyProjector for GeminiProjector {
+    fn project(
+        &mut self,
+        record: JsonlRecordRef<'_>,
+        emit: &mut dyn FnMut(LexicalDocument) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        let evidence = record.evidence();
+        for event in self
+            .parser
+            .project(
+                record.bytes(),
+                evidence.physical_ordinal(),
+                evidence.byte_start(),
+                evidence.byte_end_exclusive(),
+                evidence.record_digest(),
             )
-            .ok_or(GeminiSourceBackedError::CountOverflow)?;
-        Ok(Some(projected))
+            .map_err(capture_scan_error)?
+        {
+            emit(
+                project_event(
+                    &self.source,
+                    self.session_id,
+                    self.parent_session_id,
+                    self.root_session_id,
+                    &self.source_path,
+                    &self.session,
+                    event,
+                )
+                .map_err(capture_error)?,
+            )?;
+        }
+        Ok(())
     }
 
-    pub(crate) fn finish(self) -> GeminiSourceBackedResult<GeminiSourceBackedLeaf> {
-        let outcome = self
-            .native
-            .outcome()
-            .cloned()
-            .ok_or(GeminiSourceBackedError::ReaderNotDrained)?;
-        if outcome
-            .checkpoint
-            .session
-            .as_ref()
-            .map(|session| session.native_session_id.as_str())
-            != Some(self.session.native_session_id.as_str())
-            || outcome.checkpoint.retained_event_count != self.emitted_documents
-        {
-            return Err(GeminiSourceBackedError::CountMismatch);
-        }
+    fn finish(&mut self) -> crate::Result<()> {
+        self.parser.finish().map_err(capture_scan_error)?;
+        self.source_file.revalidate_leaf()?;
+        self.authority.revalidate()
+    }
+}
 
-        let retained_records = self.emitted_documents;
-        let rejected_records = outcome.rejected_records;
-        let ignored_records = outcome
-            .metrics
-            .ignored_records
-            .checked_add(outcome.metrics.header_records)
-            .ok_or(GeminiSourceBackedError::CountOverflow)?;
-        let complete_records = retained_records
-            .checked_add(rejected_records)
-            .and_then(|count| count.checked_add(ignored_records))
-            .ok_or(GeminiSourceBackedError::CountOverflow)?;
-        let counts = ScannedSourceCounts {
-            complete_records,
-            retained_records,
-            rejected_records,
-            ignored_records,
-            indexed_documents: self.emitted_documents,
-            certified_bytes: outcome.checkpoint.complete_prefix_end,
-        };
-        let opening = source_observation(&self.source, &self.source_observation)?;
-        let closing = source_observation(&self.source, &outcome.terminal_source_observation)?;
-        let frontier = SourceFrontier::new(
-            GEMINI_FRONTIER_KIND,
-            TypedKey::bytes(serde_json::to_vec(&GeminiSourceBackedFrontier::from(
-                &outcome.checkpoint,
-            ))?)?,
-            outcome.checkpoint.complete_prefix_end,
-            outcome.checkpoint.complete_prefix_sha256,
-        )?;
-        let certificate = CertifiedSource::certify_with_frontier(
-            opening,
-            closing,
-            GEMINI_SOURCE_BACKED_PARSER_REVISION,
-            outcome.checkpoint.complete_prefix_sha256,
-            counts,
-            Some(frontier),
-        )?;
-        Ok(GeminiSourceBackedLeaf {
-            source: self.source,
-            session: self.session,
-            session_id: self.session_id,
-            parent_session_id: self.parent_session_id,
-            root_session_id: self.root_session_id,
-            certificate,
+struct GeminiHydrator {
+    source: SourceKey,
+    source_file: Arc<OpenedProviderSourceFile>,
+}
+
+impl JsonlFamilyHydrator for GeminiHydrator {
+    fn hydrate(
+        &mut self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+        let hydrated = hydrate_opened_gemini_record(
+            self.source_file.as_ref(),
+            &self.source,
+            request.locator(),
+        )
+        .map_err(map_hydration_error)?;
+        Ok(HydratedProviderRecord {
+            event_id: request.event_id(),
+            provider_bytes: hydrated.provider_bytes,
         })
     }
 }
 
-#[derive(Debug, Serialize)]
-struct GeminiSourceBackedFrontier {
-    parser_revision: u32,
-    policy_revision: u32,
-    complete_prefix_end: u64,
-    complete_prefix_sha256: [u8; 32],
-    source_sha256: [u8; 32],
-    next_raw_ordinal: u64,
-    retained_event_count: u64,
-    rejected_records: u64,
-    append_boundary_safe: bool,
-    terminal: bool,
+fn shared_authority(
+    root: &Path,
+    metadata: &fs::Metadata,
+    transcripts: &[GeminiTranscriptSource],
+) -> crate::Result<Arc<ProviderSourceRoot>> {
+    if let Some(transcript) = transcripts.first() {
+        return Ok(Arc::new(transcript.authority.clone()));
+    }
+    let authority_path = if metadata.is_file() {
+        root.parent()
+            .ok_or(CaptureError::InvalidProviderTranscriptPath {
+                path: root.to_path_buf(),
+                reason: "Gemini transcript file has no parent authority",
+            })?
+    } else {
+        root
+    };
+    Ok(Arc::new(ProviderSourceRoot::open(authority_path)?))
 }
 
-impl From<&super::GeminiCheckpoint> for GeminiSourceBackedFrontier {
-    fn from(checkpoint: &super::GeminiCheckpoint) -> Self {
-        Self {
-            parser_revision: checkpoint.parser_revision,
-            policy_revision: checkpoint.policy_revision,
-            complete_prefix_end: checkpoint.complete_prefix_end,
-            complete_prefix_sha256: checkpoint.complete_prefix_sha256,
-            source_sha256: checkpoint.source_sha256,
-            next_raw_ordinal: checkpoint.next_raw_ordinal,
-            retained_event_count: checkpoint.retained_event_count,
-            rejected_records: checkpoint.rejected_records,
-            append_boundary_safe: checkpoint.append_boundary_safe,
-            terminal: checkpoint.terminal,
-        }
-    }
+fn decode_binding(leaf: &JsonlFamilyLeaf) -> crate::Result<GeminiFamilyBinding> {
+    let TypedKey::Bytes(bytes) = leaf.binding() else {
+        return Err(CaptureError::InvalidPayload(
+            "Gemini family leaf binding is malformed".to_owned(),
+        ));
+    };
+    Ok(serde_json::from_slice(bytes)?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,38 +358,44 @@ pub(crate) struct GeminiHydratedSourceRecord {
 
 /// Reopens one exact record from a freshly discovered Gemini leaf. The
 /// provider-owned record digest remains valid across a benign append.
+#[cfg(test)]
 pub(crate) fn hydrate_gemini_source_backed_record(
     source: &GeminiTranscriptSource,
     locator: &SourceRecordLocator,
 ) -> GeminiSourceBackedResult<GeminiHydratedSourceRecord> {
+    let session = read_gemini_session_header(source)?;
+    let expected_source = gemini_source_key(&session.native_session_id)?;
+    let source_file = source.open()?;
+    hydrate_opened_gemini_record(&source_file, &expected_source, locator)
+}
+
+fn hydrate_opened_gemini_record(
+    source_file: &OpenedProviderSourceFile,
+    expected_source: &SourceKey,
+    locator: &SourceRecordLocator,
+) -> GeminiSourceBackedResult<GeminiHydratedSourceRecord> {
     locator.validate_contract()?;
-    let identity_reader = GeminiSourceBackedLeafReader::open(source)?;
-    let expected_source = identity_reader.source().clone();
-    drop(identity_reader);
-    let (byte_offset, byte_length, physical_ordinal) = validate_locator(locator, &expected_source)?;
+    let (byte_offset, byte_length, physical_ordinal) = validate_locator(locator, expected_source)?;
     let maximum = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES)
-        .map_err(|_| GeminiSourceBackedError::CountOverflow)?
+        .map_err(|_| GeminiSourceBackedError::LocatorRangeTooLarge)?
         .checked_add(2)
-        .ok_or(GeminiSourceBackedError::CountOverflow)?;
-    if byte_length > maximum {
+        .ok_or(GeminiSourceBackedError::LocatorRangeTooLarge)?;
+    if byte_length == 0 || byte_length > maximum {
         return Err(GeminiSourceBackedError::LocatorRangeTooLarge);
     }
     let range_end = byte_offset
         .checked_add(byte_length)
         .ok_or(GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    let source_file = source.open()?;
     if source_file.len() < range_end {
         return Err(GeminiSourceBackedError::LocatorRangeMissing);
     }
     let byte_length =
         usize::try_from(byte_length).map_err(|_| GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    let provider_bytes = source_file
-        .read_exact_range(
-            byte_offset,
-            byte_length,
-            MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-        )
-        .map_err(GeminiSourceBackedError::Capture)?;
+    let provider_bytes = source_file.read_exact_range(
+        byte_offset,
+        byte_length,
+        MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
+    )?;
     let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
     if &actual_digest != locator.record_digest() {
         return Err(GeminiSourceBackedError::LocatorDigestMismatch);
@@ -497,35 +408,6 @@ pub(crate) fn hydrate_gemini_source_backed_record(
     })
 }
 
-fn project_page(
-    source: &SourceKey,
-    session_id: StableEntityId,
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
-    source_path: &str,
-    session: &GeminiSession,
-    page: GeminiNativePage,
-) -> GeminiSourceBackedResult<GeminiSourceBackedPage> {
-    let mut documents = Vec::with_capacity(page.events.len());
-    for event in page.events {
-        documents.push(project_event(
-            source,
-            session_id,
-            parent_session_id,
-            root_session_id,
-            source_path,
-            session,
-            event,
-        )?);
-    }
-    Ok(GeminiSourceBackedPage {
-        page_identity: *page.identity.as_bytes(),
-        expected_prefix_bytes: page.expected_frontier.complete_prefix_end,
-        next_prefix_bytes: page.next_safe_frontier.complete_prefix_end,
-        documents,
-    })
-}
-
 fn project_event(
     source: &SourceKey,
     session_id: StableEntityId,
@@ -533,7 +415,7 @@ fn project_event(
     root_session_id: StableEntityId,
     source_path: &str,
     session: &GeminiSession,
-    event: GeminiRetainedEvent,
+    event: super::GeminiRetainedEvent,
 ) -> GeminiSourceBackedResult<LexicalDocument> {
     let GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
     let native_item_key = NativeItemKey::native_id(
@@ -565,10 +447,17 @@ fn project_event(
         .raw_ordinal
         .checked_mul(u64::from(u32::MAX) + 1)
         .and_then(|sequence| sequence.checked_add(u64::from(event.native_order.sub_ordinal)))
-        .ok_or(GeminiSourceBackedError::CountOverflow)?;
+        .ok_or_else(|| {
+            GeminiSourceBackedError::Capture(CaptureError::SystemInvariant(
+                "Gemini event sequence overflowed",
+            ))
+        })?;
     let body = lexical_body(&event);
     if body.is_empty() {
-        return Err(GeminiSourceBackedError::CountMismatch);
+        return Err(CaptureError::InvalidPayload(
+            "Gemini source-backed event has no lexical body".to_owned(),
+        )
+        .into());
     }
     Ok(LexicalDocument {
         event_id,
@@ -578,7 +467,6 @@ fn project_event(
         source: source.clone(),
         locator,
         provider_session_id: Some(session.native_session_id.clone()),
-        // Gemini CLI JSONL does not expose VCS branch authority.
         branch: None,
         source_path: Some(source_path.to_owned()),
         agent_type: session.agent_type.as_str().to_owned(),
@@ -601,7 +489,7 @@ fn project_event(
     })
 }
 
-fn lexical_body(event: &GeminiRetainedEvent) -> String {
+fn lexical_body(event: &super::GeminiRetainedEvent) -> String {
     if !event.searchable_text.is_empty() {
         return event.searchable_text.clone();
     }
@@ -671,17 +559,6 @@ fn gemini_session_id(
         logical_session_kind: GEMINI_LOGICAL_SESSION_KIND,
         native_session_key: &native_session_key,
     })?)
-}
-
-fn source_observation(
-    source: &SourceKey,
-    observation: &GeminiFileObservation,
-) -> GeminiSourceBackedResult<SourceObservation> {
-    Ok(SourceObservation::new(
-        source.clone(),
-        GEMINI_SOURCE_REVISION_KIND,
-        serde_json::to_vec(observation)?,
-    )?)
 }
 
 fn validate_locator(
@@ -779,4 +656,54 @@ fn decode_display_text(
         .and_then(Value::as_str)
         .map(|target| format!("rewind to {}", target.trim()))
         .filter(|text| text != "rewind to "))
+}
+
+fn capture_scan_error(error: GeminiScanError) -> CaptureError {
+    CaptureError::InvalidPayload(error.to_string())
+}
+
+fn capture_error(error: impl std::fmt::Display) -> CaptureError {
+    CaptureError::InvalidPayload(error.to_string())
+}
+
+fn contract_error(error: impl std::fmt::Display) -> CaptureError {
+    CaptureError::InvalidPayload(error.to_string())
+}
+
+fn map_hydration_error(error: GeminiSourceBackedError) -> HydrationFailure {
+    let kind = match error {
+        GeminiSourceBackedError::InvalidLocator
+        | GeminiSourceBackedError::Projection(_)
+        | GeminiSourceBackedError::Resolver(_) => HydrationFailureKind::InvalidLocator,
+        GeminiSourceBackedError::ExactDisplayUnavailable => {
+            HydrationFailureKind::UnsupportedParserRevision
+        }
+        GeminiSourceBackedError::Capture(_)
+        | GeminiSourceBackedError::Scan(_)
+        | GeminiSourceBackedError::Io(_)
+        | GeminiSourceBackedError::Json(_)
+        | GeminiSourceBackedError::LocatorRangeTooLarge
+        | GeminiSourceBackedError::LocatorRangeMissing
+        | GeminiSourceBackedError::LocatorDigestMismatch => {
+            HydrationFailureKind::StaleRecordEvidence
+        }
+    };
+    HydrationFailure {
+        kind,
+        detail: error.to_string(),
+    }
+}
+
+fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
+    HydrationFailure {
+        kind: HydrationFailureKind::TemporarilyUnavailable,
+        detail: error.to_string(),
+    }
+}
+
+fn stale(detail: impl std::fmt::Display) -> HydrationFailure {
+    HydrationFailure {
+        kind: HydrationFailureKind::StaleRecordEvidence,
+        detail: detail.to_string(),
+    }
 }

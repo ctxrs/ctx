@@ -21,7 +21,6 @@ use super::parser::{
     MAX_GEMINI_FILE_TOUCHES_PER_EVENT, MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT,
     MAX_GEMINI_NATIVE_PAGE_BYTES, MAX_GEMINI_NATIVE_PAGE_RECORDS,
 };
-use super::source_backed::{hydrate_gemini_source_backed_record, GeminiSourceBackedLeafReader};
 use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
 
 fn fixture_root(temp: &TempDir) -> PathBuf {

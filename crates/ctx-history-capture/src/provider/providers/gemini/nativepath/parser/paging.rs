@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(super) fn core_page_conservative_bytes(
     expected: &GeminiPageFrontier,
     next: &GeminiPageFrontier,
@@ -13,6 +14,7 @@ pub(super) fn core_page_conservative_bytes(
         .checked_add(rejection_bytes)
 }
 
+#[cfg(test)]
 pub(super) fn frontier_wire_bytes(frontier: &GeminiPageFrontier) -> Option<usize> {
     let mut total = 1024_usize;
     if let Some(session) = &frontier.session {
@@ -50,10 +52,12 @@ pub(super) fn estimated_base64_wire_bytes(decoded_bytes: usize) -> Option<usize>
         .checked_add(2)
 }
 
+#[cfg(test)]
 pub(super) fn rejection_wire_bytes(rejection: &GeminiRejection) -> Option<usize> {
     REJECTION_ENVELOPE_FIXED_BYTES.checked_add(estimated_json_string_wire_bytes(&rejection.reason)?)
 }
 
+#[cfg(test)]
 pub(super) fn derive_page_identity(
     expected: &GeminiPageFrontier,
     next: &GeminiPageFrontier,
@@ -114,6 +118,7 @@ pub(super) fn derive_page_identity(
     GeminiPageIdentity(hasher.finalize().into())
 }
 
+#[cfg(test)]
 pub(super) fn hash_page_frontier(hasher: &mut Sha256, frontier: &GeminiPageFrontier) {
     hasher.update(frontier.parser_revision.to_le_bytes());
     hasher.update(frontier.policy_revision.to_le_bytes());
