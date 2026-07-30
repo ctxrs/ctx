@@ -209,29 +209,32 @@ Load command 3
      name /System/Library/Frameworks/CoreML.framework/Versions/A/CoreML (offset 24)
 Load command 4
       cmd LC_LOAD_DYLIB
-     name /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (offset 24)
+     name /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (offset 24)
 Load command 5
       cmd LC_LOAD_DYLIB
-     name /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (offset 24)
+     name /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (offset 24)
 Load command 6
       cmd LC_LOAD_DYLIB
-     name /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO (offset 24)
+     name /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (offset 24)
 Load command 7
       cmd LC_LOAD_DYLIB
-     name /System/Library/Frameworks/Metal.framework/Versions/A/Metal (offset 24)
+     name /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO (offset 24)
 Load command 8
       cmd LC_LOAD_DYLIB
-     name /System/Library/Frameworks/Security.framework/Versions/A/Security (offset 24)
+     name /System/Library/Frameworks/Metal.framework/Versions/A/Metal (offset 24)
 Load command 9
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libSystem.B.dylib (offset 24)
+     name /System/Library/Frameworks/Security.framework/Versions/A/Security (offset 24)
 Load command 10
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libc++.1.dylib (offset 24)
+     name /usr/lib/libSystem.B.dylib (offset 24)
 Load command 11
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libiconv.2.dylib (offset 24)
+     name /usr/lib/libc++.1.dylib (offset 24)
 Load command 12
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libiconv.2.dylib (offset 24)
+Load command 13
       cmd LC_LOAD_DYLIB
      name /usr/lib/libobjc.A.dylib (offset 24)
 EOF
@@ -385,9 +388,13 @@ missing_mac_security="${tmp}/missing-mac-security.txt"
 sed '/Security.framework\/Versions\/A\/Security/d' "${mac_objdump}" > "${missing_mac_security}"
 expect_fail mac_missing_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${missing_mac_security}"
 expect_fail mac_x64_missing_security_framework run_check macos-x64 "${mac_x64_readobj}" "${missing_mac_security}"
+missing_mac_core_services="${tmp}/missing-mac-core-services.txt"
+sed '/CoreServices.framework\/Versions\/A\/CoreServices/d' "${mac_objdump}" > "${missing_mac_core_services}"
+expect_fail mac_missing_core_services_framework run_check macos-arm64 "${mac_arm_readobj}" "${missing_mac_core_services}"
+expect_fail mac_x64_missing_core_services_framework run_check macos-x64 "${mac_x64_readobj}" "${missing_mac_core_services}"
 injected_mac_dylib="${tmp}/injected-mac-dylib.txt"
 sed '/name \/usr\/lib\/libobjc.A.dylib/a\
-Load command 13\
+Load command 14\
       cmd LC_LOAD_DYLIB\
      name /usr/local/lib/libctx-injected.dylib (offset 24)' \
   "${mac_objdump}" > "${injected_mac_dylib}"
