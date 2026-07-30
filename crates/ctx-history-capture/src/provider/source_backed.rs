@@ -148,6 +148,7 @@ use crate::{
 
 mod discovery;
 mod driver;
+pub(crate) mod family;
 mod inventory;
 mod publication;
 mod registration;
@@ -155,10 +156,28 @@ mod resolver;
 
 pub use discovery::*;
 pub use driver::*;
+const _: Option<&dyn driver::ProviderCaptureSink> = None;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;
 pub use resolver::*;
+
+pub(crate) fn source_backed_base_sources(
+    sink: &SourceBackedGenerationSink<'_>,
+    owns: impl Fn(&SourceKey) -> bool,
+) -> Vec<CertifiedSource> {
+    sink.writer
+        .base_manifest()
+        .map(|manifest| {
+            manifest
+                .sources
+                .iter()
+                .filter(|source| owns(source.observation().source()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 #[cfg(test)]
 mod tests;

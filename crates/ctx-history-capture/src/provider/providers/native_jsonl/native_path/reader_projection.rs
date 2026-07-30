@@ -1,6 +1,6 @@
 use super::*;
 
-impl DirectJsonlPageReader {
+impl DirectJsonlProjector {
     pub(super) fn project_line(
         &mut self,
         bytes: &[u8],
@@ -28,16 +28,16 @@ impl DirectJsonlPageReader {
             }
         };
 
+        let starts_session = match self.provider {
+            CaptureProvider::Qoder => {
+                super::qoder_parser::qoder_header_session_id(&value).is_some()
+            }
+            CaptureProvider::QwenCode => {
+                super::qwen_code::qwen_code_header_session_id(&value).is_some()
+            }
+            _ => native_jsonl_record_starts_session(self.provider, &value),
+        };
         if self.session.is_none() {
-            let starts_session = match self.provider {
-                CaptureProvider::Qoder => {
-                    super::qoder_parser::qoder_header_session_id(&value).is_some()
-                }
-                CaptureProvider::QwenCode => {
-                    super::qwen_code::qwen_code_header_session_id(&value).is_some()
-                }
-                _ => native_jsonl_record_starts_session(self.provider, &value),
-            };
             if !starts_session {
                 return Ok(ProjectedLine::rejection(DirectJsonlRejection {
                     raw_ordinal: ordinal,
@@ -58,6 +58,25 @@ impl DirectJsonlPageReader {
                 self.imported_at,
                 &value,
             ));
+        } else if starts_session {
+            let observed = session_from_header(
+                self.provider,
+                &self.source_format,
+                &self.path,
+                self.source_root.as_deref(),
+                self.imported_at,
+                &value,
+            );
+            let expected = self.session.as_ref().ok_or(CaptureError::SystemInvariant(
+                "direct JSONL reader lost its provider session",
+            ))?;
+            if observed.native_session_id != expected.native_session_id
+                || observed.provider_session_id != expected.provider_session_id
+                || observed.parent_provider_session_id != expected.parent_provider_session_id
+                || observed.root_provider_session_id != expected.root_provider_session_id
+            {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
         }
         let session = self.session.as_ref().ok_or(CaptureError::SystemInvariant(
             "direct JSONL reader lost its provider session",
@@ -428,11 +447,11 @@ fn attach_direct_message_locator(
     Ok(())
 }
 
-#[derive(Default)]
-pub(super) struct ProjectedLine {
-    pub(super) events: Vec<DirectJsonlEvent>,
-    pub(super) rejections: Vec<DirectJsonlRejection>,
-    pub(super) serialized_bytes: usize,
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProjectedLine {
+    pub(crate) events: Vec<DirectJsonlEvent>,
+    pub(crate) rejections: Vec<DirectJsonlRejection>,
+    pub(crate) serialized_bytes: usize,
 }
 
 impl ProjectedLine {

@@ -30,6 +30,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         "windsurf-hook-trajectory",
         "primary",
         true,
+        "e0190d935691dcdfb294672fd2a821f694be6edaf3b81d848959fa7df56c9125",
     );
 }
 
