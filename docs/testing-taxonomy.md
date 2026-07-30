@@ -1,33 +1,27 @@
 # Testing Taxonomy
 
-Public verification starts with fast local confidence and expands as needed.
-All normal commands use repository-owned wrappers; direct `bazel` and broad raw
-Cargo commands are not routine entry points.
+Public verification has one nested three-tier graph. All normal commands use
+repository-owned wrappers; direct `bazel` and broad raw Cargo commands are not
+routine entry points.
 
 ## Modes
 
 | Mode | Purpose |
 | --- | --- |
-| `fast` | Native Rust formatting/smoke, target inventory, public docs, CLI contracts, and package-surface audit. |
-| `smoke` | `fast` plus a fresh-home CLI flow and basic provider fixture smoke. |
-| `presubmit` | `fast` plus deterministic native Rust unit and bounded integration tests. |
-| `ci` | Buildkite gate: native clippy, `presubmit`, SDK packaging, and release/content audits. |
-| `nightly` | `ci` plus serialized upgrade acceptance, persistent-daemon soak, and injected crash/ENOSPC qualification. |
-| `release` | The same complete qualification graph as `nightly`, named explicitly for candidate receipts. |
+| `ci` | Merge gate: native clippy plus deterministic format, policy, SDK, unit, contract, bounded integration, packaging, and content checks. |
+| `nightly` | `ci` plus performance sanity, serialized upgrade acceptance, persistent-daemon soak, and injected crash/ENOSPC qualification. |
+| `release` | `nightly`, named explicitly for release-candidate qualification. |
 
 During editing, run the smallest owning test and then the affected selector.
-Use `presubmit` when the build graph changes or selection is uncertain, and
-`ci` for the ordinary hosted public check. Use `nightly` or `release` for the
-serialized upgrade, daemon-soak, and fault-injection qualification that is too
-expensive for each source change. Network-dependent, external,
-platform-native, and manual checks remain separate.
+Build-graph changes, unresolved comparison bases, selector failures, and
+unmapped changes fail closed to `ci`. Use `nightly` or `release` for performance
+sanity and the serialized upgrade, daemon-soak, and fault-injection
+qualification that is too expensive for each source change. Network-dependent,
+external, platform-native, and manual checks remain separate.
 
 ## Commands
 
 ```bash
-scripts/check.sh --mode=fast
-scripts/check.sh --mode=smoke
-scripts/check.sh --mode=presubmit
 scripts/check.sh --mode=ci
 scripts/check.sh --mode=nightly
 scripts/check.sh --mode=release
@@ -42,9 +36,9 @@ Use direct Bazel targets when a narrower check is enough:
 
 ```bash
 scripts/bazelw test //:docs_check --config=test
-scripts/bazelw test //:fresh_home_e2e --config=test
-scripts/bazelw test //:provider_fixture_e2e --config=test
-scripts/bazelw test //:local_transcript_oracle --config=test
+scripts/bazelw test //crates/ctx-cli:search_show_locate_sql_tests --config=test
+scripts/bazelw test //crates/ctx-cli:native_providers_tests --config=test
+scripts/bazelw test //sdks/go:go_sdk_tests --config=test
 scripts/bazelw test //:package_audit_release --config=release
 ```
 

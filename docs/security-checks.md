@@ -91,17 +91,17 @@ scripts/bazelw test //:docs_check --config=ci
 Run the public local transcript oracle through Bazel:
 
 ```bash
-scripts/bazelw test //:local_transcript_oracle --config=ci
+scripts/bazelw test //crates/ctx-cli:search_show_locate_sql_tests --config=ci
 ```
 
-`//:local_transcript_oracle` imports a synthetic provider history with fake
-secret-shaped values, then checks `search`, `show`, and SQLite search
-projections preserve local transcript text.
+`//crates/ctx-cli:search_show_locate_sql_tests` imports a synthetic provider
+history with fake secret-shaped values, then checks `search`, `show`, and SQLite
+search projections preserve local transcript text.
 
 ## Mode Placement
 
-Security-sensitive product changes should run at least `presubmit`; changes to
-setup/import/search behavior should also run `smoke` as described in
+Security-sensitive product changes should run the focused owning targets and
+`//:ci` as described in
 [`docs/testing-taxonomy.md`](testing-taxonomy.md).
 
 The default retrieval boundary remains local provider-history search. Security

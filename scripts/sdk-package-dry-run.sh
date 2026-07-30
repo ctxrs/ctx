@@ -39,7 +39,10 @@ if [[ -z "${CTX_SDK_CARGO:-}" \
   || -z "${CTX_SDK_RUSTC:-}" \
   || -z "${CTX_SDK_CARGO_VENDOR_MANIFEST:-}" ]]; then
   if [[ -z "${TEST_SRCDIR:-}" ]]; then
-    exec scripts/bazelw test //:sdk_package_dry_run \
+    exec scripts/bazelw test \
+      //:sdk_package_dry_run \
+      //sdks/go:go_sdk_tests \
+      //sdks/go/examples/dogfood:dogfood_tests \
       --config=ci --test_output=all --nocache_test_results
   fi
   printf 'Bazel SDK package dry-run requires declared Cargo, rustc, and vendor inputs\n' >&2
@@ -103,11 +106,7 @@ run_in_dir "$tmp_dir/cargo-workspace" \
   --target-dir "$tmp_dir/cargo-target"
 skip "Rust ctx-sdk cargo package dry-run (depends on unpublished in-repo ctx-protocol)"
 
-if command -v go >/dev/null 2>&1; then
-  run_in_dir sdks/go go list ./...
-else
-  skip "Go module dry-run (go unavailable)"
-fi
+printf '\n==> Go module compilation and tests are modeled by pinned rules_go targets\n'
 
 if command -v javac >/dev/null 2>&1; then
   run sdks/jvm/scripts/test

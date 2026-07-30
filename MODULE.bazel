@@ -5,7 +5,39 @@ module(
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
 bazel_dep(name = "rules_cc", version = "0.2.8")
+bazel_dep(name = "rules_go", version = "0.46.0")
 bazel_dep(name = "platforms", version = "1.1.0")
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(
+    sdks = {
+        "darwin_amd64": [
+            "go1.22.12.darwin-amd64.tar.gz",
+            "e7bbe07e96f0bd3df04225090fe1e7852ed33af37c43a23e16edbbb3b90a5b7c",
+        ],
+        "darwin_arm64": [
+            "go1.22.12.darwin-arm64.tar.gz",
+            "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d",
+        ],
+        "linux_amd64": [
+            "go1.22.12.linux-amd64.tar.gz",
+            "4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43",
+        ],
+        "linux_arm64": [
+            "go1.22.12.linux-arm64.tar.gz",
+            "fd017e647ec28525e86ae8203236e0653242722a7436929b1f775744e26278e7",
+        ],
+        "windows_amd64": [
+            "go1.22.12.windows-amd64.zip",
+            "2ceda04074eac51f4b0b85a9fcca38bcd49daee24bed9ea1f29958a8e22673a6",
+        ],
+        "windows_arm64": [
+            "go1.22.12.windows-arm64.zip",
+            "6b9eaf160b155e02ffe9ed603f162ecc3264f6130c8fcf83bb77087f9807fdec",
+        ],
+    },
+    version = "1.22.12",
+)
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 

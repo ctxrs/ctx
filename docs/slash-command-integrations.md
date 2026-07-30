@@ -38,13 +38,13 @@ skill installer.
 
 ## Automated Coverage
 
-The Bazel target `//:slash_command_e2e` runs hermetic fake-harness tests for the
-implemented file writers. Those tests execute the real ctx installer with
-temporary home and config directories, discover the generated files from the
-documented provider paths, parse the provider command formats, and substitute a
-multi-word query through the provider argument token where the provider supports
-one. Windsurf is covered as a workflow-readiness parser because its invocation
-and reload path is UI/manual.
+The Bazel target `//crates/ctx-cli:slash_command_e2e_tests` runs hermetic
+fake-harness tests for the implemented file writers. Those tests execute the
+real ctx installer with temporary home and config directories, discover the
+generated files from the documented provider paths, parse the provider command
+formats, and substitute a multi-word query through the provider argument token
+where the provider supports one. Windsurf is covered as a workflow-readiness
+parser because its invocation and reload path is UI/manual.
 
 Optional live-harness smoke tests should stay outside the default Bazel gate.
 They require installed third-party CLIs or desktop UI state and, for some

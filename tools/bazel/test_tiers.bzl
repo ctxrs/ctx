@@ -1,4 +1,4 @@
-"""Canonical public Rust format and test-tier inventories."""
+"""Canonical public format and ci/nightly test inventories."""
 
 RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:analytics_identity_tests",
@@ -39,7 +39,6 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
-    "//crates/ctx-history-capture:codex_nativepath_qualification_tests",
     "//crates/ctx-history-capture:complete_content_sqlite_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
@@ -52,13 +51,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-sdk:unit_tests",
 ]
 
-# Provider correctness is ordinary executable CI, not a second evidence system.
-#
-# The capture unit target owns the landed-route inventory and the JSONL,
-# SQLite-WAL, document/tree, and event-file lifecycle contracts. The CLI
-# targets prove real-shape admission/rejection, discovery, refresh, exact
-# hydration, and user-facing source-backed behavior.
-PROVIDER_CONTRACT_TESTS = [
+_CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:native_provider_real_shapes_tests",
     "//crates/ctx-cli:native_provider_rejections_tests",
     "//crates/ctx-cli:native_providers_tests",
@@ -68,7 +61,7 @@ PROVIDER_CONTRACT_TESTS = [
     "//crates/ctx-history-capture:complete_content_tests",
 ]
 
-NATIVE_RUST_TESTS = [
+_CI_RUST_TESTS = [
     ":native_ctx_binary_smoke",
     "//crates/ctx-cli:analytics_identity_tests",
     "//crates/ctx-cli:analytics_tests",
@@ -101,7 +94,6 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
-    "//crates/ctx-history-capture:codex_nativepath_qualification_tests",
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
@@ -112,7 +104,60 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-sdk:unit_tests",
 ]
 
-RELEASE_QUALIFICATION_TESTS = [
+# Merge validation owns every deterministic format, policy, SDK, unit,
+# contract, and bounded integration check. Keep these as direct targets so CI
+# has one aggregate graph instead of routing through overlapping aliases.
+CI_TESTS = [
+    ":bazel_affected_mutation_tests",
+    ":bazel_affected_script_tests",
+    ":bazel_wrapper_tests",
+    ":buildkite_pipeline_check",
+    ":cargo_diagnostic_tests",
+    ":check_force_rerun_tests",
+    ":cli_build_cfg_parity_check",
+    ":dependency_advisory_gate_tests",
+    ":docs_check",
+    ":freebsd_ort_exit_contract",
+    ":freebsd_ort_exit_contract_mutation_tests",
+    ":installer_path_smoke",
+    ":linux_release_construction_tests",
+    ":loc_check",
+    ":macos_release_signing_tests",
+    ":native_bazel_packaging_contract_tests",
+    ":native_candidate_smoke_tests",
+    ":package_audit_fast",
+    ":package_audit_release",
+    ":public_cli_artifact_cleanup_tests",
+    ":public_cli_bazel_build_info_tests",
+    ":public_cli_bazel_release_contract",
+    ":public_cli_release_targets_tests",
+    ":public_control_surface_check",
+    ":release_binary_compat_tests",
+    ":release_binary_string_audit_tests",
+    ":release_sbom_tests",
+    ":release_source_surface_audit_tests",
+    ":release_target_matrix_check",
+    ":release_target_matrix_tests",
+    ":rust_target_inventory_check",
+    ":rust_toolchain_pin_check",
+    ":rust_toolchain_pin_mutation_tests",
+    ":rustfmt_check",
+    ":sdk_contract_checks",
+    ":sdk_package_dry_run",
+    ":source_diff_check",
+    ":stage_github_release_assets_tests",
+    "//crates/ctx-cli:daemon_config_reload_tests",
+    "//crates/ctx-cli:search_source_identity_filters_tests",
+    "//sdks/go:go_sdk_tests",
+    "//sdks/go/examples/dogfood:dogfood_tests",
+    "//tools/bazel:release_route_analysis_tests",
+] + _CI_RUST_TESTS + _CI_PROVIDER_TESTS
+
+# Nightly adds performance sanity plus the intentionally serialized upgrade,
+# daemon, and injected process/filesystem fault qualification that should not
+# run on every merge.
+NIGHTLY_TESTS = [
+    ":performance_sanity_tests",
     "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
     "//crates/ctx-cli:pro_qualification_tests",

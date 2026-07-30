@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
+
+filegroup(
+    name = "repository_gate_data",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+loc_check_inputs(name = "loc_check_inputs")
+
+go_test(
+    name = "dogfood_tests",
+    srcs = [
+        "main.go",
+        "main_test.go",
+    ],
+    deps = ["//sdks/go:go_sdk"],
+)

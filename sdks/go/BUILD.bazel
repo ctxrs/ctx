@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
+
+filegroup(
+    name = "repository_gate_data",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+loc_check_inputs(name = "loc_check_inputs")
+
+go_library(
+    name = "go_sdk",
+    srcs = [
+        "client.go",
+        "errors.go",
+        "hosted.go",
+        "local_cli.go",
+        "normalize.go",
+        "types.go",
+        "version.go",
+    ],
+    importpath = "github.com/ctxrs/ctx/sdks/go",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "go_sdk_tests",
+    srcs = ["client_test.go"],
+    embed = [":go_sdk"],
+)
