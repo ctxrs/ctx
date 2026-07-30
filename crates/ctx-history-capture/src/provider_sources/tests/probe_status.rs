@@ -1,8 +1,8 @@
 use ctx_history_core::CaptureProvider;
 
-#[cfg(unix)]
-use super::super::discover_provider_sources;
 use super::super::probes::{default_location_import_probe, BoundedProbe};
+#[cfg(unix)]
+use super::super::{discover_provider_sources, discover_provider_sources_for_provider_report};
 use super::super::{ProviderDefaultLocation, ProviderSourceKind, ProviderSourceStatus};
 use super::support::{assert_source_status, tempdir};
 #[cfg(unix)]
@@ -59,20 +59,15 @@ fn default_source_probe_reports_unreadable_directory_as_unknown() {
         return;
     }
 
-    let source = discover_provider_sources(temp.path())
-        .into_iter()
-        .find(|source| {
-            source.provider == CaptureProvider::Codex
-                && source.source_format == "codex_session_jsonl_tree"
-        })
-        .unwrap();
+    let report = discover_provider_sources_for_provider_report(temp.path(), CaptureProvider::Codex);
     std::fs::set_permissions(&sessions, original_permissions).unwrap();
 
-    assert_eq!(source.status, ProviderSourceStatus::Unknown);
-    assert!(source
-        .unsupported_reason
-        .unwrap()
-        .contains("could not be read"));
+    assert!(!report.sources.iter().any(|source| source.path == sessions));
+    assert!(report.issues.iter().any(|issue| {
+        issue.provider == CaptureProvider::Codex
+            && issue.path.as_deref() == Some(sessions.as_path())
+            && issue.reason.contains("access was denied")
+    }));
 }
 
 #[cfg(unix)]

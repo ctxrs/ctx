@@ -156,6 +156,7 @@ fn mutation_and_concurrent_leaf_replacement_fail_closed() {
             assert!(matches!(
                 failure.kind,
                 HydrationFailureKind::StaleSourceEvidence
+                    | HydrationFailureKind::StaleRecordEvidence
                     | HydrationFailureKind::TemporarilyUnavailable
             ));
             assert!(!failure.detail.contains(&attacker));
@@ -166,7 +167,9 @@ fn mutation_and_concurrent_leaf_replacement_fail_closed() {
     let failure = resolver.hydrate_event(&request).unwrap_err();
     assert!(matches!(
         failure.kind,
-        HydrationFailureKind::StaleSourceEvidence | HydrationFailureKind::TemporarilyUnavailable
+        HydrationFailureKind::StaleSourceEvidence
+            | HydrationFailureKind::StaleRecordEvidence
+            | HydrationFailureKind::TemporarilyUnavailable
     ));
     assert!(!failure.detail.contains(&attacker));
 }

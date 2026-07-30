@@ -21,7 +21,7 @@ fn opencode_family_projects_full_bodies_and_hydrates_typed_sqlite_rows() {
         );
         assert_eq!(
             document.locator.revision_policy(),
-            LocatorRevisionPolicy::ExactSourceRevision
+            LocatorRevisionPolicy::StableRecordEvidence
         );
         let NativeRecordCoordinate::ProviderSqlite {
             logical_relation,
@@ -97,7 +97,7 @@ fn lingma_source_backed_prompt_hydrates_and_changed_row_fails_closed() {
         )
         .unwrap();
     let failure = resolver.hydrate_record(record).unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn astrbot_source_backed_conversation_hydrates_the_original_typed_item() {
     let failure = resolver
         .hydrate_event(&event_request(document))
         .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[test]
@@ -179,10 +179,11 @@ fn trae_source_backed_nested_message_hydrates_without_parent_value_retention() {
     assert_eq!(document.body, body);
     assert!(matches!(
         document.locator.coordinate(),
-        NativeRecordCoordinate::ProviderNative {
-            namespace,
-            coordinate: TypedKey::Composite(parts),
-        } if namespace == "trae.itemtable-json-message-v1" && parts.len() == 6
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation,
+            primary_key: TypedKey::Composite(parts),
+            row_version: Some(TypedKey::Bytes(digest)),
+        } if logical_relation == "ItemTable" && parts.len() == 4 && digest.len() == 32
     ));
     let locator_json = serde_json::to_string(&document.locator).unwrap();
     assert!(!locator_json.contains(path.to_string_lossy().as_ref()));
