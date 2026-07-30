@@ -242,6 +242,18 @@ pub(super) fn object_fingerprint(stamp: &ObjectStamp) -> [u8; 32] {
     digest.finalize().into()
 }
 
+pub(super) fn object_change_token(stamp: &ObjectStamp) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(super::ORDINARY_FILE_TOKEN_DOMAIN);
+    digest.update(b"windows\0");
+    digest.update(stamp.volume_serial_number.to_le_bytes());
+    digest.update(stamp.file_id);
+    digest.update(stamp.change_time.to_le_bytes());
+    digest.update(stamp.last_write_time.to_le_bytes());
+    digest.update(stamp.length.to_le_bytes());
+    digest.finalize().into()
+}
+
 pub(super) fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) -> io::Result<()> {
     while !bytes.is_empty() {
         let read = read_at(file, bytes, offset)?;
@@ -675,17 +687,6 @@ fn parse_directory_buffer(
                 ));
             }
             validate_child_name(&name)?;
-            if entry.FileAttributes
-                & (FILE_ATTRIBUTE_REPARSE_POINT
-                    | FILE_ATTRIBUTE_OFFLINE
-                    | FILE_ATTRIBUTE_RECALL_ON_OPEN
-                    | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-                != 0
-            {
-                return Err(AuthorityOpenError::Rejected(
-                    "reparse, offline, and cloud-placeholder provider entries are rejected",
-                ));
-            }
             output.push(name);
         }
         if entry.NextEntryOffset == 0 {

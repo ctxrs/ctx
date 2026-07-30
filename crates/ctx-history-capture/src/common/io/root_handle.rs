@@ -27,7 +27,11 @@ use std::{
     time::SystemTime,
 };
 
+use sha2::{Digest, Sha256};
+
 use crate::{CaptureError, Result};
+
+const ORDINARY_FILE_TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-observation-v2\0";
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[path = "root_handle/unix.rs"]
@@ -335,6 +339,18 @@ impl OpenedProviderSourceFile {
         platform::object_fingerprint(&self.opened)
     }
 
+    /// Stable ordinary-file token derived from the retained object stamp.
+    ///
+    /// This performs no second filesystem observation; [`Self::revalidate_leaf`]
+    /// is the proof that the stamp still describes the opened object and route.
+    pub(crate) fn ordinary_file_token(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(ORDINARY_FILE_TOKEN_DOMAIN);
+        digest.update(b"platform\0");
+        digest.update(platform::object_change_token(&self.opened));
+        digest.finalize().into()
+    }
+
     pub(crate) fn file(&self) -> &File {
         &self.file
     }
@@ -391,9 +407,12 @@ impl OpenedProviderSourceFile {
         Ok(bytes)
     }
 
-    /// Confirms the open handle did not change while read and the current
-    /// authority-relative route still names the same object.
-    pub(crate) fn revalidate(&self) -> Result<()> {
+    /// Confirms the open handle did not change while read and its route beneath
+    /// the retained authority still names the same object.
+    ///
+    /// Relative callers must perform one terminal [`ProviderSourceRoot::revalidate`]
+    /// after all leaf checks before publishing aggregate evidence.
+    pub(crate) fn revalidate_leaf(&self) -> Result<()> {
         let current_metadata = self.file.metadata()?;
         let current = platform::object_stamp(&self.file, &current_metadata)?;
         if current != self.opened {
@@ -409,7 +428,7 @@ impl OpenedProviderSourceFile {
                 let reopened = root.open_path(relative_path)?;
                 return match reopened {
                     OpenedProviderSourcePath::File(reopened) if reopened.opened == self.opened => {
-                        root.revalidate()
+                        Ok(())
                     }
                     _ => Err(changed_path(self.display_path())),
                 };
@@ -421,6 +440,15 @@ impl OpenedProviderSourceFile {
         let named = platform::object_stamp(&file, &metadata)?;
         if named != self.opened {
             return Err(changed_path(self.display_path()));
+        }
+        Ok(())
+    }
+
+    /// Confirms the leaf proof and, for a relative route, the current named root.
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        self.revalidate_leaf()?;
+        if let ProviderSourceFileRoute::Relative { root, .. } = &self.route {
+            root.revalidate()?;
         }
         Ok(())
     }
@@ -645,6 +673,28 @@ mod tests {
         let mut bytes = Vec::new();
         retained.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"0123456789");
+        assert!(source.revalidate_leaf().is_err());
+        assert!(source.revalidate().is_err());
+    }
+
+    #[test]
+    fn leaf_revalidation_and_one_terminal_root_fence_have_distinct_purposes() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let moved = temp.path().join("moved-root");
+        let replacement = temp.path().join("replacement");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(root.join("source.jsonl"), b"original\n").unwrap();
+        fs::write(replacement.join("source.jsonl"), b"replacement\n").unwrap();
+        let authority = ProviderSourceRoot::open(&root).unwrap();
+        let source = authority.open_file(Path::new("source.jsonl")).unwrap();
+
+        fs::rename(&root, &moved).unwrap();
+        fs::rename(&replacement, &root).unwrap();
+
+        source.revalidate_leaf().unwrap();
+        assert!(authority.revalidate().is_err());
         assert!(source.revalidate().is_err());
     }
 
