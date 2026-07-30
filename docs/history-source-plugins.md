@@ -91,7 +91,7 @@ plugin cursor.
 
 An accepted import has one authority path:
 
-1. ctx validates that the selected manifest identifies a regular
+1. The CLI validates that the selected manifest identifies a regular
    provider-owned file.
 2. A bounded header check verifies the `ctx-history-jsonl-v1` schema and exact
    declared source identity without copying the body.
