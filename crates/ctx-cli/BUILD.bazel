@@ -351,6 +351,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "index_tests",
     src = "tests/index.rs",
+    extra_crates = ["anstream"],
     test_support = [
         "base",
         "fixtures",
