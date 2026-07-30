@@ -279,49 +279,39 @@ fn journal_v2_rejects_other_unshipped_schema_versions() {
 
 #[cfg(unix)]
 #[test]
-fn v025_data_root_schema_one_journal_is_not_recovery_authority() {
+fn data_root_scoped_state_is_not_install_recovery_authority() {
     let temp = tempdir().unwrap();
     let journal_path = temp.path().join("upgrade-install-transaction.json");
-    let old_journal = br#"{
-  "schema_version": 1,
-  "transaction_id": "old",
-  "phase": "committed",
-  "install_path": "/tmp/ctx",
-  "paths": []
-}"#;
-    let would_be_backup = temp.path().join("old-ctx-backup");
-    fs::write(&journal_path, old_journal).unwrap();
-    fs::write(&would_be_backup, b"old binary").unwrap();
+    let unrelated_state = b"not executable-scoped recovery authority";
+    let unrelated_backup = temp.path().join("unowned-ctx-backup");
+    fs::write(&journal_path, unrelated_state).unwrap();
+    fs::write(&unrelated_backup, b"unowned binary").unwrap();
 
     assert!(super::pending_recovery(temp.path()).unwrap().is_none());
-    assert_eq!(fs::read(&journal_path).unwrap(), old_journal);
-    assert_eq!(fs::read(&would_be_backup).unwrap(), b"old binary");
+    assert_eq!(fs::read(&journal_path).unwrap(), unrelated_state);
+    assert_eq!(fs::read(&unrelated_backup).unwrap(), b"unowned binary");
 }
 
 #[cfg(unix)]
 #[test]
-fn v025_schema_one_journal_is_rejected_at_current_journal_path() {
+fn unsupported_schema_is_rejected_at_current_journal_path() {
     let temp = tempdir().unwrap();
-    let install_path = temp.path().join("ctx");
+    let mut transaction = coreml_semantic_journal(temp.path());
+    transaction.schema_version = 1;
+    let install_path = transaction.install_path.clone();
     let journal_path = journal::install_transaction_path(&install_path);
-    let old_journal = br#"{
-  "schema_version": 1,
-  "transaction_id": "old",
-  "phase": "committed",
-  "install_path": "/tmp/ctx",
-  "paths": []
-}"#;
-    fs::write(&journal_path, old_journal).unwrap();
+    journal::write(&transaction).unwrap();
+    let encoded = fs::read(&journal_path).unwrap();
 
-    let error = journal::read(&install_path).unwrap_err();
-
+    let decoded = journal::read(&install_path).unwrap().unwrap();
+    let error = journal::validate(&decoded).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("parse interrupted install transaction"),
+            .contains("invalid install transaction identity"),
         "{error:#}"
     );
-    assert_eq!(fs::read(&journal_path).unwrap(), old_journal);
+    assert_eq!(fs::read(&journal_path).unwrap(), encoded);
 }
 
 #[test]
