@@ -516,8 +516,14 @@ fn shelley_route_cold_noop_rewrite_and_grouped_hydration_are_exact() {
     reset_shelley_query_counters();
     let noop = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(noop.commit.opstamp, cold.commit.opstamp);
     assert_eq!(noop.sources, cold.sources);
-    assert_eq!(shelley_query_counters(), ShelleyQueryCounters::default());
+    let noop_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(noop_work), [4, 3, 3, 3, 6, 40]);
+    assert_eq!(noop_work.pages_emitted, 1);
+    assert_eq!(noop_work.peak_buffered_rows, 40);
+    assert!(noop_work.peak_buffered_bytes > 0);
+    assert_eq!(noop_work.hydration_snapshot_opens, 0);
     assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
 
     let verified = VerifiedIndex::open(&index_root).unwrap();
