@@ -1,42 +1,54 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     convert::Infallible,
-    io,
     path::{Component, Path, PathBuf},
 };
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionHydrationRequest,
-    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    provider::file_touches::{
-        event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
-        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+    provider::{
+        file_touches::{
+            event_type_supports_structured_file_touches,
+            visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        },
+        normalization::provider_result_outcome_evidence,
+        source_backed::{
+            SourceBackedCoordinatorError, SourceBackedGenerationSink, SourceBackedRouteError,
+            SourceBackedRouteErrorKind,
+        },
     },
-    provider::normalization::provider_result_outcome_evidence,
-    CaptureError, OutputOutcome, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+    provider_sources::{
+        EventFileCoordinates, EventFileGroup, EventFileInventory, EventFileInventoryError,
+        EventFileLimits,
+    },
+    CaptureError, OutputOutcome, MAX_PROVIDER_JSONL_LINE_BYTES,
+    OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
 };
 
 use crate::provider::providers::openhands::{
     event::{decode_openhands_event, OpenHandsDecodedEvent},
     source::{
-        discover_openhands_event_paths, OpenHandsFileObservation, OpenHandsInventory,
-        OpenHandsObservedFile,
+        normalized_openhands_authority_path, openhands_checked_path_text,
+        openhands_json_path_is_event, OpenHandsFileObservation, OPENHANDS_MAX_PATH_BYTES,
     },
 };
 
 mod detection;
+mod hydration;
 
 use detection::detects_current_cli_format;
+#[cfg(test)]
+pub(super) use hydration::{hydration_failure, validate_locator};
 
 const OPENHANDS_SOURCE_ANCHOR_NAMESPACE: &str = "openhands.v1-conversation";
 const OPENHANDS_NATIVE_SESSION_NAMESPACE: &str = "openhands.v1-conversation";
@@ -44,30 +56,30 @@ const OPENHANDS_NATIVE_EVENT_NAMESPACE: &str = "openhands.v1-event";
 const OPENHANDS_LOGICAL_SESSION_KIND: &str = "openhands-conversation";
 const OPENHANDS_LOGICAL_EVENT_KIND: &str = "openhands-event";
 const OPENHANDS_SOURCE_SCHEMA_VARIANT: &str = "openhands-v1-conversation-tree-v1";
-const OPENHANDS_SOURCE_REVISION_KIND: &str = "openhands-v1-conversation-leaves-v1";
+const OPENHANDS_SOURCE_REVISION_KIND: &str = "openhands-v1-conversation-leaves-v2";
 const OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE: &str = "openhands.v1-selected-tree";
-const OPENHANDS_INVENTORY_REVISION_KIND: &str = "openhands-v1-event-file-inventory-v1";
+const OPENHANDS_INVENTORY_REVISION_KIND: &str = "openhands-v1-event-file-inventory-v2";
 const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v1";
 const OPENHANDS_OBJECT_COORDINATE_KIND: &str = "openhands-event-object-v1";
 const OPENHANDS_LEAF_REVISION_DOMAIN: &[u8] = b"ctx.openhands.leaf-revision.v1\0";
-const OPENHANDS_CONVERSATION_REVISION_DOMAIN: &[u8] = b"ctx.openhands.conversation-revision.v1\0";
 const OPENHANDS_CONVERSATION_CONTENT_DOMAIN: &[u8] = b"ctx.openhands.conversation-content.v1\0";
-const OPENHANDS_INVENTORY_REVISION_DOMAIN: &[u8] = b"ctx.openhands.inventory-revision.v1\0";
+const OPENHANDS_DISCOVERY_MAX_DEPTH: usize = 16;
+const OPENHANDS_DISCOVERY_MAX_ENTRIES: usize = 16_384;
 
 #[derive(Debug, Error)]
-pub(crate) enum OpenHandsSourceBackedErrorV1 {
+pub(crate) enum OpenHandsSourceBackedErrorV2 {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    EventFiles(#[from] EventFileInventoryError),
+    #[error(transparent)]
+    Coordinator(#[from] SourceBackedCoordinatorError),
     #[error(transparent)]
     Projection(#[from] ctx_history_core::ProjectionContractError),
     #[error(transparent)]
     Resolver(#[from] SourceResolverContractError),
     #[error(transparent)]
-    Io(#[from] io::Error),
-    #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error("no OpenHands V1 event files were found below {root:?}")]
-    NoV1EventFiles { root: PathBuf },
     #[error(
         "OpenHands CLI conversations/*/events history at {root:?} is detected but unsupported"
     )]
@@ -85,10 +97,6 @@ pub(crate) enum OpenHandsSourceBackedErrorV1 {
     },
     #[error("OpenHands event path {path:?} has no bounded relative UTF-8 key")]
     InvalidRelativeEventKey { path: PathBuf },
-    #[error("OpenHands event file {path:?} exceeds the bounded provider-record limit")]
-    RecordTooLarge { path: PathBuf },
-    #[error("OpenHands V1 source changed while its conversation tree was being projected")]
-    SourceChangedDuringProjection,
     #[error("OpenHands source-backed count overflow")]
     CountOverflow,
     #[error("locator is not an OpenHands V1 conversation-tree event")]
@@ -111,419 +119,335 @@ pub(crate) enum OpenHandsSourceBackedErrorV1 {
     DecodeFailed(String),
 }
 
-pub(crate) type OpenHandsSourceBackedResultV1<T> = Result<T, OpenHandsSourceBackedErrorV1>;
+pub(crate) type OpenHandsSourceBackedResultV2<T> = Result<T, OpenHandsSourceBackedErrorV2>;
+pub(super) type OpenHandsSourceBackedResultV1<T> = OpenHandsSourceBackedResultV2<T>;
 
-#[derive(Debug)]
-pub(crate) struct OpenHandsSourceBackedProjectionV1 {
-    sources: Vec<CertifiedSource>,
-    documents: Vec<LexicalDocument>,
+#[derive(Debug, Clone)]
+pub(crate) struct OpenHandsEventFileAdapterV2 {
+    selected: PathBuf,
 }
 
-impl OpenHandsSourceBackedProjectionV1 {
-    pub(crate) fn sources(&self) -> &[CertifiedSource] {
-        &self.sources
-    }
-
-    pub(crate) fn documents(&self) -> &[LexicalDocument] {
-        &self.documents
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct OpenHandsEventFileSourcePlan {
+    pub source: SourceKey,
+    pub conversation_id: String,
+    pub session_id: StableEntityId,
+    pub opening: SourceObservation,
 }
 
-#[derive(Debug)]
-pub(crate) struct OpenHandsSourceBackedAdapterV1 {
-    selected_root: PathBuf,
-    inventory: OpenHandsInventory,
-}
-
-impl OpenHandsSourceBackedAdapterV1 {
-    pub(crate) fn discover(selected_root: impl AsRef<Path>) -> OpenHandsSourceBackedResultV1<Self> {
-        let selected_root = selected_root.as_ref();
-        let inventory = discover_openhands_event_paths(selected_root)?;
-        if inventory.paths.is_empty() {
-            return if detects_current_cli_format(inventory.selected_path())? {
-                Err(OpenHandsSourceBackedErrorV1::UnsupportedCurrentCliFormat {
-                    root: selected_root.to_path_buf(),
-                })
-            } else {
-                Err(OpenHandsSourceBackedErrorV1::NoV1EventFiles {
-                    root: selected_root.to_path_buf(),
-                })
-            };
+impl OpenHandsEventFileAdapterV2 {
+    pub(crate) fn new(selected: impl Into<PathBuf>) -> Self {
+        Self {
+            selected: selected.into(),
         }
-        Ok(Self {
-            selected_root: inventory.selected_path().to_path_buf(),
-            inventory,
-        })
     }
 
-    pub(crate) fn project(
-        &self,
-    ) -> OpenHandsSourceBackedResultV1<OpenHandsSourceBackedProjectionV1> {
-        let opening_paths = discover_required_paths(&self.inventory)?;
-        let opening_inventory = inventory_observation(&self.selected_root, &opening_paths)?;
-        let plans = bind_conversations(&opening_paths)?;
-        let source_keys = plans
-            .values()
-            .map(|plan| plan.source.clone())
-            .collect::<Vec<_>>();
-
-        let mut sources = Vec::with_capacity(plans.len());
-        let mut documents = Vec::new();
-        let mut witnesses = Vec::with_capacity(opening_paths.len());
-
-        for plan in plans.values() {
-            let projected = project_conversation(&self.inventory, plan)?;
-            witnesses.extend(projected.witnesses);
-            documents.extend(projected.documents);
-            sources.push(projected.source);
-        }
-
-        if witnesses
-            .iter()
-            .any(|source| source.revalidate().map(|same| !same).unwrap_or(true))
-        {
-            return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
-        }
-
-        let closing_paths = discover_required_paths(&self.inventory)?;
-        let closing_inventory = inventory_observation(&self.selected_root, &closing_paths)?;
-        CertifiedSourceInventory::certify(
-            opening_inventory,
-            closing_inventory,
-            OPENHANDS_PARSER_REVISION,
-            source_keys,
-        )?;
-        self.inventory.revalidate()?;
-
-        Ok(OpenHandsSourceBackedProjectionV1 { sources, documents })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenHandsHydratedRecordV1 {
-    pub provider_bytes: Vec<u8>,
-    pub decoded_display_text: String,
-}
-
-#[derive(Debug)]
-struct LocatorRoute {
-    path: PathBuf,
-    relative_file_key: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct OpenHandsLocatorResolverV1 {
-    inventory: OpenHandsInventory,
-    routes: BTreeMap<([u8; 32], String), LocatorRoute>,
-}
-
-impl OpenHandsLocatorResolverV1 {
-    pub(crate) fn discover(selected_root: impl AsRef<Path>) -> OpenHandsSourceBackedResultV1<Self> {
-        let adapter = OpenHandsSourceBackedAdapterV1::discover(selected_root)?;
-        let paths = discover_required_paths(&adapter.inventory)?;
-        let plans = bind_conversations(&paths)?;
-        let mut routes = BTreeMap::new();
-        for plan in plans.values() {
-            for event in &plan.events {
-                let key = (
-                    plan.source.identity().digest(),
-                    event.relative_file_key.clone(),
-                );
-                if routes
-                    .insert(
-                        key,
-                        LocatorRoute {
-                            path: event.path.clone(),
-                            relative_file_key: event.relative_file_key.clone(),
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
+    pub(crate) fn open_inventory(&self) -> OpenHandsSourceBackedResultV2<EventFileInventory> {
+        let selected = normalized_openhands_authority_path(&self.selected)?;
+        let inventory = match EventFileInventory::open(
+            &selected,
+            EventFileLimits {
+                max_depth: OPENHANDS_DISCOVERY_MAX_DEPTH,
+                max_entries: OPENHANDS_DISCOVERY_MAX_ENTRIES,
+                max_path_bytes: OPENHANDS_MAX_PATH_BYTES,
+                max_record_bytes: MAX_PROVIDER_JSONL_LINE_BYTES,
+            },
+            classify_openhands_event,
+        ) {
+            Ok(inventory) => inventory,
+            Err(error @ EventFileInventoryError::NoAcceptedExactFile { .. }) => {
+                if detects_current_cli_format(&selected)? {
+                    return Err(OpenHandsSourceBackedErrorV2::UnsupportedCurrentCliFormat {
+                        root: selected,
+                    });
                 }
+                return Err(error.into());
             }
-        }
-        Ok(Self {
-            inventory: adapter.inventory,
-            routes,
-        })
-    }
-
-    pub(crate) fn hydrate(
-        &self,
-        locator: &SourceRecordLocator,
-    ) -> OpenHandsSourceBackedResultV1<OpenHandsHydratedRecordV1> {
-        locator.validate_contract()?;
-        let coordinate = validate_locator(locator)?;
-        let key = (
-            locator.source().identity().digest(),
-            coordinate.relative_file_key.clone(),
-        );
-        let route = self.routes.get(&key).ok_or_else(|| {
-            if self
-                .routes
-                .keys()
-                .any(|(source_digest, _)| source_digest == &key.0)
-            {
-                OpenHandsSourceBackedErrorV1::LocatorLeafNotFound(
-                    coordinate.relative_file_key.clone(),
-                )
-            } else {
-                OpenHandsSourceBackedErrorV1::LocatorConversationNotFound(
-                    coordinate.conversation_id.clone(),
-                )
-            }
-        })?;
-        if route.relative_file_key != coordinate.relative_file_key {
-            return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-        }
-
-        let mut observed = self.inventory.open_source(&route.path)?;
-        let provider_bytes = observed.raw_bytes.take().ok_or_else(|| {
-            OpenHandsSourceBackedErrorV1::RecordTooLarge {
-                path: route.path.clone(),
-            }
-        })?;
-        let content_digest = observed.content_sha256.ok_or_else(|| {
-            OpenHandsSourceBackedErrorV1::RecordTooLarge {
-                path: route.path.clone(),
-            }
-        })?;
-        let leaf_revision = leaf_revision_digest(
-            &route.relative_file_key,
-            &observed.observation,
-            content_digest,
-        )?;
-        if leaf_revision != coordinate.leaf_revision {
-            return Err(OpenHandsSourceBackedErrorV1::LeafRevisionMismatch);
-        }
-        if content_digest != *locator.record_digest() {
-            return Err(OpenHandsSourceBackedErrorV1::RecordDigestMismatch);
-        }
-        let decoded = decode_openhands_event(&route.path, &provider_bytes)
-            .map_err(|error| OpenHandsSourceBackedErrorV1::DecodeFailed(error.to_string()))?;
-        if decoded.event_id() != coordinate.event_id {
-            return Err(OpenHandsSourceBackedErrorV1::ObjectCoordinateMismatch);
-        }
-        if !observed.revalidate()? {
-            return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
-        }
-        self.inventory.revalidate()?;
-        let decoded_display_text =
-            lexical_body(&decoded).ok_or(OpenHandsSourceBackedErrorV1::ObjectCoordinateMismatch)?;
-        Ok(OpenHandsHydratedRecordV1 {
-            provider_bytes: decoded_display_text.as_bytes().to_vec(),
-            decoded_display_text,
-        })
-    }
-
-    fn hydrate_request(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> OpenHandsSourceBackedResultV1<OpenHandsHydratedRecordV1> {
-        let coordinate = validate_locator(request.locator())?;
-        let (session_id, event_id) = identities(
-            request.locator().source(),
-            &coordinate.conversation_id,
-            &coordinate.event_id,
-        )?;
-        if event_id != request.event_id() {
-            return Err(OpenHandsSourceBackedErrorV1::EventIdentityMismatch);
-        }
-        let _ = session_id;
-        self.hydrate(request.locator())
-    }
-}
-
-impl ContentSourceResolver for OpenHandsLocatorResolverV1 {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        self.hydrate_request(request)
-            .map(|record| HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: record.decoded_display_text.into_bytes(),
-            })
-            .map_err(hydration_failure)
-    }
-
-    fn hydrate_session(
-        &self,
-        request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        if let Some(first) = request.events().first() {
-            let coordinate = validate_locator(first.locator()).map_err(hydration_failure)?;
-            let (session_id, _) = identities(
-                first.locator().source(),
-                &coordinate.conversation_id,
-                &coordinate.event_id,
-            )
-            .map_err(hydration_failure)?;
-            if session_id != request.session_id() {
-                return Err(hydration_failure(
-                    OpenHandsSourceBackedErrorV1::SessionIdentityMismatch,
-                ));
-            }
-        }
-        request
-            .events()
-            .iter()
-            .map(|event| {
-                self.hydrate_request(event)
-                    .map(|record| HydratedProviderRecord {
-                        event_id: event.event_id(),
-                        provider_bytes: record.decoded_display_text.into_bytes(),
-                    })
-                    .map_err(hydration_failure)
-            })
-            .collect()
-    }
-}
-
-#[derive(Debug)]
-struct EventPlan {
-    path: PathBuf,
-    relative_file_key: String,
-}
-
-#[derive(Debug)]
-struct ConversationPlan {
-    conversation_id: String,
-    conversation_root: PathBuf,
-    source: SourceKey,
-    events: Vec<EventPlan>,
-}
-
-#[derive(Debug)]
-struct ProjectedConversation {
-    source: CertifiedSource,
-    documents: Vec<LexicalDocument>,
-    witnesses: Vec<OpenHandsObservedFile>,
-}
-
-fn discover_required_paths(
-    inventory: &OpenHandsInventory,
-) -> OpenHandsSourceBackedResultV1<Vec<PathBuf>> {
-    let paths = inventory.refresh_paths()?;
-    if paths.is_empty() {
-        return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
-    }
-    Ok(paths)
-}
-
-fn bind_conversations(
-    paths: &[PathBuf],
-) -> OpenHandsSourceBackedResultV1<BTreeMap<String, ConversationPlan>> {
-    let mut conversations = BTreeMap::new();
-    for path in paths {
-        let (conversation_id, conversation_root) = conversation_coordinate(path)?;
-        let relative_file_key = relative_event_file_key(&conversation_root, path)?;
-        let source = source_key(&conversation_id)?;
-        let plan = conversations
-            .entry(conversation_id.clone())
-            .or_insert_with(|| ConversationPlan {
-                conversation_id: conversation_id.clone(),
-                conversation_root: conversation_root.clone(),
-                source,
-                events: Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if inventory.is_empty() && detects_current_cli_format(&selected)? {
+            return Err(OpenHandsSourceBackedErrorV2::UnsupportedCurrentCliFormat {
+                root: selected,
             });
-        if plan.conversation_root != conversation_root {
-            return Err(OpenHandsSourceBackedErrorV1::DuplicateConversationId(
-                conversation_id,
-            ));
         }
-        plan.events.push(EventPlan {
-            path: path.clone(),
-            relative_file_key,
+        Ok(inventory)
+    }
+
+    pub(crate) fn bind_group(
+        &self,
+        group: EventFileGroup<'_>,
+    ) -> OpenHandsSourceBackedResultV2<OpenHandsEventFileSourcePlan> {
+        let mut conversation_root = None;
+        for leaf in group.leaves() {
+            let (conversation_id, root) = conversation_coordinate(leaf.display_path())?;
+            if conversation_id != group.group_key() {
+                return Err(OpenHandsSourceBackedErrorV2::InvalidRelativeEventKey {
+                    path: leaf.display_path().to_path_buf(),
+                });
+            }
+            match &conversation_root {
+                Some(expected) if expected != &root => {
+                    return Err(OpenHandsSourceBackedErrorV2::DuplicateConversationId(
+                        conversation_id,
+                    ));
+                }
+                Some(_) => {}
+                None => conversation_root = Some(root),
+            }
+        }
+        let conversation_id = group.group_key().to_owned();
+        let source = source_key(&conversation_id)?;
+        let session_id = session_identity(&source, &conversation_id)?;
+        let opening = SourceObservation::new(
+            source.clone(),
+            OPENHANDS_SOURCE_REVISION_KIND,
+            group.observation_digest().to_vec(),
+        )?;
+        Ok(OpenHandsEventFileSourcePlan {
+            source,
+            conversation_id,
+            session_id,
+            opening,
+        })
+    }
+
+    pub(crate) fn exact_replay_matches(
+        &self,
+        base: &CertifiedSource,
+        plan: &OpenHandsEventFileSourcePlan,
+    ) -> bool {
+        base.observation()
+            .source()
+            .exact_descriptor_eq(&plan.source)
+            && base.observation() == &plan.opening
+            && base.parser_revision() == OPENHANDS_PARSER_REVISION
+            && base.frontier().is_none()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "called by the shared direct-staging driver in the integration commit"
+    )]
+    pub(crate) fn project_replacement(
+        &self,
+        group: EventFileGroup<'_>,
+        plan: &OpenHandsEventFileSourcePlan,
+        sink: &mut SourceBackedGenerationSink<'_>,
+    ) -> OpenHandsSourceBackedResultV2<CertifiedSource> {
+        validate_plan_for_group(group, plan)?;
+        sink.begin_source(plan.source.clone())?;
+        let certificate = project_group(group, plan, |document| {
+            sink.add_document(document)?;
+            Ok(())
+        })?;
+        sink.certify_source(certificate.clone())?;
+        Ok(certificate)
+    }
+
+    pub(crate) fn certify_complete_inventory(
+        &self,
+        inventory: &EventFileInventory,
+    ) -> OpenHandsSourceBackedResultV2<CertifiedSourceInventory> {
+        let mut sources = Vec::with_capacity(inventory.groups().len());
+        for group in inventory.groups() {
+            sources.push(self.bind_group(group)?.source);
+        }
+        let selected = openhands_checked_path_text(inventory.selected_path())?;
+        let observation = SourceInventoryObservation::new(
+            CaptureProvider::OpenHands.as_str(),
+            OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE,
+            TypedKey::utf8(selected)?,
+            OPENHANDS_INVENTORY_REVISION_KIND,
+            inventory.observation_digest().to_vec(),
+        )?;
+        inventory.revalidate_all()?;
+        Ok(CertifiedSourceInventory::certify(
+            observation.clone(),
+            observation,
+            OPENHANDS_PARSER_REVISION,
+            sources,
+        )?)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "called by shared terminal callbacks in the integration commit"
+    )]
+    pub(crate) fn revalidate_inventory(
+        &self,
+        inventory: &EventFileInventory,
+    ) -> OpenHandsSourceBackedResultV2<()> {
+        inventory.revalidate_all()?;
+        Ok(())
+    }
+}
+
+pub(crate) fn openhands_owns_source(source: &SourceKey) -> bool {
+    if source.provider() != CaptureProvider::OpenHands.as_str()
+        || source.source_format() != OPENHANDS_FILE_EVENTS_SOURCE_FORMAT
+        || source.schema_variant() != OPENHANDS_SOURCE_SCHEMA_VARIANT
+        || source.provider_identity_version() != 1
+    {
+        return false;
+    }
+    matches!(
+        source.anchor(),
+        SourceAnchor::ProviderNative { namespace, key: TypedKey::Utf8(value) }
+            if namespace == OPENHANDS_SOURCE_ANCHOR_NAMESPACE && !value.is_empty()
+    )
+}
+
+pub(crate) fn openhands_route_error(error: OpenHandsSourceBackedErrorV2) -> SourceBackedRouteError {
+    let kind = match &error {
+        OpenHandsSourceBackedErrorV2::UnsupportedCurrentCliFormat { .. } => {
+            SourceBackedRouteErrorKind::Unsupported
+        }
+        OpenHandsSourceBackedErrorV2::EventFiles(EventFileInventoryError::Unavailable {
+            ..
+        }) => SourceBackedRouteErrorKind::Unavailable,
+        OpenHandsSourceBackedErrorV2::EventFiles(EventFileInventoryError::SourceChanged {
+            ..
+        })
+        | OpenHandsSourceBackedErrorV2::Capture(CaptureError::SourceChangedDuringCapture) => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        OpenHandsSourceBackedErrorV2::Coordinator(_) => SourceBackedRouteErrorKind::Internal,
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
+fn classify_openhands_event(path: &Path) -> crate::Result<Option<EventFileCoordinates>> {
+    if !openhands_json_path_is_event(path) {
+        return Ok(None);
+    }
+    let (conversation_id, conversation_root) =
+        conversation_coordinate(path).map_err(openhands_error_as_capture)?;
+    let relative_file_key =
+        relative_event_file_key(&conversation_root, path).map_err(openhands_error_as_capture)?;
+    Ok(Some(EventFileCoordinates {
+        group_key: conversation_id,
+        relative_file_key,
+    }))
+}
+
+fn openhands_error_as_capture(error: OpenHandsSourceBackedErrorV2) -> CaptureError {
+    match error {
+        OpenHandsSourceBackedErrorV2::Capture(error) => error,
+        OpenHandsSourceBackedErrorV2::MissingConversationCoordinate { path } => {
+            CaptureError::InvalidProviderTranscriptPath {
+                path,
+                reason: "OpenHands V1 event path has no conversation coordinate",
+            }
+        }
+        OpenHandsSourceBackedErrorV2::InvalidRelativeEventKey { path } => {
+            CaptureError::InvalidProviderTranscriptPath {
+                path,
+                reason: "OpenHands V1 event path has no bounded relative UTF-8 key",
+            }
+        }
+        _ => CaptureError::InvalidPayload(error.to_string()),
+    }
+}
+
+fn validate_plan_for_group(
+    group: EventFileGroup<'_>,
+    plan: &OpenHandsEventFileSourcePlan,
+) -> OpenHandsSourceBackedResultV2<()> {
+    let expected_source = source_key(group.group_key())?;
+    if group.group_key() != plan.conversation_id
+        || !plan.source.exact_descriptor_eq(&expected_source)
+        || plan.session_id != session_identity(&plan.source, &plan.conversation_id)?
+    {
+        return Err(OpenHandsSourceBackedErrorV2::InvalidRelativeEventKey {
+            path: group
+                .leaves()
+                .first()
+                .map(|leaf| leaf.display_path().to_path_buf())
+                .unwrap_or_default(),
         });
     }
-    for plan in conversations.values_mut() {
-        plan.events
-            .sort_by(|left, right| left.relative_file_key.cmp(&right.relative_file_key));
+    let current = SourceObservation::new(
+        plan.source.clone(),
+        OPENHANDS_SOURCE_REVISION_KIND,
+        group.observation_digest().to_vec(),
+    )?;
+    if current != plan.opening {
+        return Err(EventFileInventoryError::SourceChanged {
+            path: group
+                .leaves()
+                .first()
+                .map(|leaf| leaf.display_path().to_path_buf())
+                .unwrap_or_default(),
+            detail: "OpenHands group observation changed before replacement staging".to_owned(),
+        }
+        .into());
     }
-    Ok(conversations)
+    Ok(())
 }
 
-fn project_conversation(
-    inventory: &OpenHandsInventory,
-    plan: &ConversationPlan,
-) -> OpenHandsSourceBackedResultV1<ProjectedConversation> {
-    let session_id = session_identity(&plan.source, &plan.conversation_id)?;
-    let mut documents = Vec::new();
-    let mut witnesses = Vec::with_capacity(plan.events.len());
+pub(super) fn project_group(
+    group: EventFileGroup<'_>,
+    plan: &OpenHandsEventFileSourcePlan,
+    mut emit: impl FnMut(LexicalDocument) -> OpenHandsSourceBackedResultV2<()>,
+) -> OpenHandsSourceBackedResultV2<CertifiedSource> {
+    validate_plan_for_group(group, plan)?;
     let mut event_ids = BTreeSet::new();
-    let mut revision_digest = Sha256::new();
-    revision_digest.update(OPENHANDS_CONVERSATION_REVISION_DOMAIN);
-    revision_digest.update((plan.events.len() as u64).to_be_bytes());
     let mut content_digest = Sha256::new();
     content_digest.update(OPENHANDS_CONVERSATION_CONTENT_DOMAIN);
-    content_digest.update((plan.events.len() as u64).to_be_bytes());
+    content_digest.update((group.leaves().len() as u64).to_be_bytes());
     let mut counts = ScannedSourceCounts::default();
 
-    for (sequence, event) in plan.events.iter().enumerate() {
-        let mut observed = inventory.open_source(&event.path)?;
-        let provider_bytes = observed.raw_bytes.take().ok_or_else(|| {
-            OpenHandsSourceBackedErrorV1::RecordTooLarge {
-                path: event.path.clone(),
-            }
-        })?;
-        let record_digest = observed.content_sha256.ok_or_else(|| {
-            OpenHandsSourceBackedErrorV1::RecordTooLarge {
-                path: event.path.clone(),
-            }
-        })?;
+    for (sequence, leaf) in group.leaves().iter().enumerate() {
+        let provider_bytes = group.read_leaf(leaf)?;
+        let record_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
+        let legacy_observation = OpenHandsFileObservation::from_metadata(leaf.metadata())?;
         let leaf_revision = leaf_revision_digest(
-            &event.relative_file_key,
-            &observed.observation,
+            &leaf.coordinates().relative_file_key,
+            &legacy_observation,
             record_digest,
         )?;
         digest_leaf(
-            &mut revision_digest,
-            &event.relative_file_key,
-            &leaf_revision,
-            observed.observation.length,
-        );
-        digest_leaf(
             &mut content_digest,
-            &event.relative_file_key,
+            &leaf.coordinates().relative_file_key,
             &record_digest,
-            observed.observation.length,
+            legacy_observation.length,
         );
         counts.complete_records = checked_add(counts.complete_records, 1)?;
-        counts.certified_bytes = checked_add(counts.certified_bytes, observed.observation.length)?;
+        counts.certified_bytes = checked_add(counts.certified_bytes, legacy_observation.length)?;
 
-        match decode_openhands_event(&event.path, &provider_bytes) {
+        match decode_openhands_event(leaf.display_path(), &provider_bytes) {
             Ok(decoded) => {
                 if !event_ids.insert(decoded.event_id().to_owned()) {
-                    return Err(OpenHandsSourceBackedErrorV1::DuplicateEventId {
+                    return Err(OpenHandsSourceBackedErrorV2::DuplicateEventId {
                         conversation_id: plan.conversation_id.clone(),
                         event_id: decoded.event_id().to_owned(),
                     });
                 }
                 if let Some(body) = lexical_body(&decoded) {
-                    let event_id = event_identity(&plan.source, session_id, decoded.event_id())?;
+                    let event_id =
+                        event_identity(&plan.source, plan.session_id, decoded.event_id())?;
                     let locator = source_locator(
                         &plan.source,
-                        &event.relative_file_key,
+                        &leaf.coordinates().relative_file_key,
                         decoded.event_id(),
                         leaf_revision,
                         record_digest,
                     )?;
-                    documents.push(LexicalDocument {
+                    emit(LexicalDocument {
                         event_id,
-                        session_id,
+                        session_id: plan.session_id,
                         parent_session_id: None,
-                        root_session_id: session_id,
+                        root_session_id: plan.session_id,
                         source: plan.source.clone(),
                         locator,
                         provider_session_id: Some(plan.conversation_id.clone()),
                         branch: None,
-                        source_path: Some(observed.canonical_path_text.clone()),
+                        source_path: Some(openhands_checked_path_text(leaf.display_path())?),
                         agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
                         is_primary: true,
                         event_sequence: u64::try_from(sequence)
-                            .map_err(|_| OpenHandsSourceBackedErrorV1::CountOverflow)?,
+                            .map_err(|_| OpenHandsSourceBackedErrorV2::CountOverflow)?,
                         occurred_at_unix_ms: Some(decoded.timestamp().timestamp_millis()),
                         event_type: decoded.event_type().as_str().to_owned(),
                         role: Some(decoded.role().as_str().to_owned()),
@@ -531,7 +455,7 @@ fn project_conversation(
                         workspace: None,
                         cwd: None,
                         touched_files: touched_files(&decoded),
-                    });
+                    })?;
                     counts.retained_records = checked_add(counts.retained_records, 1)?;
                     counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
                 } else {
@@ -542,28 +466,16 @@ fn project_conversation(
                 counts.rejected_records = checked_add(counts.rejected_records, 1)?;
             }
         }
-        witnesses.push(observed);
     }
-
-    let revision: [u8; 32] = revision_digest.finalize().into();
-    let content: [u8; 32] = content_digest.finalize().into();
-    let observation = SourceObservation::new(
-        plan.source.clone(),
-        OPENHANDS_SOURCE_REVISION_KIND,
-        revision.to_vec(),
-    )?;
-    let source = CertifiedSource::certify(
-        observation.clone(),
-        observation,
+    group.revalidate()?;
+    let certificate = CertifiedSource::certify(
+        plan.opening.clone(),
+        plan.opening.clone(),
         OPENHANDS_PARSER_REVISION,
-        content,
+        content_digest.finalize().into(),
         counts,
     )?;
-    Ok(ProjectedConversation {
-        source,
-        documents,
-        witnesses,
-    })
+    Ok(certificate)
 }
 
 fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
@@ -615,7 +527,7 @@ fn openhands_value_indicates_timeout(value: &serde_json::Value) -> bool {
             serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
                 let normalized = key
                     .chars()
-                    .filter(|ch| ch.is_ascii_alphanumeric())
+                    .filter(|character| character.is_ascii_alphanumeric())
                     .flat_map(char::to_lowercase)
                     .collect::<String>();
                 let direct = matches!(normalized.as_str(), "timeout" | "timedout" | "istimeout")
@@ -659,7 +571,7 @@ fn touched_files(decoded: &OpenHandsDecodedEvent) -> Vec<String> {
     }
 }
 
-fn source_key(conversation_id: &str) -> OpenHandsSourceBackedResultV1<SourceKey> {
+pub(super) fn source_key(conversation_id: &str) -> OpenHandsSourceBackedResultV2<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         OPENHANDS_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(conversation_id)?,
@@ -676,7 +588,7 @@ fn source_key(conversation_id: &str) -> OpenHandsSourceBackedResultV1<SourceKey>
 fn session_identity(
     source: &SourceKey,
     conversation_id: &str,
-) -> OpenHandsSourceBackedResultV1<StableEntityId> {
+) -> OpenHandsSourceBackedResultV2<StableEntityId> {
     let key = NativeSessionKey::native_id(
         OPENHANDS_NATIVE_SESSION_NAMESPACE,
         TypedKey::utf8(conversation_id)?,
@@ -692,7 +604,7 @@ fn event_identity(
     source: &SourceKey,
     session_id: StableEntityId,
     event_id: &str,
-) -> OpenHandsSourceBackedResultV1<StableEntityId> {
+) -> OpenHandsSourceBackedResultV2<StableEntityId> {
     let key =
         NativeItemKey::native_id(OPENHANDS_NATIVE_EVENT_NAMESPACE, TypedKey::utf8(event_id)?)?;
     Ok(derive_event_id(EventIdentityInput {
@@ -708,19 +620,19 @@ fn identities(
     source: &SourceKey,
     conversation_id: &str,
     event_id: &str,
-) -> OpenHandsSourceBackedResultV1<(StableEntityId, StableEntityId)> {
+) -> OpenHandsSourceBackedResultV2<(StableEntityId, StableEntityId)> {
     let session_id = session_identity(source, conversation_id)?;
     let event_id = event_identity(source, session_id, event_id)?;
     Ok((session_id, event_id))
 }
 
-fn source_locator(
+pub(super) fn source_locator(
     source: &SourceKey,
     relative_file_key: &str,
     event_id: &str,
     leaf_revision: [u8; 32],
     record_digest: [u8; 32],
-) -> OpenHandsSourceBackedResultV1<SourceRecordLocator> {
+) -> OpenHandsSourceBackedResultV2<SourceRecordLocator> {
     let record_coordinate = TypedKey::composite(vec![
         TypedKey::utf8(OPENHANDS_OBJECT_COORDINATE_KIND)?,
         TypedKey::utf8(event_id)?,
@@ -738,96 +650,11 @@ fn source_locator(
     )?)
 }
 
-struct LocatorCoordinate {
-    conversation_id: String,
-    relative_file_key: String,
-    event_id: String,
-    leaf_revision: [u8; 32],
-}
-
-fn validate_locator(
-    locator: &SourceRecordLocator,
-) -> OpenHandsSourceBackedResultV1<LocatorCoordinate> {
-    let source = locator.source();
-    if source.provider() != CaptureProvider::OpenHands.as_str()
-        || source.source_format() != OPENHANDS_FILE_EVENTS_SOURCE_FORMAT
-        || source.schema_variant() != OPENHANDS_SOURCE_SCHEMA_VARIANT
-        || source.provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    }
-    let SourceAnchor::ProviderNative { namespace, key } = source.anchor() else {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    };
-    let TypedKey::Utf8(conversation_id) = key else {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    };
-    if namespace != OPENHANDS_SOURCE_ANCHOR_NAMESPACE {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    }
-    let NativeRecordCoordinate::TreeRecord {
-        relative_file_key,
-        record_coordinate,
-    } = locator.coordinate()
-    else {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    };
-    let TypedKey::Utf8(relative_file_key) = relative_file_key else {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = record_coordinate else {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    };
-    let [TypedKey::Utf8(kind), TypedKey::Utf8(event_id), TypedKey::Bytes(leaf_revision)] =
-        parts.as_slice()
-    else {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    };
-    if kind != OPENHANDS_OBJECT_COORDINATE_KIND || leaf_revision.len() != 32 {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
-    }
-    let mut exact_leaf_revision = [0_u8; 32];
-    exact_leaf_revision.copy_from_slice(leaf_revision);
-    Ok(LocatorCoordinate {
-        conversation_id: conversation_id.clone(),
-        relative_file_key: relative_file_key.clone(),
-        event_id: event_id.clone(),
-        leaf_revision: exact_leaf_revision,
-    })
-}
-
-fn inventory_observation(
-    root: &Path,
-    paths: &[PathBuf],
-) -> OpenHandsSourceBackedResultV1<SourceInventoryObservation> {
-    let mut keys = paths
-        .iter()
-        .map(|path| relative_selected_key(root, path))
-        .collect::<OpenHandsSourceBackedResultV1<Vec<_>>>()?;
-    keys.sort();
-    let mut digest = Sha256::new();
-    digest.update(OPENHANDS_INVENTORY_REVISION_DOMAIN);
-    digest.update((keys.len() as u64).to_be_bytes());
-    for key in keys {
-        digest.update((key.len() as u64).to_be_bytes());
-        digest.update(key.as_bytes());
-    }
-    Ok(SourceInventoryObservation::new(
-        CaptureProvider::OpenHands.as_str(),
-        OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE,
-        TypedKey::utf8(root.to_string_lossy().into_owned())?,
-        OPENHANDS_INVENTORY_REVISION_KIND,
-        digest.finalize().to_vec(),
-    )?)
-}
-
-fn leaf_revision_digest(
+pub(super) fn leaf_revision_digest(
     relative_file_key: &str,
     observation: &OpenHandsFileObservation,
     content_digest: [u8; 32],
-) -> OpenHandsSourceBackedResultV1<[u8; 32]> {
+) -> OpenHandsSourceBackedResultV2<[u8; 32]> {
     let observation = serde_json::to_vec(observation)?;
     let mut digest = Sha256::new();
     digest.update(OPENHANDS_LEAF_REVISION_DOMAIN);
@@ -846,21 +673,21 @@ fn digest_leaf(digest: &mut Sha256, relative_file_key: &str, evidence: &[u8; 32]
     digest.update(evidence);
 }
 
-fn conversation_coordinate(path: &Path) -> OpenHandsSourceBackedResultV1<(String, PathBuf)> {
+fn conversation_coordinate(path: &Path) -> OpenHandsSourceBackedResultV2<(String, PathBuf)> {
     let components = path.components().collect::<Vec<_>>();
     let Some(v1_index) = components
         .iter()
         .position(|component| component.as_os_str() == "v1_conversations")
     else {
         return Err(
-            OpenHandsSourceBackedErrorV1::MissingConversationCoordinate {
+            OpenHandsSourceBackedErrorV2::MissingConversationCoordinate {
                 path: path.to_path_buf(),
             },
         );
     };
     let Some(conversation) = components.get(v1_index.saturating_add(1)) else {
         return Err(
-            OpenHandsSourceBackedErrorV1::MissingConversationCoordinate {
+            OpenHandsSourceBackedErrorV2::MissingConversationCoordinate {
                 path: path.to_path_buf(),
             },
         );
@@ -870,7 +697,7 @@ fn conversation_coordinate(path: &Path) -> OpenHandsSourceBackedResultV1<(String
         .to_str()
         .filter(|value| !value.is_empty())
         .ok_or_else(
-            || OpenHandsSourceBackedErrorV1::MissingConversationCoordinate {
+            || OpenHandsSourceBackedErrorV2::MissingConversationCoordinate {
                 path: path.to_path_buf(),
             },
         )?
@@ -885,33 +712,16 @@ fn conversation_coordinate(path: &Path) -> OpenHandsSourceBackedResultV1<(String
 fn relative_event_file_key(
     conversation_root: &Path,
     path: &Path,
-) -> OpenHandsSourceBackedResultV1<String> {
+) -> OpenHandsSourceBackedResultV2<String> {
     let relative = path.strip_prefix(conversation_root).map_err(|_| {
-        OpenHandsSourceBackedErrorV1::InvalidRelativeEventKey {
+        OpenHandsSourceBackedErrorV2::InvalidRelativeEventKey {
             path: path.to_path_buf(),
         }
     })?;
     relative_path_key(relative, path)
 }
 
-fn relative_selected_key(root: &Path, path: &Path) -> OpenHandsSourceBackedResultV1<String> {
-    if root == path {
-        let relative = path.file_name().map(Path::new).ok_or_else(|| {
-            OpenHandsSourceBackedErrorV1::InvalidRelativeEventKey {
-                path: path.to_path_buf(),
-            }
-        })?;
-        return relative_path_key(relative, path);
-    }
-    let relative = path.strip_prefix(root).map_err(|_| {
-        OpenHandsSourceBackedErrorV1::InvalidRelativeEventKey {
-            path: path.to_path_buf(),
-        }
-    })?;
-    relative_path_key(relative, path)
-}
-
-fn relative_path_key(relative: &Path, original: &Path) -> OpenHandsSourceBackedResultV1<String> {
+fn relative_path_key(relative: &Path, original: &Path) -> OpenHandsSourceBackedResultV2<String> {
     let parts = relative
         .components()
         .map(|component| match component {
@@ -919,60 +729,18 @@ fn relative_path_key(relative: &Path, original: &Path) -> OpenHandsSourceBackedR
             _ => None,
         })
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| OpenHandsSourceBackedErrorV1::InvalidRelativeEventKey {
+        .ok_or_else(|| OpenHandsSourceBackedErrorV2::InvalidRelativeEventKey {
             path: original.to_path_buf(),
         })?;
     if parts.is_empty() {
-        return Err(OpenHandsSourceBackedErrorV1::InvalidRelativeEventKey {
+        return Err(OpenHandsSourceBackedErrorV2::InvalidRelativeEventKey {
             path: original.to_path_buf(),
         });
     }
     Ok(parts.join("/"))
 }
 
-fn checked_add(left: u64, right: u64) -> OpenHandsSourceBackedResultV1<u64> {
+fn checked_add(left: u64, right: u64) -> OpenHandsSourceBackedResultV2<u64> {
     left.checked_add(right)
-        .ok_or(OpenHandsSourceBackedErrorV1::CountOverflow)
-}
-
-fn bounded_reason(mut reason: String) -> String {
-    const MAX_REASON_BYTES: usize = 4 * 1024;
-    if reason.len() <= MAX_REASON_BYTES {
-        return reason;
-    }
-    let mut end = MAX_REASON_BYTES;
-    while !reason.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    reason.truncate(end);
-    reason
-}
-
-pub(super) fn hydration_failure(error: OpenHandsSourceBackedErrorV1) -> HydrationFailure {
-    let kind = match &error {
-        OpenHandsSourceBackedErrorV1::UnsupportedCurrentCliFormat { .. } => {
-            HydrationFailureKind::UnsupportedParserRevision
-        }
-        OpenHandsSourceBackedErrorV1::LocatorConversationNotFound(_)
-        | OpenHandsSourceBackedErrorV1::LocatorLeafNotFound(_) => {
-            HydrationFailureKind::MissingRecord
-        }
-        OpenHandsSourceBackedErrorV1::LeafRevisionMismatch => {
-            HydrationFailureKind::StaleSourceEvidence
-        }
-        OpenHandsSourceBackedErrorV1::RecordDigestMismatch
-        | OpenHandsSourceBackedErrorV1::ObjectCoordinateMismatch
-        | OpenHandsSourceBackedErrorV1::DecodeFailed(_) => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-        OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection
-        | OpenHandsSourceBackedErrorV1::Capture(CaptureError::SourceChangedDuringCapture) => {
-            HydrationFailureKind::TemporarilyUnavailable
-        }
-        _ => HydrationFailureKind::InvalidLocator,
-    };
-    HydrationFailure {
-        kind,
-        detail: bounded_reason(error.to_string()),
-    }
+        .ok_or(OpenHandsSourceBackedErrorV2::CountOverflow)
 }

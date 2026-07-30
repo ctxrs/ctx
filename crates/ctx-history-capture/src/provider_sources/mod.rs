@@ -1,5 +1,6 @@
 mod context;
 mod discovery;
+mod event_files;
 mod lingma;
 mod ordinary_file;
 mod probes;
@@ -21,6 +22,12 @@ pub use discovery::{
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_projects,
     provider_source_for_path,
+};
+#[cfg(test)]
+pub(crate) use event_files::count_event_file_io;
+pub(crate) use event_files::{
+    EventFileCoordinates, EventFileGroup, EventFileInventory, EventFileInventoryError,
+    EventFileLimits,
 };
 pub use lingma::{
     discover_lingma_inventory_with_authority, resolve_lingma_discovery_authority,
