@@ -322,6 +322,16 @@ sh_test(
 )
 
 sh_test(
+    name = "cli_ux_capture_cleanup_tests",
+    srcs = ["scripts/tests/capture-cli-ux-frame-test.sh"],
+    data = [
+        "scripts/capture-cli-ux-frame.sh",
+        "scripts/tests/fixtures/cli-ux-capture-fake-ctx.sh",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
     name = "bazel_affected_script_tests",
     srcs = ["scripts/tests/bazel-affected-test.sh"],
     data = [
