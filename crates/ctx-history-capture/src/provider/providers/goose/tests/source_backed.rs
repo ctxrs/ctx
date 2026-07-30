@@ -196,3 +196,29 @@ fn goose_unavailable_and_commit_mutation_do_not_publish() {
         baseline.commit.generation_id
     );
 }
+
+#[test]
+fn goose_ignores_unrelated_sibling_creation_during_commit() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("sessions.db");
+    let index = temp.path().join("index");
+    let writer = create_database(&database);
+    insert_session(&writer, "session");
+    insert_message(&writer, 1, "session", "stable logical body");
+    drop(writer);
+    let registry = registry(&database);
+
+    let mut created_sibling = false;
+    let published =
+        refresh_source_backed_generation_with_progress(&index, &registry, options(), |progress| {
+            if progress.phase == "verifying" && !created_sibling {
+                fs::write(temp.path().join("unrelated-sibling"), b"unrelated").unwrap();
+                created_sibling = true;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(created_sibling);
+    assert_eq!(published.commit.indexed_documents, 1);
+}

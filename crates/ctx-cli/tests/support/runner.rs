@@ -507,7 +507,7 @@ pub(crate) fn hosted_install_marker_path(binary: &Path) -> PathBuf {
 pub(crate) fn initialize_empty_store(temp: &TempDir) {
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
     ctx_with_enabled_daemon(temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--catalog-only", "--wait", "--progress", "none"])
         .assert()
         .success();
 }

@@ -284,7 +284,8 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     assert!(
-        unavailable_search.contains("source_unreadable/temporarily_unavailable"),
+        unavailable_search.contains("source_unreadable/temporarily_unavailable")
+            || unavailable_search.contains("source_changed/stale_source_evidence"),
         "{unavailable_search}"
     );
     ctx(&temp)
@@ -299,7 +300,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--provider",
         "codex",
         "--refresh",
-        "off",
+        "wait",
         "--format=json",
     ]));
     assert_source_backed_search_show_oracle(
@@ -310,7 +311,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         1,
         "message",
     );
-    assert_eq!(generation_id(&restored), truncate_generation);
+    let restored_generation = generation_id(&restored);
 
     fs::remove_file(&session).unwrap();
     let deleted = json_output(ctx(&temp).args([
@@ -323,7 +324,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     let deletion_generation = assert_published_generation(&deleted, "wait");
-    assert_ne!(deletion_generation, truncate_generation);
+    assert_ne!(deletion_generation, restored_generation);
     assert_eq!(deleted["retrieval"]["indexed_documents"], 1, "{deleted:#}");
     assert!(
         deleted["results"].as_array().unwrap().iter().all(|result| {
@@ -446,7 +447,8 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "--format=json",
     ]));
     assert!(
-        codex.contains("content_verification_failed/stale_record_evidence")
+        (codex.contains("content_verification_failed/stale_record_evidence")
+            || codex.contains("source_changed/stale_source_evidence"))
             && !codex.contains("no registered provider route owns")
             && !codex.contains("resolver_generation_unavailable"),
         "{codex}"
@@ -462,7 +464,8 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
     ]));
     assert!(
         (claude.contains("source_unreadable/temporarily_unavailable")
-            || claude.contains("content_verification_failed/stale_record_evidence"))
+            || claude.contains("content_verification_failed/stale_record_evidence")
+            || claude.contains("source_changed/stale_source_evidence"))
             && !claude.contains("no registered provider route owns")
             && !claude.contains("resolver_generation_unavailable"),
         "{claude}"

@@ -338,7 +338,6 @@ fn finish_present_authority(
 }
 
 pub(crate) struct RetainedGooseDirectory {
-    root: ProviderSourceRoot,
     directory: ProviderSourceDirectory,
     sqlite: SqliteSourceDirectoryAuthority,
     leaf: OsString,
@@ -358,7 +357,6 @@ impl RetainedGooseDirectory {
         let sqlite = retain_sqlite_source_directory_authority(data_root, &authority, parent)
             .map_err(sqlite_access_error)?;
         Ok(Self {
-            root,
             directory,
             sqlite,
             leaf,
@@ -387,8 +385,14 @@ impl RetainedGooseDirectory {
     }
 
     fn revalidate(&self) -> SourceBackedRouteResult<()> {
-        self.directory.revalidate().map_err(route_error)?;
-        self.root.revalidate().map_err(route_error)
+        // The selected SQLite family and the named parent identity are the
+        // source authority. Unrelated sibling creation must not invalidate a
+        // pinned logical snapshot merely because it changes directory
+        // timestamps.
+        self.sqlite
+            .revalidate()
+            .map_err(sqlite_access_error)
+            .map_err(route_error)
     }
 }
 

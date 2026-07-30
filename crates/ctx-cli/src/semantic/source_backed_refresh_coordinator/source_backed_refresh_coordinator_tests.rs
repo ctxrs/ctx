@@ -620,6 +620,95 @@ fn unchanged_nonempty_publication_is_no_op_by_generation_identity() {
 }
 
 #[test]
+fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = SourceBackedRefreshCoordinator::new();
+    let request = coordinator.enqueue(None);
+    assert_eq!(request["request_state"], "queued");
+
+    let index_root = source_backed_index_root(temp.path());
+    std::fs::create_dir_all(&index_root).unwrap();
+    std::fs::write(index_root.join("meta.json"), b"in-flight metadata").unwrap();
+
+    let coalesced = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+            }),
+        )
+        .unwrap()
+        .expect("coalesced refresh response");
+    assert_eq!(coalesced["request_id"], request["request_id"]);
+    assert_eq!(coalesced["coalesced_requests"], 1);
+}
+
+#[test]
+fn wait_request_during_running_refresh_queues_one_fresh_successor() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
+    let first = coordinator.enqueue(None);
+    let first_request_id = request_id(&first);
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_started = Arc::clone(&started);
+        let runner_release = Arc::clone(&release);
+        scope.spawn(move || {
+            runner
+                .run_next_with(
+                    |_, _| {
+                        runner_started.wait();
+                        runner_release.wait();
+                        Ok(test_publication("generation-1"))
+                    },
+                    || Ok(Some("generation-1".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running refresh");
+        });
+        started.wait();
+
+        let request = || {
+            coordinator
+                .handle_ipc_request(
+                    temp.path(),
+                    &json!({
+                        "op": SOURCE_REFRESH_REQUEST_OP,
+                        "mode": "wait",
+                    }),
+                )
+                .unwrap()
+                .expect("wait refresh response")
+        };
+        let successor = request();
+        let replay = request();
+        assert_ne!(request_id(&successor), first_request_id);
+        assert_eq!(request_id(&replay), request_id(&successor));
+        assert_eq!(replay["coalesced_requests"], 1);
+        release.wait();
+    });
+
+    let successor_run = coordinator
+        .run_next_with(
+            |_, _| Ok(test_publication("generation-2")),
+            || Ok(Some("generation-2".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("fresh successor");
+    assert!(!successor_run.failed);
+    assert_eq!(
+        successor_run.job["published_generation"],
+        Value::String("generation-2".to_owned())
+    );
+}
+
+#[test]
 fn ipc_job_records_source_refresh_only_search_autostart_provenance() {
     let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()

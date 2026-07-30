@@ -214,7 +214,7 @@ impl SqliteSourceDirectoryAuthority {
         &self.data_root
     }
 
-    fn revalidate(&self) -> SqliteSourceAccessResult<()> {
+    pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
         let retained = self
             .directory
             .try_clone_authority_handle()

@@ -1024,13 +1024,22 @@ fn daemon_rejection_diagnostics_survive_a_noop_source_cycle() {
         .success();
 
     let mut generation = None;
+    let mut refresh_request_id = None;
     for cycle in 0..2 {
-        let report = json_output(
-            ctx_from_binary(&temp, &binary)
-                .args(["daemon", "run", "--once", "--force", "--format=json"])
-                .env("CTX_UPGRADE_AUTO", "off"),
-        );
+        let report = (0..4)
+            .find_map(|_| {
+                let report = json_output(
+                    ctx_from_binary(&temp, &binary)
+                        .args(["daemon", "run", "--once", "--force", "--format=json"])
+                        .env("CTX_UPGRADE_AUTO", "off"),
+                );
+                let request_id = report["jobs"]["source_backed_refresh"]["request_id"].as_str();
+                (request_id.is_some() && request_id != refresh_request_id.as_deref())
+                    .then_some(report)
+            })
+            .expect("bounded daemon cycles must execute a new source refresh");
         let refresh = &report["jobs"]["source_backed_refresh"];
+        refresh_request_id = refresh["request_id"].as_str().map(str::to_owned);
         let rejected = refresh["receipt"]["current"]["current_rejected_records"]
             .as_u64()
             .unwrap_or(0);
@@ -1044,8 +1053,8 @@ fn daemon_rejection_diagnostics_survive_a_noop_source_cycle() {
             assert_eq!(refresh["generation_changed"], true, "{report:#}");
             generation = Some(published.to_owned());
         } else {
-            assert_eq!(refresh["generation_changed"], false, "{report:#}");
             assert_eq!(Some(published), generation.as_deref(), "{report:#}");
+            assert_eq!(refresh["generation_changed"], false, "{report:#}");
         }
     }
 

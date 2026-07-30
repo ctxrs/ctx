@@ -268,13 +268,16 @@ pub(in crate::semantic) fn source_backed_lexical_artifact_is_uncommitted_schema_
             .with_context(|| format!("read lexical metadata {}", meta_path.display()))?,
     )
     .with_context(|| format!("parse lexical metadata {}", meta_path.display()))?;
-    let schema_only = meta.get("payload").is_none_or(Value::is_null)
+    Ok(source_backed_meta_is_uncommitted_schema_only(&meta))
+}
+
+fn source_backed_meta_is_uncommitted_schema_only(meta: &Value) -> bool {
+    meta.get("payload").is_none_or(Value::is_null)
         && meta.get("opstamp").and_then(Value::as_u64) == Some(0)
         && meta
             .get("segments")
             .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty);
-    Ok(schema_only)
+            .is_some_and(Vec::is_empty)
 }
 
 fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
@@ -315,10 +318,15 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
             .with_context(|| format!("read retained lexical metadata {}", meta_path.display()))?,
     )
     .with_context(|| format!("parse retained lexical metadata {}", meta_path.display()))?;
-    let payload = meta
-        .get("payload")
-        .and_then(Value::as_str)
-        .ok_or(IndexError::MissingCommitPayload)?;
+    let payload = match meta.get("payload").and_then(Value::as_str) {
+        Some(payload) => payload,
+        None if receipt_generation.is_none()
+            && source_backed_meta_is_uncommitted_schema_only(&meta) =>
+        {
+            return Ok(None);
+        }
+        None => return Err(IndexError::MissingCommitPayload.into()),
+    };
     let payload: Value =
         serde_json::from_str(payload).context("parse retained lexical generation payload")?;
     let meta_generation = payload
