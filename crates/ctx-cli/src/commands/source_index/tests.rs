@@ -416,8 +416,10 @@ mod tests {
             semantic_fallback: None,
             semantic_diagnostics: None,
         };
+        let follow_up_root = std::path::Path::new("/tmp/ctx root/owner's history");
         let value = search_json(
             &source_request,
+            follow_up_root,
             &index,
             &collection,
             &EventSearchFilters::default(),
@@ -468,13 +470,83 @@ mod tests {
         assert!(result.get("cursor").is_none());
         assert_eq!(result["citations"][0]["source_exists"], true);
         assert!(result["citations"][0].get("cursor").is_none());
+        let commands = result["suggested_next_commands"].as_array().unwrap();
+        assert!(commands.iter().all(|command| {
+            command
+                .as_str()
+                .is_some_and(|command| command.starts_with(
+                    r#"ctx --data-root '/tmp/ctx root/owner'\''s history' "#,
+                ))
+        }));
         assert_eq!(
             result["suggested_next_commands"][2],
             format!(
-                "ctx search 'primary query' --term='term with spaces' --session {}",
+                r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search 'primary query' --term='term with spaces' --session {}"#,
                 result["ctx_session_id"].as_str().unwrap()
             )
         );
+    }
+
+    #[test]
+    fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        let first = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 41, 1);
+        let second = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 42, 1);
+        let first_id = first.event_id.as_uuid();
+        let second_id = second.event_id.as_uuid();
+        let mut source_request = request(RefreshArg::Off);
+        source_request.limit = 2;
+        let collection = SearchCollection {
+            result_window: SearchResultWindow {
+                limit: 2,
+                hits: vec![
+                    SearchHit {
+                        event: first,
+                        score: 0.25,
+                        more_matches_in_session: 0,
+                    },
+                    SearchHit {
+                        event: second,
+                        score: 9.5,
+                        more_matches_in_session: 0,
+                    },
+                ],
+                more_available: false,
+            },
+            candidate_pool: 2,
+            candidate_pool_truncated: false,
+            requested_backend: SearchBackendArg::Lexical,
+            effective_backend: SearchBackendArg::Lexical,
+            semantic_weight: 0.0,
+            semantic_status: "skipped",
+            semantic_fallback: None,
+            semantic_diagnostics: None,
+        };
+        let value = search_json(
+            &source_request,
+            temp.path(),
+            &index,
+            &collection,
+            &EventSearchFilters::default(),
+            &HashMap::from([
+                (first_id, "first shaped result".to_owned()),
+                (second_id, "second shaped result".to_owned()),
+            ]),
+            "existing_generation",
+            1,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results[0]["ctx_event_id"], first_id.to_string());
+        assert_eq!(results[1]["ctx_event_id"], second_id.to_string());
+        assert_eq!(results[0]["rank"], 1);
+        assert_eq!(results[1]["rank"], 2);
+        assert_eq!(results[0]["retrieval_score"], 0.25);
+        assert_eq!(results[1]["retrieval_score"], 9.5);
     }
 
     #[test]

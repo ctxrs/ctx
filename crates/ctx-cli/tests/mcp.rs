@@ -772,10 +772,12 @@ fn mcp_search_returns_structured_json_without_refresh() {
             "ctx_session_id:",
             "ctx_event_id:",
             "snippet:",
-            "next: ctx show",
+            "next: ctx --data-root",
         ],
     );
     let first_result = &search["results"][0];
+    assert_eq!(first_result["rank"], 1);
+    assert!(first_result["retrieval_score"].is_number());
     assert!(first_result["result_type"].is_string());
     assert!(first_result["ctx_session_id"].is_string());
     assert!(first_result["ctx_event_id"].is_string());

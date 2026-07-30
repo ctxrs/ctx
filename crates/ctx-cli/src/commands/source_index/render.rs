@@ -1,8 +1,12 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use ctx_history_core::utc_now;
+use ctx_history_core::{managed_data_root, utc_now};
 use ctx_history_index::{EventSearchFilters, VerifiedIndex};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -13,7 +17,7 @@ use crate::{
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     output::{compact_json, OutputFormat},
-    transcript::write_output,
+    transcript::{shell_quote_arg, write_output},
 };
 
 use super::{
@@ -41,6 +45,7 @@ pub(super) fn stdout_body_bytes(body: &str) -> usize {
 
 struct SearchJsonInput<'a> {
     request: &'a SourceSearchRequest,
+    data_root: &'a Path,
     index: &'a VerifiedIndex,
     collection: &'a SearchCollection,
     filters: &'a EventSearchFilters,
@@ -57,6 +62,7 @@ struct SearchRenderMetrics<'a> {
 // Keep the orchestration call shape stable while rendering consumes one typed input.
 type SearchJsonCompatibilityFn = fn(
     &SourceSearchRequest,
+    &Path,
     &VerifiedIndex,
     &SearchCollection,
     &EventSearchFilters,
@@ -68,6 +74,7 @@ type SearchJsonCompatibilityFn = fn(
 
 pub(super) const SEARCH_JSON: SearchJsonCompatibilityFn =
     |request,
+     data_root,
      index,
      collection,
      filters,
@@ -77,6 +84,7 @@ pub(super) const SEARCH_JSON: SearchJsonCompatibilityFn =
      query_duration| {
         render_search_json(SearchJsonInput {
             request,
+            data_root,
             index,
             collection,
             filters,
@@ -93,6 +101,7 @@ pub(super) use self::SEARCH_JSON as search_json;
 fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
     let SearchJsonInput {
         request,
+        data_root,
         index,
         collection,
         filters,
@@ -101,11 +110,13 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
     } = input;
     let normalized_query = NormalizedSearchQuery::from_request(request);
     let result_scope = if request.events { "event" } else { "session" };
+    let command_prefix = follow_up_command_prefix(data_root);
     let results = collection
         .result_window
         .hits
         .iter()
-        .map(|hit| {
+        .enumerate()
+        .map(|(offset, hit)| {
             let snippet = snippets
                 .get(&hit.event.event_id.as_uuid())
                 .filter(|snippet| !snippet.is_empty())
@@ -120,6 +131,8 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
                 snippet,
                 result_scope,
                 &normalized_query,
+                offset.saturating_add(1),
+                &command_prefix,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -181,6 +194,8 @@ fn search_result_json(
     snippet: &str,
     result_scope: &str,
     query: &NormalizedSearchQuery,
+    rank: usize,
+    command_prefix: &str,
 ) -> Value {
     let event = &hit.event;
     let event_id = event.event_id.as_uuid();
@@ -194,14 +209,16 @@ fn search_result_json(
         Some(role) => format!("{} {role} {}", event.provider, event.event_type),
         None => format!("{} {}", event.provider, event.event_type),
     };
-    let mut next = vec![format!("ctx show event {event_id} --window 10")];
+    let mut next = vec![format!(
+        "{command_prefix} show event {event_id} --window 10"
+    )];
     if result_scope == "session" {
-        next.insert(0, format!("ctx show session {session_id}"));
+        next.insert(0, format!("{command_prefix} show session {session_id}"));
     }
     let query_arguments = query.shell_arguments();
     if !query_arguments.is_empty() {
         next.push(format!(
-            "ctx search {query_arguments} --session {session_id}"
+            "{command_prefix} search {query_arguments} --session {session_id}"
         ));
     }
     let source_exists = source_path_exists(event.source_path.as_deref());
@@ -215,7 +232,8 @@ fn search_result_json(
         "event_seq": event.event_sequence,
         "title": title,
         "snippet": snippet,
-        "rank": hit.score,
+        "rank": rank,
+        "retrieval_score": hit.score,
         "result_scope": result_scope,
         "session_importance": (result_scope == "session").then_some(hit.score),
         "more_matches_in_session": (result_scope == "session")
@@ -247,6 +265,14 @@ fn search_result_json(
         }],
         "visibility": "local",
     }))
+}
+
+fn follow_up_command_prefix(data_root: &Path) -> String {
+    if managed_data_root().is_ok_and(|default_root| default_root == data_root) {
+        return "ctx".to_owned();
+    }
+    let data_root = data_root.to_string_lossy();
+    format!("ctx --data-root {}", shell_quote_arg(data_root.as_ref()))
 }
 
 pub(super) fn write_show_value(

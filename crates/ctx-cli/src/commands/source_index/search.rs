@@ -465,6 +465,7 @@ where
     let snippets = hydrate(&index, data_root, &events)?;
     let value = search_json(
         request,
+        data_root,
         &index,
         &collection,
         &filters,

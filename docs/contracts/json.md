@@ -549,7 +549,8 @@ shaped result.
 `--term` alternatives: surrounding whitespace is removed and nonempty
 alternatives are joined with ` OR ` in argument order. Suggested scoped-search
 commands preserve the positional/`--term` argument shape and shell-quote every
-user-provided value.
+user-provided value. When search uses a non-default data root, each command also
+preserves it as a shell-quoted `ctx --data-root <path>` prefix.
 `generated_at` is the RFC 3339 UTC time at which the result envelope was
 rendered.
 
@@ -561,12 +562,16 @@ Each result can include:
 - `event_seq`;
 - `title`;
 - `snippet`;
-- `rank`;
+- `rank`, the one-based position in the final shaped result window;
+- `retrieval_score`, the backend-provided diagnostic score; this score is not an
+  ordering contract and need not be monotonic after query-coverage and
+  session-diversity shaping;
 - `result_type`, the concrete hit kind such as `event`, `session`,
   `session_result`, or `indexed_item`;
 - `result_scope`, either `session` for a session-level result or `event` for an
   event-level result;
-- `session_importance` for default session results;
+- `session_importance` for default session results, retained as a compatibility
+  alias of the diagnostic `retrieval_score` rather than an ordering contract;
 - `more_matches_in_session` for default session results;
 - `provider`;
 - `timestamp`;
