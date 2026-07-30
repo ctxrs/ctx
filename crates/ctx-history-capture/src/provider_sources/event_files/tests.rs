@@ -80,6 +80,10 @@ fn directory_and_exact_file_inventories_are_sorted_and_body_free() {
     );
     assert_eq!(counts.inventory_opens, 1);
     assert_eq!(counts.body_reads, 0);
+    assert_eq!(counts.active_transient_leaf_handles, 0);
+    assert_eq!(counts.active_transient_directory_handles, 0);
+    assert_eq!(counts.peak_transient_leaf_handles, 1);
+    assert!(counts.peak_transient_directory_handles <= 3);
 
     let exact_path = root.join("conversation-a").join("nested").join("b.json");
     let (exact, counts) =
@@ -92,9 +96,54 @@ fn directory_and_exact_file_inventories_are_sorted_and_body_free() {
         Path::new("b.json")
     );
     assert_eq!(counts.body_reads, 0);
+    assert_eq!(counts.active_transient_leaf_handles, 0);
+    assert_eq!(counts.active_transient_directory_handles, 0);
     let (bytes, counts) = count_event_file_io(|| group.read_leaf(&group.leaves()[0]).unwrap());
     assert_eq!(bytes, b"b");
     assert_eq!(counts.body_reads, 1);
+    assert_eq!(counts.peak_transient_leaf_handles, 1);
+    assert_eq!(counts.active_transient_leaf_handles, 0);
+}
+
+#[test]
+fn two_thousand_leaf_inventory_has_a_constant_descriptor_working_set() {
+    const LEAF_COUNT: usize = 2_000;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("large-events");
+    let conversation = root.join("conversation-large");
+    fs::create_dir_all(&conversation).unwrap();
+    for index in 0..LEAF_COUNT {
+        fs::write(
+            conversation.join(format!("{index:04}.json")),
+            index.to_string(),
+        )
+        .unwrap();
+    }
+    let large_limits = EventFileLimits {
+        max_depth: 8,
+        max_entries: LEAF_COUNT + 8,
+        max_path_bytes: 16 * 1024,
+        max_record_bytes: 1024,
+    };
+
+    let ((), counts) = count_event_file_io(|| {
+        let inventory =
+            EventFileInventory::open(&root, large_limits, classify).expect("large inventory");
+        assert_eq!(inventory.retained_authority_handles(), 1);
+        let group = inventory.groups().next().expect("large group");
+        assert_eq!(group.leaves().len(), LEAF_COUNT);
+        inventory
+            .revalidate_all()
+            .expect("metadata-only terminal inventory");
+    });
+
+    assert_eq!(counts.inventory_opens, 1);
+    assert_eq!(counts.body_reads, 0);
+    assert_eq!(counts.peak_transient_leaf_handles, 1);
+    assert!(counts.peak_transient_directory_handles <= 2);
+    assert_eq!(counts.active_transient_leaf_handles, 0);
+    assert_eq!(counts.active_transient_directory_handles, 0);
 }
 
 #[test]
@@ -256,6 +305,30 @@ fn retained_inventory_rejects_leaf_add_delete_and_same_size_rewrite() {
         rewritten.revalidate_all(),
         Err(EventFileInventoryError::SourceChanged { .. })
     ));
+}
+
+#[test]
+fn changed_leaf_is_rejected_before_reopened_body_read() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("read-race");
+    let conversation = root.join("conversation-a");
+    fs::create_dir_all(&conversation).unwrap();
+    let event = conversation.join("event.json");
+    fs::write(&event, b"trusted").unwrap();
+
+    let inventory = EventFileInventory::open(&root, limits(), classify).unwrap();
+    let group = inventory.groups().next().unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    fs::write(&event, b"changed").unwrap();
+
+    let (result, counts) = count_event_file_io(|| group.read_leaf(&group.leaves()[0]));
+    assert!(matches!(
+        result,
+        Err(EventFileInventoryError::SourceChanged { .. })
+    ));
+    assert_eq!(counts.body_reads, 0);
+    assert_eq!(counts.peak_transient_leaf_handles, 1);
+    assert_eq!(counts.active_transient_leaf_handles, 0);
 }
 
 #[test]

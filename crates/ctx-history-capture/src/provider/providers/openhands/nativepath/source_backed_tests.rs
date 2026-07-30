@@ -85,6 +85,10 @@ fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
     let projection = &projection[0];
     assert_eq!(io.inventory_opens, 1);
     assert_eq!(io.body_reads, 5);
+    assert_eq!(io.peak_transient_leaf_handles, 1);
+    assert!(io.peak_transient_directory_handles <= 4);
+    assert_eq!(io.active_transient_leaf_handles, 0);
+    assert_eq!(io.active_transient_directory_handles, 0);
     assert_eq!(projection.source.counts().complete_records, 5);
     assert_eq!(projection.source.counts().retained_records, 3);
     assert_eq!(projection.source.counts().ignored_records, 1);
@@ -126,6 +130,36 @@ fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
         projection.source.observation().revision_kind(),
         "openhands-v1-conversation-leaves-v2"
     );
+}
+
+#[test]
+fn two_thousand_leaf_cold_projection_reads_once_with_constant_descriptors() {
+    const LEAF_COUNT: usize = 2_000;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("large-profile");
+    for index in 0..LEAF_COUNT {
+        write_event(
+            &root,
+            "conversation-large",
+            &format!("{index:04}.json"),
+            message(&format!("event-{index:04}"), "body"),
+        );
+    }
+
+    let (projection, io) = count_event_file_io(|| project(&root).unwrap());
+    assert_eq!(projection.len(), 1);
+    assert_eq!(projection[0].documents.len(), LEAF_COUNT);
+    assert_eq!(
+        projection[0].source.counts().complete_records,
+        LEAF_COUNT as u64
+    );
+    assert_eq!(io.inventory_opens, 1);
+    assert_eq!(io.body_reads, LEAF_COUNT);
+    assert_eq!(io.peak_transient_leaf_handles, 1);
+    assert!(io.peak_transient_directory_handles <= 4);
+    assert_eq!(io.active_transient_leaf_handles, 0);
+    assert_eq!(io.active_transient_directory_handles, 0);
 }
 
 #[test]
@@ -339,6 +373,9 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
     assert_eq!(unchanged, vec![true, true]);
     assert_eq!(unchanged_io.inventory_opens, 1);
     assert_eq!(unchanged_io.body_reads, 0);
+    assert_eq!(unchanged_io.peak_transient_leaf_handles, 1);
+    assert_eq!(unchanged_io.active_transient_leaf_handles, 0);
+    assert_eq!(unchanged_io.active_transient_directory_handles, 0);
 
     fs::write(
         changed_leaf,
@@ -361,6 +398,9 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
     assert_eq!(replaced, vec![("conversation-a".to_owned(), 2)]);
     assert_eq!(replaced_io.inventory_opens, 1);
     assert_eq!(replaced_io.body_reads, 2);
+    assert_eq!(replaced_io.peak_transient_leaf_handles, 1);
+    assert_eq!(replaced_io.active_transient_leaf_handles, 0);
+    assert_eq!(replaced_io.active_transient_directory_handles, 0);
 }
 
 #[test]
@@ -565,6 +605,9 @@ fn grouped_hydration_inventories_once_reads_each_leaf_once_and_preserves_order()
     let (result, io) = count_event_file_io(|| adapter.hydrate_batch(&batch).unwrap());
     assert_eq!(io.inventory_opens, 1);
     assert_eq!(io.body_reads, 2);
+    assert_eq!(io.peak_transient_leaf_handles, 1);
+    assert_eq!(io.active_transient_leaf_handles, 0);
+    assert_eq!(io.active_transient_directory_handles, 0);
     assert_eq!(
         result
             .records()
@@ -619,6 +662,9 @@ fn grouped_hydration_fails_atomically_and_rejects_source_coordinate_revision_and
     ));
     assert_eq!(io.inventory_opens, 1);
     assert_eq!(io.body_reads, 2);
+    assert_eq!(io.peak_transient_leaf_handles, 1);
+    assert_eq!(io.active_transient_leaf_handles, 0);
+    assert_eq!(io.active_transient_directory_handles, 0);
 
     fs::write(
         root.join("v1_conversations")
