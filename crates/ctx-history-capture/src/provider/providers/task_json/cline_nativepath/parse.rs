@@ -26,13 +26,12 @@ use crate::{
 use super::{
     bounded::BoundedString,
     normalize::{
-        estimated_event_bytes, ClineCatalogEntry, ClineEventComponent, ClineEventContext,
-        ClineEventKind, ClineEventRole, ClineEventRow, ClineFileTouch, ClineItemCheckpoint,
-        ClineItemRejection, ClineItemRejectionKind, ClineMetadataCheckpoint, ClineNativeItemKey,
-        ClinePublicationStats, ClineSessionRow, ClineSourceRecordEvidence,
-        ClineSparseOutputDiagnostic, ClineTaskIdentity, ClineTaskIdentityOrigin,
-        CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES,
-        CLINE_NATIVE_PAGE_MAX_UNITS,
+        estimated_event_bytes, ClineEventComponent, ClineEventContext, ClineEventKind,
+        ClineEventRole, ClineEventRow, ClineFileTouch, ClineItemCheckpoint, ClineItemRejection,
+        ClineItemRejectionKind, ClineMetadataCheckpoint, ClineNativeItemKey, ClinePublicationStats,
+        ClineSessionRow, ClineSourceRecordEvidence, ClineSparseOutputDiagnostic, ClineTaskIdentity,
+        ClineTaskIdentityOrigin, CLINE_NATIVE_CORE_PAGE_MAX_BYTES,
+        CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES, CLINE_NATIVE_PAGE_MAX_UNITS,
     },
     source::{
         capture_source_error, is_component_local_error, source_io, ClineComponent,
@@ -43,7 +42,6 @@ use super::{
 
 const COMPONENT_REVISION_DOMAIN: &[u8] = b"ctx-cline-nativepath-component-v2\0";
 const MAX_METADATA_JSON_BYTES: usize = 1024 * 1024;
-const MAX_ROOT_INDEX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_NATIVE_ID_BYTES: usize = 512;
 const MAX_SMALL_FIELD_BYTES: usize = 4 * 1024;
 const MAX_METADATA_TEXT_BYTES: usize = 64 * 1024;
@@ -143,7 +141,11 @@ pub(super) fn hydrate_component(
             false,
         ));
     }
-    let file = expected.opened();
+    let file = Arc::new(
+        observation
+            .open_verified()
+            .map_err(|error| classify_native_error(observation, error))?,
+    );
     let declared_len = file.len();
     if declared_len != expected.len() {
         return Err(ClineLocalReadError::Local(source_changed_failure(
@@ -173,40 +175,11 @@ pub(super) fn hydrate_component(
     })
 }
 
-pub(super) fn pin_component_content(
-    observation: &ClineComponentObservation,
-    content_sha256: [u8; 32],
-) -> Result<ClinePinnedContentAuthority, ClineLocalReadError> {
-    let Some(expected) = observation.stamp() else {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
-            observation,
-        )));
-    };
-    let file = expected.opened();
-    if file.len() != expected.len() || file.revalidate().is_err() {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
-            observation,
-        )));
-    }
-    let mut authority = ClinePinnedContentAuthority {
-        file,
-        observation: observation.clone(),
-        content_sha256,
-    };
-    if !authority.verify_content()? {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
-            observation,
-        )));
-    }
-    Ok(authority)
-}
-
 fn component_byte_bound(component: ClineComponent) -> Result<usize, ClineLocalReadError> {
     match component {
         ClineComponent::TaskMetadata | ClineComponent::HistoryItem | ClineComponent::TaskIndex => {
             Ok(MAX_METADATA_JSON_BYTES)
         }
-        ClineComponent::RootIndex => Ok(MAX_ROOT_INDEX_JSON_BYTES),
         ClineComponent::ApiHistory
         | ClineComponent::UiMessages
         | ClineComponent::FallbackHistory => Err(ClineLocalReadError::Fatal(
@@ -646,85 +619,5 @@ fn normalize_integer_timestamp(value: i64) -> i64 {
         value.saturating_mul(1000)
     } else {
         value
-    }
-}
-
-pub(super) fn parse_root_index(
-    hydrated: &HydratedComponent,
-    observation: &ClineComponentObservation,
-    stats: &mut ClinePublicationStats,
-) -> Result<Vec<ClineCatalogEntry>, super::normalize::ClineComponentFailure> {
-    stats.component_parse_passes = stats.component_parse_passes.saturating_add(1);
-    let mut deserializer = serde_json::Deserializer::from_slice(&hydrated.bytes);
-    let mut entries = deserializer
-        .deserialize_seq(RootIndexVisitor)
-        .map_err(|error| parse_failure(observation, &error, "malformed Cline taskHistory"))?;
-    deserializer
-        .end()
-        .map_err(|error| parse_failure(observation, &error, "trailing Cline taskHistory data"))?;
-    entries.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-    entries.dedup_by(|left, right| left.task_id == right.task_id);
-    Ok(entries)
-}
-
-struct RootIndexVisitor;
-
-impl<'de> Visitor<'de> for RootIndexVisitor {
-    type Value = Vec<ClineCatalogEntry>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a Cline taskHistory JSON array")
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut entries = Vec::new();
-        while let Some(raw) = sequence.next_element::<RawRootEntry>()? {
-            if let Some(entry) = raw.normalize() {
-                if entries.len() == 4_096 {
-                    return Err(serde::de::Error::custom(
-                        "Cline taskHistory exceeds the 4096-entry catalog bound",
-                    ));
-                }
-                entries.push(entry);
-            }
-        }
-        Ok(entries)
-    }
-}
-
-#[derive(Deserialize)]
-struct RawRootEntry {
-    #[serde(default, alias = "taskId")]
-    id: Option<BoundedString<MAX_NATIVE_ID_BYTES>>,
-    #[serde(default, alias = "title")]
-    task: Option<BoundedString<MAX_METADATA_TEXT_BYTES>>,
-    #[serde(default, alias = "workspaceDirectory")]
-    workspace_directory: Option<BoundedString<MAX_METADATA_TEXT_BYTES>>,
-    #[serde(default, alias = "timestamp")]
-    ts: Option<i64>,
-    #[serde(default, alias = "inputTokens")]
-    tokens_input: Option<u64>,
-    #[serde(default, alias = "outputTokens")]
-    tokens_output: Option<u64>,
-}
-
-impl RawRootEntry {
-    fn normalize(self) -> Option<ClineCatalogEntry> {
-        let task_id = self
-            .id
-            .and_then(|value| value.0)
-            .filter(|value| valid_identity(value))?
-            .into_boxed_str();
-        Some(ClineCatalogEntry {
-            task_id,
-            title: bounded_metadata(self.task),
-            workspace_directory: bounded_metadata(self.workspace_directory),
-            timestamp_millis: self.ts.map(normalize_integer_timestamp),
-            tokens_input: self.tokens_input,
-            tokens_output: self.tokens_output,
-        })
     }
 }

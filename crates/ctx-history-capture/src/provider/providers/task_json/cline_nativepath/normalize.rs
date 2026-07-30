@@ -531,10 +531,6 @@ pub(crate) struct ClineTaskCheckpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClineComponentTransition {
     Cold,
-    Unchanged,
-    Append { prior_items: usize },
-    Rewrite,
-    ControlOnlyRewrite,
     LogicalEmpty,
     MissingPhysical,
 }
@@ -597,45 +593,6 @@ pub(crate) struct ClinePublicationStats {
     pub(crate) core_rows: usize,
     pub(crate) local_rejections: usize,
     pub(crate) output_outcomes_observed: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClineCatalogEntry {
-    pub(crate) task_id: Box<str>,
-    pub(crate) title: Option<Box<str>>,
-    pub(crate) workspace_directory: Option<Box<str>>,
-    pub(crate) timestamp_millis: Option<i64>,
-    pub(crate) tokens_input: Option<u64>,
-    pub(crate) tokens_output: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClineCatalogIndex {
-    Missing,
-    Parsed {
-        content_sha256: [u8; 32],
-        entries: Box<[ClineCatalogEntry]>,
-    },
-    Incomplete(ClineCatalogRejection),
-    Malformed(ClineCatalogRejection),
-    Unavailable(ClineCatalogRejection),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClineCatalogRejection {
-    pub(crate) path: PathBuf,
-    pub(crate) retryable: bool,
-    pub(crate) message: Box<str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClineCatalogCompletion {
-    pub(crate) inventory_complete: bool,
-    pub(crate) inventory_revalidated: bool,
-    pub(crate) root_index: ClineCatalogIndex,
-    pub(crate) component_outcomes: Box<[ClineComponentReadOutcome]>,
-    pub(crate) live_checkpoints: Box<[ClineTaskCheckpoint]>,
-    pub(crate) missing_task_paths: Box<[PathBuf]>,
 }
 
 mod metrics;

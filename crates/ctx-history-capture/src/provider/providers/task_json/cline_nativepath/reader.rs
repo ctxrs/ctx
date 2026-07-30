@@ -1,13 +1,9 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::Path};
 
 use super::{
     normalize::{
         estimated_rejection_bytes, estimated_session_bytes, estimated_source_bytes,
-        ClineArrayCheckpoint, ClineCatalogCompletion, ClineCatalogIndex, ClineCatalogRejection,
-        ClineCertifiedPage, ClineComponentFailure, ClineComponentFailureKind,
+        ClineArrayCheckpoint, ClineCertifiedPage, ClineComponentFailure, ClineComponentFailureKind,
         ClineComponentReadOutcome, ClineComponentTransition, ClineCorePayload, ClineEventComponent,
         ClineEventKind, ClineFileSourceIdentity, ClineMetadataCheckpoint, ClinePageFrontier,
         ClinePublicationStats, ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity,
@@ -15,9 +11,8 @@ use super::{
         CLINE_NATIVE_SESSION_PAGE_UNITS,
     },
     parse::{
-        hydrate_component, parse_metadata, parse_root_index, parse_scanned_item,
-        pin_component_content, ClineArrayScanStep, ClineArrayScanner, ClineLocalReadError,
-        ClinePinnedContentAuthority, ParsedItem,
+        hydrate_component, parse_metadata, parse_scanned_item, ClineArrayScanStep,
+        ClineArrayScanner, ClineLocalReadError, ClinePinnedContentAuthority, ParsedItem,
     },
     source::{
         is_component_local_error, ClineComponent, ClineComponentObservation, ClineDiscovery,
@@ -28,7 +23,6 @@ use super::{
 
 pub(crate) struct ClineNativeReader {
     discovery: ClineDiscovery,
-    previous_by_path: BTreeMap<PathBuf, ClineTaskCheckpoint>,
     route_index: usize,
     pending_page: Option<ClineCertifiedPage>,
     active_task: Option<ActiveTask>,
@@ -36,7 +30,11 @@ pub(crate) struct ClineNativeReader {
     outcomes: Vec<ClineComponentReadOutcome>,
     live_checkpoints: Vec<ClineTaskCheckpoint>,
     stats: ClinePublicationStats,
-    catalog_finished: bool,
+}
+
+pub(crate) struct ClineColdCompletion {
+    pub(crate) component_outcomes: Box<[ClineComponentReadOutcome]>,
+    pub(crate) live_checkpoints: Box<[ClineTaskCheckpoint]>,
 }
 
 struct ActiveTask {
@@ -44,10 +42,8 @@ struct ActiveTask {
     metadata: ClineMetadataCheckpoint,
     metadata_content_authority: Option<ClinePinnedContentAuthority>,
     deferred_metadata_page: Option<ClineCertifiedPage>,
-    discard_deferred_metadata_on_failure: bool,
     component_failed: bool,
     component_page_certified: bool,
-    identity_changed: bool,
     api_history: Option<ClineArrayCheckpoint>,
     ui_messages: Option<ClineArrayCheckpoint>,
     fallback_history: Option<ClineArrayCheckpoint>,
@@ -60,7 +56,6 @@ struct ActiveArray {
     task: Box<ClineLiveTaskObservation>,
     metadata: ClineMetadataCheckpoint,
     component: ClineEventComponent,
-    prior: Option<ClineArrayCheckpoint>,
     scanner: ClineArrayScanner,
     source: ClineFileSourceIdentity,
     revision_sha256: [u8; 32],
@@ -68,7 +63,6 @@ struct ActiveArray {
     observed_items: u64,
     retained_rows: u64,
     native_id_occurrences: BTreeMap<String, u64>,
-    prior_prefix_matches: bool,
     attach_session: bool,
     pages: usize,
 }
@@ -111,32 +105,6 @@ fn fallback_metadata(
     }
 }
 
-fn merge_task_identity_authority(
-    session: &mut ClineSessionRow,
-    previous: Option<&ClineTaskCheckpoint>,
-) {
-    let Some(previous) = previous else {
-        return;
-    };
-    let prior = &previous.task_metadata.session;
-    let mut aliases = prior
-        .identity_aliases
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if prior.identity == session.identity {
-        session.identity_aliases = aliases.into_iter().collect::<Vec<_>>().into_boxed_slice();
-        return;
-    }
-    if prior.identity_origin == ClineTaskIdentityOrigin::DirectoryNameDegraded
-        && session.identity_origin == ClineTaskIdentityOrigin::TaskMetadata
-    {
-        aliases.insert(prior.identity.clone());
-        aliases.remove(&session.identity);
-        session.identity_aliases = aliases.into_iter().collect::<Vec<_>>().into_boxed_slice();
-    }
-}
-
 fn file_source(component: ClineComponent, path: &Path) -> ClineFileSourceIdentity {
     ClineFileSourceIdentity {
         component,
@@ -144,31 +112,12 @@ fn file_source(component: ClineComponent, path: &Path) -> ClineFileSourceIdentit
     }
 }
 
-fn classify_transition(
-    prior: Option<&ClineArrayCheckpoint>,
-    current: &ClineArrayCheckpoint,
-    prior_prefix_matches: bool,
-) -> ClineComponentTransition {
-    let Some(prior) = prior else {
-        return if current.observed_items == 0 {
-            ClineComponentTransition::LogicalEmpty
-        } else {
-            ClineComponentTransition::Cold
-        };
-    };
-    if current.observed_items == prior.observed_items
-        && current.final_frontier == prior.final_frontier
-    {
-        return ClineComponentTransition::ControlOnlyRewrite;
+fn cold_transition(current: &ClineArrayCheckpoint) -> ClineComponentTransition {
+    if current.observed_items == 0 {
+        ClineComponentTransition::LogicalEmpty
+    } else {
+        ClineComponentTransition::Cold
     }
-    if current.observed_items > prior.observed_items && prior_prefix_matches {
-        return ClineComponentTransition::Append {
-            prior_items: usize::try_from(prior.observed_items).unwrap_or(usize::MAX),
-        };
-    }
-    // A shorter bounded summary cannot prove that every retained item is an
-    // unchanged prefix. Publish it conservatively as a rewrite.
-    ClineComponentTransition::Rewrite
 }
 
 fn source_changed(observation: &ClineComponentObservation) -> ClineComponentFailure {
@@ -181,22 +130,6 @@ fn source_changed(observation: &ClineComponentObservation) -> ClineComponentFail
     }
 }
 
-fn deletion_metadata_authority_refusal(
-    metadata: &ClineMetadataCheckpoint,
-    array: &ClineComponentObservation,
-) -> Option<ClineComponentFailure> {
-    (metadata.observation.stamp().is_none()
-        || metadata.session.identity_origin != ClineTaskIdentityOrigin::TaskMetadata)
-        .then(|| ClineComponentFailure {
-            component: array.component,
-            path: metadata.observation.path.clone(),
-            kind: ClineComponentFailureKind::SourceChanged,
-            message: "Cline array deletion requires present metadata with a valid certified taskId"
-                .into(),
-            retryable: true,
-        })
-}
-
 fn component_failure_outcome(failure: ClineComponentFailure) -> ClineComponentReadOutcome {
     ClineComponentReadOutcome {
         component: failure.component,
@@ -204,14 +137,6 @@ fn component_failure_outcome(failure: ClineComponentFailure) -> ClineComponentRe
         transition: None,
         pages: 0,
         failure: Some(failure),
-    }
-}
-
-fn catalog_rejection(failure: ClineComponentFailure) -> ClineCatalogRejection {
-    ClineCatalogRejection {
-        path: failure.path,
-        retryable: failure.retryable,
-        message: failure.message,
     }
 }
 

@@ -1,72 +1,217 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use ctx_history_core::{
-    CaptureProvider, CertifiedSourceDeletion, ContentSourceResolver, EventHydrationRequest,
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
     HydrationFailureKind, NativeRecordCoordinate,
 };
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use crate::{
-    discover_provider_sources_for_provider_with_context, provider_source_for_path,
-    DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport,
-    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
-    CLINE_TASK_JSON_SOURCE_FORMAT, ROO_TASK_JSON_SOURCE_FORMAT,
+    discover_provider_sources_for_provider_with_context,
+    provider::source_backed::{
+        family::document::register_replacement_document_tree_route,
+        refresh_source_backed_generation, SourceBackedCoordinatorError,
+        SourceBackedProviderRegistry, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
+    },
+    provider_source_for_path, register_landed_source_backed_route, DiscoveryContext,
+    DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport, ProviderImportSupport,
+    ProviderSource, ProviderSourceKind, ProviderSourceStatus, CLINE_TASK_JSON_SOURCE_FORMAT,
+    ROO_TASK_JSON_SOURCE_FORMAT,
 };
 
+use super::source::ClineFileStamp;
 use super::source_backed::{
-    estimated_documents_bytes, TaskJsonSourceBackedCompletion, TaskJsonSourceBackedPage,
-};
-use super::{
     cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
     roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
 };
 
 #[test]
-fn cline_source_backed_cold_exact_replacement_and_delete_ready() {
-    lifecycle_case(CaptureProvider::Cline);
+fn task_json_routes_cold_noop_replace_and_delete_through_shared_engine() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        lifecycle_case(provider);
+    }
 }
 
 #[test]
-fn roo_source_backed_cold_exact_replacement_and_delete_ready() {
-    lifecycle_case(CaptureProvider::RooCode);
+fn task_json_grouped_hydration_is_ordered_single_scan_and_atomic() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let hydration_scans = Arc::new(AtomicUsize::new(0));
+        let registry = registry(
+            provider,
+            fixture.source(),
+            None,
+            Some(Arc::clone(&hydration_scans)),
+            None,
+        );
+        let index_root = fixture._temp.path().join("hydration-index");
+        refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect("index task JSON fixture");
+        let events = retained_events(&index_root);
+        assert_eq!(events.len(), 2);
+        let requests = events
+            .iter()
+            .rev()
+            .map(|event| {
+                EventHydrationRequest::new(event.event_id, event.locator.clone())
+                    .expect("valid task event locator")
+            })
+            .collect::<Vec<_>>();
+        let batch = BatchHydrationRequest::new(requests.clone()).expect("valid grouped request");
+        let hydrated = registry
+            .resolver_registry()
+            .hydrate_batch(&batch)
+            .expect("hydrate exact grouped task records");
+        assert_eq!(
+            hydrated
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            requests
+                .iter()
+                .map(EventHydrationRequest::event_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hydration_scans.load(Ordering::Relaxed), 1);
+        assert!(hydrated
+            .records()
+            .iter()
+            .any(|record| record.provider_bytes.ends_with(b"task-json-tail")));
+
+        fixture.replace_api("stale grouped body");
+        let error = registry
+            .resolver_registry()
+            .hydrate_batch(&batch)
+            .expect_err("changed task must fail the whole hydration group");
+        assert_eq!(error.kind, HydrationFailureKind::StaleSourceEvidence);
+        assert_eq!(hydration_scans.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
+fn task_json_unavailable_root_is_explicit_and_preserves_generation() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let registry = registry(provider, fixture.source(), None, None, None);
+        let index_root = fixture._temp.path().join("unavailable-index");
+        let cold = refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect("publish retained task JSON generation");
+        let retained = event_ids(&retained_events(&index_root));
+        let displaced = fixture.root.with_extension("temporarily-unavailable");
+        fs::rename(&fixture.root, displaced).expect("make selected task root unavailable");
+        let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect_err("unavailable task root must fail closed");
+        assert!(matches!(
+            error,
+            SourceBackedCoordinatorError::RouteScan {
+                source: crate::provider::source_backed::SourceBackedRouteError {
+                    kind: SourceBackedRouteErrorKind::Unavailable,
+                    ..
+                },
+                ..
+            }
+        ));
+        let verified = VerifiedIndex::open(&index_root).expect("reopen retained task index");
+        assert_eq!(verified.generation_id(), cold.commit.generation_id);
+        assert_eq!(event_ids(&retained_events(&index_root)), retained);
+    }
+}
+
+#[test]
+fn task_json_commit_time_inventory_race_fails_closed() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let api = fixture.api.clone();
+        let hook_calls = Arc::clone(&calls);
+        let hook = Arc::new(move || {
+            if hook_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                replace_json(&api, &messages("commit fence race"));
+            }
+        });
+        let registry = registry(provider, fixture.source(), None, None, Some(hook));
+        let index_root = fixture._temp.path().join("race-index");
+        let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect_err("terminal task inventory race must abort publication");
+        assert!(matches!(
+            error,
+            SourceBackedCoordinatorError::Index(_) | SourceBackedCoordinatorError::RouteScan { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the shared engine performs one scan fence and one cached commit fence"
+        );
+    }
+}
+
+#[test]
+fn task_json_catalog_is_compact_and_registration_has_no_captured_driver() {
+    assert!(
+        std::mem::size_of::<ClineFileStamp>() <= 40,
+        "a compact file stamp must not retain an opened provider file"
+    );
+    let source = include_str!("source.rs");
+    assert!(!source.contains("Arc<OpenedProviderSourceFile>"));
+
+    let registration = include_str!("../../../source_backed/registration/families/document.rs");
+    let task_route = registration
+        .split("pub(super) fn register_task_json_route")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Registers one explicit NanoClaw").next())
+        .expect("task JSON registration body");
+    assert!(!task_route.contains("captured_route_driver"));
+    assert!(task_route.contains("register_replacement_document_tree_route"));
+}
+
+#[test]
+fn task_json_production_registration_uses_shared_document_route() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route(
+            &mut registry,
+            fixture.source(),
+            SourceBackedRouteSelection::Automatic,
+        )
+        .expect("register production task JSON route");
+        let index_root = fixture._temp.path().join("production-registration-index");
+        refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect("run production task JSON route");
+        assert_eq!(retained_events(&index_root).len(), 2);
+    }
 }
 
 #[test]
 fn source_backed_resolvers_reject_swapped_authority_roots() {
     for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
         let fixture = Fixture::new(provider);
-        let selected = exact_source(provider, fixture.root.clone());
-        let (pages, _) = scan(provider, &selected);
-        let document = &pages[0].documents[0];
-        let request = EventHydrationRequest::new(document.event_id, document.locator.clone())
+        let registry = registry(provider, fixture.source(), None, None, None);
+        let index_root = fixture._temp.path().join("swap-index");
+        refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect("index task before root swap");
+        let event = retained_events(&index_root).remove(0);
+        let request = EventHydrationRequest::new(event.event_id, event.locator)
             .expect("valid task event request");
-        let resolver = resolver(provider, std::slice::from_ref(&selected));
         let displaced = fixture.root.with_extension("displaced");
         fs::rename(&fixture.root, &displaced).expect("displace selected authority root");
         Fixture::write_task(provider, &fixture.task, fixture.task_id, "cold body");
 
-        let error = resolver
+        let error = registry
+            .resolver_registry()
             .hydrate_event(&request)
-            .expect_err("swapped root must not satisfy retained authority");
+            .expect_err("swapped root must not satisfy retained source evidence");
         assert_eq!(error.kind, HydrationFailureKind::StaleSourceEvidence);
-    }
-}
-
-#[test]
-fn unavailable_roots_remain_explicit_without_source_opens() {
-    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut selected = exact_source(provider, temp.path().join("unavailable"));
-        selected.exists = false;
-        selected.status = ProviderSourceStatus::Missing;
-        let (_, completion) = scan(provider, &selected);
-        assert!(completion.inventories.is_empty());
-        assert!(completion.tasks.is_empty());
-        assert_eq!(completion.unavailable.as_ref(), &[selected]);
     }
 }
 
@@ -80,16 +225,6 @@ fn current_cline_sdk_format_remains_detected_but_unsupported() {
     assert_eq!(detected.source_kind, ProviderSourceKind::DetectionOnly);
     assert_eq!(detected.import_support, ProviderImportSupport::Unsupported);
     assert_eq!(detected.status, ProviderSourceStatus::Unsupported);
-
-    let mut adapter = cline_task_json_source_backed_adapter(std::slice::from_ref(&detected));
-    assert_eq!(adapter.detected_but_unsupported(), &[detected]);
-    assert!(adapter
-        .next_page()
-        .expect("drain unsupported selection")
-        .is_none());
-    let completion = adapter.finish().expect("finish unsupported selection");
-    assert!(completion.inventories.is_empty());
-    assert!(completion.tasks.is_empty());
 }
 
 #[test]
@@ -122,149 +257,164 @@ fn roo_external_workspace_root_requires_discovery_consent() {
         discover_provider_sources_for_provider_with_context(&context, CaptureProvider::RooCode);
     assert!(report.sources.iter().all(|source| source.path != external));
     assert!(!report.issues.is_empty());
-
-    let mut adapter = roo_task_json_source_backed_adapter(&report.sources);
-    assert!(adapter
-        .next_page()
-        .expect("drain consent-filtered roots")
-        .is_none());
-    let completion = adapter.finish().expect("finish consent-filtered roots");
-    assert!(completion.tasks.is_empty());
-    assert!(completion.inventories.is_empty());
 }
 
 fn lifecycle_case(provider: CaptureProvider) {
     let fixture = Fixture::new(provider);
-    let selected = exact_source(provider, fixture.root.clone());
+    let projection_scans = Arc::new(AtomicUsize::new(0));
+    let registry = registry(
+        provider,
+        fixture.source(),
+        Some(Arc::clone(&projection_scans)),
+        None,
+        None,
+    );
+    let index_root = fixture._temp.path().join("lifecycle-index");
 
-    let (cold_pages, cold) = scan(provider, &selected);
-    assert_eq!(cold.inventories.len(), 1);
-    assert_eq!(cold.tasks.len(), 1);
-    assert_eq!(cold.inventories[0].observed_sources(), 1);
-    assert!(cold.detected_but_unsupported.is_empty());
-    assert!(cold.unavailable.is_empty());
-    assert!(!cold_pages.is_empty());
-    assert!(cold_pages.iter().all(|page| {
-        page.documents.len() <= 64
-            && estimated_documents_bytes(&page.documents) <= 4 * 1024 * 1024
-            && page.documents.iter().all(|document| {
-                document.parent_session_id.is_none()
-                    && document.root_session_id == document.session_id
-                    && document.provider_session_id.is_some()
-                    && document.branch.is_none()
-                    && document.source_path.as_ref().is_some_and(|path| {
-                        matches!(
-                            path.as_str(),
-                            "api_conversation_history.json"
-                                | "ui_messages.json"
-                                | "claude_messages.json"
-                        )
-                    })
-                    && document.is_primary
-                    && document.agent_type
-                        == match provider {
-                            CaptureProvider::Cline => "cline",
-                            CaptureProvider::RooCode => "roo-code",
-                            _ => unreachable!(),
-                        }
-                    && matches!(
-                        document.locator.coordinate(),
-                        NativeRecordCoordinate::TreeRecord { .. }
-                    )
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect("cold task JSON route");
+    assert_eq!(cold.sources.len(), 1);
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 1);
+    let source = cold.sources[0].observation().source().clone();
+    let cold_events = retained_events(&index_root);
+    assert_eq!(cold_events.len(), 2);
+    assert!(cold_events.iter().all(|event| {
+        event.locator.source().exact_descriptor_eq(&source)
+            && event.parent_session_id.is_none()
+            && event.root_session_id == event.session_id
+            && event.provider_session_id.is_some()
+            && event.branch.is_none()
+            && event.source_path.as_deref().is_some_and(|path| {
+                matches!(
+                    path,
+                    "api_conversation_history.json" | "ui_messages.json" | "claude_messages.json"
+                )
             })
+            && event.is_primary
+            && matches!(
+                event.locator.coordinate(),
+                NativeRecordCoordinate::TreeRecord { .. }
+            )
     }));
-    let full_body = source_fixture_body();
-    let full_document = cold_pages
+    assert!(hydrate_events(&registry, &cold_events)
         .iter()
-        .flat_map(|page| &page.documents)
-        .find(|document| document.body.ends_with("task-json-tail"))
-        .expect("full source-backed body");
-    assert_eq!(full_document.body, full_body);
-    let cold_ids = event_ids(&cold_pages);
-    let cold_request =
-        EventHydrationRequest::new(full_document.event_id, full_document.locator.clone())
-            .expect("valid cold task event request");
-    let cold_source = cold.tasks[0].source.clone();
-    let cold_certificate = cold.tasks[0].certified_source.clone();
-    let resolver = resolver(provider, std::slice::from_ref(&selected));
-    let hydrated = resolver
-        .hydrate_event(&cold_request)
-        .expect("hydrate exact native item");
-    assert_eq!(hydrated.provider_bytes, full_document.body.as_bytes());
+        .any(|record| record.provider_bytes.ends_with(b"task-json-tail")));
+    let cold_ids = event_ids(&cold_events);
 
-    let (exact_pages, exact) = scan(provider, &selected);
-    assert_eq!(event_ids(&exact_pages), cold_ids);
-    assert_eq!(exact.tasks[0].source, cold_source);
-    assert_eq!(exact.tasks[0].certified_source, cold_certificate);
-
-    fixture.replace_api("replacement body");
-    let stale = resolver
-        .hydrate_event(&cold_request)
-        .expect_err("old exact locator must go stale");
-    assert_eq!(stale.kind, HydrationFailureKind::StaleSourceEvidence);
-    let (replacement_pages, replacement) = scan(provider, &selected);
-    assert_eq!(event_ids(&replacement_pages), cold_ids);
-    assert_eq!(replacement.tasks[0].source, cold_source);
-    assert_ne!(
-        replacement.tasks[0].certified_source.content_digest(),
-        cold_certificate.content_digest()
+    let unchanged = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect("unchanged task JSON route");
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(
+        projection_scans.load(Ordering::Relaxed),
+        1,
+        "cheap unchanged discovery must perform zero parses"
     );
 
-    fs::remove_dir_all(&fixture.task).expect("remove authoritative task");
-    let (deleted_pages, deleted) = scan(provider, &selected);
-    assert!(deleted_pages.is_empty());
-    assert!(deleted.tasks.is_empty());
-    assert_eq!(deleted.inventories.len(), 1);
-    assert_eq!(deleted.inventories[0].observed_sources(), 0);
-    let deletion = CertifiedSourceDeletion::from_inventory(cold_source, &deleted.inventories[0])
-        .expect("complete inventory proves deletion");
-    assert!(deletion.verifies(&deleted.inventories[0]));
-}
-
-fn scan(
-    provider: CaptureProvider,
-    selected: &ProviderSource,
-) -> (
-    Vec<TaskJsonSourceBackedPage>,
-    TaskJsonSourceBackedCompletion,
-) {
-    let mut adapter = match provider {
-        CaptureProvider::Cline => {
-            cline_task_json_source_backed_adapter(std::slice::from_ref(selected))
-        }
-        CaptureProvider::RooCode => {
-            roo_task_json_source_backed_adapter(std::slice::from_ref(selected))
-        }
-        _ => unreachable!(),
-    };
-    let mut pages = Vec::new();
-    while let Some(page) = adapter.next_page().expect("stream source-backed page") {
-        pages.push(page);
-    }
-    let completion = adapter.finish().expect("finish source-backed scan");
-    (pages, completion)
-}
-
-fn resolver(
-    provider: CaptureProvider,
-    selected: &[ProviderSource],
-) -> super::source_backed::TaskJsonSourceBackedResolver {
-    match provider {
-        CaptureProvider::Cline => {
-            cline_task_json_source_backed_resolver(selected).expect("Cline resolver")
-        }
-        CaptureProvider::RooCode => {
-            roo_task_json_source_backed_resolver(selected).expect("Roo resolver")
-        }
-        _ => unreachable!(),
-    }
-}
-
-fn event_ids(pages: &[TaskJsonSourceBackedPage]) -> Vec<ctx_history_core::StableEntityId> {
-    pages
+    fixture.replace_api("replacement body");
+    let replacement = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect("replacement task JSON route");
+    assert_ne!(replacement.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    let replacement_events = retained_events(&index_root);
+    assert_eq!(event_ids(&replacement_events), cold_ids);
+    assert!(hydrate_events(&registry, &replacement_events)
         .iter()
-        .flat_map(|page| page.documents.iter().map(|document| document.event_id))
-        .collect()
+        .any(|record| record.provider_bytes == b"replacement body"));
+
+    fs::remove_dir_all(&fixture.task).expect("remove authoritative task");
+    let deleted = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect("delete task JSON source through complete inventory");
+    assert!(deleted.sources.is_empty());
+    assert!(deleted
+        .removals
+        .iter()
+        .any(|removal| removal.deletion.source().exact_descriptor_eq(&source)));
+    assert_eq!(
+        projection_scans.load(Ordering::Relaxed),
+        2,
+        "complete deletion inventory must not parse a removed source"
+    );
+}
+
+fn registry(
+    provider: CaptureProvider,
+    source: ProviderSource,
+    projection_scans: Option<Arc<AtomicUsize>>,
+    hydration_scans: Option<Arc<AtomicUsize>>,
+    terminal_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> SourceBackedProviderRegistry {
+    let selected = vec![source.clone()];
+    let mut resolver = match provider {
+        CaptureProvider::Cline => cline_task_json_source_backed_resolver(&selected),
+        CaptureProvider::RooCode => roo_task_json_source_backed_resolver(&selected),
+        _ => unreachable!(),
+    }
+    .expect("task JSON resolver");
+    if let Some(scans) = hydration_scans {
+        resolver = resolver.with_hydration_scans(scans);
+    }
+    let mut adapter = match provider {
+        CaptureProvider::Cline => cline_task_json_source_backed_adapter(&selected),
+        CaptureProvider::RooCode => roo_task_json_source_backed_adapter(&selected),
+        _ => unreachable!(),
+    }
+    .with_resolver(resolver);
+    if let Some(scans) = projection_scans {
+        adapter = adapter.with_projection_scans(scans);
+    }
+    if let Some(hook) = terminal_hook {
+        adapter = adapter.with_terminal_revalidation_hook(hook);
+    }
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_replacement_document_tree_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+        adapter,
+    )
+    .expect("register task JSON replacement route");
+    registry
+}
+
+fn writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+fn retained_events(index_root: &Path) -> Vec<ctx_history_index::EventRecord> {
+    let index = VerifiedIndex::open(index_root).expect("open retained task index");
+    let source = index.manifest().sources[0].observation().source().clone();
+    let mut events = index
+        .source_event_page(&source, None, 8)
+        .expect("task event page")
+        .items;
+    events.sort_by_key(|event| event.event_sequence);
+    events
+}
+
+fn event_ids(events: &[ctx_history_index::EventRecord]) -> Vec<ctx_history_core::StableEntityId> {
+    events.iter().map(|event| event.event_id).collect()
+}
+
+fn hydrate_events(
+    registry: &SourceBackedProviderRegistry,
+    events: &[ctx_history_index::EventRecord],
+) -> Vec<ctx_history_core::HydratedProviderRecord> {
+    let requests = events
+        .iter()
+        .map(|event| {
+            EventHydrationRequest::new(event.event_id, event.locator.clone())
+                .expect("valid retained task locator")
+        })
+        .collect::<Vec<_>>();
+    let batch = BatchHydrationRequest::new(requests).expect("valid retained task batch");
+    registry
+        .resolver_registry()
+        .hydrate_batch(&batch)
+        .expect("hydrate retained task events")
+        .into_records()
 }
 
 fn exact_source(provider: CaptureProvider, path: PathBuf) -> ProviderSource {
@@ -329,6 +479,10 @@ impl Fixture {
         }
     }
 
+    fn source(&self) -> ProviderSource {
+        exact_source(self.provider, self.root.clone())
+    }
+
     fn write_task(provider: CaptureProvider, task: &Path, task_id: &str, body: &str) {
         fs::create_dir_all(task).expect("task directory");
         write_json(&task.join("api_conversation_history.json"), &messages(body));
@@ -369,15 +523,7 @@ impl Fixture {
     }
 
     fn replace_api(&self, body: &str) {
-        let replacement = self.task.join("api_conversation_history.replacement");
-        write_json(&replacement, &messages(body));
-        fs::rename(&replacement, &self.api).expect("atomically replace API history");
-        assert!(self.api.is_file());
-        assert!(matches!(
-            self.provider,
-            CaptureProvider::Cline | CaptureProvider::RooCode
-        ));
-        assert!(!self.task_id.is_empty());
+        replace_json(&self.api, &messages(body));
     }
 }
 
@@ -398,6 +544,12 @@ fn messages(body: &str) -> Value {
 
 fn source_fixture_body() -> String {
     format!("{}task-json-tail", "cold body ".repeat(400))
+}
+
+fn replace_json(path: &Path, value: &Value) {
+    let replacement = path.with_extension("replacement");
+    write_json(&replacement, value);
+    fs::rename(replacement, path).expect("atomically replace task component");
 }
 
 fn write_json(path: &Path, value: &Value) {

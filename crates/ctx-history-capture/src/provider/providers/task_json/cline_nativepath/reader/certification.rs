@@ -140,57 +140,11 @@ impl ClineNativeReader {
     pub(super) fn resolve_metadata(
         &mut self,
         task: &ClineLiveTaskObservation,
-        previous: Option<&ClineTaskCheckpoint>,
     ) -> Result<MetadataResolution, ClineNativePathError> {
         let observation = task.metadata_authority();
-        let prior = previous.map(|checkpoint| &checkpoint.task_metadata);
-        if let Some(prior) = prior.filter(|prior| prior.observation == *observation) {
-            if let Some(failure) = component_authority_failure(observation, false)?
-                .or(directory_authority_failure(task, observation)?)
-            {
-                return Ok(MetadataResolution::Unsafe(failure));
-            }
-            self.outcomes.push(ClineComponentReadOutcome {
-                component: observation.component,
-                path: observation.path.clone(),
-                transition: Some(ClineComponentTransition::Unchanged),
-                pages: 0,
-                failure: None,
-            });
-            return Ok(MetadataResolution::Ready(Box::new(MetadataReady {
-                checkpoint: prior.clone(),
-                page: None,
-                content_authority: match prior.content_sha256 {
-                    Some(content_sha256) => {
-                        match pin_component_content(observation, content_sha256) {
-                            Ok(authority) => Some(authority),
-                            Err(ClineLocalReadError::Local(failure)) => {
-                                return Ok(MetadataResolution::Unsafe(failure));
-                            }
-                            Err(ClineLocalReadError::Fatal(error)) => return Err(error),
-                        }
-                    }
-                    None => None,
-                },
-            })));
-        }
         match &observation.state {
-            ClineObservedFileState::Unavailable(message) => {
-                let failure = ClineComponentFailure {
-                    component: observation.component,
-                    path: observation.path.clone(),
-                    kind: ClineComponentFailureKind::LocalIo,
-                    message: message.clone(),
-                    retryable: true,
-                };
-                if previous.is_some_and(|checkpoint| {
-                    checkpoint.task_metadata.session.identity_origin
-                        == ClineTaskIdentityOrigin::TaskMetadata
-                }) {
-                    return Ok(MetadataResolution::Unsafe(failure));
-                }
-                let mut checkpoint = fallback_metadata(task, observation.clone());
-                merge_task_identity_authority(&mut checkpoint.session, previous);
+            ClineObservedFileState::Unavailable(_) => {
+                let checkpoint = fallback_metadata(task, observation.clone());
                 return Ok(MetadataResolution::Ready(Box::new(MetadataReady {
                     checkpoint,
                     page: None,
@@ -203,25 +157,12 @@ impl ClineNativeReader {
                 {
                     return Ok(MetadataResolution::Unsafe(failure));
                 }
-                let mut checkpoint = prior.map_or_else(
-                    || fallback_metadata(task, observation.clone()),
-                    |prior| ClineMetadataCheckpoint {
-                        observation: observation.clone(),
-                        content_sha256: None,
-                        session: prior.session.clone(),
-                    },
-                );
-                merge_task_identity_authority(&mut checkpoint.session, previous);
-                let transition = if prior.is_some() {
-                    ClineComponentTransition::MissingPhysical
-                } else {
-                    ClineComponentTransition::Cold
-                };
+                let checkpoint = fallback_metadata(task, observation.clone());
                 let page = self.build_metadata_page(checkpoint.clone())?;
                 self.outcomes.push(ClineComponentReadOutcome {
                     component: observation.component,
                     path: observation.path.clone(),
-                    transition: Some(transition),
+                    transition: Some(ClineComponentTransition::Cold),
                     pages: 1,
                     failure: None,
                 });
@@ -240,7 +181,7 @@ impl ClineNativeReader {
             }
             Err(ClineLocalReadError::Fatal(error)) => return Err(error),
         };
-        let mut checkpoint = match parse_metadata(
+        let checkpoint = match parse_metadata(
             &hydrated,
             observation,
             &task.directory_task_id,
@@ -249,7 +190,6 @@ impl ClineNativeReader {
             Ok(checkpoint) => checkpoint,
             Err(failure) => return Ok(MetadataResolution::Unsafe(failure)),
         };
-        merge_task_identity_authority(&mut checkpoint.session, previous);
         let mut content_authority = Some(hydrated.into_pinned_authority(observation));
         if let Some(failure) = component_authority_failure(observation, true)?
             .or(directory_authority_failure(task, observation)?)
@@ -269,18 +209,11 @@ impl ClineNativeReader {
         } {
             return Ok(MetadataResolution::Unsafe(source_changed(observation)));
         }
-        let transition = match prior {
-            None => ClineComponentTransition::Cold,
-            Some(prior) if prior.session.metadata_hash == checkpoint.session.metadata_hash => {
-                ClineComponentTransition::ControlOnlyRewrite
-            }
-            Some(_) => ClineComponentTransition::Rewrite,
-        };
         let page = self.build_metadata_page(checkpoint.clone())?;
         self.outcomes.push(ClineComponentReadOutcome {
             component: observation.component,
             path: observation.path.clone(),
-            transition: Some(transition),
+            transition: Some(ClineComponentTransition::Cold),
             pages: 1,
             failure: None,
         });

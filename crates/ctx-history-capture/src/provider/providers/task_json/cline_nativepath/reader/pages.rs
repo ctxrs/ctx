@@ -86,27 +86,4 @@ impl ClineNativeReader {
             source_record: None,
         })
     }
-
-    pub(super) fn build_deleted_array_page(
-        &self,
-        observation: &ClineComponentObservation,
-    ) -> Result<ClineCertifiedPage, ClineNativePathError> {
-        let source = file_source(observation.component, &observation.path);
-        let core_bytes = estimated_source_bytes(&source);
-        if !owned_page_bounds_are_valid(core_bytes, CLINE_NATIVE_FIXED_PAGE_UNITS) {
-            return Err(ClineNativePathError::Invariant {
-                message: "Cline deletion page exceeded the 4 MiB Core/8 MiB total page bounds"
-                    .to_owned(),
-            });
-        }
-        Ok(ClineCertifiedPage {
-            source,
-            core: ClineCorePayload {
-                session: None,
-                events: Box::new([]),
-                rejections: Box::new([]),
-            },
-            source_record: None,
-        })
-    }
 }

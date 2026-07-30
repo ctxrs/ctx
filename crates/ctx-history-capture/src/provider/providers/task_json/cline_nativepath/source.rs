@@ -1,7 +1,6 @@
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use ctx_history_core::CaptureProvider;
@@ -88,7 +87,6 @@ pub(crate) enum ClineComponent {
     ApiHistory = 0,
     UiMessages = 1,
     TaskMetadata = 2,
-    RootIndex = 3,
     FallbackHistory = 4,
     HistoryItem = 5,
     TaskIndex = 6,
@@ -100,7 +98,6 @@ impl ClineComponent {
             Self::ApiHistory => API_FILE,
             Self::UiMessages => UI_FILE,
             Self::TaskMetadata => METADATA_FILE,
-            Self::RootIndex => ROOT_INDEX_FILE,
             Self::FallbackHistory => ROO_FALLBACK_FILE,
             Self::HistoryItem => ROO_HISTORY_ITEM_FILE,
             Self::TaskIndex => ROO_TASK_INDEX_FILE,
@@ -112,16 +109,11 @@ impl ClineComponent {
 pub(crate) struct ClineFileStamp {
     len: u64,
     token: [u8; 32],
-    opened: Arc<OpenedProviderSourceFile>,
 }
 
 impl ClineFileStamp {
     pub(crate) fn len(&self) -> u64 {
         self.len
-    }
-
-    pub(super) fn opened(&self) -> Arc<OpenedProviderSourceFile> {
-        self.opened.clone()
     }
 
     pub(crate) fn token(&self) -> String {
@@ -195,13 +187,39 @@ impl ClineComponentObservation {
         if authority.revalidate().is_err() {
             return Ok(false);
         }
-        if let Some(stamp) = self.stamp() {
-            if stamp.opened.revalidate().is_err() {
-                return Ok(false);
-            }
-        }
         let current = observe_component_optional(authority, relative, &self.path, self.component)?;
         Ok(current == *self)
+    }
+
+    pub(super) fn open_verified(&self) -> Result<OpenedProviderSourceFile, ClineNativePathError> {
+        let expected = self
+            .stamp()
+            .ok_or_else(|| ClineNativePathError::SourceChanged {
+                path: self.path.clone(),
+            })?;
+        let (Some(authority), Some(relative)) =
+            (self.authority.as_ref(), self.relative_path.as_deref())
+        else {
+            return Err(ClineNativePathError::SourceChanged {
+                path: self.path.clone(),
+            });
+        };
+        authority.revalidate().map_err(|error| {
+            capture_source_error(&self.path, "revalidate component root", error)
+        })?;
+        let opened = authority
+            .open_file(relative)
+            .map_err(|error| capture_source_error(&self.path, "reopen component", error))?;
+        let token = opened_file_token(&opened, &self.path)?;
+        if opened.len() != expected.len || token != expected.token {
+            return Err(ClineNativePathError::SourceChanged {
+                path: self.path.clone(),
+            });
+        }
+        opened.revalidate().map_err(|error| {
+            capture_source_error(&self.path, "revalidate reopened component", error)
+        })?;
+        Ok(opened)
     }
 
     pub(super) fn post_parse_revalidate(&self) -> Result<bool, ClineNativePathError> {
@@ -252,9 +270,6 @@ impl ClineLiveTaskObservation {
             ClineComponent::TaskMetadata => &self.task_metadata,
             ClineComponent::HistoryItem => &self.history_item,
             ClineComponent::TaskIndex => &self.task_index,
-            ClineComponent::RootIndex => {
-                unreachable!("root index is not a task component")
-            }
         }
     }
 
@@ -329,48 +344,30 @@ struct ClineRootInventoryProof {
 #[derive(Debug, Clone)]
 pub(crate) struct ClineRootAuthority {
     data_root: PathBuf,
-    tasks_root: PathBuf,
     dialect: TaskJsonNativeDialect,
-    inventory: Option<ClineRootInventoryProof>,
-    complete: bool,
+    inventory: ClineRootInventoryProof,
     authority: ProviderSourceRoot,
 }
 
 impl PartialEq for ClineRootAuthority {
     fn eq(&self, other: &Self) -> bool {
         self.data_root == other.data_root
-            && self.tasks_root == other.tasks_root
             && self.dialect == other.dialect
             && self.inventory == other.inventory
-            && self.complete == other.complete
     }
 }
 
 impl Eq for ClineRootAuthority {}
 
 impl ClineRootAuthority {
-    pub(crate) fn tasks_root(&self) -> &Path {
-        &self.tasks_root
-    }
-
-    pub(crate) fn is_complete(&self) -> bool {
-        self.complete
-    }
-
     pub(crate) fn source_backed_revision(&self) -> Vec<u8> {
-        let mut revision = Vec::with_capacity(1 + 8 + 32);
-        revision.push(u8::from(self.complete));
-        if let Some(inventory) = &self.inventory {
-            revision.extend_from_slice(
-                &u64::try_from(inventory.entries)
-                    .unwrap_or(u64::MAX)
-                    .to_le_bytes(),
-            );
-            revision.extend_from_slice(&inventory.digest);
-        } else {
-            revision.extend_from_slice(&0_u64.to_le_bytes());
-            revision.extend_from_slice(&[0_u8; 32]);
-        }
+        let mut revision = Vec::with_capacity(8 + 32);
+        revision.extend_from_slice(
+            &u64::try_from(self.inventory.entries)
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        revision.extend_from_slice(&self.inventory.digest);
         revision
     }
 
@@ -379,10 +376,7 @@ impl ClineRootAuthority {
         if self.authority.revalidate().is_err() {
             return Ok(false);
         }
-        let Some(expected) = &self.inventory else {
-            return Ok(true);
-        };
-        Ok(observe_direct_child_inventory(&self.authority, self.dialect)?.proof == *expected)
+        Ok(observe_direct_child_inventory(&self.authority, self.dialect)?.proof == self.inventory)
     }
 }
 
@@ -394,7 +388,6 @@ struct ClineRootInventory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClineDiscovery {
     root_authority: ClineRootAuthority,
-    root_index: ClineComponentObservation,
     task_routes: Box<[ClineLiveTaskObservation]>,
 }
 
@@ -403,12 +396,15 @@ impl ClineDiscovery {
         &self.root_authority
     }
 
-    pub(crate) fn root_index(&self) -> &ClineComponentObservation {
-        &self.root_index
-    }
-
     pub(crate) fn task_routes(&self) -> &[ClineLiveTaskObservation] {
         &self.task_routes
+    }
+
+    pub(crate) fn for_task(&self, task: ClineLiveTaskObservation) -> Self {
+        Self {
+            root_authority: self.root_authority.clone(),
+            task_routes: vec![task].into_boxed_slice(),
+        }
     }
 }
 
@@ -433,29 +429,9 @@ fn discover_task_json_root(
     let inventory = observe_direct_child_inventory(&authority, dialect)?;
     let root_authority = ClineRootAuthority {
         data_root: authority.named_path().to_path_buf(),
-        tasks_root,
         dialect,
-        inventory: Some(inventory.proof.clone()),
-        complete: true,
+        inventory: inventory.proof.clone(),
         authority: authority.clone(),
-    };
-    let root_index = match dialect.root_index_file {
-        Some(file) => {
-            let relative = PathBuf::from("state").join(file);
-            observe_component_optional(
-                &authority,
-                &relative,
-                &authority.named_path().join(&relative),
-                ClineComponent::RootIndex,
-            )?
-        }
-        None => ClineComponentObservation {
-            component: ClineComponent::RootIndex,
-            path: authority.named_path().join("state").join(ROOT_INDEX_FILE),
-            state: ClineObservedFileState::Missing,
-            authority: Some(authority.clone()),
-            relative_path: Some(PathBuf::from("state").join(ROOT_INDEX_FILE)),
-        },
     };
     let mut routes = Vec::with_capacity(inventory.task_relatives.len());
     for relative in inventory.task_relatives {
@@ -464,7 +440,6 @@ fn discover_task_json_root(
     routes.sort_by(|left, right| left.requested_task_path.cmp(&right.requested_task_path));
     Ok(ClineDiscovery {
         root_authority,
-        root_index,
         task_routes: routes.into_boxed_slice(),
     })
 }
@@ -573,7 +548,6 @@ fn observe_component_optional(
         state: ClineObservedFileState::Present(ClineFileStamp {
             len: opened.len(),
             token,
-            opened: Arc::new(opened),
         }),
         authority: Some(authority.clone()),
         relative_path: Some(relative_path.to_path_buf()),

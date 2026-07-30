@@ -50,7 +50,11 @@ impl ClineArrayScanner {
                 true,
             ));
         };
-        let opened = expected.opened();
+        let opened = Arc::new(
+            observation
+                .open_verified()
+                .map_err(|error| classify_native_error(observation, error))?,
+        );
         let declared_len = opened.len();
         if declared_len != expected.len() {
             return Err(ClineLocalReadError::Local(source_changed_failure(
