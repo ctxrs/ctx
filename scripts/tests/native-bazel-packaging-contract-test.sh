@@ -13,6 +13,7 @@ recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
 matrix="${source_root}/contracts/release-targets-v1.json"
 staging="${source_root}/scripts/stage-github-release-assets.sh"
+packager="${source_root}/scripts/package-public-cli-bazel-release.sh"
 release_routes="${source_root}/tools/bazel/release_routes.bzl"
 
 for required in \
@@ -42,7 +43,9 @@ done
 
 for required in \
   '--declared-advisory-gate-runfile' \
+  '--declared-sbom-tool-runfile' \
   'script = "//:dependency_advisory_gate"' \
+  'sbom_tool = "//:release_sbom"' \
   'export RUNFILES_DIR="${{runfiles_root}}"' \
   'export RUNFILES_MANIFEST_FILE="${{manifest}}"'; do
   grep -Fq -- "${required}" "${release_routes}" || {
@@ -51,6 +54,22 @@ for required in \
     exit 1
   }
 done
+
+for required in \
+  '"${sbom_tool}" generate' \
+  '"${sbom_tool}" verify' \
+  '"${sbom_tool}" verify-bundle'; do
+  grep -Fq -- "${required}" "${packager}" || {
+    printf 'native release packager bypasses declared SBOM tool: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+if grep -Fq 'python3 -I "${repo_root}/scripts/release-sbom.py"' "${packager}"; then
+  echo "native release packager invokes the host-Python SBOM script" >&2
+  exit 1
+fi
+
 if grep -Eq 'cargo (build|zigbuild)|qemu-' "${wrapper}"; then
   echo "native Linux Bazel wrapper contains Cargo construction or emulation" >&2
   exit 1

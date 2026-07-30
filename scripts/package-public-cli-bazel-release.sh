@@ -122,6 +122,7 @@ advisory_gate_runfile=""
 artifact_runfile=""
 rustc_runfile=""
 llvm_readobj_runfile=""
+sbom_tool_runfile=""
 sbom_inventory_runfile=""
 license_materials_runfile=""
 cargo_lock_runfile=""
@@ -133,6 +134,7 @@ seen_advisory_gate=0
 seen_artifact=0
 seen_rustc=0
 seen_llvm_readobj=0
+seen_sbom_tool=0
 seen_sbom_inventory=0
 seen_license_materials=0
 seen_cargo_lock=0
@@ -175,6 +177,14 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
       llvm_readobj_runfile="$1"
+      ;;
+    --declared-sbom-tool-runfile)
+      seen_sbom_tool=$((seen_sbom_tool + 1))
+      [[ "${seen_sbom_tool}" == "1" ]] \
+        || usage_error "duplicate reserved argument: ${option}"
+      shift
+      [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
+      sbom_tool_runfile="$1"
       ;;
     --declared-sbom-inventory-runfile)
       seen_sbom_inventory=$((seen_sbom_inventory + 1))
@@ -244,8 +254,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ "${seen_advisory_gate}:${seen_artifact}:${seen_rustc}:${seen_sbom_inventory}:${seen_license_materials}:${seen_cargo_lock}:${seen_target_matrix}:${seen_target}" \
-  == "1:1:1:1:1:1:1:1" ]] || usage_error "release route declarations are incomplete"
+[[ "${seen_advisory_gate}:${seen_artifact}:${seen_rustc}:${seen_sbom_tool}:${seen_sbom_inventory}:${seen_license_materials}:${seen_cargo_lock}:${seen_target_matrix}:${seen_target}" \
+  == "1:1:1:1:1:1:1:1:1" ]] || usage_error "release route declarations are incomplete"
 
 advisory_gate="$(resolve_declared_runfile "${advisory_gate_runfile}")" \
   || die "declared dependency-advisory gate runfile is unavailable"
@@ -253,6 +263,8 @@ artifact="$(resolve_declared_runfile "${artifact_runfile}")" \
   || die "declared Bazel artifact runfile is unavailable"
 rustc="$(resolve_declared_runfile "${rustc_runfile}")" \
   || die "declared Bazel rustc runfile is unavailable"
+sbom_tool="$(resolve_declared_runfile "${sbom_tool_runfile}")" \
+  || die "declared Bazel SBOM tool runfile is unavailable"
 llvm_readobj=""
 if [[ "${target_id}" == "windows-x64" ]]; then
   [[ "${seen_llvm_readobj}" == "1" ]] \
@@ -573,7 +585,7 @@ runfiles_args=()
 if [[ -n "${RUNFILES_DIR:-}" ]]; then
   runfiles_args+=(--runfiles-root "${RUNFILES_DIR}")
 fi
-python3 -I "${repo_root}/scripts/release-sbom.py" generate \
+"${sbom_tool}" generate \
   --product core \
   --version "${version}" \
   --target-id "${target_id}" \
@@ -615,7 +627,7 @@ fi
   || die "staged artifact changed after release checks"
 [[ "$("${identity_env[@]}" "${staged}" _release-build-identity)" == "${identity_output}" ]] \
   || die "staged artifact identity changed after release checks"
-python3 -I "${repo_root}/scripts/release-sbom.py" verify \
+"${sbom_tool}" verify \
   --product core \
   --version "${version}" \
   --target-id "${target_id}" \
@@ -637,7 +649,7 @@ python3 -I "${repo_root}/scripts/release-sbom.py" verify \
   --size-report "${staged_size_report}" \
   --candidate-manifest "${staged_candidate_manifest}" \
   "${runfiles_args[@]}" >/dev/null
-python3 -I "${repo_root}/scripts/release-sbom.py" verify-bundle \
+"${sbom_tool}" verify-bundle \
   --artifact "${staged}" \
   --build-info "${staged_build_info}" \
   --sbom "${staged_sbom}" \
