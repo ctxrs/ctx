@@ -8,8 +8,10 @@ provider::codex::nativepath::source_backed::tests::hydration::active_source_fami
 provider::codex::nativepath::source_backed::tests::hydration::active_source_family_contract_codex_hydration_remains_exact_during_append
 provider::codex::nativepath::source_backed::tests::lifecycle::active_source_family_contract_codex_append_publishes_then_catches_up
 provider::codex::nativepath::source_backed::tests::lifecycle::active_source_family_contract_codex_rewrite_with_failed_append_proof_replaces_the_source
+provider::codex::nativepath::source_backed::tests::lifecycle::active_source_family_contract_codex_terminal_prefix_proof_rejects_post_hash_rewrite
 provider::codex::nativepath::source_backed::tests::lifecycle::active_source_family_contract_codex_truncation_replaces_the_source_without_stale_documents
 provider::providers::native_jsonl::native_path::source_backed::lifecycle_tests::active_source_family_contract_direct_jsonl_freezes_discovery_and_terminal_boundaries
+provider::providers::native_jsonl::native_path::source_backed::lifecycle_tests::active_source_family_contract_direct_jsonl_hydration_rejects_crossed_event_identity
 provider::providers::native_jsonl::native_path::source_backed::lifecycle_tests::active_source_family_contract_direct_jsonl_hydration_rejects_identity_rewrite_with_append
 provider::providers::native_jsonl::native_path::source_backed::lifecycle_tests::active_source_family_contract_direct_jsonl_recertifies_legacy_v1_removal
 provider::providers::native_jsonl::native_path::source_backed::lifecycle_tests::active_source_family_contract_direct_jsonl_rejects_late_identity_admission

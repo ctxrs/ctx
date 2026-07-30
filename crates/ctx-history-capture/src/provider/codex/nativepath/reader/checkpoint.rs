@@ -1,6 +1,32 @@
 use super::super::rows::{build_event_row, tool_context_from_row};
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_CODEX_PREFIX_HASH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_codex_prefix_hash_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_PREFIX_HASH_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex prefix-hash hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_prefix_hash_hook() {
+    AFTER_CODEX_PREFIX_HASH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 pub(super) struct BoundedRecordRead {
     pub(super) complete: bool,
     pub(super) terminal_nul_padding: bool,
@@ -390,8 +416,30 @@ pub(crate) fn revalidate_codex_source_observation(
         return Err(source_changed_during_scan());
     }
     if current != *certified {
-        revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
-        opened.revalidate_same_object()?;
+        let mut before = current;
+        for attempt in 0..2 {
+            revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
+            if attempt == 0 {
+                #[cfg(test)]
+                run_after_codex_prefix_hash_hook();
+            }
+            let middle = opened_file_observation(&source.source_path, opened.file())?;
+            opened.revalidate_same_object()?;
+            if !before.admits_append_only_growth(&middle) {
+                return Err(source_changed_during_scan());
+            }
+            revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
+            let after = opened_file_observation(&source.source_path, opened.file())?;
+            opened.revalidate_same_object()?;
+            if middle == after {
+                return Ok(());
+            }
+            if !middle.admits_append_only_growth(&after) {
+                return Err(source_changed_during_scan());
+            }
+            before = after;
+        }
+        return Err(source_changed_during_scan());
     }
     Ok(())
 }
