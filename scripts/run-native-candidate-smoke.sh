@@ -288,7 +288,8 @@ if ! run_bounded "${root}/import.json" "${root}/import.err" ctx import \
   }
 fi
 if [ "${fresh_epoch_required}" = true ]; then
-  if ! grep -Eq '"imported_sources"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
+  if ! grep -Eq '"current_source_count"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
+    || ! grep -Eq '"current_indexed_documents"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
     || ! grep -Eq '"published_generation"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "${root}/import.json"; then
     printf 'candidate fixture import did not publish source-manifest authority\n' >&2
     exit 1
