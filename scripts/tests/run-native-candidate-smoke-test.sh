@@ -60,13 +60,26 @@ esac
 case "${1:-}" in
   --version)
     version=0.25.0
-    case "$0" in *bad-version*) version=9.9.9 ;; esac
+    case "$0" in
+      *bad-version*) version=9.9.9 ;;
+      *ctx-v1*) version=1.0.0 ;;
+    esac
     printf 'ctx %s\n' "${version}"
     ;;
   setup)
     ;;
   import)
-    printf '%s\n' '{"totals":{"imported_events":2}}'
+    case "$0" in
+      *ctx-v1*)
+        mkdir -p "${CTX_DATA_ROOT}/search/lexical/ctx-generations"
+        : > "${CTX_DATA_ROOT}/search/lexical/meta.json"
+        : > "${CTX_DATA_ROOT}/search/lexical/ctx-generations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+        printf '%s\n' '{"totals":{"current_source_count":1,"current_indexed_documents":2},"sources":[{"published_generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+        ;;
+      *)
+        printf '%s\n' '{"totals":{"imported_events":2}}'
+        ;;
+    esac
     ;;
   search)
     printf '%s\n' '{"retrieval":{"requested_mode":"lexical","effective_mode":"lexical"},"results":[{"text":"Add a parser test."}]}'
@@ -152,6 +165,17 @@ for access_case in absent-helper-trial absent-helper-locked absent-helper-unavai
     exit 1
   }
 done
+
+v1_fake="${tmp}/ctx-v1"
+cp "${fake}" "${v1_fake}"
+cp "${pro_status_fixtures}/absent-helper-trial.json" "${v1_fake}.pro-status.json"
+v1_result="${tmp}/result-v1.json"
+"${smoke}" "${v1_fake}" "${tmp}/fixture.jsonl" 1.0.0 "${v1_result}" >/dev/null
+[[ "$(tr -d '\r\n' < "${v1_result}")" == "${expected}" ]] || {
+  printf 'candidate smoke result schema changed for the fresh epoch\n' >&2
+  cat "${v1_result}" >&2
+  exit 1
+}
 
 failed_result="${tmp}/failed-result.json"
 cp "${fake}" "${tmp}/ctx-bad-version"

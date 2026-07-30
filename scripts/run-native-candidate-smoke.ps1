@@ -254,7 +254,8 @@ try {
         }
     }
     if ($freshEpochRequired) {
-        if ($import -notmatch '"imported_sources"\s*:\s*[1-9][0-9]*' -or
+        if ($import -notmatch '"current_source_count"\s*:\s*[1-9][0-9]*' -or
+            $import -notmatch '"current_indexed_documents"\s*:\s*[1-9][0-9]*' -or
             $import -notmatch '"published_generation"\s*:\s*"[0-9a-f]{64}"') {
             Fail "fixture import did not publish source-manifest authority"
         }
