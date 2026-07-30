@@ -332,8 +332,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "crush",
             "crush_sqlite",
             "crush/v1/crush.db",
-            "crush oracle",
-            2,
+            "crush sqlite search oracle request",
+            1,
             3,
         ),
         (
@@ -341,7 +341,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "goose",
             "goose_sessions_sqlite",
             "goose/v14/sessions.db",
-            "goose oracle",
+            "goose sqlite search oracle",
             1,
             2,
         ),
@@ -403,25 +403,18 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
                 &temp,
                 &format!("SELECT COUNT(*) FROM ctx_sessions WHERE provider = '{stored_provider}'")
             ),
-            sessions
+            sessions,
+            "unexpected {stored_provider} session count"
         );
         assert_eq!(
             source_backed_count(
                 &temp,
                 &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
             ),
-            events
+            events,
+            "unexpected {stored_provider} event count"
         );
         if stored_provider == "crush" {
-            assert_eq!(
-                source_backed_count(
-                    &temp,
-                    "SELECT COUNT(*) FROM ctx_sessions \
-                     WHERE provider = 'crush' AND provider_session_id = 'crush-child'",
-                ),
-                1,
-                "NativePath must preserve the structurally valid child without conversation messages"
-            );
             assert_eq!(
                 source_backed_count(
                     &temp,

@@ -646,7 +646,7 @@ pub(crate) fn write_native_openhands_fixture(temp: &TempDir, query: &str) -> Str
             "observation": {
                 "kind": "FileEditorObservation",
                 "command": "str_replace",
-                "output": "openhands-success-tool-output-sentinel",
+                "output": "openhandssuccesstooloutputsentinel",
                 "path": "openhands-cli-native-oracle.txt",
                 "prev_exist": true,
                 "old_content": "old",
@@ -1087,7 +1087,7 @@ pub(crate) fn write_native_continue_fixture(temp: &TempDir, query: &str) -> Stri
                                 {
                                     "name": "Result",
                                     "description": "",
-                                    "content": "continue-success-tool-output-sentinel"
+                                    "content": "continuesuccesstooloutputsentinel"
                                 }
                             ]
                         }

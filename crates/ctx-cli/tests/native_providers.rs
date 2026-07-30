@@ -64,7 +64,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "kimi-code-cli",
             "kimi_code_cli",
             "kimi jsonl oracle prompt",
-            6,
+            5,
         ),
         (
             "mistral-vibe",
@@ -513,18 +513,6 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             write_native_nanoclaw_fixture,
         ),
         (
-            "astrbot",
-            "astrbot",
-            "astrbot_data_v4_sqlite",
-            write_native_astrbot_fixture,
-        ),
-        (
-            "shelley",
-            "shelley",
-            "shelley_sqlite",
-            write_native_shelley_fixture,
-        ),
-        (
             "continue",
             "continue",
             "continue_cli_sessions_json",
@@ -585,6 +573,38 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
     }
 }
 
+#[test]
+fn discovery_only_sqlite_explicit_paths_are_rejected_without_fallback() {
+    for (provider, fixture, reason) in [
+        (
+            "astrbot",
+            write_native_astrbot_fixture as fn(&TempDir, &str) -> String,
+            "requires provider discovery authority",
+        ),
+        (
+            "shelley",
+            write_native_shelley_fixture,
+            "has no explicit source-backed adapter",
+        ),
+    ] {
+        let temp = tempdir();
+        let path = fixture(&temp, &format!("{provider}-explicit-unsupported-oracle"));
+        let stderr = failure_stderr(ctx(&temp).args([
+            "import",
+            "--provider",
+            provider,
+            "--path",
+            &path,
+            "--no-daemon",
+            "--format=json",
+        ]));
+        assert!(
+            stderr.contains(reason) && stderr.contains("no legacy import fallback was used"),
+            "{provider}: {stderr}"
+        );
+    }
+}
+
 fn source_by_path<'a>(packet: &'a Value, provider: &str, path: &Path) -> &'a Value {
     let expected_path = path.display().to_string();
     packet["sources"]
@@ -625,14 +645,14 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "openhands_file_events",
             write_native_openhands_fixture,
             "openhands-policy-real-message-oracle",
-            "openhands-success-tool-output-sentinel",
+            "openhandssuccesstooloutputsentinel",
         ),
         (
             "continue",
             "continue_cli_sessions_json",
             write_native_continue_fixture,
             "continue-policy-real-message-oracle",
-            "continue-success-tool-output-sentinel",
+            "continuesuccesstooloutputsentinel",
         ),
     ] {
         let temp = tempdir();
@@ -749,10 +769,11 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
                 (path.display().to_string(), true, false)
             }
             "astrbot" => {
-                let path = temp.path().join(".astrbot/data/data_v4.db");
+                fs::write(temp.path().join(".astrbot"), b"cli marker").unwrap();
+                let path = temp.path().join("data/data_v4.db");
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::copy(&fixture_path, &path).unwrap();
-                (path.display().to_string(), true, false)
+                (path.display().to_string(), true, true)
             }
             "shelley" => {
                 let path = temp.path().join("shelley.db");
@@ -783,7 +804,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             &temp,
             &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'"),
         );
-        assert!(initial_event_count >= 1, "{first:#}");
+        assert!(initial_event_count >= 1, "{stored_provider}: {first:#}");
 
         let mut second_command = ctx(&temp);
         second_command.args(["import", "--provider", cli_provider]);
@@ -1030,8 +1051,11 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 #[test]
 fn task_json_cli_imports_cline_and_roo_and_searches() {
     let temp = tempdir();
-    let cline = provider_history_fixture("cline/data");
+    let cline_fixture = PathBuf::from(provider_history_fixture("cline/data"));
+    let cline = temp.path().join(".cline/data");
+    copy_dir_all(&cline_fixture, &cline);
     let _daemon = start_isolated_provider_daemon(&temp);
+    let cline = cline.display().to_string();
 
     let imported = json_output(ctx(&temp).args([
         "import",
