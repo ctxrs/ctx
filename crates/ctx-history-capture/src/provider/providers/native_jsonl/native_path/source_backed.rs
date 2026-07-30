@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use super::{
     reader::{DirectJsonlProjector, ProjectedLine},
-    DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlSession,
+    DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlRejection, DirectJsonlSession,
     DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
 use crate::CaptureError;
@@ -41,6 +41,7 @@ const DIRECT_JSONL_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const DIRECT_JSONL_MAX_TOUCHED_FILES: usize = 256;
 const DIRECT_JSONL_MAX_EXPANDED_RECORD_UNITS: usize = 64;
 const DIRECT_JSONL_MAX_EXPANDED_RECORD_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const DIRECT_JSONL_MAX_REJECTION_DETAILS: usize = 64;
 
 #[derive(Debug, Error)]
 pub(crate) enum DirectJsonlSourceBackedError {
@@ -60,8 +61,14 @@ pub(crate) enum DirectJsonlSourceBackedError {
     MissingNativeSession(PathBuf),
     #[error("direct JSONL leaf changed provider-native session identity while scanning")]
     NativeSessionChanged,
-    #[error("direct JSONL leaf {path:?} rejected {rejected} records")]
-    RejectedSource { path: PathBuf, rejected: usize },
+    #[error(
+        "direct JSONL leaf {path:?} rejected {count} records",
+        count = .rejections.len()
+    )]
+    RejectedSource {
+        path: PathBuf,
+        rejections: Vec<DirectJsonlRejection>,
+    },
     #[error("direct JSONL leaf scan did not reach a certified frontier")]
     IncompleteScan,
     #[error("direct JSONL scan counters do not reconcile")]

@@ -22,6 +22,8 @@ const CODEX_AMBIGUOUS_JSONL_REASON: &str =
 const PI_INVALID_JSONL_REASON: &str = "Pi explicit JSONL file has no valid session header";
 const UNSUPPORTED_EXPLICIT_ROOT_REASON: &str =
     "the explicit provider path uses an unsupported, non-local, or unsafe source root";
+const PI_HEADER_PROBE_MAX_RECORDS: usize = 64;
+const PI_HEADER_PROBE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> ProviderSource {
     let unknown_spec = ProviderSourceSpec {
@@ -170,46 +172,89 @@ fn codex_explicit_jsonl_source_format(path: &Path) -> Option<&'static str> {
 }
 
 fn pi_explicit_jsonl_has_session_header(path: &Path) -> bool {
-    certified_first_jsonl_value(path).is_some_and(|value| {
-        value.get("type").and_then(Value::as_str) == Some("session")
-            && value
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-            && value.get("timestamp").and_then(Value::as_str).is_some()
-    })
+    certified_jsonl_value_matching(
+        path,
+        PI_HEADER_PROBE_MAX_RECORDS,
+        PI_HEADER_PROBE_MAX_BYTES,
+        |value| {
+            value.get("type").and_then(Value::as_str) == Some("session")
+                && value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+                && value
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .is_some_and(|timestamp| {
+                        chrono::DateTime::parse_from_rfc3339(timestamp).is_ok()
+                    })
+        },
+    )
+    .is_some()
 }
 
 fn certified_first_jsonl_value(path: &Path) -> Option<Value> {
+    certified_jsonl_value_matching(
+        path,
+        1,
+        crate::MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
+        |_| true,
+    )
+}
+
+fn certified_jsonl_value_matching(
+    path: &Path,
+    max_records: usize,
+    max_probe_bytes: usize,
+    mut matches: impl FnMut(&Value) -> bool,
+) -> Option<Value> {
     let file = open_provider_source_file(path).ok()?;
     let mut reader = BufReader::new(file.file().try_clone().ok()?);
     let mut record = Vec::new();
-    loop {
-        let available = reader.fill_buf().ok()?;
-        if available.is_empty() {
+    let mut probed_bytes = 0_usize;
+    for _ in 0..max_records {
+        record.clear();
+        let mut terminated = false;
+        loop {
+            let available = reader.fill_buf().ok()?;
+            if available.is_empty() {
+                break;
+            }
+            let take = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index.saturating_add(1));
+            if record.len().saturating_add(take) > crate::MAX_PROVIDER_JSONL_LINE_BYTES
+                || probed_bytes.saturating_add(take) > max_probe_bytes
+            {
+                return None;
+            }
+            terminated = available.get(take.saturating_sub(1)) == Some(&b'\n');
+            record.extend_from_slice(&available[..take]);
+            probed_bytes = probed_bytes.saturating_add(take);
+            reader.consume(take);
+            if terminated {
+                break;
+            }
+        }
+        if record.is_empty() {
             break;
         }
-        let take = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |index| index.saturating_add(1));
-        if record.len().saturating_add(take) > crate::MAX_PROVIDER_JSONL_LINE_BYTES {
-            return None;
+        while matches!(record.last(), Some(b'\n') | Some(b'\r')) {
+            record.pop();
         }
-        let terminated = available.get(take.saturating_sub(1)) == Some(&b'\n');
-        record.extend_from_slice(&available[..take]);
-        reader.consume(take);
-        if terminated {
+        if let Ok(value) = serde_json::from_slice::<Value>(&record) {
+            if matches(&value) {
+                file.revalidate().ok()?;
+                return Some(value);
+            }
+        }
+        if !terminated {
             break;
         }
     }
-    while matches!(record.last(), Some(b'\n') | Some(b'\r')) {
-        record.pop();
-    }
-
-    let value = serde_json::from_slice::<Value>(&record).ok()?;
     file.revalidate().ok()?;
-    Some(value)
+    None
 }
 
 fn exact_current_unsupported_reason(

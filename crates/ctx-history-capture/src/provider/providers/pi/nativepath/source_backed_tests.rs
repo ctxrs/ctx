@@ -184,6 +184,67 @@ fn shared_family_pi_noop_replacement_lineage_and_hydration_oracle() {
     assert_eq!(growth.sources[0].counts().indexed_documents, 3);
 }
 
+#[test]
+fn shared_family_pi_admits_a_later_header_and_counts_independent_rejections() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let transcript = root.join("mixed.jsonl");
+    let records = [
+        message("orphan", "must not be projected", 0).to_string(),
+        header("pi-mixed", None).to_string(),
+        message("message-1", "before malformed", 1).to_string(),
+        "{\"type\":\"message\",\"message\":{\"content\":[".to_owned(),
+        message("message-2", "after malformed", 2).to_string(),
+    ];
+    fs::write(&transcript, format!("{}\n", records.join("\n"))).unwrap();
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+
+    reset_pi_header_probes();
+    let receipt =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(pi_header_probes(), 2);
+    assert_eq!(receipt.sources.len(), 1);
+    let counts = receipt.sources[0].counts();
+    assert_eq!(counts.complete_records, 5);
+    assert_eq!(counts.retained_records, 2);
+    assert_eq!(counts.rejected_records, 2);
+    assert_eq!(counts.ignored_records, 1);
+    assert_eq!(counts.indexed_documents, 2);
+
+    let source = receipt.sources[0].observation().source();
+    let events = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(source, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(events.len(), 2);
+    let requests = events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap()
+        .into_records();
+    let bodies = hydrated
+        .iter()
+        .map(|record| record.provider_bytes.as_slice())
+        .collect::<Vec<_>>();
+    assert!(bodies.contains(&b"before malformed".as_slice()));
+    assert!(bodies.contains(&b"after malformed".as_slice()));
+    assert!(!bodies.contains(&b"must not be projected".as_slice()));
+
+    reset_pi_header_probes();
+    let second_index = temp.path().join("second-index");
+    let cached_binding_cold =
+        refresh_source_backed_generation(&second_index, &registry, writer_options()).unwrap();
+    assert_eq!(pi_header_probes(), 0);
+    assert_eq!(cached_binding_cold.sources[0].counts(), counts);
+}
+
 #[cfg(unix)]
 #[test]
 fn shared_family_pi_accepts_hardlinks_without_retaining_leaf_handles() {

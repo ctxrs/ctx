@@ -618,7 +618,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "qoder_transcript_jsonl_tree",
             write_native_qoder_fixture as fn(&TempDir, &str) -> String,
             "qoder-policy-real-message-oracle",
-            "qoder-success-tool-output-sentinel",
+            "qoderleakproofxylophonium",
         ),
         (
             "openhands",
@@ -1182,14 +1182,14 @@ fn antigravity_cli_imports_native_transcript_tree() {
 
     let search = json_output(ctx(&temp).args([
         "search",
-        "write_to_file",
+        "agycardinalityxylophonium",
         "--provider",
         "antigravity",
         "--refresh",
         "off",
         "--format=json",
     ]));
-    assert_source_backed_search(&search, "antigravity", "write_to_file");
+    assert_source_backed_search(&search, "antigravity", "agycardinalityxylophonium");
 }
 
 #[test]
@@ -1290,7 +1290,7 @@ fn pi_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
-    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
+    assert_eq!(imported["totals"]["rejected_records"], 2, "{imported:#}");
     assert_eq!(
         source_backed_count(
             &temp,
