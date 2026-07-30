@@ -14,6 +14,29 @@ pub(super) enum PendingSourceMode {
     Append { base: CertifiedSource },
 }
 
+pub(super) fn verify_published_mutations(
+    generation: &GenerationWriter,
+    verified: &VerifiedIndex,
+) -> Result<()> {
+    for pending in generation.pending.values() {
+        let certificate = pending
+            .certificate
+            .as_ref()
+            .ok_or_else(|| IndexError::SourceNotCertified(pending.source.identity().to_string()))?;
+        let changed = match &pending.mode {
+            PendingSourceMode::Replace => true,
+            PendingSourceMode::Append { base } => certificate != base,
+        };
+        if changed {
+            crate::publication::verify_source_document_count(&verified.searcher, certificate)?;
+        }
+    }
+    for removal in generation.deletions.values() {
+        crate::publication::verify_source_absent(&verified.searcher, removal.source())?;
+    }
+    Ok(())
+}
+
 /// Discards a completed one-pass staging run when it reproduced the full
 /// verified base manifest exactly.
 ///
