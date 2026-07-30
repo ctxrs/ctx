@@ -1,18 +1,12 @@
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
-    fs::{File, Metadata},
-    io::{self, Read, Write},
+    io,
     path::{Component, Path, PathBuf},
-    sync::Arc,
 };
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-#[cfg(target_os = "linux")]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex,
-};
 
 use crate::{
     common::io::{
@@ -30,29 +24,25 @@ use super::{
 mod common;
 mod index;
 mod inventory;
-mod spool;
+mod watch;
 
 use common::*;
 use index::*;
-#[cfg(all(test, windows))]
-pub(super) use inventory::metadata_identity;
-use inventory::{observe_inventory, opened_file_token};
-pub(crate) use spool::ContinuePathIter;
-use spool::{ContinuePathSpool, RootMutationWatch};
+use inventory::observe_inventory;
+use watch::RootMutationWatch;
 
 const SESSION_REVISION_DOMAIN: &[u8] = b"ctx-continue-nativepath-session-v2\0";
 const INDEX_REVISION_DOMAIN: &[u8] = b"ctx-continue-nativepath-index-v2\0";
-const INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx-continue-nativepath-inventory-v1\0";
-const METADATA_TOKEN_DOMAIN: &[u8] = b"ctx-continue-nativepath-metadata-token-v1\0";
+const INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx-continue-nativepath-inventory-v2\0";
+const DOCUMENT_LEAF_DIGEST_DOMAIN: &[u8] = b"ctx-continue-document-leaf-v1\0";
+const DOCUMENT_TREE_DIGEST_DOMAIN: &[u8] = b"ctx-continue-document-tree-v1\0";
 const MAX_CONTINUE_SESSION_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
 const MAX_CONTINUE_INDEX_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
 const MAX_CONTINUE_SESSION_ID_BYTES: usize = 512;
 const MAX_CONTINUE_INDEX_STRING_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
 const MAX_CONTINUE_DIRECTORY_DEPTH: usize = 128;
 const MAX_CONTINUE_INVENTORY_ENTRIES: usize = 8_192;
-// Keep optional-index residency bounded by the same fixed corpus ceiling.
 const MAX_CONTINUE_INDEX_ENTRIES: usize = MAX_CONTINUE_INVENTORY_ENTRIES;
-const MAX_SPOOLED_PATH_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 struct ExactFileSnapshot {
@@ -61,33 +51,16 @@ struct ExactFileSnapshot {
     file_token: [u8; 32],
     bytes: Box<[u8]>,
     revision: String,
-    opened: Arc<OpenedProviderSourceFile>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContinueSourceObservation {
     requested_path: PathBuf,
     canonical_path: PathBuf,
     file_token: [u8; 32],
     session_revision: String,
     raw_bytes: u64,
-    // Retain the opened authority with the observation so commit-time
-    // revalidation can be restored without reopening by pathname.
-    #[allow(dead_code)]
-    opened: Arc<OpenedProviderSourceFile>,
 }
-
-impl PartialEq for ContinueSourceObservation {
-    fn eq(&self, other: &Self) -> bool {
-        self.requested_path == other.requested_path
-            && self.canonical_path == other.canonical_path
-            && self.file_token == other.file_token
-            && self.session_revision == other.session_revision
-            && self.raw_bytes == other.raw_bytes
-    }
-}
-
-impl Eq for ContinueSourceObservation {}
 
 impl ContinueSourceObservation {
     pub(crate) fn requested_path(&self) -> &Path {
@@ -105,30 +78,6 @@ impl ContinueSourceObservation {
     pub(crate) fn raw_bytes(&self) -> u64 {
         self.raw_bytes
     }
-
-    // This is the authority-preserving revalidation operation for the retained
-    // observation shape; the current coordinator revalidates at the root.
-    #[allow(dead_code)]
-    pub(crate) fn revalidate(&self) -> Result<bool, ContinueNativePathError> {
-        let snapshot = match read_opened_exact_file(
-            &self.requested_path,
-            self.opened.clone(),
-            MAX_CONTINUE_SESSION_BYTES,
-            SESSION_REVISION_DOMAIN,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(ContinueNativePathError::SourceIo {
-                kind: io::ErrorKind::NotFound,
-                ..
-            })
-            | Err(ContinueNativePathError::SourceTooLarge { .. }) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(snapshot.canonical_path == self.canonical_path
-            && snapshot.file_token == self.file_token
-            && snapshot.revision == self.session_revision
-            && u64::try_from(snapshot.bytes.len()).ok() == Some(self.raw_bytes))
-    }
 }
 
 #[derive(Debug)]
@@ -144,7 +93,7 @@ impl ContinueSourceSnapshot {
     ) -> Result<Self, ContinueNativePathError> {
         let snapshot = read_opened_exact_file(
             path,
-            Arc::new(opened),
+            opened,
             MAX_CONTINUE_SESSION_BYTES,
             SESSION_REVISION_DOMAIN,
         )?;
@@ -162,7 +111,6 @@ impl ContinueSourceSnapshot {
                 file_token: snapshot.file_token,
                 session_revision: snapshot.revision,
                 raw_bytes,
-                opened: snapshot.opened,
             },
             bytes: snapshot.bytes,
         })
@@ -185,6 +133,17 @@ pub(crate) enum ContinueIndexState {
     Unavailable,
 }
 
+impl ContinueIndexState {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Missing => 0,
+            Self::Ready => 1,
+            Self::Malformed => 2,
+            Self::Unavailable => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContinueIndexObservation {
     path: PathBuf,
@@ -199,6 +158,15 @@ impl ContinueIndexObservation {
 
     pub(crate) fn dependency_revision(&self) -> &str {
         &self.dependency_revision
+    }
+
+    fn fingerprint(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"ctx-continue-index-observation-v1\0");
+        digest.update([self.state.tag()]);
+        digest.update((self.dependency_revision.len() as u64).to_be_bytes());
+        digest.update(self.dependency_revision.as_bytes());
+        digest.finalize().into()
     }
 }
 
@@ -218,16 +186,8 @@ pub(crate) struct ContinueIndexMetadata {
 pub(crate) struct ContinueIndexSnapshot {
     observation: ContinueIndexObservation,
     metadata_entries: Vec<ContinueIndexEntry>,
-    // These retain the exact admitted index authority for item-local
-    // revalidation; the current release path consumes only its observation.
-    #[allow(dead_code)]
     authority: ProviderSourceRoot,
-    #[allow(dead_code)]
     relative_path: PathBuf,
-    #[cfg(test)]
-    entry_count: usize,
-    #[cfg(test)]
-    content_read: bool,
 }
 
 #[derive(Debug)]
@@ -262,95 +222,91 @@ impl ContinueIndexSnapshot {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn entry_count(&self) -> usize {
-        self.entry_count
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resident_metadata_entries(&self) -> usize {
-        self.metadata_entries.len()
-    }
-
-    // Kept with the authority-bearing index snapshot for a future commit-time
-    // check without changing the release data shape.
-    #[allow(dead_code)]
-    pub(crate) fn revalidate(&self) -> bool {
+    fn observe_current(&self) -> ContinueIndexObservation {
         observe_continue_index(&self.authority, self.relative_path.clone()).observation
-            == self.observation
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ContinueRootAuthority {
-    // The named root and discovery cardinality are retained diagnostic evidence.
-    #[allow(dead_code)]
-    root: PathBuf,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContinueDocumentLeaf {
+    relative_path: PathBuf,
+    path: PathBuf,
+    file_token: [u8; 32],
+}
+
+impl ContinueDocumentLeaf {
+    pub(super) fn new(relative_path: PathBuf, path: PathBuf, file_token: [u8; 32]) -> Self {
+        Self {
+            relative_path,
+            path,
+            file_token,
+        }
+    }
+
+    fn matches(&self, observation: &ContinueSourceObservation) -> bool {
+        self.path == observation.requested_path && self.file_token == observation.file_token
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ContinueTreeAuthority {
     authority: ProviderSourceRoot,
     selected_relative: PathBuf,
     selected_file: bool,
-    complete: bool,
-    #[cfg(test)]
-    #[allow(dead_code)]
-    discovered_sources: usize,
-    inventory_entries: usize,
-    inventory_digest: String,
-    before_token: [u8; 32],
-    after_token: [u8; 32],
-    mutation_watch: Option<Arc<RootMutationWatch>>,
+    inventory_fingerprint: [u8; 32],
+    mutation_watch: RootMutationWatch,
+    index: ContinueIndexSnapshot,
 }
 
-impl ContinueRootAuthority {
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn is_complete(&self) -> bool {
-        self.complete
+impl ContinueTreeAuthority {
+    pub(crate) fn index(&self) -> &ContinueIndexSnapshot {
+        &self.index
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn discovered_sources(&self) -> usize {
-        self.discovered_sources
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn inventory_digest(&self) -> &str {
-        &self.inventory_digest
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn before_token(&self) -> &[u8; 32] {
-        &self.before_token
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn after_token(&self) -> &[u8; 32] {
-        &self.after_token
-    }
-
-    pub(crate) fn revalidate(&self) -> Result<ContinueRootRevalidation, ContinueNativePathError> {
-        if !self.complete {
-            return Ok(ContinueRootRevalidation {
-                authoritative: false,
-                inventory_entries: 0,
-                inventory_digest: String::new(),
-                before_token: [0; 32],
-                after_token: [0; 32],
+    pub(crate) fn open_source(
+        &self,
+        leaf: &ContinueDocumentLeaf,
+    ) -> Result<ContinueSourceSnapshot, ContinueNativePathError> {
+        let opened = self
+            .authority
+            .open_file(&leaf.relative_path)
+            .map_err(|error| capture_source_error(&leaf.path, "open Continue source", error))?;
+        let snapshot = ContinueSourceSnapshot::read_opened(&leaf.path, opened)?;
+        if !leaf.matches(snapshot.observation()) {
+            return Err(ContinueNativePathError::SourceChanged {
+                path: leaf.path.clone(),
             });
         }
-        let mutated_before = self
-            .mutation_watch
-            .as_ref()
-            .is_some_and(|watch| watch.mutated());
+        Ok(snapshot)
+    }
+
+    pub(crate) fn leaf_fingerprint(&self, leaf: &ContinueDocumentLeaf) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(DOCUMENT_LEAF_DIGEST_DOMAIN);
+        digest.update(leaf.file_token);
+        digest.update(self.index.observation.fingerprint());
+        digest.finalize().into()
+    }
+
+    pub(crate) fn tree_fingerprint(&self) -> [u8; 32] {
+        continue_tree_fingerprint(
+            self.inventory_fingerprint,
+            self.index.observation.fingerprint(),
+        )
+    }
+
+    pub(crate) fn revalidate_fingerprint(
+        &self,
+    ) -> Result<Option<[u8; 32]>, ContinueNativePathError> {
+        if self.mutation_watch.mutated() {
+            return Ok(None);
+        }
         let current = match observe_inventory(
             &self.authority,
             &self.selected_relative,
             self.selected_file,
             None,
-            self.mutation_watch.as_deref(),
+            Some(&self.mutation_watch),
         ) {
             Ok(current) => current,
             Err(ContinueNativePathError::SourceChanged { .. })
@@ -358,107 +314,32 @@ impl ContinueRootAuthority {
                 kind: io::ErrorKind::NotFound,
                 ..
             })
-            | Err(ContinueNativePathError::SourceAccess { .. }) => {
-                return Ok(ContinueRootRevalidation {
-                    authoritative: false,
-                    inventory_entries: 0,
-                    inventory_digest: String::new(),
-                    before_token: [0; 32],
-                    after_token: [0; 32],
-                });
-            }
+            | Err(ContinueNativePathError::SourceAccess { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let mutated_after = self
-            .mutation_watch
-            .as_ref()
-            .is_some_and(|watch| watch.mutated());
-        Ok(ContinueRootRevalidation {
-            authoritative: !mutated_before
-                && !mutated_after
-                && current.before_token == current.after_token
-                && current.before_token == self.before_token
-                && current.after_token == self.after_token
-                && current.entries == self.inventory_entries
-                && current.digest == self.inventory_digest,
-            inventory_entries: current.entries,
-            inventory_digest: current.digest,
-            before_token: current.before_token,
-            after_token: current.after_token,
-        })
+        if self.mutation_watch.mutated() {
+            return Ok(None);
+        }
+        let index = self.index.observe_current();
+        if self.mutation_watch.mutated() {
+            return Ok(None);
+        }
+        Ok(Some(continue_tree_fingerprint(
+            current.digest,
+            index.fingerprint(),
+        )))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContinueRootRevalidation {
-    pub(crate) authoritative: bool,
-    pub(crate) inventory_entries: usize,
-    pub(crate) inventory_digest: String,
-    pub(crate) before_token: [u8; 32],
-    pub(crate) after_token: [u8; 32],
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ContinueDiscoveryStats {
-    pub(crate) scanned_session_paths: usize,
-    pub(crate) inventory_entries: usize,
-    pub(crate) index_observations: usize,
-    pub(crate) index_content_reads: usize,
-    pub(crate) index_entries: usize,
-    pub(crate) index_resident_metadata_entries: usize,
-    pub(crate) spooled_path_bytes: u64,
-    pub(crate) maximum_spool_record_bytes: usize,
-    pub(crate) maximum_directory_sort_entries: usize,
-    pub(crate) maximum_directory_sort_key_bytes: usize,
 }
 
 #[derive(Debug)]
 pub(crate) struct ContinueDiscovery {
-    spool: ContinuePathSpool,
-    index: ContinueIndexSnapshot,
-    root_authority: ContinueRootAuthority,
-    #[cfg(test)]
-    // Retained as focused discovery-accounting evidence.
-    #[allow(dead_code)]
-    stats: ContinueDiscoveryStats,
+    leaves: Vec<ContinueDocumentLeaf>,
+    authority: ContinueTreeAuthority,
 }
 
 impl ContinueDiscovery {
-    pub(crate) fn paths(&self) -> Result<ContinuePathIter, ContinueNativePathError> {
-        self.spool.iter()
-    }
-
-    pub(crate) fn index(&self) -> &ContinueIndexSnapshot {
-        &self.index
-    }
-
-    pub(crate) fn root_authority(&self) -> &ContinueRootAuthority {
-        &self.root_authority
-    }
-
-    pub(crate) fn open_source(
-        &self,
-        path: &Path,
-    ) -> Result<ContinueSourceSnapshot, ContinueNativePathError> {
-        let relative = path
-            .strip_prefix(self.root_authority.authority.named_path())
-            .map_err(|_| ContinueNativePathError::SourceAccess {
-                path: path.to_path_buf(),
-                message: "Continue source escaped its retained root authority".to_owned(),
-            })?;
-        let opened = self
-            .root_authority
-            .authority
-            .open_file(relative)
-            .map_err(|error| capture_source_error(path, "open Continue source", error))?;
-        ContinueSourceSnapshot::read_opened(path, opened)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn stats(&self) -> ContinueDiscoveryStats {
-        self.stats
+    pub(crate) fn into_parts(self) -> (Vec<ContinueDocumentLeaf>, ContinueTreeAuthority) {
+        (self.leaves, self.authority)
     }
 }
 
@@ -507,54 +388,54 @@ pub(crate) fn discover_continue_root(
     } else {
         selected_relative.join("sessions.json")
     };
-    let mut spool = ContinuePathSpool::new(&selected_path)?;
-    let mutation_watch = Arc::new(RootMutationWatch::new(&selected_path)?);
+    let mutation_watch = RootMutationWatch::new(if selected_file {
+        authority.named_path()
+    } else {
+        &selected_path
+    })?;
+    let mut leaves = Vec::new();
     let inventory = observe_inventory(
         &authority,
         &selected_relative,
         selected_file,
-        Some(&mut spool),
+        Some(&mut leaves),
         Some(&mutation_watch),
     )?;
-    if inventory.before_token != inventory.after_token || mutation_watch.mutated() {
+    if mutation_watch.mutated() {
         return Err(ContinueNativePathError::SourceChanged {
             path: selected_path,
         });
     }
+    let mut admitted_files = HashSet::with_capacity(leaves.len());
+    leaves.retain(|leaf| admitted_files.insert(leaf.file_token));
     let index = ContinueIndexSnapshot::observe(&authority, index_relative);
-    #[cfg(test)]
-    let stats = ContinueDiscoveryStats {
-        scanned_session_paths: spool.entries,
-        inventory_entries: inventory.entries,
-        index_observations: 1,
-        index_content_reads: usize::from(index.content_read),
-        index_entries: index.entry_count(),
-        index_resident_metadata_entries: index.resident_metadata_entries(),
-        spooled_path_bytes: spool.bytes,
-        maximum_spool_record_bytes: spool.maximum_record_bytes,
-        maximum_directory_sort_entries: inventory.maximum_directory_sort_entries,
-        maximum_directory_sort_key_bytes: inventory.maximum_directory_sort_key_bytes,
-    };
+    if mutation_watch.mutated() {
+        return Err(ContinueNativePathError::SourceChanged {
+            path: selected_path,
+        });
+    }
     Ok(ContinueDiscovery {
-        root_authority: ContinueRootAuthority {
-            root: selected_path,
+        leaves,
+        authority: ContinueTreeAuthority {
             authority,
             selected_relative,
             selected_file,
-            complete: true,
-            #[cfg(test)]
-            discovered_sources: spool.entries,
-            inventory_entries: inventory.entries,
-            inventory_digest: inventory.digest,
-            before_token: inventory.before_token,
-            after_token: inventory.after_token,
-            mutation_watch: Some(mutation_watch),
+            inventory_fingerprint: inventory.digest,
+            mutation_watch,
+            index,
         },
-        spool,
-        index,
-        #[cfg(test)]
-        stats,
     })
+}
+
+fn continue_tree_fingerprint(
+    inventory_fingerprint: [u8; 32],
+    index_fingerprint: [u8; 32],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(DOCUMENT_TREE_DIGEST_DOMAIN);
+    digest.update(inventory_fingerprint);
+    digest.update(index_fingerprint);
+    digest.finalize().into()
 }
 
 fn normalized_continue_authority_path(path: &Path) -> Result<PathBuf, ContinueNativePathError> {

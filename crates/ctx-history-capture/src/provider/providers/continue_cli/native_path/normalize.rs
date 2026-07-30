@@ -73,15 +73,8 @@ pub(crate) struct ContinueFileTouch {
     pub(crate) metadata: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContinueSourceCompleteness {
-    Complete,
-    Incomplete,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContinueGenerationAuthority {
-    pub(crate) completeness: ContinueSourceCompleteness,
     pub(crate) observed_history_items: Option<usize>,
     pub(crate) retained_events: usize,
     pub(crate) rejected_items: usize,
@@ -155,7 +148,6 @@ impl ContinuePreparedSource {
 pub(crate) struct ContinuePreparedPage {
     pub(crate) source: Option<Box<ContinuePreparedSource>>,
     pub(crate) session_identity: ContinueSessionIdentity,
-    pub(crate) page_ordinal: u64,
     pub(crate) events: Box<[ContinueEventRow]>,
     pub(crate) terminal: bool,
     pub(crate) authority: Option<ContinueGenerationAuthority>,

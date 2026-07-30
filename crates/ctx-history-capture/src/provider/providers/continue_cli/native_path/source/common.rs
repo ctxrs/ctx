@@ -105,13 +105,6 @@ pub(super) fn encode_os_string(value: &OsStr) -> Option<Vec<u8>> {
     Some(value.as_bytes().to_vec())
 }
 
-#[cfg(unix)]
-pub(super) fn decode_path(value: Vec<u8>) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-
-    Some(PathBuf::from(OsString::from_vec(value)))
-}
-
 #[cfg(windows)]
 pub(super) fn encode_os_string(value: &OsStr) -> Option<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt;
@@ -124,26 +117,7 @@ pub(super) fn encode_os_string(value: &OsStr) -> Option<Vec<u8>> {
     )
 }
 
-#[cfg(windows)]
-pub(super) fn decode_path(value: Vec<u8>) -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-
-    if !value.len().is_multiple_of(2) {
-        return None;
-    }
-    let units = value
-        .chunks_exact(2)
-        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
-        .collect::<Vec<_>>();
-    Some(PathBuf::from(OsString::from_wide(&units)))
-}
-
 #[cfg(not(any(unix, windows)))]
 pub(super) fn encode_os_string(value: &OsStr) -> Option<Vec<u8>> {
     value.to_str().map(|value| value.as_bytes().to_vec())
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(super) fn decode_path(value: Vec<u8>) -> Option<PathBuf> {
-    String::from_utf8(value).ok().map(PathBuf::from)
 }

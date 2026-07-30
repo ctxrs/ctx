@@ -17,14 +17,10 @@ use super::{
     normalize::{
         normalize_continue_document, normalize_event, ContinueEventRow, ContinueFileTouch,
         ContinueGenerationAuthority, ContinuePreparedPage, ContinuePreparedSource,
-        ContinueSessionIdentity, ContinueSourceCompleteness, NormalizeEventError,
-        CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT, CONTINUE_NATIVE_MAX_PAGE_BYTES,
-        CONTINUE_NATIVE_MAX_PAGE_ROWS,
+        ContinueSessionIdentity, NormalizeEventError, CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT,
+        CONTINUE_NATIVE_MAX_PAGE_BYTES, CONTINUE_NATIVE_MAX_PAGE_ROWS,
     },
-    source::{
-        ContinueIndexObservation, ContinueIndexSnapshot, ContinueSourceObservation,
-        ContinueSourceSnapshot,
-    },
+    source::{ContinueIndexSnapshot, ContinueSourceObservation, ContinueSourceSnapshot},
 };
 
 mod document;
@@ -50,17 +46,10 @@ pub(crate) struct ContinueOutputExclusionStats {
     pub(crate) retained_decode_string_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContinueIncompleteSource {
-    pub(crate) observation: ContinueSourceObservation,
-    pub(crate) index_dependency: ContinueIndexObservation,
-    pub(crate) authority: ContinueGenerationAuthority,
-}
-
 #[derive(Debug)]
 pub(crate) enum ContinueParseOutcome {
     Complete(Box<ContinueSourcePageStream>),
-    Incomplete(Box<ContinueIncompleteSource>),
+    Incomplete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,18 +91,7 @@ pub(crate) fn parse_continue_source(
     let root = match validate_and_root(&snapshot.bytes) {
         Ok(root) => root,
         Err(error) if error.is_eof() => {
-            return Ok(ContinueParseOutcome::Incomplete(Box::new(
-                ContinueIncompleteSource {
-                    observation: snapshot.observation().clone(),
-                    index_dependency: index.observation().clone(),
-                    authority: ContinueGenerationAuthority {
-                        completeness: ContinueSourceCompleteness::Incomplete,
-                        observed_history_items: None,
-                        retained_events: 0,
-                        rejected_items: 0,
-                    },
-                },
-            )));
+            return Ok(ContinueParseOutcome::Incomplete);
         }
         Err(error) => {
             return Err(ContinueSourceFailure::from_snapshot(
@@ -275,8 +253,6 @@ pub(crate) struct ContinueSourcePageStream {
     history_range: Option<Range<usize>>,
     cursor: Option<JsonArrayCursor>,
     next_history_ordinal: u64,
-    emitted_events: usize,
-    page_ordinal: u64,
     pending_event: Option<ContinueRetainedEvent>,
     authority: ContinueGenerationAuthority,
     output_exclusion: ContinueOutputExclusionStats,
@@ -293,7 +269,7 @@ impl ContinueSourcePageStream {
         snapshot: ContinueSourceSnapshot,
         source: ContinuePreparedSource,
         history_range: Option<Range<usize>>,
-        mut output_exclusion: ContinueOutputExclusionStats,
+        output_exclusion: ContinueOutputExclusionStats,
     ) -> Result<Self, ContinueSourceFailure> {
         let identity = source.session.identity.clone();
         let source_bytes = ContinuePreparedPage::base_estimated_bytes(&identity)
@@ -307,71 +283,6 @@ impl ContinueSourcePageStream {
                      the {CONTINUE_NATIVE_MAX_PAGE_BYTES} byte page bound"
                 ),
             ));
-        }
-        let mut observed = 0_usize;
-        let mut retained = 0_usize;
-        let mut rejected = 0_usize;
-        if let Some(range) = history_range.as_ref() {
-            let history = &snapshot.bytes[range.clone()];
-            let mut cursor = JsonArrayCursor::new(history).map_err(|error| {
-                ContinueSourceFailure::from_snapshot(
-                    &snapshot,
-                    ContinueSourceFailureKind::MalformedDocument,
-                    scan_error(error),
-                )
-            })?;
-            while let Some(item) = cursor.next(history).map_err(|error| {
-                ContinueSourceFailure::from_snapshot(
-                    &snapshot,
-                    ContinueSourceFailureKind::MalformedDocument,
-                    scan_error(error),
-                )
-            })? {
-                if item.kind() != JsonKind::Object {
-                    return Err(ContinueSourceFailure::from_snapshot(
-                        &snapshot,
-                        ContinueSourceFailureKind::MalformedDocument,
-                        "Continue history item is not a JSON object".to_owned(),
-                    ));
-                }
-                let ordinal = u64::try_from(observed).map_err(|_| {
-                    ContinueSourceFailure::from_snapshot(
-                        &snapshot,
-                        ContinueSourceFailureKind::Normalization,
-                        "Continue history ordinal exceeds u64".to_owned(),
-                    )
-                })?;
-                observed = observed.saturating_add(1);
-                let source_record_digest = Sha256::digest(item.raw()).into();
-                let Some(item) =
-                    parse_history_item(item, &mut output_exclusion).map_err(|message| {
-                        ContinueSourceFailure::from_snapshot(
-                            &snapshot,
-                            ContinueSourceFailureKind::MalformedDocument,
-                            message,
-                        )
-                    })?
-                else {
-                    rejected = rejected.saturating_add(1);
-                    continue;
-                };
-                let event = normalize_event(&identity, ordinal, &item, source_record_digest)
-                    .map_err(|error| normalization_failure(&snapshot, ordinal, error))?;
-                let event_bytes = event.estimated_bytes();
-                let event_page_bytes = ContinuePreparedPage::base_estimated_bytes(&identity)
-                    .saturating_add(event_bytes);
-                if event_page_bytes > CONTINUE_NATIVE_MAX_PAGE_BYTES {
-                    return Err(ContinueSourceFailure::from_snapshot(
-                        &snapshot,
-                        ContinueSourceFailureKind::RetainedItemTooLarge,
-                        format!(
-                            "Continue history item {ordinal} requires {event_page_bytes} page bytes, \
-                             exceeding the {CONTINUE_NATIVE_MAX_PAGE_BYTES} byte page bound"
-                        ),
-                    ));
-                }
-                retained = retained.saturating_add(1);
-            }
         }
         let cursor = history_range
             .as_ref()
@@ -391,14 +302,11 @@ impl ContinueSourcePageStream {
             history_range,
             cursor,
             next_history_ordinal: 0,
-            emitted_events: 0,
-            page_ordinal: 0,
             pending_event: None,
             authority: ContinueGenerationAuthority {
-                completeness: ContinueSourceCompleteness::Complete,
-                observed_history_items: Some(observed),
-                retained_events: retained,
-                rejected_items: rejected,
+                observed_history_items: Some(0),
+                retained_events: 0,
+                rejected_items: 0,
             },
             output_exclusion,
             done: false,
@@ -418,16 +326,13 @@ impl ContinueSourcePageStream {
                 .saturating_add(source.as_ref().map_or(0, |source| source.estimated_bytes()));
         let mut events = Vec::new();
 
-        while self.emitted_events.saturating_add(events.len()) < self.authority.retained_events {
+        let terminal = loop {
             let retained = match self.pending_event.take() {
                 Some(event) => event,
-                None => self.next_retained_event()?.ok_or_else(|| {
-                    ContinueSourceFailure::from_snapshot(
-                        &self.snapshot,
-                        ContinueSourceFailureKind::Normalization,
-                        "Continue preflight/event stream retained-count mismatch".to_owned(),
-                    )
-                })?,
+                None => match self.next_retained_event()? {
+                    Some(event) => event,
+                    None => break true,
+                },
             };
             let event_bytes = retained.event.estimated_bytes();
             let next_rows = row_count.saturating_add(retained.event.logical_units());
@@ -437,7 +342,7 @@ impl ContinueSourcePageStream {
                     || next_bytes > CONTINUE_NATIVE_MAX_PAGE_BYTES)
             {
                 self.pending_event = Some(retained);
-                break;
+                break false;
             }
             if next_rows > CONTINUE_NATIVE_MAX_PAGE_ROWS
                 || next_bytes > CONTINUE_NATIVE_MAX_PAGE_BYTES
@@ -451,20 +356,14 @@ impl ContinueSourcePageStream {
             events.push(retained.event);
             row_count = next_rows;
             estimated_bytes = next_bytes;
-        }
+        };
 
-        let terminal =
-            self.emitted_events.saturating_add(events.len()) == self.authority.retained_events;
-        let page_ordinal = self.page_ordinal;
-        self.page_ordinal = self.page_ordinal.saturating_add(1);
-        self.emitted_events = self.emitted_events.saturating_add(events.len());
         self.done = terminal;
         debug_assert!(row_count <= CONTINUE_NATIVE_MAX_PAGE_ROWS);
         debug_assert!(estimated_bytes <= CONTINUE_NATIVE_MAX_PAGE_BYTES);
         Ok(Some(ContinuePreparedPage {
             source,
             session_identity: self.session_identity.clone(),
-            page_ordinal,
             events: events.into_boxed_slice(),
             terminal,
             authority: terminal.then(|| self.authority.clone()),
@@ -508,10 +407,20 @@ impl ContinueSourcePageStream {
                         "Continue history ordinal exceeds u64".to_owned(),
                     )
                 })?;
-            let mut second_pass_stats = ContinueOutputExclusionStats::default();
+            self.authority.observed_history_items = self
+                .authority
+                .observed_history_items
+                .and_then(|count| count.checked_add(1));
+            if self.authority.observed_history_items.is_none() {
+                return Err(ContinueSourceFailure::from_snapshot(
+                    &self.snapshot,
+                    ContinueSourceFailureKind::Normalization,
+                    "Continue observed history count exceeds usize".to_owned(),
+                ));
+            }
             let source_record_digest = Sha256::digest(item.raw()).into();
             let Some(item) =
-                parse_history_item(item, &mut second_pass_stats).map_err(|message| {
+                parse_history_item(item, &mut self.output_exclusion).map_err(|message| {
                     ContinueSourceFailure::from_snapshot(
                         &self.snapshot,
                         ContinueSourceFailureKind::MalformedDocument,
@@ -519,21 +428,43 @@ impl ContinueSourcePageStream {
                     )
                 })?
             else {
+                self.authority.rejected_items = self
+                    .authority
+                    .rejected_items
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        ContinueSourceFailure::from_snapshot(
+                            &self.snapshot,
+                            ContinueSourceFailureKind::Normalization,
+                            "Continue rejected history count exceeds usize".to_owned(),
+                        )
+                    })?;
                 continue;
             };
             let event =
                 normalize_event(&self.session_identity, ordinal, &item, source_record_digest)
                     .map_err(|error| normalization_failure(&self.snapshot, ordinal, error))?;
+            self.authority.retained_events = self
+                .authority
+                .retained_events
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ContinueSourceFailure::from_snapshot(
+                        &self.snapshot,
+                        ContinueSourceFailureKind::Normalization,
+                        "Continue retained history count exceeds usize".to_owned(),
+                    )
+                })?;
             return Ok(Some(ContinueRetainedEvent { event }));
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum ContinueExactHistoryLookup<'a> {
     DifferentSession,
     MissingItem,
-    Item(&'a [u8]),
+    Items(Vec<&'a [u8]>),
 }
 
 /// Resolves one exact physical `history` element with the same bounded
@@ -541,10 +472,10 @@ pub(super) enum ContinueExactHistoryLookup<'a> {
 ///
 /// The returned bytes borrow the already-certified whole-document snapshot;
 /// no second JSON representation or normalized record is created.
-pub(super) fn locate_continue_exact_history_item<'a>(
+pub(super) fn locate_continue_exact_history_items<'a>(
     bytes: &'a [u8],
     expected_session_id: &str,
-    history_ordinal: u64,
+    history_ordinals: &[u64],
 ) -> Result<ContinueExactHistoryLookup<'a>, String> {
     let root = validate_and_root(bytes)
         .map_err(|error| format!("invalid Continue session JSON: {error}"))?;
@@ -571,17 +502,23 @@ pub(super) fn locate_continue_exact_history_item<'a>(
     let Some(history) = history else {
         return Ok(ContinueExactHistoryLookup::MissingItem);
     };
+    let mut resolved = vec![None; history_ordinals.len()];
     let mut cursor = JsonArrayCursor::new(history.raw()).map_err(scan_error)?;
     let mut ordinal = 0_u64;
     while let Some(item) = cursor.next(history.raw()).map_err(scan_error)? {
-        if ordinal == history_ordinal {
-            return Ok(ContinueExactHistoryLookup::Item(item.raw()));
+        for (index, expected) in history_ordinals.iter().enumerate() {
+            if ordinal == *expected {
+                resolved[index] = Some(item.raw());
+            }
         }
         ordinal = ordinal
             .checked_add(1)
             .ok_or_else(|| "Continue history ordinal exceeds u64".to_owned())?;
     }
-    Ok(ContinueExactHistoryLookup::MissingItem)
+    Ok(match resolved.into_iter().collect::<Option<Vec<_>>>() {
+        Some(items) => ContinueExactHistoryLookup::Items(items),
+        None => ContinueExactHistoryLookup::MissingItem,
+    })
 }
 
 fn normalization_failure(
