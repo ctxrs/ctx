@@ -26,7 +26,7 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "none",
     ]));
     assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
         source_backed_count(
             &temp,
@@ -72,12 +72,13 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "none",
     ]));
     assert_explicit_source_publication(&second, "trae", "trae_state_vscdb");
-    assert_eq!(second["totals"]["rejected_records"], 0);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
+    assert_noop_publication(&second);
     assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 }
 
 #[test]
-fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
+fn trae_cn_workspace_storage_returns_verified_empty_until_explicit_path_import() {
     let temp = tempdir();
     let query = "trae-cn-explicit-discovery-oracle";
     install_default_trae_cn_fixture(&temp, query);
@@ -96,7 +97,7 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "Trae CN workspace storage must not be auto-discovered: {sources:#}"
     );
 
-    let stderr = failure_stderr(ctx(&temp).args([
+    let empty = json_output(ctx(&temp).args([
         "search",
         query,
         "--provider",
@@ -105,10 +106,13 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "wait",
         "--format=json",
     ]));
-    assert!(
-        stderr.contains("no executable source-backed routes were registered"),
-        "{stderr}"
-    );
+    assert_eq!(empty["schema_version"], 1, "{empty:#}");
+    assert_eq!(empty["filters"]["provider"], "trae", "{empty:#}");
+    assert_eq!(empty["freshness"]["mode"], "wait", "{empty:#}");
+    assert_eq!(empty["freshness"]["status"], "completed", "{empty:#}");
+    assert_eq!(empty["freshness"]["source_count"], 0, "{empty:#}");
+    assert_eq!(empty["retrieval"]["indexed_documents"], 0, "{empty:#}");
+    assert!(empty["results"].as_array().unwrap().is_empty(), "{empty:#}");
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -121,7 +125,7 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "none",
     ]));
     assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -174,7 +178,7 @@ fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
         "none",
     ]));
     assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -202,11 +206,20 @@ fn trae_cn_workspace_storage_is_excluded_from_import_all() {
     let query = "trae-cn-import-all-oracle";
     install_default_trae_cn_fixture(&temp, query);
 
-    let stderr =
-        failure_stderr(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert!(
-        stderr.contains("no executable source-backed routes were registered"),
-        "{stderr}"
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(
+        imported["totals"]["current_source_count"], 0,
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["totals"]["current_indexed_documents"], 0,
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["totals"]["current_rejected_records"], 0,
+        "{imported:#}"
     );
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));

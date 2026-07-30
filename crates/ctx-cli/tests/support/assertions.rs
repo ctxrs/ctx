@@ -118,6 +118,15 @@ pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Valu
     source
 }
 
+pub(crate) fn assert_noop_publication(packet: &Value) {
+    assert_eq!(packet["totals"]["change"], "no_op", "{packet:#}");
+    assert_eq!(packet["sources"][0]["change"], "no_op", "{packet:#}");
+    assert_eq!(
+        packet["sources"][0]["generation_changed"], false,
+        "{packet:#}"
+    );
+}
+
 #[cfg(any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures))]
 pub(crate) fn sqlite_column_text(conn: &Connection, sql: &str) -> String {
     let mut statement = conn.prepare(sql).unwrap();

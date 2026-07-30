@@ -504,7 +504,7 @@ fn fresh_home_search_mvp_flow() {
         .arg("setup")
         .assert()
         .success()
-        .stdout(predicate::str::contains("History indexing"));
+        .stdout(predicate::str::contains("History is ready to search"));
     assert!(
         !data_root(&temp).join("config.toml").exists(),
         "setup should not write config.toml for implicit defaults"
@@ -540,8 +540,15 @@ fn fresh_home_search_mvp_flow() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&import, "codex", "codex_session_jsonl_tree");
-    assert!(import["totals"]["source_files"].as_u64().unwrap() > 0);
-    assert!(import["totals"]["source_bytes"].as_u64().unwrap() > 0);
+    assert!(import["totals"]["current_source_count"].as_u64().unwrap() > 0);
+    assert!(
+        import["totals"]["current_certified_source_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(import["sources"][0]["source_files"].as_u64().unwrap() > 0);
+    assert!(import["sources"][0]["source_bytes"].as_u64().unwrap() > 0);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -847,7 +854,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
 
     let blocked_parent = temp.path().join("blocked-show-output");
     fs::write(&blocked_parent, "not a directory").unwrap();
-    ctx(&temp)
+    let failed_show = ctx(&temp)
         .env_remove("CTX_LOCAL_USAGE_ENABLED")
         .arg("show")
         .arg("session")
@@ -856,7 +863,14 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
         .arg("--out")
         .arg(blocked_parent.join("session.json"))
         .assert()
-        .failure();
+        .failure()
+        .get_output()
+        .clone();
+    let failed_show_output_bytes = failed_show
+        .stdout
+        .len()
+        .saturating_add(failed_show.stderr.len());
+    assert!(failed_show_output_bytes > 0);
 
     let connection = Connection::open(data_root(&temp).join("usage.sqlite")).unwrap();
     let totals = |operation: &str, outcome: &str, value_class: &str| {
@@ -947,7 +961,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
     );
     assert_eq!(
         totals("show_session", "failure", "not_applicable"),
-        (1, 0, 0, 0, 0, 0)
+        (1, 0, 0, failed_show_output_bytes as i64, 0, 0)
     );
 }
 
@@ -1231,7 +1245,8 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_explicit_source_publication(&second, "codex", "codex_session_jsonl_tree");
     assert_eq!(second["resume"], true);
     assert_eq!(second["resume_mode"], "idempotent_rescan");
-    assert_eq!(second["totals"]["skipped"], 0);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
+    assert_noop_publication(&second);
     assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 }
 
@@ -1263,7 +1278,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_explicit_source_publication(&first, "codex", "codex_session_jsonl_tree");
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
-    assert_eq!(first["totals"]["rejected_records"], 0);
+    assert_eq!(first["totals"]["current_rejected_records"], 0);
     let first_generation = first["sources"][0]["published_generation"]
         .as_str()
         .unwrap()
@@ -1302,8 +1317,8 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_explicit_source_publication(&second, "codex", "codex_session_jsonl_tree");
     assert_eq!(second["resume"], false);
     assert_eq!(second["resume_mode"], "normal_scan");
-    assert_eq!(second["totals"]["skipped"], 0);
-    assert_eq!(second["totals"]["rejected_records"], 0);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
+    assert_noop_publication(&second);
     assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
     assert_eq!(
         second["sources"][0]["published_generation"], first_generation,

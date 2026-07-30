@@ -103,38 +103,19 @@ fn index_status_and_watch_are_read_only_for_missing_store() {
 
 #[test]
 fn index_watch_exits_when_background_indexing_has_terminally_failed() {
-    let temp = tempdir();
-    let sessions = temp
-        .path()
-        .join(".codex")
-        .join("sessions")
-        .join("2026/06/24");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::copy(
-        provider_history_fixture("codex-malformed-session.jsonl"),
-        sessions.join("rollout-pending.jsonl"),
-    )
-    .unwrap();
+    let temp = daemon_test_root();
+    import_ready_history(&temp);
     ctx(&temp)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["daemon", "disable", "--format=json"])
         .assert()
         .success();
-    let pending = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
-    assert!(
-        pending["lexical"]["pending_inventory_units"]
-            .as_u64()
-            .unwrap_or(0)
-            > 0,
-        "{pending:#}"
-    );
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
 
-    let daemon_root = temp.path().join("daemon");
+    let daemon_root = data_root(&temp).join("daemon");
     fs::create_dir_all(&daemon_root).unwrap();
     fs::write(
         daemon_root.join("status.json"),
@@ -167,7 +148,8 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
     let snapshots = snapshots.lines().collect::<Vec<_>>();
     assert_eq!(snapshots.len(), 1, "{snapshots:#?}");
     let status: Value = serde_json::from_str(snapshots[0]).unwrap();
-    assert_eq!(status["lexical"]["status"], "pending", "{status:#}");
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(status["semantic"]["status"], "pending", "{status:#}");
     assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -181,12 +163,12 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
 #[test]
 fn index_status_reports_stale_daemon_lock_as_recoverable() {
     let temp = tempdir();
-    let daemon = temp.path().join("daemon");
+    let daemon = data_root(&temp).join("daemon");
     fs::create_dir_all(&daemon).unwrap();
     fs::write(
         daemon.join("daemon.lock"),
         json!({
-            "pid": 0,
+            "pid": u32::MAX,
             "started_at_ms": 0,
         })
         .to_string(),
@@ -209,7 +191,7 @@ fn index_status_reports_stale_daemon_lock_as_recoverable() {
     target_env = "gnu"
 ))]
 #[test]
-fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
+fn index_status_omits_transient_semantic_cache_policy_fields() {
     let temp = tempdir();
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
@@ -219,10 +201,13 @@ fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
     current_dir_command.current_dir(&workspace);
     remove_semantic_cache_env(&mut current_dir_command);
     let status = json_output(current_dir_command.args(["index", "status", "--format=json"]));
-    assert_eq!(status["semantic"]["model_cache_available"], true);
-    assert_eq!(
-        status["semantic"]["embed_policy"]["source"],
-        "dynamic_quiet"
+    assert!(
+        status["semantic"].get("model_cache_available").is_none(),
+        "{status:#}"
+    );
+    assert!(
+        status["semantic"].get("embed_policy").is_none(),
+        "{status:#}"
     );
 
     let temp = tempdir();
@@ -232,16 +217,19 @@ fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
     remove_semantic_cache_env(&mut hf_home_command);
     hf_home_command.env("HF_HOME", &hf_home);
     let status = json_output(hf_home_command.args(["index", "status", "--format=json"]));
-    assert_eq!(status["semantic"]["model_cache_available"], true);
-    assert_eq!(
-        status["semantic"]["embed_policy"]["source"],
-        "dynamic_quiet"
+    assert!(
+        status["semantic"].get("model_cache_available").is_none(),
+        "{status:#}"
+    );
+    assert!(
+        status["semantic"].get("embed_policy").is_none(),
+        "{status:#}"
     );
 }
 
 #[test]
 fn index_wait_lexical_reports_ready_after_import() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
@@ -270,7 +258,7 @@ fn index_wait_lexical_reports_ready_after_import() {
 
 #[test]
 fn index_wait_default_skips_semantic_when_disabled_after_import() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let wait = json_output(ctx(&temp).args([
@@ -293,7 +281,7 @@ fn index_wait_default_skips_semantic_when_disabled_after_import() {
 
 #[test]
 fn index_watch_default_skips_semantic_when_disabled_after_import() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let output = ctx(&temp)
@@ -321,7 +309,7 @@ fn index_watch_default_skips_semantic_when_disabled_after_import() {
 
 #[test]
 fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let output = ctx(&temp)
@@ -351,7 +339,7 @@ fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
 
 #[test]
 fn index_wait_all_stays_strict_when_semantic_is_disabled() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let output = ctx(&temp)
@@ -382,16 +370,9 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
 
 #[test]
 fn human_status_and_wait_share_the_ready_document() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
-    let status = ctx(&temp)
-        .args(["--color=never", "index", "status"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
     let wait = ctx(&temp)
         .args([
             "--color=never",
@@ -403,6 +384,13 @@ fn human_status_and_wait_share_the_ready_document() {
             "--interval-seconds",
             "1",
         ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status = ctx(&temp)
+        .args(["--color=never", "index", "status"])
         .assert()
         .success()
         .get_output()
@@ -426,7 +414,7 @@ fn human_status_and_wait_share_the_ready_document() {
 
 #[test]
 fn human_wait_blocked_renders_the_final_searchable_snapshot() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let output = ctx(&temp)
@@ -458,10 +446,10 @@ fn human_wait_blocked_renders_the_final_searchable_snapshot() {
 
 #[test]
 fn human_wait_timeout_renders_the_final_active_snapshot() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
     fs::write(
-        temp.path().join("config.toml"),
+        data_root(&temp).join("config.toml"),
         "[daemon]\nenabled = false\n\n[search]\nsemantic = true\n",
     )
     .unwrap();
@@ -498,7 +486,7 @@ fn human_wait_timeout_renders_the_final_active_snapshot() {
 
 #[test]
 fn forced_color_on_a_pipe_adds_only_sgr_not_cursor_motion() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     import_ready_history(&temp);
 
     let plain = ctx(&temp)

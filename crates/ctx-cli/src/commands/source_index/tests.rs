@@ -1382,7 +1382,10 @@ mod tests {
         )
         .render_plain()
         .len();
-        assert!(narrow > expected, "fixture must add narrow-terminal wrapping");
+        assert!(
+            narrow > expected,
+            "fixture must add narrow-terminal wrapping"
+        );
         assert_eq!(canonical_show_output_bytes(&value), expected);
         let event_id = uuid::Uuid::parse_str("01900001-0000-7000-8000-000000000002").unwrap();
         crate::complete_content::enforce_complete_content_output_limit(
