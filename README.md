@@ -66,10 +66,6 @@ ctx show event <ctx-event-id> --window 3
 
 # Or print a compact transcript of the original session
 ctx show session <ctx-session-id>
-
-# Inspect local, read-only retrieval and value statistics
-ctx stats
-ctx stats --detail
 ```
 
 Those IDs let your current agent recover as much context from previous sessions as it needs.
@@ -97,7 +93,7 @@ For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works)
 
 ## Supported agent histories
 
-Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --format json` on your machine to see which sources are currently `importable`.
+Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --json` on your machine to see which sources are currently `importable`.
 
 | Agent harness | Support |
 | --- | --- |
