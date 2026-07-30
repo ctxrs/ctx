@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -19,6 +20,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "scripts/release/detached-debug-symbols.py"
 SOURCE_COMMIT = "1" * 40
+
+
+def elf_sections(path: Path) -> set[str]:
+    result = subprocess.run(
+        ["readelf", "-SW", path],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    return set(re.findall(r"\[\s*\d+\]\s+(\S+)", result.stdout))
+
+
+def forbidden_distribution_sections(path: Path) -> set[str]:
+    return {
+        name
+        for name in elf_sections(path)
+        if name == ".symtab"
+        or name.startswith(".debug")
+        or name.startswith(".zdebug")
+    }
 
 
 def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -40,6 +63,11 @@ class DetachedDebugSymbolsTest(unittest.TestCase):
         source.write_text(
             """
 #include <stdio.h>
+__asm__(
+    ".pushsection .debug_gdb_scripts,\\"MS\\",@progbits,1\\n"
+    ".asciz \\"gdb_load_rust_pretty_printers.py\\"\\n"
+    ".popsection\\n"
+);
 static int answer(void) { return 42; }
 int main(void) { printf("%d\\n", answer()); return 0; }
 """,
@@ -52,6 +80,7 @@ int main(void) { printf("%d\\n", answer()); return 0; }
             timeout=60,
         )
         self.before_size = self.artifact.stat().st_size
+        self.assertIn(".debug_gdb_scripts", elf_sections(self.artifact))
         self.output = self.directory / "private-symbols"
 
     def prepare_and_finalize(self) -> dict[str, object]:
@@ -124,6 +153,12 @@ int main(void) { printf("%d\\n", answer()); return 0; }
             self.assertEqual(len(members), 1)
             self.assertEqual(members[0].name, "ctx.debug")
             self.assertGreater(members[0].size, 0)
+            source = bundle.extractfile(members[0])
+            self.assertIsNotNone(source)
+            archived_debug = self.directory / "archived-ctx.debug"
+            archived_debug.write_bytes(source.read())
+        self.assertIn(".debug_gdb_scripts", elf_sections(archived_debug))
+        self.assertEqual(forbidden_distribution_sections(self.artifact), set())
 
     def test_tampered_archive_and_binary_fail_closed(self) -> None:
         self.prepare_and_finalize()
