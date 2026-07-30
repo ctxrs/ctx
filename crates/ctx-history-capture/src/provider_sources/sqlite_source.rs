@@ -1,9 +1,10 @@
 //! Stock SQLite snapshots for root-authorized provider databases.
 //!
 //! The ordinary provider-source layer approves and retains the database parent
-//! directory. This module keeps that directory handle, rejects symlink,
-//! reparse-point, and non-regular SQLite family members, and never asks SQLite
-//! to create or update files in the provider directory.
+//! directory. This module keeps that [`ProviderSourceDirectory`] capability,
+//! opens every DB/WAL/SHM/journal leaf relative to it, rejects symlink,
+//! reparse-point, cross-filesystem, and non-regular members, and never asks
+//! SQLite to create or update files in the provider directory.
 //!
 //! A certified sidecar-free database is opened through SQLite's immutable URI
 //! mode. A database with WAL or SHM state is copied once, with bounded I/O, to a
@@ -21,6 +22,7 @@ use std::{
     ops::Deref,
     path::{Component, Path, PathBuf},
     ptr,
+    sync::Arc,
 };
 
 use ctx_history_core::default_data_root;
@@ -33,6 +35,14 @@ use url::Url;
 
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+
+use crate::{
+    common::io::{
+        OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
+        ProviderSourceRoot,
+    },
+    CaptureError,
+};
 
 const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v2\0";
 const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
@@ -142,9 +152,12 @@ impl SqliteSourceEvidence {
 }
 
 /// Retained authority for one approved SQLite parent directory.
-#[derive(Debug)]
+///
+/// `path` is retained only to certify the parent route and describe errors.
+/// SQLite family members are always opened relative to `directory`.
+#[derive(Debug, Clone)]
 pub(crate) struct SqliteSourceDirectoryAuthority {
-    directory: File,
+    directory: Arc<ProviderSourceDirectory>,
     path: PathBuf,
     identity: NativeFileIdentity,
 }
@@ -152,38 +165,64 @@ pub(crate) struct SqliteSourceDirectoryAuthority {
 impl SqliteSourceDirectoryAuthority {
     fn retain(authorized_parent: &File, approved_path: &Path) -> SqliteSourceAccessResult<Self> {
         validate_approved_parent_path(approved_path)?;
-        let directory =
-            authorized_parent
-                .try_clone()
-                .map_err(|source| SqliteSourceAccessError::Io {
-                    operation: "retaining the approved SQLite parent directory",
-                    path: approved_path.to_path_buf(),
-                    source,
-                })?;
-        let retained =
-            NativeFileState::read(&directory, approved_path, ExpectedObjectKind::Directory)?;
-        let named = open_nofollow(approved_path, ExpectedObjectKind::Directory)?;
+        let retained = NativeFileState::read(
+            authorized_parent,
+            approved_path,
+            ExpectedObjectKind::Directory,
+        )?;
+        let root = ProviderSourceRoot::open(approved_path).map_err(|error| {
+            map_provider_source_error(
+                error,
+                "opening the approved SQLite parent capability",
+                approved_path,
+            )
+        })?;
+        let directory = root.directory().map_err(|error| {
+            map_provider_source_error(
+                error,
+                "retaining the approved SQLite parent capability",
+                approved_path,
+            )
+        })?;
+        let named = directory.try_clone_authority_handle().map_err(|source| {
+            SqliteSourceAccessError::Io {
+                operation: "retaining the approved SQLite parent capability handle",
+                path: approved_path.to_path_buf(),
+                source,
+            }
+        })?;
         let named_state =
             NativeFileState::read(&named, approved_path, ExpectedObjectKind::Directory)?;
         if retained.identity != named_state.identity {
             return Err(SqliteSourceAccessError::ConnectionIdentityMismatch);
         }
         Ok(Self {
-            directory,
+            directory: Arc::new(directory),
             path: approved_path.to_path_buf(),
             identity: retained.identity,
         })
     }
 
     fn revalidate(&self) -> SqliteSourceAccessResult<()> {
-        let retained =
-            NativeFileState::read(&self.directory, &self.path, ExpectedObjectKind::Directory)
-                .map_err(map_revalidation_error)?;
+        let retained = self
+            .directory
+            .try_clone_authority_handle()
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)
+            .and_then(|directory| {
+                NativeFileState::read(&directory, &self.path, ExpectedObjectKind::Directory)
+                    .map_err(map_revalidation_error)
+            })?;
         if retained.identity != self.identity {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        let named = open_nofollow(&self.path, ExpectedObjectKind::Directory)
-            .map_err(map_revalidation_error)?;
+        let named_root = ProviderSourceRoot::open(&self.path)
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let named_directory = named_root
+            .directory()
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let named = named_directory
+            .try_clone_authority_handle()
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
         let named_state = NativeFileState::read(&named, &self.path, ExpectedObjectKind::Directory)
             .map_err(map_revalidation_error)?;
         if named_state.identity == self.identity {
@@ -241,6 +280,11 @@ impl SqliteSourceReadSnapshot {
     }
 
     #[cfg(test)]
+    pub(crate) fn family_revalidation_count(&self) -> u32 {
+        self.family.revalidation_count()
+    }
+
+    #[cfg(test)]
     pub(crate) fn snapshot_directory(&self) -> Option<&Path> {
         self._snapshot_directory
             .as_ref()
@@ -292,17 +336,20 @@ mod snapshot;
 
 use family::{
     capture_sqlite_evidence, clear_snapshot_authorizer, configure_and_pin_snapshot,
-    map_revalidation_error, open_nofollow, sqlite_error, validate_approved_parent_path,
+    map_provider_source_error, map_revalidation_error, sqlite_error, validate_approved_parent_path,
     verify_connection_read_only, verify_snapshot_active, ExpectedObjectKind, NativeFileIdentity,
     NativeFileState, SqliteConnectionEvidence, SqliteFamilyEvidence, SqliteFamilyMember,
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
-#[cfg(test)]
-use snapshot::open_root_handle_sqlite_source_snapshot_for_test;
 pub(crate) use snapshot::{
     open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
     retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot,
+};
+#[cfg(test)]
+use snapshot::{
+    open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
+    open_root_handle_sqlite_source_snapshot_for_test,
 };
 
 #[cfg(test)]
@@ -319,14 +366,17 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    use ctx_history_core::ScannedSourceCounts;
     use rusqlite::{config::DbConfig, params, Connection};
+    use sha2::{Digest, Sha256};
 
     use super::{
         default_data_root, open_root_handle_sqlite_source_snapshot,
+        open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
         open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceComponent, SqliteSourceDirectoryAuthority,
-        SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy, SQLITE_SHM_MAX_BYTES,
-        SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceComponent,
+        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy,
+        SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
     };
 
     fn create_database(path: &Path, value: &str) {
@@ -372,6 +422,30 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
+    }
+
+    fn logical_message_snapshot(snapshot: &SqliteSourceReadSnapshot) -> SqliteLogicalSnapshot {
+        let values = read_values(snapshot);
+        let mut digest = Sha256::new();
+        let mut certified_bytes = 0_u64;
+        for value in &values {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+            certified_bytes += value.len() as u64;
+        }
+        SqliteLogicalSnapshot::new(
+            "shared-sqlite-test-v1",
+            b"messages(body TEXT NOT NULL)",
+            digest.finalize().into(),
+            ScannedSourceCounts {
+                complete_records: values.len() as u64,
+                retained_records: values.len() as u64,
+                rejected_records: 0,
+                ignored_records: 0,
+                indexed_documents: values.len() as u64,
+                certified_bytes,
+            },
+        )
     }
 
     fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
@@ -597,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_active_wal_copy_has_one_source_byte_pass() {
+    fn bounded_active_wal_copy_has_one_source_byte_pass_and_two_fences() {
         const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
         let temp = tempfile::tempdir().unwrap();
@@ -636,6 +710,11 @@ mod tests {
             .unwrap();
         assert_eq!(length, PAYLOAD_BYTES as i64);
         assert_eq!(snapshot.copied_bytes(), expected_copied);
+        assert_eq!(
+            snapshot.family_revalidation_count(),
+            2,
+            "acquisition keeps only the post-pin and final evidence fences"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "an 8 MiB active-WAL snapshot exceeded the focused sanity bound"
@@ -818,6 +897,70 @@ mod tests {
             snapshot.finish(),
             Err(SqliteSourceAccessError::SourceChanged)
         ));
+    }
+
+    #[test]
+    fn logical_snapshot_ignores_wal_growth_when_rows_are_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let writer = create_persistent_wal(&database);
+        let parent = retain_parent(temp.path());
+
+        let first = open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+            .unwrap();
+        let first_logical = logical_message_snapshot(&first);
+        let first_physical_revision = *first.evidence().revision();
+        first.finish().unwrap();
+
+        writer
+            .execute("UPDATE messages SET body = 'transient'", [])
+            .unwrap();
+        writer
+            .execute("UPDATE messages SET body = 'from-wal'", [])
+            .unwrap();
+
+        let second =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                .unwrap();
+        let second_logical = logical_message_snapshot(&second);
+        assert_ne!(second.evidence().revision(), &first_physical_revision);
+        assert_eq!(second_logical, first_logical);
+        second.finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_swap_after_certification_cannot_open_replacement_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let approved_parent = temp.path().join("provider");
+        let retained_parent = temp.path().join("retained-provider");
+        let replacement_parent = temp.path().join("replacement-provider");
+        fs::create_dir(&approved_parent).unwrap();
+        fs::create_dir(&replacement_parent).unwrap();
+        create_database(&approved_parent.join("provider.sqlite"), "expected");
+        let attacker = outside.path().join("attacker.sqlite");
+        fs::write(&attacker, b"attacker-controlled non-SQLite bytes").unwrap();
+        symlink(&attacker, replacement_parent.join("provider.sqlite")).unwrap();
+        let retained_before = directory_file_bytes(&approved_parent);
+        let replacement_before = directory_file_bytes(&replacement_parent);
+        let parent = retain_parent(&approved_parent);
+
+        let result = open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test(
+            &parent,
+            OsStr::new("provider.sqlite"),
+            || {
+                fs::rename(&approved_parent, &retained_parent).unwrap();
+                fs::rename(&replacement_parent, &approved_parent).unwrap();
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::SourceChanged)
+        ));
+        assert_eq!(directory_file_bytes(&approved_parent), replacement_before);
+        assert_eq!(directory_file_bytes(&retained_parent), retained_before);
     }
 
     #[cfg(unix)]

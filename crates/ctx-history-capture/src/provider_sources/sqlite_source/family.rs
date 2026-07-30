@@ -1,42 +1,63 @@
 use super::*;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 #[derive(Debug)]
 pub(super) struct SqliteSourceFamily {
     authority: SqliteSourceDirectoryAuthority,
     pub(super) database: SqliteFamilyMember,
     pub(super) wal: Option<SqliteFamilyMember>,
     pub(super) shared_memory: Option<SqliteFamilyMember>,
+    wal_name: OsString,
+    shared_memory_name: OsString,
+    journal_name: OsString,
     wal_path: PathBuf,
     shared_memory_path: PathBuf,
     journal_path: PathBuf,
+    #[cfg(test)]
+    revalidation_count: Cell<u32>,
 }
 
 impl SqliteSourceFamily {
     pub(super) fn open(
         authority: &SqliteSourceDirectoryAuthority,
         database_name: &OsStr,
+        after_parent_certification: impl FnOnce(),
     ) -> SqliteSourceAccessResult<Self> {
         validate_database_leaf(database_name)?;
         authority.revalidate()?;
-        let retained_authority = SqliteSourceDirectoryAuthority {
-            directory: authority.directory.try_clone().map_err(|source| {
-                SqliteSourceAccessError::Io {
-                    operation: "retaining the SQLite source parent",
-                    path: authority.path.clone(),
-                    source,
-                }
-            })?,
-            path: authority.path.clone(),
-            identity: authority.identity.clone(),
-        };
+        after_parent_certification();
+        let retained_authority = authority.clone();
         let database_path = authority.path.join(database_name);
-        let database = SqliteFamilyMember::open(database_path, ExpectedObjectKind::RegularFile)?;
-        let wal_path = authority.path.join(with_suffix(database_name, "-wal"));
-        let shared_memory_path = authority.path.join(with_suffix(database_name, "-shm"));
-        let journal_path = authority.path.join(with_suffix(database_name, "-journal"));
-        let wal = SqliteFamilyMember::open_optional(wal_path.clone())?;
-        let shared_memory = SqliteFamilyMember::open_optional(shared_memory_path.clone())?;
-        if SqliteFamilyMember::path_exists(&journal_path)? {
+        let database = SqliteFamilyMember::open(
+            &retained_authority,
+            database_name.to_os_string(),
+            database_path,
+        )?;
+        let wal_name = with_suffix(database_name, "-wal");
+        let shared_memory_name = with_suffix(database_name, "-shm");
+        let journal_name = with_suffix(database_name, "-journal");
+        let wal_path = authority.path.join(&wal_name);
+        let shared_memory_path = authority.path.join(&shared_memory_name);
+        let journal_path = authority.path.join(&journal_name);
+        let wal = SqliteFamilyMember::open_optional(
+            &retained_authority,
+            wal_name.clone(),
+            wal_path.clone(),
+        )?;
+        let shared_memory = SqliteFamilyMember::open_optional(
+            &retained_authority,
+            shared_memory_name.clone(),
+            shared_memory_path.clone(),
+        )?;
+        if SqliteFamilyMember::open_optional(
+            &retained_authority,
+            journal_name.clone(),
+            journal_path.clone(),
+        )?
+        .is_some()
+        {
             return Err(SqliteSourceAccessError::UnsupportedSidecarIdentity {
                 component: SqliteSourceComponent::RollbackJournal,
                 capability: "read-only provider snapshots do not perform rollback recovery",
@@ -47,9 +68,14 @@ impl SqliteSourceFamily {
             database,
             wal,
             shared_memory,
+            wal_name,
+            shared_memory_name,
+            journal_name,
             wal_path,
             shared_memory_path,
             journal_path,
+            #[cfg(test)]
+            revalidation_count: Cell::new(0),
         })
     }
 
@@ -84,15 +110,27 @@ impl SqliteSourceFamily {
         &self,
         expected: &SqliteFamilyEvidence,
     ) -> SqliteSourceAccessResult<()> {
+        #[cfg(test)]
+        self.revalidation_count
+            .set(self.revalidation_count.get().saturating_add(1));
         self.authority.revalidate()?;
         if self.authority.identity != expected.parent_identity {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        self.database.revalidate(&expected.database)?;
-        revalidate_optional_member(self.wal.as_ref(), expected.wal.as_ref(), &self.wal_path)?;
+        self.database
+            .revalidate(&self.authority, &expected.database)?;
         revalidate_optional_member(
+            &self.authority,
+            self.wal.as_ref(),
+            expected.wal.as_ref(),
+            &self.wal_name,
+            &self.wal_path,
+        )?;
+        revalidate_optional_member(
+            &self.authority,
             self.shared_memory.as_ref(),
             expected.shared_memory.as_ref(),
+            &self.shared_memory_name,
             &self.shared_memory_path,
         )?;
         match (self.wal.as_ref(), expected.wal_token.as_ref()) {
@@ -109,70 +147,97 @@ impl SqliteSourceFamily {
             (None, None) => {}
             _ => return Err(SqliteSourceAccessError::SourceChanged),
         }
-        if SqliteFamilyMember::path_exists(&self.journal_path).map_err(map_revalidation_error)? {
+        if SqliteFamilyMember::open_optional(
+            &self.authority,
+            self.journal_name.clone(),
+            self.journal_path.clone(),
+        )
+        .map_err(map_revalidation_error)?
+        .is_some()
+        {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn revalidation_count(&self) -> u32 {
+        self.revalidation_count.get()
     }
 }
 
 #[derive(Debug)]
 pub(super) struct SqliteFamilyMember {
-    pub(super) file: File,
+    opened: OpenedProviderSourceFile,
+    name: OsString,
     pub(super) path: PathBuf,
 }
 
 impl SqliteFamilyMember {
-    fn open(path: PathBuf, kind: ExpectedObjectKind) -> SqliteSourceAccessResult<Self> {
-        let file = open_nofollow(&path, kind)?;
-        NativeFileState::read(&file, &path, kind)?;
-        Ok(Self { file, path })
-    }
-
-    fn open_optional(path: PathBuf) -> SqliteSourceAccessResult<Option<Self>> {
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                validate_named_metadata(&path, &metadata, ExpectedObjectKind::RegularFile)?;
-                Self::open(path, ExpectedObjectKind::RegularFile).map(Some)
+    fn open(
+        authority: &SqliteSourceDirectoryAuthority,
+        name: OsString,
+        path: PathBuf,
+    ) -> SqliteSourceAccessResult<Self> {
+        match authority.directory.open_child(&name) {
+            Ok(OpenedProviderSourcePath::File(opened)) => {
+                NativeFileState::read(opened.file(), &path, ExpectedObjectKind::RegularFile)?;
+                Ok(Self { opened, name, path })
             }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(SqliteSourceAccessError::Io {
-                operation: "inspecting an optional SQLite source member",
-                path,
-                source,
-            }),
+            Ok(OpenedProviderSourcePath::Directory(_)) => {
+                Err(SqliteSourceAccessError::UnsafeFile {
+                    path,
+                    reason: "SQLite source family members must be regular files",
+                })
+            }
+            Err(error) => Err(map_provider_source_error(
+                error,
+                "opening a SQLite source family member relative to retained authority",
+                &path,
+            )),
         }
     }
 
-    fn path_exists(path: &Path) -> SqliteSourceAccessResult<bool> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                validate_named_metadata(path, &metadata, ExpectedObjectKind::RegularFile)?;
-                Ok(true)
+    fn open_optional(
+        authority: &SqliteSourceDirectoryAuthority,
+        name: OsString,
+        path: PathBuf,
+    ) -> SqliteSourceAccessResult<Option<Self>> {
+        match Self::open(authority, name, path) {
+            Ok(member) => Ok(Some(member)),
+            Err(SqliteSourceAccessError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
             }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(source) => Err(SqliteSourceAccessError::Io {
-                operation: "inspecting an optional SQLite source member",
-                path: path.to_path_buf(),
-                source,
-            }),
+            Err(error) => Err(error),
         }
+    }
+
+    pub(super) fn file(&self) -> &File {
+        self.opened.file()
     }
 
     fn capture_state(&self) -> SqliteSourceAccessResult<NativeFileState> {
-        NativeFileState::read(&self.file, &self.path, ExpectedObjectKind::RegularFile)
+        NativeFileState::read(
+            self.opened.file(),
+            &self.path,
+            ExpectedObjectKind::RegularFile,
+        )
     }
 
-    fn revalidate(&self, expected: &NativeFileState) -> SqliteSourceAccessResult<()> {
+    fn revalidate(
+        &self,
+        authority: &SqliteSourceDirectoryAuthority,
+        expected: &NativeFileState,
+    ) -> SqliteSourceAccessResult<()> {
         let retained = self.capture_state().map_err(map_revalidation_error)?;
         if &retained != expected {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        let named = open_nofollow(&self.path, ExpectedObjectKind::RegularFile)
+        let named = Self::open(authority, self.name.clone(), self.path.clone())
             .map_err(map_revalidation_error)?;
-        let named_state =
-            NativeFileState::read(&named, &self.path, ExpectedObjectKind::RegularFile)
-                .map_err(map_revalidation_error)?;
+        let named_state = named.capture_state().map_err(map_revalidation_error)?;
         if &named_state == expected {
             Ok(())
         } else {
@@ -182,14 +247,15 @@ impl SqliteFamilyMember {
 
     fn bounded_token(&self) -> SqliteSourceAccessResult<[u8; 32]> {
         let state = self.capture_state()?;
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "retaining the SQLite WAL for bounded revision evidence",
-                path: self.path.clone(),
-                source,
-            })?;
+        let mut file =
+            self.opened
+                .file()
+                .try_clone()
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "retaining the SQLite WAL for bounded revision evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
         file.seek(SeekFrom::Start(0))
             .map_err(|source| SqliteSourceAccessError::Io {
                 operation: "seeking the SQLite WAL for bounded revision evidence",
@@ -237,14 +303,15 @@ impl SqliteFamilyMember {
                 maximum: SQLITE_SHM_MAX_BYTES,
             });
         }
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "retaining SQLite SHM for bounded content evidence",
-                path: self.path.clone(),
-                source,
-            })?;
+        let mut file =
+            self.opened
+                .file()
+                .try_clone()
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "retaining SQLite SHM for bounded content evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
         file.seek(SeekFrom::Start(0))
             .map_err(|source| SqliteSourceAccessError::Io {
                 operation: "seeking SQLite SHM for bounded content evidence",
@@ -272,14 +339,19 @@ impl SqliteFamilyMember {
 }
 
 fn revalidate_optional_member(
+    authority: &SqliteSourceDirectoryAuthority,
     member: Option<&SqliteFamilyMember>,
     expected: Option<&NativeFileState>,
+    name: &OsStr,
     path: &Path,
 ) -> SqliteSourceAccessResult<()> {
     match (member, expected) {
-        (Some(member), Some(expected)) => member.revalidate(expected),
+        (Some(member), Some(expected)) => member.revalidate(authority, expected),
         (None, None) => {
-            if SqliteFamilyMember::path_exists(path).map_err(map_revalidation_error)? {
+            if SqliteFamilyMember::open_optional(authority, name.to_os_string(), path.to_path_buf())
+                .map_err(map_revalidation_error)?
+                .is_some()
+            {
                 Err(SqliteSourceAccessError::SourceChanged)
             } else {
                 Ok(())
@@ -637,63 +709,6 @@ fn with_suffix(name: &OsStr, suffix: &str) -> OsString {
     value
 }
 
-pub(super) fn open_nofollow(
-    path: &Path,
-    expected_kind: ExpectedObjectKind,
-) -> SqliteSourceAccessResult<File> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| SqliteSourceAccessError::Io {
-        operation: "inspecting a named SQLite source object",
-        path: path.to_path_buf(),
-        source,
-    })?;
-    validate_named_metadata(path, &metadata, expected_kind)?;
-    let mut options = OpenOptions::new();
-    options.read(true);
-    configure_nofollow_open(&mut options, expected_kind);
-    options
-        .open(path)
-        .map_err(|source| SqliteSourceAccessError::Io {
-            operation: "opening a named SQLite source object without following",
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-#[cfg(unix)]
-fn configure_nofollow_open(options: &mut OpenOptions, _expected_kind: ExpectedObjectKind) {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-}
-
-#[cfg(windows)]
-fn configure_nofollow_open(options: &mut OpenOptions, expected_kind: ExpectedObjectKind) {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-
-    let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
-    if matches!(expected_kind, ExpectedObjectKind::Directory) {
-        flags |= FILE_FLAG_BACKUP_SEMANTICS;
-    }
-    options
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(flags);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn configure_nofollow_open(_options: &mut OpenOptions, _expected_kind: ExpectedObjectKind) {}
-
-fn validate_named_metadata(
-    path: &Path,
-    metadata: &Metadata,
-    expected_kind: ExpectedObjectKind,
-) -> SqliteSourceAccessResult<()> {
-    validate_opened_metadata(path, metadata, expected_kind)
-}
-
 fn validate_opened_metadata(
     path: &Path,
     metadata: &Metadata,
@@ -735,6 +750,30 @@ fn metadata_is_reparse_point(metadata: &Metadata) -> bool {
 #[cfg(not(windows))]
 fn metadata_is_reparse_point(_metadata: &Metadata) -> bool {
     false
+}
+
+pub(super) fn map_provider_source_error(
+    error: CaptureError,
+    operation: &'static str,
+    path: &Path,
+) -> SqliteSourceAccessError {
+    match error {
+        CaptureError::Io(source) => SqliteSourceAccessError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        },
+        CaptureError::InvalidProviderTranscriptPath { reason, .. } => {
+            SqliteSourceAccessError::UnsafeFile {
+                path: path.to_path_buf(),
+                reason,
+            }
+        }
+        CaptureError::SourceChangedDuringCapture => SqliteSourceAccessError::SourceChanged,
+        error => SqliteSourceAccessError::SnapshotUnavailable {
+            reason: format!("{operation} for {path:?} failed: {error}"),
+        },
+    }
 }
 
 pub(super) fn map_revalidation_error(error: SqliteSourceAccessError) -> SqliteSourceAccessError {
