@@ -475,7 +475,7 @@ fn unverified_returned_generation_is_never_recorded_as_published() {
     assert!(status["last_error"]
         .as_str()
         .is_some_and(|error| error.contains("returned generation generation-2")));
-    assert!(coordinator.lock_state().published_resolver.is_none());
+    assert!(!coordinator.has_retained_resolver_for_test("generation-2"));
 }
 
 #[test]
@@ -544,6 +544,132 @@ fn verified_publication_atomically_installs_generation_bound_resolver() {
         }
     );
     assert!(coordinator.has_pending_request());
+}
+
+#[test]
+fn generation_lease_keeps_concurrent_a_search_show_alive_while_b_publishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
+    coordinator.enqueue(None);
+    let resolver_a = test_resolver();
+    let run_a = coordinator
+        .run_next_with(
+            |_, _| {
+                let mut publication = test_publication("generation-a");
+                publication.resolver = Some(resolver_a);
+                Ok(publication)
+            },
+            || Ok(Some("generation-a".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("A publication");
+    assert!(!run_a.failed);
+    coordinator.enqueue(Some("generation-a".to_owned()));
+
+    let start_publication = Arc::new(Barrier::new(2));
+    let publication_finished = Arc::new(Barrier::new(2));
+    let lease_a = std::thread::scope(|scope| {
+        let query_coordinator = Arc::clone(&coordinator);
+        let query_root = data_root.clone();
+        let query_start = Arc::clone(&start_publication);
+        let query_finished = Arc::clone(&publication_finished);
+        let query = scope.spawn(move || {
+            let lease = query_coordinator
+                .resolver_for_generation(&query_root, "generation-a")
+                .expect("A search/show resolver lease");
+            query_start.wait();
+            query_finished.wait();
+            assert_eq!(lease.generation_id(), "generation-a");
+            lease
+        });
+
+        let publisher_coordinator = Arc::clone(&coordinator);
+        let publisher_start = Arc::clone(&start_publication);
+        let publisher_finished = Arc::clone(&publication_finished);
+        let publisher = scope.spawn(move || {
+            publisher_start.wait();
+            let resolver_b = test_resolver();
+            let run = publisher_coordinator
+                .run_next_with(
+                    |_, _| {
+                        let mut publication = test_publication("generation-b");
+                        publication.resolver = Some(resolver_b);
+                        Ok(publication)
+                    },
+                    || Ok(Some("generation-b".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("B publication");
+            publisher_finished.wait();
+            run
+        });
+
+        let lease = query.join().expect("A query");
+        let run_b = publisher.join().expect("B publisher");
+        assert!(!run_b.failed);
+        lease
+    });
+
+    assert_eq!(
+        coordinator
+            .resolver_for_generation(&data_root, "generation-b")
+            .unwrap()
+            .generation_id(),
+        "generation-b"
+    );
+    coordinator.prune_retired_resolvers_for_test();
+    assert!(coordinator.has_retained_resolver_for_test("generation-a"));
+    drop(lease_a);
+    coordinator.prune_retired_resolvers_for_test();
+    assert!(!coordinator.has_retained_resolver_for_test("generation-a"));
+}
+
+#[test]
+fn trailing_publication_failure_keeps_success_and_installed_resolver() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = SourceBackedRefreshCoordinator::new();
+    let resolver = test_resolver();
+    let failed_callbacks = AtomicUsize::new(0);
+    let request = coordinator.enqueue(Some("generation-a".to_owned()));
+    let request_id = request_id(&request);
+
+    let run = coordinator
+        .run_next_with(
+            |_, _| {
+                let mut publication = test_publication("generation-b");
+                publication.resolver = Some(resolver);
+                Ok(publication)
+            },
+            || Ok(Some("generation-b".to_owned())),
+            |_| Err(anyhow!("injected cleanup failure after commit")),
+            |_| {
+                failed_callbacks.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("published refresh");
+
+    assert!(!run.failed);
+    assert!(run.did_work);
+    assert_eq!(run.job["status"], "completed");
+    assert!(run.job["post_publication_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("injected cleanup failure after commit")));
+    assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        coordinator
+            .resolver_for_generation(temp.path(), "generation-b")
+            .unwrap()
+            .generation_id(),
+        "generation-b"
+    );
+    assert_eq!(
+        coordinator.status(&request_id).unwrap()["request_state"],
+        "published"
+    );
 }
 
 #[test]
@@ -831,6 +957,59 @@ fn restart_reconciliation_finishes_commit_before_cleanup_without_rebuild() {
     );
     assert!(!database.exists());
     assert!(!wal.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_failure_after_commit_is_retried_on_restart_without_rebuild() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    let database = ctx_history_core::database_path(data_root.clone());
+    let blocker = temp.path().join("held-old-store");
+    fs::write(&database, b"old-store-after-commit").unwrap();
+    fs::hard_link(&database, &blocker).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = Arc::clone(&calls);
+    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, Ordering::SeqCst);
+            let writer = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?;
+            let receipt = writer.commit(|_| true)?;
+            Ok(test_publication(receipt.generation_id))
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+
+    let run = coordinator.run_next(&data_root).expect("published refresh");
+    let generation_id = run.job["published_generation"]
+        .as_str()
+        .expect("published generation")
+        .to_owned();
+
+    assert!(!run.failed);
+    assert_eq!(run.job["status"], "completed");
+    assert!(run.job["post_publication_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("hard-linked old Store file")));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(database.is_file());
+
+    fs::remove_file(blocker).unwrap();
+    reconcile_verified_source_epoch(&data_root).unwrap();
+    reconcile_verified_source_epoch(&data_root).unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        VerifiedIndex::open(source_backed_index_root(&data_root))
+            .unwrap()
+            .generation_id(),
+        generation_id
+    );
+    assert!(!database.exists());
 }
 
 #[test]

@@ -1,9 +1,9 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration as StdDuration,
+    time::{Duration as StdDuration, Instant as StdInstant},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -74,6 +74,9 @@ const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
+// Covers a search/show generation pin crossing the daemon IPC boundary; an
+// acquired Arc lease keeps its exact resolver alive beyond this grace.
+const SOURCE_RESOLVER_RETIREMENT_GRACE: StdDuration = StdDuration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SourceBackedRefreshMode {

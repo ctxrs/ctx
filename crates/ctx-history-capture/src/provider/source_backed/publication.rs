@@ -188,6 +188,12 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         certified_source_bytes: None,
     })
     .map_err(SourceBackedCoordinatorError::Progress)?;
+    recertify_retained_deletions(
+        &mut writer,
+        registry,
+        &mut owners,
+        &complete_inventory_owners,
+    )?;
     let scan_stage_duration = scan_started.elapsed();
     let commit_started = Instant::now();
     let commit = writer.commit_with_complete_inventory_revalidation(
@@ -229,7 +235,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         },
     )?;
     let commit_duration = commit_started.elapsed();
-    report_progress(SourceBackedRefreshProgress {
+    let _ = report_progress(SourceBackedRefreshProgress {
         phase: "committed",
         completed_sources: completed_routes,
         total_sources: scanned_routes,
@@ -238,8 +244,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
         certified_source_count: Some(commit.certified_sources),
         certified_source_bytes: Some(commit.certified_source_bytes),
-    })
-    .map_err(SourceBackedCoordinatorError::Progress)?;
+    });
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
     let sources = commit.manifest().sources.clone();
@@ -264,4 +269,116 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         certified_source_count,
         certified_source_bytes,
     })
+}
+
+fn recertify_retained_deletions(
+    writer: &mut GenerationWriter,
+    registry: &SourceBackedProviderRegistry,
+    owners: &mut HashMap<[u8; 32], SourceOwner>,
+    complete_inventory_owners: &[CompleteInventoryOwner],
+) -> SourceBackedCoordinatorResult<()> {
+    let retained = writer
+        .base_manifest()
+        .map(|manifest| manifest.removals.clone())
+        .unwrap_or_default();
+    for removal in retained {
+        let source = removal.source();
+        let prior_authority = removal.deletion().inventory();
+        let current = complete_inventory_owners
+            .iter()
+            .find(|owner| {
+                let current = owner.inventory.observation();
+                current.provider() == prior_authority.provider()
+                    && current.authority_namespace() == prior_authority.authority_namespace()
+                    && current.authority_key() == prior_authority.authority_key()
+            })
+            .cloned()
+            .ok_or_else(|| {
+                retained_deletion_error(
+                    source,
+                    "the current refresh supplied no complete inventory for its authority",
+                )
+            })?;
+        let driver = registry.routes[current.route_index]
+            .driver
+            .as_ref()
+            .ok_or_else(|| {
+                retained_deletion_error(
+                    source,
+                    "the current complete inventory has no executable route",
+                )
+            })?;
+        if !(driver.owns_source)(source) {
+            return Err(retained_deletion_error(
+                source,
+                "the current inventory route does not own the deleted source",
+            ));
+        }
+
+        let digest = source.identity().digest();
+        if current.inventory.contains(source) {
+            let staged = owners.get(&digest).is_some_and(|owner| {
+                owner.route_index == current.route_index && owner.source.exact_descriptor_eq(source)
+            });
+            if !staged {
+                return Err(retained_deletion_error(
+                    source,
+                    "the current inventory rediscovered the source without staging it",
+                ));
+            }
+            continue;
+        }
+
+        claim_retained_deletion(owners, current.route_index, source)?;
+        if !removal.deletion().verifies(&current.inventory) {
+            let deletion =
+                CertifiedSourceDeletion::from_inventory(source.clone(), &current.inventory)
+                    .map_err(|error| {
+                        retained_deletion_error(
+                            source,
+                            format!("the current inventory could not certify absence: {error}"),
+                        )
+                    })?;
+            writer.delete_source(deletion, current.inventory)?;
+        }
+    }
+    Ok(())
+}
+
+fn claim_retained_deletion(
+    owners: &mut HashMap<[u8; 32], SourceOwner>,
+    route_index: usize,
+    source: &SourceKey,
+) -> SourceBackedCoordinatorResult<()> {
+    let digest = source.identity().digest();
+    match owners.get(&digest) {
+        Some(owner)
+            if owner.route_index != route_index || !owner.source.exact_descriptor_eq(source) =>
+        {
+            Err(SourceBackedCoordinatorError::DuplicateSourceOwner {
+                source_id: source.identity().to_string(),
+            })
+        }
+        Some(_) => Ok(()),
+        None => {
+            owners.insert(
+                digest,
+                SourceOwner {
+                    route_index,
+                    source: source.clone(),
+                },
+            );
+            Ok(())
+        }
+    }
+}
+
+fn retained_deletion_error(
+    source: &SourceKey,
+    detail: impl Into<String>,
+) -> SourceBackedCoordinatorError {
+    SourceBackedCoordinatorError::RetainedDeletionRecertification {
+        source_id: source.identity().to_string(),
+        detail: detail.into(),
+    }
 }

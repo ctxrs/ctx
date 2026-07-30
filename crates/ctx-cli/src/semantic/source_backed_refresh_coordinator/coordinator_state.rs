@@ -179,6 +179,7 @@ struct SourceBackedRefreshAttempt {
     trigger: &'static str,
     trigger_provenance: &'static str,
     last_error: Option<String>,
+    post_publication_error: Option<String>,
 }
 
 impl SourceBackedRefreshAttempt {
@@ -227,6 +228,7 @@ impl SourceBackedRefreshAttempt {
             "error_code": self.failure_code(),
             "reason": self.failure_reason(),
             "last_error": self.last_error,
+            "post_publication_error": self.post_publication_error,
         }))
     }
 
@@ -268,6 +270,7 @@ impl SourceBackedRefreshAttempt {
             "error_code": self.failure_code(),
             "reason": self.failure_reason(),
             "last_error": self.last_error,
+            "post_publication_error": self.post_publication_error,
         }))
     }
 }
@@ -285,7 +288,45 @@ impl SourceBackedRefreshTimings {
 pub(super) struct SourceBackedRefreshCoordinatorState {
     active_request_id: Option<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
-    pub(super) published_resolver: Option<Arc<GenerationBoundSourceBackedResolver>>,
+    published_resolvers: HashMap<String, RetainedGenerationResolver>,
+    current_published_generation: Option<String>,
+}
+
+struct RetainedGenerationResolver {
+    resolver: Arc<GenerationBoundSourceBackedResolver>,
+    retired_at: Option<StdInstant>,
+}
+
+impl SourceBackedRefreshCoordinatorState {
+    fn install_resolver(&mut self, resolver: Arc<GenerationBoundSourceBackedResolver>) {
+        let generation_id = resolver.generation_id.clone();
+        let now = StdInstant::now();
+        if let Some(previous) = self.current_published_generation.as_deref() {
+            if previous != generation_id {
+                if let Some(retained) = self.published_resolvers.get_mut(previous) {
+                    retained.retired_at.get_or_insert(now);
+                }
+            }
+        }
+        self.published_resolvers.insert(
+            generation_id.clone(),
+            RetainedGenerationResolver {
+                resolver,
+                retired_at: None,
+            },
+        );
+        self.current_published_generation = Some(generation_id);
+        self.prune_retired_resolvers(now, SOURCE_RESOLVER_RETIREMENT_GRACE);
+    }
+
+    fn prune_retired_resolvers(&mut self, now: StdInstant, grace: StdDuration) {
+        self.published_resolvers.retain(|_, retained| {
+            retained.retired_at.is_none_or(|retired_at| {
+                now.saturating_duration_since(retired_at) < grace
+                    || Arc::strong_count(&retained.resolver) > 1
+            })
+        });
+    }
 }
 
 pub(in crate::semantic) struct SourceBackedRefreshCoordinator {
@@ -299,8 +340,8 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) failed: bool,
 }
 
-/// One daemon-retained resolver whose identity is inseparable from the
-/// verified lexical generation that installed it.
+/// One leaseable resolver whose identity is inseparable from the verified
+/// lexical generation that installed it.
 #[derive(Debug)]
 #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
 pub(crate) struct GenerationBoundSourceBackedResolver {
@@ -350,7 +391,8 @@ impl SourceBackedRefreshCoordinator {
             state: Mutex::new(SourceBackedRefreshCoordinatorState {
                 active_request_id: None,
                 attempts: VecDeque::new(),
-                published_resolver: None,
+                published_resolvers: HashMap::new(),
+                current_published_generation: None,
             }),
             executor,
         }
@@ -368,10 +410,12 @@ impl SourceBackedRefreshCoordinator {
     pub(in crate::semantic) fn retained_published_generation(
         &self,
     ) -> Option<Arc<GenerationBoundSourceBackedResolver>> {
-        self.lock_state()
-            .published_resolver
-            .as_ref()
-            .map(Arc::clone)
+        let state = self.lock_state();
+        state
+            .current_published_generation
+            .as_deref()
+            .and_then(|generation_id| state.published_resolvers.get(generation_id))
+            .map(|retained| Arc::clone(&retained.resolver))
     }
 
     /// Returns the resolver only when it is bound to the caller's exact
@@ -387,14 +431,15 @@ impl SourceBackedRefreshCoordinator {
         SourceBackedResolverAccessError,
     > {
         let result = {
-            let state = self.lock_state();
-            match state.published_resolver.as_ref() {
-                Some(retained) if retained.generation_id == generation_id => {
-                    return Ok(Arc::clone(retained));
-                }
-                Some(retained) => SourceBackedResolverAccessError::GenerationMismatch {
+            let mut state = self.lock_state();
+            state.prune_retired_resolvers(StdInstant::now(), SOURCE_RESOLVER_RETIREMENT_GRACE);
+            if let Some(retained) = state.published_resolvers.get(generation_id) {
+                return Ok(Arc::clone(&retained.resolver));
+            }
+            match state.current_published_generation.as_ref() {
+                Some(retained_generation) => SourceBackedResolverAccessError::GenerationMismatch {
                     requested_generation: generation_id.to_owned(),
-                    retained_generation: retained.generation_id.clone(),
+                    retained_generation: retained_generation.clone(),
                 },
                 None => SourceBackedResolverAccessError::Missing {
                     requested_generation: generation_id.to_owned(),
@@ -422,9 +467,9 @@ impl SourceBackedRefreshCoordinator {
         let retained_generation_matches = {
             let state = self.lock_state();
             state
-                .published_resolver
-                .as_ref()
-                .is_some_and(|retained| retained.generation_id == generation_id)
+                .current_published_generation
+                .as_deref()
+                .is_some_and(|retained| retained == generation_id)
         };
         if hydration_failure_queues_refresh(failure.kind) && retained_generation_matches {
             self.enqueue_with_metadata(
@@ -607,6 +652,7 @@ impl SourceBackedRefreshCoordinator {
             trigger: metadata.trigger,
             trigger_provenance: metadata.trigger_provenance,
             last_error: None,
+            post_publication_error: None,
         };
         let response = attempt.to_json();
         state.active_request_id = Some(attempt.request_id.clone());
@@ -726,18 +772,7 @@ impl SourceBackedRefreshCoordinator {
             )), None),
         };
         let verified = match verified {
-            Ok((observed, publication)) => match published(&observed) {
-                Ok(()) => Ok((observed, publication)),
-                Err(error) => {
-                    let error = format!("record source-backed rebuild publication: {error:#}");
-                    match failed(&error) {
-                        Ok(()) => Err(error),
-                        Err(record_error) => Err(format!(
-                            "{error}; recording the resumable rebuild failure also failed: {record_error:#}"
-                        )),
-                    }
-                }
-            },
+            Ok(verified) => Ok(verified),
             Err(error) => match failed(&error) {
                 Ok(()) => Err(error),
                 Err(record_error) => Err(format!(
@@ -747,12 +782,12 @@ impl SourceBackedRefreshCoordinator {
         };
         let mut state = self.lock_state();
         let mut installed_resolver = None;
-        let (failed, did_work, job) = {
+        let (failed_run, did_work) = {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             attempt.finished_at_ms = Some(utc_now().timestamp_millis());
             attempt.progress.current_source = None;
             if observed_for_status.is_some() {
-                attempt.published_generation = observed_for_status;
+                attempt.published_generation = observed_for_status.clone();
             }
 
             match verified {
@@ -778,7 +813,7 @@ impl SourceBackedRefreshCoordinator {
                     attempt.published_explicit_source_catalog = requested_catalog.clone();
                     installed_resolver = publication.resolver.map(|resolver| {
                         Arc::new(GenerationBoundSourceBackedResolver {
-                            generation_id: observed,
+                            generation_id: observed.clone(),
                             source_manifest,
                             resolver,
                         })
@@ -793,19 +828,49 @@ impl SourceBackedRefreshCoordinator {
 
             let failed = attempt.state == SourceBackedRefreshState::Failed;
             let did_work = !failed && attempt.published_generation != previous_generation;
-            (failed, did_work, attempt.job_json())
+            (failed, did_work)
         };
         if let Some(resolver) = installed_resolver {
-            state.published_resolver = Some(resolver);
+            state.install_resolver(resolver);
         }
         if state.active_request_id.as_deref() == Some(request_id.as_str()) {
             state.active_request_id = None;
         }
+        drop(state);
+
+        if !failed_run {
+            if let Err(error) = published(
+                observed_for_status
+                    .as_deref()
+                    .expect("verified publication has an observed generation"),
+            ) {
+                let mut state = self.lock_state();
+                if let Some(attempt) = find_attempt_mut(&mut state, &request_id) {
+                    attempt.post_publication_error = Some(format!(
+                        "finish retryable source-backed publication work: {error:#}"
+                    ));
+                }
+            }
+        }
+        let job = self.job_status(&request_id)?;
         Some(SourceBackedRefreshRun {
             job,
             did_work,
-            failed,
+            failed: failed_run,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn prune_retired_resolvers_for_test(&self) {
+        self.lock_state()
+            .prune_retired_resolvers(StdInstant::now(), StdDuration::ZERO);
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_retained_resolver_for_test(&self, generation_id: &str) -> bool {
+        self.lock_state()
+            .published_resolvers
+            .contains_key(generation_id)
     }
 
     pub(super) fn lock_state(
