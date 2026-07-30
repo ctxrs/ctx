@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use crate::{
     native_source::NativeSqliteValue,
     provider::normalization::{provider_json_text, provider_value_text},
-    provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::SqliteSourceAccessError,
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -22,8 +21,7 @@ use super::super::super::{
 };
 use super::{
     discovery::{
-        open_root_authorized_snapshot, revision_digest, source_observation,
-        AstrBotSourceBackedInventoryV0, AstrBotSourceBackedSourceV0,
+        open_root_authorized_snapshot, AstrBotSourceBackedInventoryV0, AstrBotSourceBackedSourceV0,
     },
     identity::{conversation_native_item_key, logical_values_digest, stable_session_id},
     parsing::{conversation_items, platform_session_fact, serialized_hash},
@@ -91,43 +89,12 @@ impl AstrBotSourceBackedResolverV0 {
         let hydration = (|| {
             let conn = sqlite_snapshot.connection().map_err(map_sqlite_hydration)?;
             let sql = AstrBotSql::new(conn).map_err(map_parser_hydration)?;
-            let user_version: i64 = conn
-                .pragma_query_value(None, "user_version", |row| row.get(0))
-                .map_err(CaptureError::from)
-                .map_err(map_capture_hydration)?;
-            let schema_fingerprint =
-                sqlite_schema_fingerprint(conn).map_err(map_capture_hydration)?;
-            let observation = source_observation(
-                &source.source_key,
-                sqlite_snapshot.evidence(),
-                user_version,
-                &schema_fingerprint,
-            )
-            .map_err(|_| {
-                hydration_failure(
-                    HydrationFailureKind::InvalidLocator,
-                    "AstrBot source observation is invalid",
-                )
-            })?;
-            let observed_revision = revision_digest(&observation);
-            if requests.iter().any(|request| {
-                request.locator().certified_source_revision_digest() != Some(&observed_revision)
-            }) {
-                return Err(hydration_failure(
-                    HydrationFailureKind::StaleSourceEvidence,
-                    "AstrBot SQLite snapshot no longer matches the certified revision",
-                ));
-            }
-
             let checkpoint_links = coordinates
                 .iter()
                 .any(AstrBotCoordinate::is_platform)
                 .then(|| load_checkpoint_links(conn, &sql))
                 .transpose()?
                 .unwrap_or_default();
-            let revision_scope = TypedKey::bytes(observed_revision.to_vec()).map_err(|error| {
-                hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
-            })?;
             let mut hydrated = Vec::with_capacity(requests.len());
             let mut conversations = BTreeMap::new();
             for (request, coordinate) in requests.iter().zip(coordinates) {
@@ -169,7 +136,6 @@ impl AstrBotSourceBackedResolverV0 {
                             physical_rowid,
                             item_index,
                             content_kind,
-                            &revision_scope,
                         )?
                     }
                     AstrBotCoordinate::Platform {
@@ -279,10 +245,12 @@ impl AstrBotCoordinate {
 fn decode_locator(
     locator: &SourceRecordLocator,
 ) -> std::result::Result<AstrBotCoordinate, HydrationFailure> {
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision {
+    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
+    {
         return Err(hydration_failure(
             HydrationFailureKind::InvalidLocator,
-            "AstrBot SQLite locator is not exact-revision scoped",
+            "AstrBot SQLite locator is not stable-record scoped",
         ));
     }
     let NativeRecordCoordinate::ProviderSqlite {
@@ -363,7 +331,6 @@ fn hydrate_conversation_coordinate(
     physical_rowid: i64,
     item_index: u32,
     content_kind: ConversationContentKind,
-    revision_scope: &TypedKey,
 ) -> std::result::Result<Vec<u8>, HydrationFailure> {
     let row =
         super::super::super::model::decode_conversation(values).map_err(map_capture_hydration)?;
@@ -406,11 +373,13 @@ fn hydrate_conversation_coordinate(
     })?;
     let session_id =
         stable_session_id(source, &provider_session_id(&row)).map_err(invalid_locator)?;
+    let revision_scope =
+        TypedKey::bytes(logical_values_digest(values).to_vec()).map_err(invalid_locator)?;
     let native_item_key = conversation_native_item_key(
         physical_rowid,
         usize::try_from(item_index).unwrap_or(usize::MAX),
         Some(item),
-        revision_scope,
+        &revision_scope,
     )
     .map_err(invalid_locator)?;
     let expected_event_id = derive_event_id(EventIdentityInput {

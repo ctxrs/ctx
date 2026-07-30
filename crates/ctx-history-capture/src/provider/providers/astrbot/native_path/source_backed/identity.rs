@@ -90,8 +90,6 @@ pub(super) fn logical_values_digest(values: &[NativeSqliteValue]) -> [u8; 32] {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn conversation_document(
     source: &AstrBotSourceBackedSourceV0,
-    source_revision_digest: &[u8; 32],
-    revision_scope: &TypedKey,
     physical_rowid: i64,
     item_index: usize,
     row_digest: [u8; 32],
@@ -101,8 +99,9 @@ pub(super) fn conversation_document(
     complete_text: &str,
 ) -> AstrBotSourceBackedResultV0<LexicalDocument> {
     let session_id = stable_session_id(&source.source_key, &session.provider_session_id)?;
+    let revision_scope = TypedKey::bytes(row_digest.to_vec())?;
     let native_item_key =
-        conversation_native_item_key(physical_rowid, item_index, item, revision_scope)?;
+        conversation_native_item_key(physical_rowid, item_index, item, &revision_scope)?;
     let event_id = derive_event_id(EventIdentityInput {
         source: &source.source_key,
         session_id,
@@ -128,8 +127,8 @@ pub(super) fn conversation_document(
             ])?,
             row_version: Some(TypedKey::bytes(row_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(*source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         Sha256::digest(complete_text.as_bytes()).into(),
     )?;
     Ok(LexicalDocument {
@@ -160,7 +159,6 @@ pub(super) fn conversation_document(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn platform_document(
     source: &AstrBotSourceBackedSourceV0,
-    source_revision_digest: &[u8; 32],
     physical_rowid: i64,
     logical_id: i64,
     row_digest: [u8; 32],
@@ -188,8 +186,8 @@ pub(super) fn platform_document(
             ])?,
             row_version: Some(TypedKey::bytes(row_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(*source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         Sha256::digest(complete_text.as_bytes()).into(),
     )?;
     Ok(LexicalDocument {

@@ -46,8 +46,8 @@ pub use super::providers::crush::native_path::source_backed::{
 };
 use super::providers::{
     astrbot::native_path::source_backed::{
-        scan_astrbot_source_backed_v0, AstrBotSourceBackedInventoryV0,
-        AstrBotSourceBackedResolverV0,
+        scan_astrbot_snapshot_v0, AstrBotSourceBackedInventoryV0, AstrBotSourceBackedResolverV0,
+        AstrBotSourceBackedSourceV0, PARSER_REVISION as ASTRBOT_SOURCE_BACKED_PARSER_REVISION,
     },
     continue_cli::native_path::{ContinueSourceBackedOutcome, ContinueSourceBackedReader},
     crush::native_path::source_backed::{
@@ -84,8 +84,9 @@ use super::providers::{
     },
     kimi::native_path::source_backed::{KimiSourceBackedCatalog, KimiSourceBackedResolver},
     lingma::native_path::{
-        scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0,
-        LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
+        reject_duplicate_paths as reject_duplicate_lingma_paths, scan_lingma_snapshot_v0,
+        LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0, LingmaSourceBackedResolverV0,
+        LingmaSourceBackedResultV0, LingmaSourceInventoryV0, LINGMA_SOURCE_BACKED_PARSER_REVISION,
     },
     mistral_vibe::native_path::source_backed::scan_mistral_vibe_source_backed,
     mux::native_path::{
@@ -104,6 +105,7 @@ use super::providers::{
     rovodev::native_path::RovoDevDocumentTreeAdapter,
     shelley::native_path::source_backed::{
         discover_shelley_source_backed_exact_cwd, ShelleySourceBackedAdapter,
+        SHELLEY_SOURCE_PARSER_REVISION,
     },
     task_json::cline_nativepath::{
         cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,

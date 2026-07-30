@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CertifiedSource, EventRole, EventType, ScannedSourceCounts, TypedKey};
+use ctx_history_core::{CertifiedSource, EventRole, EventType, ScannedSourceCounts};
 use ctx_history_index::LexicalDocument;
 use serde::Serialize;
 use serde_json::Value;
@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     provider::normalization::{provider_json_text, provider_timestamp_millis, provider_value_text},
     provider::sqlite::sqlite_schema_fingerprint,
+    provider_sources::{SqliteLogicalSnapshot, SqliteSourceReadSnapshot},
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
@@ -21,12 +22,12 @@ use super::super::super::{
     source::{
         fetch_candidate, hydrate_conversation, hydrate_platform_message, AstrBotSql, RowCandidate,
     },
+    ASTRBOT_CAPTURE_REVISION, ASTRBOT_POLICY_REVISION,
 };
+#[cfg(test)]
+use super::discovery::open_root_authorized_snapshot;
 use super::{
-    discovery::{
-        open_root_authorized_snapshot, revision_digest, source_observation,
-        AstrBotSourceBackedSourceV0,
-    },
+    discovery::AstrBotSourceBackedSourceV0,
     identity::{
         conversation_document, logical_values_digest, platform_document, EventFact, SessionFact,
     },
@@ -34,6 +35,7 @@ use super::{
 };
 
 type PlatformUnitProjection = (Option<CoreUnit>, Option<String>, [u8; 32], Option<String>);
+const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 
 #[derive(Debug)]
 struct CoreUnit {
@@ -160,31 +162,33 @@ where
     }
 }
 
+#[cfg(test)]
 pub(crate) fn scan_astrbot_source_backed_v0(
     source: &AstrBotSourceBackedSourceV0,
     sink: &mut impl AstrBotSourceBackedSinkV0,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
     let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&source.path)?;
-    let opening_evidence = sqlite_snapshot.evidence().clone();
+    let certificate = scan_astrbot_snapshot_v0(source, sqlite_snapshot, sink)?;
+    source_root.revalidate()?;
+    Ok(certificate)
+}
+
+pub(crate) fn scan_astrbot_snapshot_v0(
+    source: &AstrBotSourceBackedSourceV0,
+    sqlite_snapshot: SqliteSourceReadSnapshot,
+    sink: &mut impl AstrBotSourceBackedSinkV0,
+) -> AstrBotSourceBackedResultV0<CertifiedSource> {
     let conn = sqlite_snapshot.connection()?;
     let sql = AstrBotSql::new(conn)?;
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-    let opening = source_observation(
-        &source.source_key,
-        &opening_evidence,
-        user_version,
-        &schema_fingerprint,
-    )?;
-    let source_revision_digest = revision_digest(&opening);
-    let revision_scope = TypedKey::bytes(source_revision_digest.to_vec())?;
     let mut counts = ScannedSourceCounts::default();
     let mut content_chain = [0_u8; 32];
     let mut native_ordinal = 0_u64;
     let mut conversation_after = None;
-    let mut pending_documents = Vec::new();
+    let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
     let mut checkpoint_links = BTreeMap::new();
 
     loop {
@@ -255,8 +259,6 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                 let session = conversation_session_fact(&row);
                 let document = conversation_document(
                     source,
-                    &source_revision_digest,
-                    &revision_scope,
                     candidate.physical_rowid,
                     item_index,
                     row_digest,
@@ -265,7 +267,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                     &event,
                     &complete_text,
                 )?;
-                pending_documents.push(document);
+                emit_bounded(sink, &mut page, document)?;
                 add_retained(&mut counts)?;
             } else {
                 add_ignored(&mut counts)?;
@@ -311,7 +313,6 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                     if let Some(event) = unit.event {
                         let document = platform_document(
                             source,
-                            &source_revision_digest,
                             candidate.physical_rowid,
                             candidate.legacy_order.logical_id,
                             row_digest,
@@ -321,7 +322,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                                 .as_deref()
                                 .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?,
                         )?;
-                        pending_documents.push(document);
+                        emit_bounded(sink, &mut page, document)?;
                         add_retained(&mut counts)?;
                     } else {
                         add_ignored(&mut counts)?;
@@ -336,30 +337,40 @@ pub(crate) fn scan_astrbot_source_backed_v0(
         }
     }
 
-    let closing_evidence = sqlite_snapshot.finish()?;
-    source_root.revalidate()?;
-    let closing = source_observation(
-        &source.source_key,
-        &closing_evidence,
-        user_version,
-        &schema_fingerprint,
-    )?;
+    for document in page {
+        sink.emit(document)?;
+    }
+    sqlite_snapshot.finish()?;
     let mut digest = Sha256::new();
     digest.update(b"ctx-astrbot-source-backed-content-v0\0");
     digest.update(content_chain);
     digest.update(counts.complete_records.to_be_bytes());
     digest.update(counts.certified_bytes.to_be_bytes());
-    let certificate = CertifiedSource::certify(
-        opening,
-        closing,
+    let schema_evidence = format!(
+        "capture={ASTRBOT_CAPTURE_REVISION}\0policy={ASTRBOT_POLICY_REVISION}\0\
+         user_version={user_version}\0schema={schema_fingerprint}"
+    );
+    Ok(SqliteLogicalSnapshot::new(
         PARSER_REVISION,
+        schema_evidence.as_bytes(),
         digest.finalize().into(),
         counts,
-    )?;
-    for document in pending_documents {
-        sink.emit(document)?;
+    )
+    .certify(source.source_key.clone())?)
+}
+
+fn emit_bounded(
+    sink: &mut impl AstrBotSourceBackedSinkV0,
+    page: &mut Vec<LexicalDocument>,
+    document: LexicalDocument,
+) -> AstrBotSourceBackedResultV0<()> {
+    page.push(document);
+    if page.len() == SOURCE_BACKED_PAGE_ROWS {
+        for document in page.drain(..) {
+            sink.emit(document)?;
+        }
     }
-    Ok(certificate)
+    Ok(())
 }
 
 fn source_backed_platform_unit(

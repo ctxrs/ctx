@@ -13,9 +13,12 @@ mod source_backed;
 
 use records::{hash_optional_bytes, hash_optional_i64, hash_optional_u64};
 pub(super) use records::{lingma_complete_user_message, lingma_complete_values};
+#[cfg(test)]
+pub(crate) use source_backed::scan_lingma_source_backed_v0;
 pub(crate) use source_backed::{
-    scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0,
-    LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
+    reject_duplicate_paths, scan_lingma_snapshot_v0, LingmaDatabaseSourceV0,
+    LingmaSourceBackedErrorV0, LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0,
+    LingmaSourceInventoryV0, PARSER_REVISION as LINGMA_SOURCE_BACKED_PARSER_REVISION,
 };
 
 const CORE_PAGE_LOOKAHEAD_ROWS: usize = 65;

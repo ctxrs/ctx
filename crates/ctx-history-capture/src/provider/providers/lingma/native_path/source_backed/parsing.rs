@@ -1,43 +1,64 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-use ctx_history_core::{
-    CertifiedSource, CertifiedSourceInventory, ScannedSourceCounts, SourceKey, TypedKey,
-};
+#[cfg(test)]
+use ctx_history_core::CertifiedSourceInventory;
+use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceKey};
+use ctx_history_index::LexicalDocument;
 use sha2::Digest;
 
-use crate::{provider::sqlite::sqlite_schema_fingerprint, CaptureError};
+use crate::{
+    provider::sqlite::sqlite_schema_fingerprint,
+    provider_sources::{SqliteLogicalSnapshot, SqliteSourceReadSnapshot},
+    CaptureError,
+};
 
 use super::super::{
     detect_schema, hash_candidate, initial_prefix_hasher, load_candidates, load_raw_row,
     records::{assistant_text, lingma_logical_record_sha256, native_values},
     SqliteEncoding,
 };
+#[cfg(test)]
 use super::{
-    discovery::{
-        source_observation, source_revision_digest, LingmaDatabaseSourceV0,
-        LingmaRootAuthorizedSource, LingmaSourceInventoryV0,
-    },
-    identity::{project_row, LingmaSourceBackedRecordV0, ParsedRow},
-    LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, INVENTORY_DISCOVERY_REVISION,
-    PARSER_REVISION,
+    discovery::LingmaRootAuthorizedSource, identity::LingmaSourceBackedRecordV0,
+    INVENTORY_DISCOVERY_REVISION,
+};
+use super::{
+    discovery::{LingmaDatabaseSourceV0, LingmaSourceInventoryV0},
+    identity::{project_row, ParsedRow},
+    LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, PARSER_REVISION,
 };
 
+const SOURCE_BACKED_PAGE_ROWS: usize = 64;
+type DuplicateRequestIdentity = (Vec<u8>, Vec<u8>);
+
+pub(crate) trait LingmaSourceBackedSinkV0 {
+    fn emit(&mut self, document: LexicalDocument) -> LingmaSourceBackedResultV0<()>;
+}
+
+impl<F> LingmaSourceBackedSinkV0 for F
+where
+    F: FnMut(LexicalDocument) -> LingmaSourceBackedResultV0<()>,
+{
+    fn emit(&mut self, document: LexicalDocument) -> LingmaSourceBackedResultV0<()> {
+        self(document)
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaDatabaseScanV0 {
     pub(super) certificate: CertifiedSource,
     pub(super) records: Vec<LingmaSourceBackedRecordV0>,
 }
 
+#[cfg(test)]
 impl LingmaDatabaseScanV0 {
-    pub(crate) fn certificate(&self) -> &CertifiedSource {
-        &self.certificate
-    }
-
     pub(crate) fn records(&self) -> &[LingmaSourceBackedRecordV0] {
         &self.records
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceBackedScanV0 {
     pub(super) databases: Vec<LingmaDatabaseScanV0>,
@@ -68,12 +89,14 @@ fn before_database_certification() {
 #[cfg(not(test))]
 fn before_database_certification() {}
 
+#[cfg(test)]
 impl LingmaSourceBackedScanV0 {
     pub(crate) fn databases(&self) -> &[LingmaDatabaseScanV0] {
         &self.databases
     }
 }
 
+#[cfg(test)]
 pub(crate) fn scan_lingma_source_backed_v0<F>(
     opening_inventory: LingmaSourceInventoryV0,
     close_inventory: F,
@@ -84,7 +107,18 @@ where
     reject_duplicate_paths(&opening_inventory)?;
     let mut databases = Vec::with_capacity(opening_inventory.databases.len());
     for database in &opening_inventory.databases {
-        databases.push(scan_database(database)?);
+        let root_authority = LingmaRootAuthorizedSource::retain(&database.path)?;
+        let sqlite_snapshot = root_authority.open_snapshot()?;
+        let mut records = Vec::new();
+        let certificate = scan_lingma_snapshot_v0(database, sqlite_snapshot, &mut |document| {
+            records.push(LingmaSourceBackedRecordV0 { document });
+            Ok(())
+        })?;
+        root_authority.source_root.revalidate()?;
+        databases.push(LingmaDatabaseScanV0 {
+            certificate,
+            records,
+        });
     }
 
     let closing_inventory = close_inventory()?;
@@ -101,7 +135,9 @@ where
     Ok(LingmaSourceBackedScanV0 { databases })
 }
 
-fn reject_duplicate_paths(inventory: &LingmaSourceInventoryV0) -> LingmaSourceBackedResultV0<()> {
+pub(crate) fn reject_duplicate_paths(
+    inventory: &LingmaSourceInventoryV0,
+) -> LingmaSourceBackedResultV0<()> {
     let mut paths = inventory
         .databases
         .iter()
@@ -114,87 +150,52 @@ fn reject_duplicate_paths(inventory: &LingmaSourceInventoryV0) -> LingmaSourceBa
     Ok(())
 }
 
-fn scan_database(
+pub(crate) fn scan_lingma_snapshot_v0(
     database: &LingmaDatabaseSourceV0,
-) -> LingmaSourceBackedResultV0<LingmaDatabaseScanV0> {
+    sqlite_snapshot: SqliteSourceReadSnapshot,
+    sink: &mut impl LingmaSourceBackedSinkV0,
+) -> LingmaSourceBackedResultV0<CertifiedSource> {
     let source = database.source_key()?;
-    let root_authority = LingmaRootAuthorizedSource::retain(&database.path)?;
-    let sqlite_snapshot = root_authority.open_snapshot()?;
-    let opening_evidence = sqlite_snapshot.evidence().clone();
     let connection = sqlite_snapshot.connection()?;
     let encoding = detect_schema(connection)?;
     let user_version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
-    let opening = source_observation(
-        source.clone(),
-        &opening_evidence,
-        user_version,
-        &schema_fingerprint,
-        encoding,
-    )?;
-    let source_revision_digest = source_revision_digest(&opening);
-    let revision_scope = TypedKey::bytes(opening.revision().to_vec())?;
     let source_path = database.path.display().to_string();
-    let parsed = scan_rows(
-        connection,
-        encoding,
-        &source,
-        &source_revision_digest,
-        &revision_scope,
-        &source_path,
-    )?;
-    sqlite_snapshot.finish()?;
-    root_authority.source_root.revalidate()?;
-
-    let closing_sqlite_snapshot = root_authority.open_snapshot()?;
-    let closing_evidence = closing_sqlite_snapshot.evidence().clone();
-    let closing_connection = closing_sqlite_snapshot.connection()?;
-    let closing_encoding = detect_schema(closing_connection)?;
-    let closing_user_version = closing_connection
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(CaptureError::from)?;
-    let closing_schema_fingerprint = sqlite_schema_fingerprint(closing_connection)?;
-    closing_sqlite_snapshot.finish()?;
+    let parsed = scan_rows(connection, encoding, &source, &source_path, sink)?;
     before_database_certification();
-    if !root_authority.evidence_is_current(&closing_evidence)? {
-        return Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan);
-    }
-    let closing = source_observation(
-        source,
-        &closing_evidence,
-        closing_user_version,
-        &closing_schema_fingerprint,
-        closing_encoding,
-    )?;
-    let certificate = CertifiedSource::certify(
-        opening,
-        closing,
+    sqlite_snapshot.finish()?;
+    let schema_evidence = format!(
+        "user_version={user_version}\0schema={schema_fingerprint}\0encoding={}",
+        match encoding {
+            SqliteEncoding::Utf8 => "utf8",
+            SqliteEncoding::Utf16Le => "utf16le",
+            SqliteEncoding::Utf16Be => "utf16be",
+        }
+    );
+    Ok(SqliteLogicalSnapshot::new(
         PARSER_REVISION,
+        schema_evidence.as_bytes(),
         parsed.content_digest,
         ScannedSourceCounts {
             complete_records: parsed.complete_records,
             retained_records: parsed.retained_records,
             rejected_records: parsed.rejected_records,
             ignored_records: parsed.ignored_records,
-            indexed_documents: u64::try_from(parsed.records.len())
-                .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?,
+            indexed_documents: parsed.indexed_documents,
             certified_bytes: parsed.certified_bytes,
         },
-    )?;
-    Ok(LingmaDatabaseScanV0 {
-        certificate,
-        records: parsed.records,
-    })
+    )
+    .certify(source)?)
 }
 
 struct ParsedScan {
-    records: Vec<LingmaSourceBackedRecordV0>,
     complete_records: u64,
     retained_records: u64,
     rejected_records: u64,
     ignored_records: u64,
+    indexed_documents: u64,
     certified_bytes: u64,
     content_digest: [u8; 32],
 }
@@ -203,18 +204,19 @@ fn scan_rows(
     connection: &rusqlite::Connection,
     encoding: SqliteEncoding,
     source: &SourceKey,
-    source_revision_digest: &[u8; 32],
-    revision_scope: &TypedKey,
     source_path: &str,
-) -> Result<ParsedScan, CaptureError> {
+    sink: &mut impl LingmaSourceBackedSinkV0,
+) -> LingmaSourceBackedResultV0<ParsedScan> {
     let mut after_rowid = None;
     let mut physical_ordinal = 0_u64;
     let mut certified_bytes = 0_u64;
     let mut rejected_records = 0_u64;
     let mut ignored_records = 0_u64;
     let mut retained_records = 0_u64;
+    let mut indexed_documents = 0_u64;
     let mut hasher = initial_prefix_hasher();
-    let mut rows = Vec::new();
+    let duplicate_requests = duplicate_request_identities(connection)?;
+    let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
 
     loop {
         let candidates = load_candidates(connection, encoding, after_rowid, None)?;
@@ -245,13 +247,42 @@ fn scan_rows(
                 }
                 Some(row) => {
                     let logical_records = 1_u64 + u64::from(assistant_text(&row).is_some());
-                    retained_records = retained_records.saturating_add(logical_records);
+                    retained_records = retained_records
+                        .checked_add(logical_records)
+                        .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
                     let record_digest = lingma_logical_record_sha256(&native_values(&row));
-                    rows.push(ParsedRow {
-                        ordinal: physical_ordinal,
-                        row,
-                        record_digest,
-                    });
+                    let request_identity_unique = row
+                        .request_id
+                        .as_ref()
+                        .filter(|request_id| !request_id.trim().is_empty())
+                        .is_some_and(|request_id| {
+                            !duplicate_requests.contains(&(
+                                row.session_id.as_bytes().to_vec(),
+                                request_id.as_bytes().to_vec(),
+                            ))
+                        });
+                    let mut projected = Vec::with_capacity(2);
+                    project_row(
+                        source,
+                        source_path,
+                        ParsedRow {
+                            ordinal: physical_ordinal,
+                            row,
+                            record_digest,
+                            request_identity_unique,
+                        },
+                        &mut projected,
+                    )?;
+                    indexed_documents = indexed_documents
+                        .checked_add(
+                            u64::try_from(projected.len())
+                                .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?,
+                        )
+                        .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
+                    if page.len().saturating_add(projected.len()) > SOURCE_BACKED_PAGE_ROWS {
+                        emit_page(sink, &mut page)?;
+                    }
+                    page.extend(projected.into_iter().map(|record| record.document));
                 }
                 None => {
                     rejected_records = rejected_records.saturating_add(1);
@@ -265,48 +296,39 @@ fn scan_rows(
     let complete_records = retained_records
         .checked_add(rejected_records)
         .and_then(|count| count.checked_add(ignored_records))
-        .ok_or(CaptureError::SystemInvariant(
-            "Lingma logical record count exhausted",
-        ))?;
-    let request_counts = request_identity_counts(&rows);
-    let mut records = Vec::with_capacity(usize::try_from(retained_records).unwrap_or(usize::MAX));
-    for parsed in rows {
-        project_row(
-            source,
-            source_revision_digest,
-            revision_scope,
-            source_path,
-            &request_counts,
-            parsed,
-            &mut records,
-        )
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    }
+        .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
+    emit_page(sink, &mut page)?;
     Ok(ParsedScan {
-        records,
         complete_records,
         retained_records,
         rejected_records,
         ignored_records,
+        indexed_documents,
         certified_bytes,
         content_digest: hasher.finalize().into(),
     })
 }
 
-fn request_identity_counts(rows: &[ParsedRow]) -> BTreeMap<(String, String), usize> {
-    let mut counts = BTreeMap::new();
-    for parsed in rows {
-        let Some(request_id) = parsed
-            .row
-            .request_id
-            .as_ref()
-            .filter(|request_id| !request_id.trim().is_empty())
-        else {
-            continue;
-        };
-        *counts
-            .entry((parsed.row.session_id.clone(), request_id.clone()))
-            .or_default() += 1;
+fn duplicate_request_identities(
+    connection: &rusqlite::Connection,
+) -> Result<BTreeSet<DuplicateRequestIdentity>, CaptureError> {
+    let mut statement = connection.prepare(
+        "select cast(session_id as blob), cast(request_id as blob)
+           from chat_record
+          where request_id is not null and length(cast(request_id as blob)) > 0
+          group by cast(session_id as blob), cast(request_id as blob)
+         having count(*) > 1",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<Result<_, _>>().map_err(CaptureError::from)
+}
+
+fn emit_page(
+    sink: &mut impl LingmaSourceBackedSinkV0,
+    page: &mut Vec<LexicalDocument>,
+) -> LingmaSourceBackedResultV0<()> {
+    for document in page.drain(..) {
+        sink.emit(document)?;
     }
-    counts
+    Ok(())
 }
