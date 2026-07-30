@@ -157,7 +157,7 @@ impl ReplacementDocumentTree for CodeBuddyDocumentAdapter {
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
         #[cfg(test)]
         if let Some(leaf_workers) = self.leaf_workers {
-            return DocumentLeafExecutionPolicy::IndependentWithWorkers(leaf_workers);
+            return DocumentLeafExecutionPolicy::IndependentCapped(leaf_workers);
         }
         document_leaf_execution_policy(CaptureProvider::CodeBuddy)
     }

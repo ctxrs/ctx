@@ -67,6 +67,10 @@ pub enum ParallelLeafScanComplete<R> {
         append: CertifiedSourceAppend,
         result: R,
     },
+    Retain {
+        certificate: CertifiedSource,
+        result: R,
+    },
     Skipped {
         result: R,
     },
@@ -84,6 +88,13 @@ impl<R> ParallelLeafScanComplete<R> {
         Self::Append { append, result }
     }
 
+    pub fn retain(certificate: CertifiedSource, result: R) -> Self {
+        Self::Retain {
+            certificate,
+            result,
+        }
+    }
+
     pub fn skipped(result: R) -> Self {
         Self::Skipped { result }
     }
@@ -96,6 +107,7 @@ pub enum ParallelLeafScanMessageKind {
     Document,
     CompleteReplace,
     CompleteAppend,
+    CompleteRetain,
 }
 
 impl std::fmt::Display for ParallelLeafScanMessageKind {
@@ -106,6 +118,7 @@ impl std::fmt::Display for ParallelLeafScanMessageKind {
             Self::Document => formatter.write_str("document"),
             Self::CompleteReplace => formatter.write_str("replacement completion"),
             Self::CompleteAppend => formatter.write_str("append completion"),
+            Self::CompleteRetain => formatter.write_str("retained completion"),
         }
     }
 }
@@ -114,6 +127,7 @@ impl std::fmt::Display for ParallelLeafScanMessageKind {
 pub enum ParallelLeafScanMode {
     Replace,
     Append,
+    Retain,
     Skipped,
 }
 
@@ -122,6 +136,7 @@ impl std::fmt::Display for ParallelLeafScanMode {
         match self {
             Self::Replace => formatter.write_str("replacement"),
             Self::Append => formatter.write_str("append"),
+            Self::Retain => formatter.write_str("retained"),
             Self::Skipped => formatter.write_str("skipped"),
         }
     }
@@ -221,6 +236,7 @@ pub enum ParallelLeafSinkOperation {
     AddDocument,
     CompleteReplace,
     CompleteAppend,
+    RetainSource,
 }
 
 impl std::fmt::Display for ParallelLeafSinkOperation {
@@ -231,6 +247,7 @@ impl std::fmt::Display for ParallelLeafSinkOperation {
             Self::AddDocument => formatter.write_str("add document"),
             Self::CompleteReplace => formatter.write_str("complete replacement"),
             Self::CompleteAppend => formatter.write_str("complete append"),
+            Self::RetainSource => formatter.write_str("retain source"),
         }
     }
 }
@@ -646,6 +663,35 @@ where
                 )
             })?;
             state.completion = Some(ParallelLeafScanMode::Append);
+            Ok(result)
+        }
+        ParallelLeafScanComplete::Retain {
+            certificate,
+            result,
+        } => {
+            if state.begin.is_some() {
+                return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
+            }
+            let source = bound_source(
+                job_index,
+                ParallelLeafScanMessageKind::CompleteRetain,
+                state,
+            )?;
+            validate_source(
+                job_index,
+                ParallelLeafScanMessageKind::CompleteRetain,
+                source,
+                certificate.observation().source(),
+            )?;
+            sink.retain_source(certificate).map_err(|error| {
+                sink_error(
+                    job_index,
+                    source,
+                    ParallelLeafSinkOperation::RetainSource,
+                    error,
+                )
+            })?;
+            state.completion = Some(ParallelLeafScanMode::Retain);
             Ok(result)
         }
         ParallelLeafScanComplete::Skipped { result } => {

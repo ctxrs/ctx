@@ -12,6 +12,54 @@ pub(super) struct PendingSource {
 pub(super) enum PendingSourceMode {
     Replace,
     Append { base: CertifiedSource },
+    Retain { base: CertifiedSource },
+}
+
+impl GenerationWriter {
+    /// Retains one source after a full logical rescan reproduced its exact
+    /// certified base. This records current-source coverage without opening
+    /// Tantivy or requiring an append frontier.
+    pub fn retain_source(&mut self, certificate: CertifiedSource) -> Result<()> {
+        certificate.validate_contract()?;
+        let source = certificate.observation().source();
+        register_compact_identity(
+            &mut self.source_identities,
+            source.identity(),
+            "source",
+            false,
+        )?;
+        let token = source_token(source);
+        if self.pending.contains_key(&token) {
+            return Err(IndexError::DuplicateSource(source.identity().to_string()));
+        }
+        let base =
+            self.base_manifest
+                .as_ref()
+                .and_then(|manifest| {
+                    manifest.sources.iter().find(|candidate| {
+                        candidate.observation().source().exact_descriptor_eq(source)
+                    })
+                })
+                .cloned()
+                .ok_or_else(|| IndexError::SourceNotAppendable(source.identity().to_string()))?;
+        if base != certificate {
+            return Err(IndexError::SourceCertificateMismatch);
+        }
+        self.deletions.remove(source);
+        self.pending.insert(
+            token.clone(),
+            super::PendingSource {
+                index_fields: IndexSourceFields::new(source, &token),
+                staged: PendingSource {
+                    source: source.clone(),
+                    mode: PendingSourceMode::Retain { base },
+                    staged_documents: 0,
+                    certificate: Some(certificate),
+                },
+            },
+        );
+        Ok(())
+    }
 }
 
 pub(super) fn verify_published_mutations(
@@ -25,7 +73,9 @@ pub(super) fn verify_published_mutations(
             .ok_or_else(|| IndexError::SourceNotCertified(pending.source.identity().to_string()))?;
         let changed = match &pending.mode {
             PendingSourceMode::Replace => true,
-            PendingSourceMode::Append { base } => certificate != base,
+            PendingSourceMode::Append { base } | PendingSourceMode::Retain { base } => {
+                certificate != base
+            }
         };
         if changed {
             crate::publication::verify_source_document_count(&verified.searcher, certificate)?;
