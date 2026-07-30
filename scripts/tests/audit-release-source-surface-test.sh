@@ -21,7 +21,16 @@ if ! bash "${checker}" "${fixture_root}/retained-pro-uninstall" >/dev/null; then
   fail 'retained Local Pro lifecycle uninstall was rejected'
 fi
 
-for retired_case in retired-top-level-uninstall retired-command-surfaces retired-misplaced-pro-uninstall; do
+if ! bash "${checker}" "${fixture_root}/retained-upgrade-status" >/dev/null; then
+  fail 'retained upgrade availability status was rejected'
+fi
+
+for retired_case in \
+  retired-top-level-uninstall \
+  retired-command-surfaces \
+  retired-misplaced-pro-uninstall \
+  retired-update-invocation \
+  retired-update-route; do
   if bash "${checker}" "${fixture_root}/${retired_case}" >/dev/null 2>&1; then
     fail "removed surface passed: ${retired_case}"
   fi

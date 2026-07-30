@@ -772,9 +772,12 @@ sh_test(
     data = [
         "scripts/check-release-source-surface.sh",
         "scripts/tests/fixtures/release-source-surface/retained-pro-uninstall/crates/ctx-cli/src/pro/lifecycle_commands.rs",
+        "scripts/tests/fixtures/release-source-surface/retained-upgrade-status/crates/ctx-cli/src/upgrade/command/status.rs",
         "scripts/tests/fixtures/release-source-surface/retired-command-surfaces/crates/ctx-cli/src/main.rs",
         "scripts/tests/fixtures/release-source-surface/retired-misplaced-pro-uninstall/crates/ctx-cli/src/pro/other.rs",
         "scripts/tests/fixtures/release-source-surface/retired-top-level-uninstall/crates/ctx-cli/src/main.rs",
+        "scripts/tests/fixtures/release-source-surface/retired-update-invocation/crates/ctx-cli/src/main.rs",
+        "scripts/tests/fixtures/release-source-surface/retired-update-route/crates/ctx-cli/src/main.rs",
     ],
     tags = ["non-rust-action"],
 )
