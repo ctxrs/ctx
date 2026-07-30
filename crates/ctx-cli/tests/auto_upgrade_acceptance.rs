@@ -15,21 +15,39 @@ mod unix {
     const FIXTURE_TARGET_VERSION: &str = "9.9.9";
     const FIXTURE_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(45);
 
-    fn scheduler_state_path(binary: &Path) -> PathBuf {
-        binary.with_file_name(".ctx.upgrade-state.json")
+    fn installation_sibling(binary: &Path, suffix: &str) -> PathBuf {
+        let name = binary
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ctx");
+        binary.with_file_name(format!(".{name}.{suffix}"))
     }
 
-    fn managed_hook_candidate(temp: &tempfile::TempDir, install_attempt_id: &str) -> PathBuf {
+    fn scheduler_state_path(binary: &Path) -> PathBuf {
+        installation_sibling(binary, "upgrade-state.json")
+    }
+
+    fn configured_hook_fixture() -> PathBuf {
         let configured = PathBuf::from(
             std::env::var_os("CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE")
                 .expect("Bazel must provide the auto-upgrade hook fixture"),
         );
-        let source = if configured.is_absolute() {
+        if configured.is_absolute() {
             configured
         } else {
             std::env::current_dir().unwrap().join(configured)
-        };
-        managed_candidate_from_binary(temp, &source, install_attempt_id)
+        }
+    }
+
+    fn managed_hook_candidate(temp: &tempfile::TempDir, install_attempt_id: &str) -> PathBuf {
+        managed_candidate_from_binary(temp, &configured_hook_fixture(), install_attempt_id)
+    }
+
+    fn managed_bound_hook_candidate(
+        temp: &FiniteDaemonTestRoot,
+        install_attempt_id: &str,
+    ) -> PathBuf {
+        managed_bound_candidate_from_binary(temp, &configured_hook_fixture(), install_attempt_id)
     }
 
     fn managed_daemon(
@@ -120,6 +138,21 @@ mod unix {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     }
 
+    fn start_managed_background_daemon(
+        temp: &FiniteDaemonTestRoot,
+        release: &FakeRelease,
+        binary: &Path,
+    ) {
+        let mut command = ctx(temp);
+        managed_release_env(&mut command, release, binary);
+        let output = command
+            .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
+            .args(["daemon", "enable", "--format=json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
     fn wait_for(description: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + timeout;
         while !condition() {
@@ -139,12 +172,17 @@ mod unix {
         (status["status"] == "running" && previous_pid != Some(pid)).then_some(pid)
     }
 
+    fn process_is_running(pid: u32) -> bool {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
     fn installation_acknowledgement(
         binary: &Path,
         data_root: &Path,
         attempt_id: &str,
     ) -> Option<Value> {
-        let root = binary.with_file_name(".ctx.daemon-quiescence-acks");
+        let root = installation_sibling(binary, "daemon-quiescence-acks");
         fs::read_dir(root).ok()?.find_map(|entry| {
             let value: Value = serde_json::from_slice(&fs::read(entry.ok()?.path()).ok()?).ok()?;
             (value["status"] == "acknowledged"
@@ -200,11 +238,12 @@ mod unix {
         .unwrap();
     }
 
-    fn initialize_source_backed_epoch(data_root: &Path) {
-        seed_authoritative_codex_source(data_root);
-        let generation_id = initialize_generation_only_sql_projection(data_root);
+    fn initialize_source_backed_epoch(temp: &tempfile::TempDir) {
+        seed_authoritative_codex_source(temp.path());
+        let data_root = data_root(temp);
+        let generation_id = initialize_generation_only_sql_projection(&data_root);
         assert!(!generation_id.is_empty());
-        assert_source_backed_epoch_remained_fresh(data_root);
+        assert_source_backed_epoch_remained_fresh(&data_root);
     }
 
     fn assert_source_backed_epoch_remained_fresh(data_root: &Path) {
@@ -223,7 +262,7 @@ mod unix {
     }
 
     fn acknowledgement_snapshot(binary: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-        let root = binary.with_file_name(".ctx.daemon-quiescence-acks");
+        let root = installation_sibling(binary, "daemon-quiescence-acks");
         let Ok(entries) = fs::read_dir(root) else {
             return Vec::new();
         };
@@ -267,6 +306,45 @@ mod unix {
         fs::write(journal_path, replacement_bytes).unwrap();
     }
 
+    fn assert_original_terminal_scheduler_evidence(binary: &Path, original_attempt_id: &str) {
+        let state: Value =
+            serde_json::from_slice(&fs::read(scheduler_state_path(binary)).unwrap()).unwrap();
+        assert_eq!(state["schema_version"], 1);
+        assert_eq!(state["status"], "error");
+        assert_eq!(state["attempt_id"], original_attempt_id);
+        assert_eq!(state["attempt_source"], "daemon");
+        assert_eq!(state["current_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(state["latest_version"], FIXTURE_TARGET_VERSION);
+        assert_eq!(state["install_path"], binary.display().to_string());
+        assert_eq!(state["managed"], true);
+        assert!(
+            state["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("injected applying-state write failure")),
+            "{state:#}"
+        );
+    }
+
+    fn assert_current_replacement_recovery_evidence(
+        journal: &[u8],
+        replacement_attempt_id: &str,
+        binary: &Path,
+        data_root: &Path,
+    ) {
+        let journal: Value = serde_json::from_slice(journal).unwrap();
+        assert_eq!(journal["schema_version"], 2);
+        assert_eq!(journal["phase"], "prepared");
+        assert_eq!(journal["attempt_id"], replacement_attempt_id);
+        assert_eq!(journal["install_path"], binary.display().to_string());
+        assert_eq!(journal["data_root"], data_root.display().to_string());
+        assert!(
+            journal["paths"]
+                .as_array()
+                .is_some_and(|paths| !paths.is_empty()),
+            "{journal:#}"
+        );
+    }
+
     fn prove_stale_recovery_observation_is_rejected(recovery_owner: RecoveryOwner) {
         let installation = tempdir();
         let release = fake_release(&installation, "9.9.9");
@@ -276,7 +354,8 @@ mod unix {
         );
         let binary_before = fs::read(&binary).unwrap();
         let owner = tempdir();
-        initialize_source_backed_epoch(owner.path());
+        let owner_data_root = data_root(&owner);
+        initialize_source_backed_epoch(&owner);
 
         let prepared = managed_daemon_with_timing(&owner, &release, &binary, 1, 1)
             .env("CTX_DAEMON_AUTOSTART_OFF", "1")
@@ -284,11 +363,11 @@ mod unix {
             .output()
             .unwrap();
         assert!(prepared.status.success(), "{prepared:?}");
-        let journal_path = binary.with_file_name(".ctx.upgrade-install-transaction.json");
+        let journal_path = installation_sibling(&binary, "upgrade-install-transaction.json");
         let journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
         assert_eq!(journal["phase"], "prepared");
         let attempt_id = journal["attempt_id"].as_str().unwrap().to_owned();
-        let state_before = fs::read(scheduler_state_path(&binary)).unwrap();
+        assert_original_terminal_scheduler_evidence(&binary, &attempt_id);
         let acknowledgements_before = acknowledgement_snapshot(&binary);
         let pause = installation
             .path()
@@ -332,8 +411,13 @@ mod unix {
             let replacement_attempt_id = format!("{attempt_id}-replacement");
             replace_current_recovery_attempt(&journal_path, &attempt_id, &replacement_attempt_id);
             let replacement_journal = fs::read(&journal_path).unwrap();
-            let terminal_state = fs::read(scheduler_state_path(&binary)).unwrap();
-            assert_eq!(terminal_state, state_before);
+            assert_current_replacement_recovery_evidence(
+                &replacement_journal,
+                &replacement_attempt_id,
+                &binary,
+                &owner_data_root,
+            );
+            assert_original_terminal_scheduler_evidence(&binary, &attempt_id);
 
             fs::write(pause.with_extension("continue"), b"continue\n").unwrap();
             if matches!(recovery_owner, RecoveryOwner::Automatic) {
@@ -342,16 +426,13 @@ mod unix {
                     Duration::from_secs(10),
                     || stale_rejection.exists(),
                 );
-                assert_eq!(
-                    fs::read(scheduler_state_path(&binary)).unwrap(),
-                    terminal_state
-                );
+                assert_original_terminal_scheduler_evidence(&binary, &attempt_id);
                 assert_eq!(fs::read(&journal_path).unwrap(), replacement_journal);
                 // The stale observation has now been rejected under the lock.
                 // Disable later scheduler ticks so a fresh, valid discovery of
                 // the replacement attempt cannot obscure what this claimant did.
                 fs::write(
-                    owner.path().join("config.toml"),
+                    owner_data_root.join("config.toml"),
                     "[upgrade]\nauto = \"off\"\n",
                 )
                 .unwrap();
@@ -370,11 +451,7 @@ mod unix {
                 }
             }
 
-            assert_eq!(
-                fs::read(scheduler_state_path(&binary)).unwrap(),
-                terminal_state,
-                "{recovery_owner:?} rewrote terminal scheduler state"
-            );
+            assert_original_terminal_scheduler_evidence(&binary, &attempt_id);
             assert_eq!(
                 fs::read(&journal_path).unwrap(),
                 replacement_journal,
@@ -391,23 +468,24 @@ mod unix {
                 "{recovery_owner:?} began a daemon handoff from stale discovery"
             );
         });
-        assert_source_backed_epoch_remained_fresh(owner.path());
+        assert_source_backed_epoch_remained_fresh(&owner_data_root);
     }
 
     fn prove_recovery_quiescence(recovery_owner: RecoveryOwner) {
-        let installation = tempdir();
-        let release = fake_release(&installation, "9.9.9");
-        let binary = managed_hook_candidate(
-            &installation,
+        let second = finite_daemon_test_root();
+        let release = fake_release(&second, "9.9.9");
+        let binary = managed_bound_hook_candidate(
+            &second,
             &format!("ia_current_recovery_{recovery_owner:?}"),
         );
         let binary_before = fs::read(&binary).unwrap();
         let owner = tempdir();
-        let second = tempdir();
-        initialize_source_backed_epoch(owner.path());
-        initialize_source_backed_epoch(second.path());
+        let owner_data_root = data_root(&owner);
+        let second_data_root = data_root(&second);
+        initialize_source_backed_epoch(&owner);
+        initialize_source_backed_epoch(&second);
         fs::write(
-            second.path().join("config.toml"),
+            second_data_root.join("config.toml"),
             "[upgrade]\nauto = \"off\"\n",
         )
         .unwrap();
@@ -421,7 +499,7 @@ mod unix {
         let state: Value =
             serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
         assert_eq!(state["status"], "error");
-        let journal_path = binary.with_file_name(".ctx.upgrade-install-transaction.json");
+        let journal_path = installation_sibling(&binary, "upgrade-install-transaction.json");
         let journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
         assert_eq!(journal["phase"], "prepared");
         let attempt_id = journal["attempt_id"].as_str().unwrap().to_owned();
@@ -434,25 +512,19 @@ mod unix {
                 )
             });
         }
-        let pause = installation
+        let pause = second
             .path()
             .join(format!("recovering-current-{recovery_owner:?}"));
 
-        std::thread::scope(|scope| {
-            let second_handle = scope.spawn(|| {
-                managed_daemon_with_timing(&second, &release, &binary, 60, 30)
-                    .env("CTX_UPGRADE_AUTO", "off")
-                    .env_remove("CTX_DAEMON_AUTOSTART_OFF")
-                    .output()
-                    .unwrap()
-            });
-            wait_for(
-                "long-running recovery participant",
-                Duration::from_secs(10),
-                || running_daemon_pid(second.path(), None).is_some(),
-            );
-            let second_pid = running_daemon_pid(second.path(), None).unwrap();
+        start_managed_background_daemon(&second, &release, &binary);
+        wait_for(
+            "long-running recovery participant",
+            Duration::from_secs(10),
+            || running_daemon_pid(&second_data_root, None).is_some(),
+        );
+        let second_pid = running_daemon_pid(&second_data_root, None).unwrap();
 
+        std::thread::scope(|scope| {
             let owner_handle = scope.spawn(|| {
                 let mut command = match recovery_owner {
                     RecoveryOwner::Automatic => {
@@ -489,16 +561,14 @@ mod unix {
                 "{recovery_owner:?} mutated its journal before quiescence"
             );
             assert!(
-                second_handle.is_finished(),
+                !process_is_running(second_pid),
                 "{recovery_owner:?} left the opted-out second root running"
             );
-            let second_output = second_handle.join().unwrap();
-            assert!(second_output.status.success(), "{second_output:?}");
             let recovering: Value =
                 serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
             assert_eq!(recovering["status"], "recovering");
             assert_eq!(recovering["attempt_id"], attempt_id);
-            let second_ack = installation_acknowledgement(&binary, second.path(), &attempt_id)
+            let second_ack = installation_acknowledgement(&binary, &second_data_root, &attempt_id)
                 .unwrap_or_else(|| {
                     panic!("{recovery_owner:?} has no second-root recovery acknowledgement")
                 });
@@ -525,7 +595,7 @@ mod unix {
             );
 
             let owner_pid = if matches!(recovery_owner, RecoveryOwner::Automatic) {
-                installation_acknowledgement(&binary, owner.path(), &attempt_id)
+                installation_acknowledgement(&binary, &owner_data_root, &attempt_id)
                     .and_then(|value| value["pid"].as_u64())
                     .and_then(|pid| u32::try_from(pid).ok())
             } else {
@@ -544,7 +614,7 @@ mod unix {
                 "opted-out second root recovery restart replay",
                 Duration::from_secs(15),
                 || {
-                    restarted_second = running_daemon_pid(second.path(), Some(second_pid));
+                    restarted_second = running_daemon_pid(&second_data_root, Some(second_pid));
                     restarted_second.is_some()
                 },
             );
@@ -555,7 +625,7 @@ mod unix {
                     "automatic recovery owner restart",
                     Duration::from_secs(15),
                     || {
-                        restarted_owner = running_daemon_pid(owner.path(), Some(owner_pid));
+                        restarted_owner = running_daemon_pid(&owner_data_root, Some(owner_pid));
                         restarted_owner.is_some()
                     },
                 );
@@ -575,8 +645,8 @@ mod unix {
                 }
             }
         });
-        assert_source_backed_epoch_remained_fresh(owner.path());
-        assert_source_backed_epoch_remained_fresh(second.path());
+        assert_source_backed_epoch_remained_fresh(&owner_data_root);
+        assert_source_backed_epoch_remained_fresh(&second_data_root);
     }
 
     #[test]
@@ -629,7 +699,7 @@ mod unix {
         .unwrap();
         assert!(!interrupted.status.success(), "{interrupted:?}");
 
-        let journal = binary.with_file_name(".ctx.upgrade-install-transaction.json");
+        let journal = installation_sibling(&binary, "upgrade-install-transaction.json");
         assert!(journal.exists());
         let binary_before = fs::read(&binary).unwrap();
         let journal_before = fs::read(&journal).unwrap();
@@ -657,7 +727,7 @@ mod unix {
             .assert()
             .success();
 
-        let journal = binary.with_file_name(".ctx.upgrade-install-transaction.json");
+        let journal = installation_sibling(&binary, "upgrade-install-transaction.json");
         let transaction: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
         assert_eq!(transaction["phase"], "prepared");
         assert_eq!(fs::read(&binary).unwrap(), before);
@@ -746,32 +816,32 @@ mod unix {
 
     #[test]
     fn long_running_second_root_acknowledges_before_mutation_and_restarts() {
-        let installation = tempdir();
-        let mut release = fake_release(&installation, FIXTURE_TARGET_VERSION);
-        let binary = managed_hook_candidate(&installation, "ia_cross_root");
+        let second = finite_daemon_test_root();
+        let mut release = fake_release(&second, FIXTURE_TARGET_VERSION);
+        let binary = managed_bound_hook_candidate(&second, "ia_cross_root");
         patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
         let binary_before = fs::read(&binary).unwrap();
         let first = tempdir();
-        let second = tempdir();
-        initialize_source_backed_epoch(first.path());
-        initialize_source_backed_epoch(second.path());
-        let pause = installation.path().join("installation-quiesced");
+        let first_data_root = data_root(&first);
+        let second_data_root = data_root(&second);
+        initialize_source_backed_epoch(&first);
+        initialize_source_backed_epoch(&second);
+        fs::write(
+            second_data_root.join("config.toml"),
+            "[upgrade]\nauto = \"off\"\n",
+        )
+        .unwrap();
+        let pause = second.path().join("installation-quiesced");
+
+        start_managed_background_daemon(&second, &release, &binary);
+        wait_for(
+            "long-running second daemon",
+            Duration::from_secs(10),
+            || running_daemon_pid(&second_data_root, None).is_some(),
+        );
+        let second_pid = running_daemon_pid(&second_data_root, None).unwrap();
 
         std::thread::scope(|scope| {
-            let second_handle = scope.spawn(|| {
-                managed_daemon_with_timing(&second, &release, &binary, 60, 30)
-                    .env("CTX_UPGRADE_AUTO", "off")
-                    .env_remove("CTX_DAEMON_AUTOSTART_OFF")
-                    .output()
-                    .unwrap()
-            });
-            wait_for(
-                "long-running second daemon",
-                Duration::from_secs(10),
-                || running_daemon_pid(second.path(), None).is_some(),
-            );
-            let second_pid = running_daemon_pid(second.path(), None).unwrap();
-
             let owner_handle = scope.spawn(|| {
                 managed_daemon_with_timing(&first, &release, &binary, 60, 30)
                     .env("CTX_UPGRADE_INTERVAL_SECONDS", "3600")
@@ -792,25 +862,22 @@ mod unix {
                 "managed executable changed before every daemon acknowledged quiescence"
             );
             assert!(
-                second_handle.is_finished(),
+                !process_is_running(second_pid),
                 "long-running non-owner daemon had not exited before first mutation"
             );
-            let second_output = second_handle.join().unwrap();
-            assert!(second_output.status.success(), "{second_output:?}");
             let state: Value =
                 serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
             assert_eq!(state["status"], "staged");
             let attempt_id = state["attempt_id"].as_str().unwrap();
-            let second_ack = installation_acknowledgement(&binary, second.path(), attempt_id)
+            let second_ack = installation_acknowledgement(&binary, &second_data_root, attempt_id)
                 .expect("second root did not leave an attempt-bound acknowledgement");
             assert_eq!(second_ack["pid"], second_pid);
-            let owner_pid = installation_acknowledgement(&binary, first.path(), attempt_id)
+            let owner_pid = installation_acknowledgement(&binary, &first_data_root, attempt_id)
                 .and_then(|value| value["pid"].as_u64())
                 .and_then(|pid| u32::try_from(pid).ok())
                 .expect("owner root did not leave an attempt-bound acknowledgement");
             assert!(
-                second
-                    .path()
+                second_data_root
                     .join("daemon/upgrade-restart-requests")
                     .join(format!("{attempt_id}.json"))
                     .exists(),
@@ -827,8 +894,8 @@ mod unix {
                 "both installation daemons to restart",
                 Duration::from_secs(15),
                 || {
-                    restarted_first = running_daemon_pid(first.path(), Some(owner_pid));
-                    restarted_second = running_daemon_pid(second.path(), Some(second_pid));
+                    restarted_first = running_daemon_pid(&first_data_root, Some(owner_pid));
+                    restarted_second = running_daemon_pid(&second_data_root, Some(second_pid));
                     restarted_first.is_some() && restarted_second.is_some()
                 },
             );
@@ -841,14 +908,14 @@ mod unix {
             assert_eq!(final_state["attempt_source"], "daemon");
             assert_eq!(marker["version"], FIXTURE_TARGET_VERSION);
             assert_ne!(fs::read(&binary).unwrap(), binary_before);
-            assert!(!first.path().join("upgrade-state.json").exists());
-            assert!(!second.path().join("upgrade-state.json").exists());
+            assert!(!first_data_root.join("upgrade-state.json").exists());
+            assert!(!second_data_root.join("upgrade-state.json").exists());
 
             stop_daemon(restarted_first.unwrap());
             stop_daemon(restarted_second.unwrap());
         });
-        assert_source_backed_epoch_remained_fresh(first.path());
-        assert_source_backed_epoch_remained_fresh(second.path());
+        assert_source_backed_epoch_remained_fresh(&first_data_root);
+        assert_source_backed_epoch_remained_fresh(&second_data_root);
     }
 
     #[test]
