@@ -8,7 +8,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use super::{
-    copied_ctx_binary, ctx, ctx_from_binary, data_root, json_output, terminate_and_reap_test_child,
+    assert_explicit_source_publication, copied_ctx_binary, ctx, ctx_from_binary, data_root,
+    json_output, terminate_and_reap_test_child,
 };
 
 pub(crate) struct McpSourceRefreshDaemon {
@@ -127,8 +128,13 @@ pub(crate) fn import_codex_fixture_through_daemon(
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["outcome"], "success", "{imported:#}");
-    assert_eq!(imported["totals"]["imported_sources"], 1, "{imported:#}");
+    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
+    assert!(
+        imported["totals"]["current_source_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "{imported:#}"
+    );
     assert!(
         imported["sources"][0]["published_generation"].is_string(),
         "{imported:#}"

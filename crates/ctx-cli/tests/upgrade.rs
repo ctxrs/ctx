@@ -881,8 +881,14 @@ fn upgrade_status_text_output_shows_error_details() {
     };
 
     assert!(
-        stdout.contains("ctx upgrade status: error"),
-        "status line should be present: {stdout}"
+        stdout.contains("Upgrade needs attention"),
+        "error outcome should be present: {stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("State") && line.ends_with("error")),
+        "structured error state should be present: {stdout}"
     );
     assert!(
         stdout.contains("download artifact: connection refused"),

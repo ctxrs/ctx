@@ -393,7 +393,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         let imported = json_output(&mut first_command);
         if explicit.is_some() {
             assert_explicit_source_publication(&imported, stored_provider, source_format);
-            assert_eq!(imported["totals"]["rejected_records"], 0);
+            assert_eq!(imported["totals"]["current_rejected_records"], 0);
         } else {
             assert_authoritative_provider_publication(&imported);
             assert_eq!(imported["totals"]["current_rejected_records"], 0);
@@ -480,11 +480,13 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         let second = json_output(&mut second_command);
         if explicit.is_some() {
             assert_explicit_source_publication(&second, stored_provider, source_format);
-            assert_eq!(second["totals"]["rejected_records"], 0);
+            assert_eq!(second["totals"]["current_rejected_records"], 0);
+            assert_noop_publication(&second);
             assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
         } else {
             assert_authoritative_provider_publication(&second);
             assert_eq!(second["totals"]["current_rejected_records"], 0);
+            assert_noop_publication(&second);
         }
     }
 }

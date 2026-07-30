@@ -558,7 +558,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "--format=json",
         ]));
         assert_explicit_source_publication(&first, stored_provider, expected_format);
-        assert_eq!(first["totals"]["rejected_records"], 0, "{first:#}");
+        assert_eq!(first["totals"]["current_rejected_records"], 0, "{first:#}");
         assert!(
             source_backed_count(
                 &temp,
@@ -648,7 +648,10 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "none",
         ]));
         assert_explicit_source_publication(&imported, provider, source_format);
-        assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
+        assert_eq!(
+            imported["totals"]["current_rejected_records"], 0,
+            "{imported:#}"
+        );
 
         let search = json_output(ctx(&temp).args([
             "search",
@@ -774,7 +777,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_eq!(first["totals"]["current_rejected_records"], 0);
         } else {
             assert_explicit_source_publication(&first, stored_provider, source_format);
-            assert_eq!(first["totals"]["rejected_records"], 0);
+            assert_eq!(first["totals"]["current_rejected_records"], 0);
         }
         let initial_event_count = source_backed_count(
             &temp,
@@ -796,8 +799,9 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_eq!(second["totals"]["current_rejected_records"], 0);
         } else {
             assert_explicit_source_publication(&second, stored_provider, source_format);
-            assert_eq!(second["totals"]["rejected_records"], 0);
+            assert_eq!(second["totals"]["current_rejected_records"], 0);
         }
+        assert_noop_publication(&second);
 
         append_event(&path, &incremental_query);
         let mut third_command = ctx(&temp);
@@ -814,7 +818,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_eq!(third["totals"]["current_rejected_records"], 0);
         } else {
             assert_explicit_source_publication(&third, stored_provider, source_format);
-            assert_eq!(third["totals"]["rejected_records"], 0);
+            assert_eq!(third["totals"]["current_rejected_records"], 0);
         }
         assert!(
             source_backed_count(
@@ -872,7 +876,7 @@ fn openclaw_import_accepts_explicit_session_jsonl_file() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "openclaw", "openclaw_session_jsonl_tree");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
 
     let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "openclaw", "--format=json"]));
@@ -904,7 +908,7 @@ fn nanoclaw_import_tolerates_partial_auxiliary_tables() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "nanoclaw", "nanoclaw_project");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
 
     let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--format=json"]));
@@ -1015,7 +1019,9 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ]));
 
         assert!(
-            stderr.contains("no executable source-backed routes were registered"),
+            stderr.contains("--path <path>")
+                && (stderr.contains("no importable ")
+                    || stderr.contains("no official automatic history location established")),
             "{cli_provider}: {stderr}"
         );
     }
@@ -1037,7 +1043,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "cline", "cline_task_directory_json");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
         source_backed_count(
             &temp,
@@ -1087,7 +1093,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "roo_code", "roo_task_directory_json");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
         source_backed_count(
             &temp,
@@ -1227,11 +1233,14 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         "antigravity_cli_transcript_jsonl_tree",
     );
     assert_eq!(
-        imported["totals"]["source_files"],
+        imported["sources"][0]["source_files"],
         2,
         "outer inventory reports the authoritative root; the provider owns sibling preference: {imported:#}"
     );
-    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
+    assert_eq!(
+        imported["totals"]["current_rejected_records"], 0,
+        "{imported:#}"
+    );
     assert_eq!(
         source_backed_count(
             &temp,
@@ -1256,7 +1265,10 @@ fn codex_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl");
-    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
+    assert_eq!(
+        imported["totals"]["current_rejected_records"], 1,
+        "{imported:#}"
+    );
     assert_eq!(
         source_backed_count(
             &temp,
@@ -1290,7 +1302,10 @@ fn pi_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
-    assert_eq!(imported["totals"]["rejected_records"], 2, "{imported:#}");
+    assert_eq!(
+        imported["totals"]["current_rejected_records"], 2,
+        "{imported:#}"
+    );
     assert_eq!(
         source_backed_count(
             &temp,
