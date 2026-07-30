@@ -240,6 +240,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .import_mut(),
             &mut provider_refreshes,
             &config,
+            &mut ui,
         ),
         CommandRoot::Show(args) => run_show(
             args,

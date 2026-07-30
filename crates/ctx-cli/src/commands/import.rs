@@ -48,7 +48,6 @@ impl ImportReport {
 pub(crate) struct ImportRunOptions {
     pub(crate) progress: ProgressArg,
     pub(crate) json: bool,
-    pub(crate) print_human: bool,
     pub(crate) operation: &'static str,
 }
 
