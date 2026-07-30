@@ -16,7 +16,9 @@ use security_framework_sys::base::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use super::unix_file::{BackendSelection, VaultRoot, FILE_SELECTION};
+#[cfg(test)]
+use super::unix_file::FILE_SELECTION;
+use super::unix_file::{BackendSelection, VaultRoot};
 use super::{validate_record_id, CredentialVaultBackend, CredentialVaultError, SecretBytes};
 
 const SERVICE: &str = "com.ctx.pro.credentials.v1";
@@ -33,6 +35,7 @@ const MAX_SECRET_BYTES: usize = 5 * 512;
 const ERR_SEC_DUPLICATE_ITEM: i32 = -25_299;
 const ERR_SEC_NOT_AVAILABLE: i32 = -25_291;
 const ERR_SEC_NO_ACCESS_FOR_ITEM: i32 = -25_243;
+#[cfg(test)]
 const ERR_SEC_NO_SUCH_KEYCHAIN: i32 = -25_294;
 const ERR_SEC_NO_DEFAULT_KEYCHAIN: i32 = -25_307;
 const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25_308;

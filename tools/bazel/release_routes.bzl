@@ -92,6 +92,15 @@ resolve_main_runfile() {{
 
 route_root="ctx_release_routes/{target_id}"
 packager="$(resolve_main_runfile "${{route_root}}/packager")"
+export RUNFILES_DIR="${{runfiles_root}}"
+if [[ -z "${{RUNFILES_MANIFEST_FILE:-}}" ]]; then
+  for manifest in "$0.runfiles_manifest" "${{runfiles_root}}/MANIFEST"; do
+    if [[ -f "${{manifest}}" ]]; then
+      export RUNFILES_MANIFEST_FILE="${{manifest}}"
+      break
+    fi
+  done
+fi
 exec "${{packager}}" \
   --declared-artifact-runfile "${{route_root}}/artifact" \
   --declared-rustc-runfile "${{route_root}}/rustc" \

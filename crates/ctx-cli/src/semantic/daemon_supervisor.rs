@@ -44,7 +44,9 @@ use environment::{
     SupervisorEnvironmentSnapshot,
 };
 #[cfg(any(test, windows))]
-use environment::{validated_supervisor_artifact_path, validated_supervisor_artifact_text};
+use environment::{
+    validated_supervisor_artifact_path, validated_supervisor_artifact_text, xml_escape,
+};
 pub(super) use report::daemon_supervisor_report;
 #[cfg(any(test, target_os = "freebsd"))]
 use report::freebsd_supervisor_authority_blocker;
@@ -982,14 +984,4 @@ fn supervisor_command(program: &str) -> Command {
 fn supervisor_output(command: &mut Command) -> std::io::Result<std::process::Output> {
     crate::process_environment::sanitize_release_authority_env(command);
     command.output()
-}
-
-#[cfg(any(test, target_os = "macos", windows))]
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }

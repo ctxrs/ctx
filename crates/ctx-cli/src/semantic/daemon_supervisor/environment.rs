@@ -201,8 +201,8 @@ pub(super) fn launch_agent_plist_with_environment(
     ))
 }
 
-#[cfg(any(test, target_os = "macos"))]
-fn xml_escape(value: &str) -> String {
+#[cfg(any(test, target_os = "macos", windows))]
+pub(super) fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
