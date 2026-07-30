@@ -3,6 +3,37 @@ mod support;
 use support::*;
 
 #[test]
+fn release_cli_does_not_expose_or_invoke_the_index_dashboard_fixture() {
+    const FIXTURE_COMMAND: &str = "_index-dashboard-renderer-fixture";
+
+    let temp = tempdir();
+    ctx(&temp)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(FIXTURE_COMMAND).not());
+
+    ctx(&temp)
+        .args([
+            FIXTURE_COMMAND,
+            "--case",
+            "ready",
+            "--columns",
+            "80",
+            "--rows",
+            "24",
+            "--clock",
+            "2026-06-23T12:00:00Z",
+            "--random-seed",
+            "ctx-cli-ux-core-v1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unrecognized subcommand"))
+        .stderr(predicate::str::contains("requires stdout to be a terminal").not());
+}
+
+#[test]
 fn help_exposes_session_retrieval_commands() {
     let temp = tempdir();
     let output = ctx(&temp)
@@ -361,7 +392,7 @@ fn removed_commands_are_rejected() {
             .arg(command)
             .assert()
             .failure()
-            .stderr(predicate::str::contains("unrecognized subcommand"));
+            .stderr(predicate::str::contains("Unrecognized subcommand"));
     }
 }
 
@@ -649,14 +680,14 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         .args(["status", "--json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unexpected argument '--json'"));
+        .stderr(predicate::str::contains("Unexpected argument '--json'"));
 
     ctx(&temp)
         .args(["doctor", "--progress", "none"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "unexpected argument '--progress' found",
+            "Unexpected argument '--progress' found",
         ));
 }
 
@@ -733,7 +764,7 @@ fn daemon_run_rejects_public_runtime_cap() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["daemon", "run", "--max-seconds", "1"]));
     assert!(
-        stderr.contains("unexpected argument '--max-seconds'"),
+        stderr.contains("Unexpected argument '--max-seconds'"),
         "daemon run must not accept --max-seconds; stderr:\n{stderr}"
     );
 }
@@ -1097,7 +1128,7 @@ fn removed_public_commands_are_rejected() {
         vec!["facts", "commit", "abc"],
     ] {
         ctx(&temp).args(args.clone()).assert().failure().stderr(
-            predicate::str::contains("unrecognized subcommand")
+            predicate::str::contains("Unrecognized subcommand")
                 .and(predicate::str::contains(args[0])),
         );
     }
@@ -1107,6 +1138,6 @@ fn removed_public_commands_are_rejected() {
             .args(["pro", obsolete])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("unrecognized subcommand"));
+            .stderr(predicate::str::contains("Unrecognized subcommand"));
     }
 }
