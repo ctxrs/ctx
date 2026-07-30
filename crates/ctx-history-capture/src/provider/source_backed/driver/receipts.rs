@@ -59,6 +59,8 @@ pub enum SourceBackedCoordinatorError {
     NoExecutableRoutes,
     #[error("source deletion was not certified by its supplied authoritative inventory")]
     InvalidDeletionWitness,
+    #[error("retained source deletion {source_id} could not be recertified: {detail}")]
+    RetainedDeletionRecertification { source_id: String, detail: String },
     #[error("source-backed refresh progress callback failed: {0}")]
     Progress(SourceBackedRouteError),
 }

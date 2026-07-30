@@ -164,6 +164,37 @@ fn refresh_receipt_stays_bound_to_commit_when_current_generation_advances() {
     );
 }
 
+#[test]
+fn committed_progress_failure_does_not_hide_visible_publication() {
+    let (route, certificate) = revisioned_receipt_route(7);
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    let temp = tempdir().unwrap();
+
+    let receipt = refresh_source_backed_generation_with_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |progress| {
+            if progress.phase == "committed" {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "injected committed status failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect("commit visibility is irreversible success");
+
+    assert_eq!(receipt.sources, vec![certificate]);
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        receipt.commit.generation_id
+    );
+}
+
 fn revisioned_receipt_route(revision: u8) -> (SourceBackedRoute, CertifiedSource) {
     let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 91);
     let session_id = fixture_session_id(&source);
@@ -252,6 +283,221 @@ fn revisioned_receipt_route(revision: u8) -> (SourceBackedRoute, CertifiedSource
         fixture_executable_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, driver),
         certificate,
     )
+}
+
+fn inventory_replay_certificate(source: &SourceKey) -> CertifiedSource {
+    let digest = source.identity().digest();
+    let observation = SourceObservation::new(
+        source.clone(),
+        "inventory-replay-source-v1",
+        digest.to_vec(),
+    )
+    .unwrap();
+    let frontier = SourceFrontier::new(
+        "inventory-replay-frontier-v1",
+        TypedKey::bytes(digest.to_vec()).unwrap(),
+        0,
+        digest,
+    )
+    .unwrap();
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "inventory-replay-parser-v1",
+        digest,
+        ScannedSourceCounts::default(),
+        Some(frontier),
+    )
+    .unwrap()
+}
+
+fn inventory_replay_inventory(sources: &[SourceKey]) -> CertifiedSourceInventory {
+    let mut ordered = sources.to_vec();
+    ordered.sort();
+    let revision = ordered
+        .iter()
+        .flat_map(|source| source.identity().digest())
+        .collect::<Vec<_>>();
+    let observation = SourceInventoryObservation::new(
+        CaptureProvider::Gemini.as_str(),
+        "inventory-replay-root-v1",
+        TypedKey::utf8("root").unwrap(),
+        "inventory-replay-membership-v1",
+        if revision.is_empty() {
+            vec![0]
+        } else {
+            revision
+        },
+    )
+    .unwrap();
+    CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        "inventory-replay-discovery-v1",
+        ordered,
+    )
+    .unwrap()
+}
+
+fn owns_inventory_replay_source(source: &SourceKey) -> bool {
+    source.provider() == CaptureProvider::Gemini.as_str()
+        && source.source_format() == GEMINI_CLI_SOURCE_FORMAT
+}
+
+fn inventory_replay_registry(
+    current_sources: Arc<Mutex<Vec<SourceKey>>>,
+) -> SourceBackedProviderRegistry {
+    let scan_sources = Arc::clone(&current_sources);
+    let revalidation_sources = Arc::clone(&current_sources);
+    let driver = SourceBackedRouteDriver::new(
+        move |sink| {
+            let current = scan_sources.lock().unwrap().clone();
+            let base_sources = source_backed_base_sources(sink, owns_inventory_replay_source);
+            for source in &current {
+                if let Some(base) = sink.base_source(source).cloned() {
+                    let frontier = base.frontier().expect("replay frontier");
+                    sink.begin_source_append(source.clone())
+                        .map_err(route_coordinator_error)?;
+                    let append = CertifiedSourceAppend::certify(
+                        &base,
+                        base.clone(),
+                        frontier.certified_prefix_bytes(),
+                        *frontier.certified_prefix_digest(),
+                    )
+                    .map_err(|error| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            error.to_string(),
+                        )
+                    })?;
+                    sink.certify_source_append(append)
+                        .map_err(route_coordinator_error)?;
+                } else {
+                    sink.begin_source(source.clone())
+                        .map_err(route_coordinator_error)?;
+                    sink.certify_source(inventory_replay_certificate(source))
+                        .map_err(route_coordinator_error)?;
+                }
+            }
+            let inventory = inventory_replay_inventory(&current);
+            sink.certify_complete_inventory(inventory.clone())
+                .map_err(route_coordinator_error)?;
+            for base in base_sources {
+                let source = base.observation().source();
+                if current
+                    .iter()
+                    .any(|candidate| candidate.exact_descriptor_eq(source))
+                {
+                    continue;
+                }
+                let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory)
+                    .map_err(|error| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            error.to_string(),
+                        )
+                    })?;
+                sink.delete_source(deletion, inventory.clone())
+                    .map_err(route_coordinator_error)?;
+            }
+            Ok(())
+        },
+        owns_inventory_replay_source,
+        move |target| {
+            let current = revalidation_sources.lock().unwrap().clone();
+            let inventory = inventory_replay_inventory(&current);
+            match target {
+                SourceBackedRevalidationTarget::Source(certificate) => current
+                    .iter()
+                    .any(|source| inventory_replay_certificate(source) == *certificate),
+                SourceBackedRevalidationTarget::Deletion(deletion) => {
+                    owns_inventory_replay_source(deletion.source())
+                        && !inventory.contains(deletion.source())
+                        && deletion.verifies(&inventory)
+                }
+            }
+        },
+        |_request| {
+            Err(HydrationFailure {
+                kind: HydrationFailureKind::MissingRecord,
+                detail: "inventory replay fixture has no documents".to_owned(),
+            })
+        },
+    )
+    .with_complete_inventory_revalidation(move |inventory| {
+        let current = current_sources.lock().unwrap().clone();
+        inventory == &inventory_replay_inventory(&current)
+    });
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(fixture_executable_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        driver,
+    ));
+    registry
+}
+
+#[test]
+fn delete_b_then_discover_c_recertifies_replay_and_restart() {
+    let source_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 101);
+    let source_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 102);
+    let source_c = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 103);
+    let current = Arc::new(Mutex::new(vec![source_a.clone(), source_b.clone()]));
+    let registry = inventory_replay_registry(Arc::clone(&current));
+    let temp = tempdir().unwrap();
+
+    let initial =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(initial.sources.len(), 2);
+    assert!(initial.removals.is_empty());
+
+    *current.lock().unwrap() = vec![source_a.clone()];
+    let deleted =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    let deleted_b = deleted
+        .removals
+        .iter()
+        .find(|removal| removal.deletion.source().exact_descriptor_eq(&source_b))
+        .expect("B deletion");
+    assert!(deleted_b.deletion.verifies(&deleted_b.inventory));
+
+    *current.lock().unwrap() = vec![source_a, source_c];
+    let discovered =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    let recertified_b = discovered
+        .removals
+        .iter()
+        .find(|removal| removal.deletion.source().exact_descriptor_eq(&source_b))
+        .expect("recertified B deletion");
+    assert!(recertified_b.deletion.verifies(&recertified_b.inventory));
+    assert_eq!(recertified_b.inventory.observed_sources(), 2);
+    assert_ne!(
+        deleted_b.inventory.inventory_digest(),
+        recertified_b.inventory.inventory_digest()
+    );
+
+    let replay =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(replay.commit.generation_id, discovered.commit.generation_id);
+    assert!(replay.removals[0]
+        .deletion
+        .verifies(&replay.removals[0].inventory));
+
+    drop(registry);
+    let restarted_registry = inventory_replay_registry(Arc::clone(&current));
+    let restarted = refresh_source_backed_generation(
+        temp.path(),
+        &restarted_registry,
+        WriterOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.commit.generation_id,
+        discovered.commit.generation_id
+    );
+    assert!(restarted.removals[0]
+        .deletion
+        .verifies(&restarted.removals[0].inventory));
 }
 
 #[test]

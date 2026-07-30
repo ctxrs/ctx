@@ -15,7 +15,7 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
     EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
-    SourceAnchor, SourceObservation, SourceRecordLocator, TypedKey,
+    SourceAnchor, SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use tempfile::tempdir;
