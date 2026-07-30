@@ -17,7 +17,7 @@ use crate::compact_json;
 
 use super::super::{
     health_search::create_private_dir_all,
-    paths_status::{daemon_root_path, write_private_json_file},
+    paths_status::{daemon_root_path, replace_private_file, write_private_json_file},
 };
 
 const SUPERVISOR_RECEIPT_FILE: &str = "supervisor.json";
@@ -56,7 +56,7 @@ pub(super) fn write_atomic_file(path: &Path, body: &[u8]) -> Result<()> {
         file.sync_all()
             .with_context(|| format!("sync supervisor artifact {}", temp.display()))?;
         drop(file);
-        fs::rename(&temp, path)
+        replace_private_file(&temp, path)
             .with_context(|| format!("publish supervisor artifact {}", path.display()))?;
         sync_supervisor_directory(parent)
     })();

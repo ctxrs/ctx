@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf, Prefix},
 };
 
-use windows_sys::Win32::Foundation::ERROR_HANDLE_EOF;
+use windows_sys::Win32::Foundation::{FreeLibrary, ERROR_HANDLE_EOF};
 use windows_sys::Win32::Storage::FileSystem::{
     FileAttributeTagInfo, FileBasicInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
     FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
@@ -21,6 +21,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
     FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
     VOLUME_NAME_DOS,
+};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
@@ -52,16 +55,13 @@ unsafe extern "system" {
     fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
-#[link(name = "cldapi")]
-unsafe extern "system" {
-    fn CfGetSyncRootInfoByHandle(
-        file_handle: *mut c_void,
-        info_class: i32,
-        info_buffer: *mut c_void,
-        info_buffer_length: u32,
-        returned_length: *mut u32,
-    ) -> i32;
-}
+type CfGetSyncRootInfoByHandle = unsafe extern "system" fn(
+    file_handle: *mut c_void,
+    info_class: i32,
+    info_buffer: *mut c_void,
+    info_buffer_length: u32,
+    returned_length: *mut u32,
+) -> i32;
 
 #[repr(C)]
 struct UnicodeString {
@@ -528,12 +528,38 @@ fn ensure_handle_is_ordinary(
 }
 
 fn ensure_not_cloud_root(file: &File) -> Result<(), AuthorityOpenError> {
-    let mut basic = CfSyncRootBasicInfo::default();
-    let mut returned = 0_u32;
     let length = u32::try_from(size_of::<CfSyncRootBasicInfo>())
         .map_err(|_| AuthorityOpenError::Rejected("cloud root info is too large"))?;
+    let library_name = "cldapi.dll\0".encode_utf16().collect::<Vec<_>>();
+    let library = unsafe {
+        LoadLibraryExW(
+            library_name.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    };
+    if library.is_null() {
+        return Err(AuthorityOpenError::Rejected(
+            "Windows Cloud Files API is unavailable",
+        ));
+    }
+    let entry = unsafe { GetProcAddress(library, c"CfGetSyncRootInfoByHandle".as_ptr().cast()) };
+    let Some(entry) = entry else {
+        unsafe {
+            FreeLibrary(library);
+        }
+        return Err(AuthorityOpenError::Rejected(
+            "Windows Cloud Files API is unavailable",
+        ));
+    };
+    // SAFETY: `entry` was resolved from the system copy of cldapi.dll using
+    // the documented CfGetSyncRootInfoByHandle export name and ABI.
+    let get_sync_root_info: CfGetSyncRootInfoByHandle = unsafe { std::mem::transmute(entry) };
+
+    let mut basic = CfSyncRootBasicInfo::default();
+    let mut returned = 0_u32;
     let result = unsafe {
-        CfGetSyncRootInfoByHandle(
+        get_sync_root_info(
             file.as_raw_handle(),
             CF_SYNC_ROOT_INFO_BASIC,
             (&mut basic as *mut CfSyncRootBasicInfo).cast(),
@@ -541,6 +567,9 @@ fn ensure_not_cloud_root(file: &File) -> Result<(), AuthorityOpenError> {
             &mut returned,
         )
     };
+    unsafe {
+        FreeLibrary(library);
+    }
     if result >= 0 {
         return Err(AuthorityOpenError::Rejected(
             "cloud-synchronized provider source roots are rejected",

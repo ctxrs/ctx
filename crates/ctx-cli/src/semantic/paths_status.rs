@@ -426,12 +426,12 @@ pub(super) fn write_private_json_file(path: &Path, value: &Value) -> Result<()> 
 }
 
 #[cfg(not(windows))]
-fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(super) fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
     fs::rename(source, target)
 }
 
 #[cfg(windows)]
-fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(super) fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -447,18 +447,58 @@ fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    retry_windows_private_file_replacement(
+        || {
+            let moved = unsafe {
+                MoveFileExW(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if moved == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        },
+        || std::thread::sleep(PRIVATE_FILE_REPLACE_RETRY),
+    )
+}
+
+#[cfg(any(test, windows))]
+fn retry_windows_private_file_replacement(
+    mut replace: impl FnMut() -> std::io::Result<()>,
+    mut wait: impl FnMut(),
+) -> std::io::Result<()> {
+    for attempt in 1..=PRIVATE_FILE_REPLACE_ATTEMPTS {
+        match replace() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if windows_file_replacement_error_is_retryable(&error)
+                    && attempt < PRIVATE_FILE_REPLACE_ATTEMPTS =>
+            {
+                // Virus scanners and indexers can briefly open a newly
+                // published status file without delete sharing. Keep atomic
+                // replacement semantics while allowing that handle to close.
+                wait();
+            }
+            Err(error) => return Err(error),
+        }
     }
+    unreachable!("the bounded replacement loop always returns")
+}
+
+#[cfg(any(test, windows))]
+fn windows_file_replacement_error_is_retryable(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            WINDOWS_ERROR_ACCESS_DENIED
+                | WINDOWS_ERROR_SHARING_VIOLATION
+                | WINDOWS_ERROR_LOCK_VIOLATION
+        )
+    )
 }
 
 pub(super) fn write_daemon_status(data_root: &Path, value: &Value) -> Result<()> {
@@ -909,6 +949,8 @@ fn daemon_config_reload_report(
     }))
 }
 
+#[cfg(windows)]
+use std::time::Duration;
 use std::{
     fs,
     io::{Seek, SeekFrom, Write},
@@ -946,6 +988,16 @@ pub(super) use binary_identity::*;
 
 const PRIVATE_JSON_TEMP_ATTEMPTS: usize = 16;
 static PRIVATE_JSON_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, windows))]
+const PRIVATE_FILE_REPLACE_ATTEMPTS: usize = 40;
+#[cfg(windows)]
+const PRIVATE_FILE_REPLACE_RETRY: Duration = Duration::from_millis(50);
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
 
 #[cfg(test)]
 mod tests {
@@ -995,5 +1047,70 @@ mod tests {
                 .file_name()
                 .to_string_lossy()
                 .ends_with(".tmp")));
+    }
+
+    #[test]
+    fn windows_private_file_replacement_retries_transient_lock_errors() {
+        let errors = [
+            WINDOWS_ERROR_ACCESS_DENIED,
+            WINDOWS_ERROR_SHARING_VIOLATION,
+            WINDOWS_ERROR_LOCK_VIOLATION,
+        ];
+        let mut attempts = 0;
+        let mut waits = 0;
+        retry_windows_private_file_replacement(
+            || {
+                let attempt = attempts;
+                attempts += 1;
+                if let Some(code) = errors.get(attempt) {
+                    Err(std::io::Error::from_raw_os_error(*code))
+                } else {
+                    Ok(())
+                }
+            },
+            || waits += 1,
+        )
+        .unwrap();
+
+        assert_eq!(attempts, 4);
+        assert_eq!(waits, 3);
+    }
+
+    #[test]
+    fn windows_private_file_replacement_does_not_retry_other_errors() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let error = retry_windows_private_file_replacement(
+            || {
+                attempts += 1;
+                Err(std::io::Error::from_raw_os_error(2))
+            },
+            || waits += 1,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(2));
+        assert_eq!(attempts, 1);
+        assert_eq!(waits, 0);
+    }
+
+    #[test]
+    fn windows_private_file_replacement_has_a_bounded_retry_window() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let error = retry_windows_private_file_replacement(
+            || {
+                attempts += 1;
+                Err(std::io::Error::from_raw_os_error(
+                    WINDOWS_ERROR_ACCESS_DENIED,
+                ))
+            },
+            || waits += 1,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(WINDOWS_ERROR_ACCESS_DENIED));
+        assert_eq!(attempts, PRIVATE_FILE_REPLACE_ATTEMPTS);
+        assert_eq!(waits, PRIVATE_FILE_REPLACE_ATTEMPTS - 1);
     }
 }
