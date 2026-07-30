@@ -148,6 +148,7 @@ else:
     raise SystemExit(f"unexpected mode: {mode}")
 print("0" * 64)
 PY
+chmod 700 "${repo}/scripts/release-sbom.py"
 
 cat >"${repo}/scripts/fake-osv-scanner.py" <<'PY'
 #!/usr/bin/env python3
@@ -381,6 +382,7 @@ PY
 test -x "${source_root}/dependency_advisory_gate"
 ln -s "${source_root}/dependency_advisory_gate" \
   "${route_runfiles}/advisory-gate"
+ln -s "${repo}/scripts/release-sbom.py" "${route_runfiles}/sbom-tool"
 ln -s "${artifact}" "${route_runfiles}/artifact"
 ln -s "${repo}/inputs/rustc" "${route_runfiles}/rustc"
 cat >"${repo}/inputs/sbom-inventory.txt" <<'EOF'
@@ -412,6 +414,7 @@ package() {
       ctx_release_routes/linux-x64/advisory-gate \
     --declared-artifact-runfile ctx_release_routes/linux-x64/artifact \
     --declared-rustc-runfile ctx_release_routes/linux-x64/rustc \
+    --declared-sbom-tool-runfile ctx_release_routes/linux-x64/sbom-tool \
     --declared-sbom-inventory-runfile \
       ctx_release_routes/linux-x64/sbom-inventory.txt \
     --declared-license-materials-runfile \
@@ -493,6 +496,17 @@ fi
 grep -Fq \
   'duplicate reserved argument: --declared-advisory-gate-runfile' \
   "${test_root}/duplicate-advisory.stderr"
+
+if package --output-dir out-duplicate-sbom-tool \
+  --declared-sbom-tool-runfile ctx_release_routes/linux-x64/sbom-tool \
+  >"${test_root}/duplicate-sbom-tool.stdout" \
+  2>"${test_root}/duplicate-sbom-tool.stderr"; then
+  echo "duplicate reserved SBOM tool unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq \
+  'duplicate reserved argument: --declared-sbom-tool-runfile' \
+  "${test_root}/duplicate-sbom-tool.stderr"
 
 if package --output-dir out-linux-forged-llvm \
   --declared-llvm-readobj-runfile ctx_release_routes/linux-x64/rustc \

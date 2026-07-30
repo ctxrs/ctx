@@ -106,6 +106,7 @@ exec "${{packager}}" \
   --declared-artifact-runfile "${{route_root}}/artifact" \
   --declared-rustc-runfile "${{route_root}}/rustc" \
 {llvm_readobj_argument}\
+  --declared-sbom-tool-runfile "${{route_root}}/sbom-tool" \
   --declared-sbom-inventory-runfile "${{route_root}}/sbom-inventory.txt" \
   --declared-license-materials-runfile "${{route_root}}/license-materials.txt" \
   --declared-cargo-lock-runfile "${{route_root}}/Cargo.lock" \
@@ -135,6 +136,7 @@ def _release_route_impl(ctx):
         ctx.file.rustc,
         ctx.file.sbom_inventory,
         ctx.file.target_matrix,
+        ctx.executable.sbom_tool,
     ]
     symlinks = {
         "{}/advisory-gate".format(route_root): ctx.executable.advisory_gate,
@@ -144,6 +146,7 @@ def _release_route_impl(ctx):
         "{}/packager".format(route_root): ctx.executable.packager,
         "{}/release-targets-v1.json".format(route_root): ctx.file.target_matrix,
         "{}/rustc".format(route_root): ctx.file.rustc,
+        "{}/sbom-tool".format(route_root): ctx.executable.sbom_tool,
         "{}/sbom-inventory.txt".format(route_root): ctx.file.sbom_inventory,
     }
     if ctx.file.llvm_readobj:
@@ -158,6 +161,7 @@ def _release_route_impl(ctx):
     )
     runfiles = runfiles.merge(ctx.attr.advisory_gate[DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.attr.packager[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(ctx.attr.sbom_tool[DefaultInfo].default_runfiles)
     return [
         DefaultInfo(executable = launcher, runfiles = runfiles),
         ReleaseRouteInfo(
@@ -204,6 +208,11 @@ _release_route = rule(
             cfg = _route_transition,
             mandatory = True,
         ),
+        "sbom_tool": attr.label(
+            cfg = "exec",
+            executable = True,
+            mandatory = True,
+        ),
         "target_id": attr.string(mandatory = True, values = sorted(_ROUTES.keys())),
         "target_matrix": attr.label(allow_single_file = True, mandatory = True),
         "_allowlist_function_transition": attr.label(
@@ -220,7 +229,8 @@ def public_cli_release_route(
         rustc,
         packager,
         sbom_inventory,
-        license_materials):
+        license_materials,
+        sbom_tool = "//:release_sbom"):
     """Declares one exact target-configured release route."""
     llvm_readobj = None
     if target_id == "windows-x64":
@@ -235,6 +245,7 @@ def public_cli_release_route(
         packager = packager,
         rustc = rustc,
         sbom_inventory = sbom_inventory,
+        sbom_tool = sbom_tool,
         target_id = target_id,
         target_matrix = "//:release_target_matrix",
         tags = ["manual", "release-gate", "release-tool"],
