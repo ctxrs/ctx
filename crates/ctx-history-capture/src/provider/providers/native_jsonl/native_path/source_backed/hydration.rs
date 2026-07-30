@@ -3,16 +3,17 @@ use std::{collections::HashMap, path::Path, sync::Mutex};
 #[cfg(test)]
 use ctx_history_core::CertifiedSource;
 use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, EventHydrationRequest, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, NativeRecordCoordinate, SourceKey, SourceRecordLocator,
-    TypedKey,
+    derive_event_id, BatchHydrationRequest, BatchHydrationResult, EventHydrationRequest,
+    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    NativeItemKey, NativeRecordCoordinate, PositionStability, SourceKey, SourceRecordLocator,
+    SubrecordSelector, TypedKey,
 };
 
 #[cfg(test)]
 use super::decode_certificate;
 use super::{
-    DirectJsonlInventoryLeaf, DirectJsonlSourceAdapter, DirectJsonlSourceBackedError,
-    DirectJsonlSourceBackedResult,
+    direct_jsonl_session_identity, DirectJsonlInventoryLeaf, DirectJsonlSourceAdapter,
+    DirectJsonlSourceBackedError, DirectJsonlSourceBackedResult,
 };
 use crate::{
     provider::providers::native_jsonl::native_path::reader::hydrated_direct_jsonl_lexical_text,
@@ -307,13 +308,8 @@ fn hydrate_bound_group(
     let mut sub_ordinals = Vec::with_capacity(requests.len());
     let mut ranges = Vec::with_capacity(requests.len());
     for request in requests {
-        let (sub_ordinal, range) = hydration_locator_range(
-            adapter,
-            source,
-            native_session_id,
-            &leaf.route_key,
-            request.locator(),
-        )?;
+        let (sub_ordinal, range) =
+            hydration_locator_range(adapter, source, native_session_id, &leaf.route_key, request)?;
         sub_ordinals.push(sub_ordinal);
         ranges.push(range);
     }
@@ -375,8 +371,9 @@ fn hydration_locator_range(
     source: &SourceKey,
     native_session_id: &str,
     route_key: &[u8],
-    locator: &SourceRecordLocator,
+    request: &EventHydrationRequest,
 ) -> DirectJsonlSourceBackedResult<(u32, JsonlHydrationRange)> {
+    let locator = request.locator();
     locator.validate_contract()?;
     if !source.exact_descriptor_eq(locator.source())
         || locator.source().provider() != adapter.provider.as_str()
@@ -388,9 +385,9 @@ fn hydration_locator_range(
     let NativeRecordCoordinate::Jsonl {
         byte_offset,
         byte_length,
+        physical_ordinal,
         native_session_key,
         native_event_key,
-        ..
     } = locator.coordinate()
     else {
         return Err(DirectJsonlSourceBackedError::InvalidLocator);
@@ -409,6 +406,40 @@ fn hydration_locator_range(
     };
     let sub_ordinal =
         u32::try_from(*sub_ordinal).map_err(|_| DirectJsonlSourceBackedError::InvalidLocator)?;
+    let (_, session_id) = direct_jsonl_session_identity(adapter, native_session_id)?;
+    let native_item_key = match event_key.first() {
+        Some(TypedKey::Utf8(native_record_id)) => NativeItemKey::native_id(
+            format!("{}.direct-jsonl-event", adapter.provider.as_str()),
+            TypedKey::utf8(native_record_id)?,
+        )?,
+        Some(TypedKey::U64(raw_ordinal)) if raw_ordinal == physical_ordinal => {
+            NativeItemKey::certified_position(
+                format!("{}.direct-jsonl-ordinal", adapter.provider.as_str()),
+                TypedKey::U64(*raw_ordinal),
+                PositionStability::AppendStable,
+            )?
+        }
+        _ => return Err(DirectJsonlSourceBackedError::InvalidLocator),
+    };
+    let subrecord_selector = (sub_ordinal != 0)
+        .then(|| {
+            SubrecordSelector::certified_position(
+                "direct-jsonl-subrecord",
+                TypedKey::U64(u64::from(sub_ordinal)),
+                PositionStability::StableSlot,
+            )
+        })
+        .transpose()?;
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "direct-jsonl-event",
+        native_item_key: &native_item_key,
+        subrecord_selector: subrecord_selector.as_ref(),
+    })?;
+    if event_id != request.event_id() {
+        return Err(DirectJsonlSourceBackedError::InvalidLocator);
+    }
     let byte_length = usize::try_from(*byte_length)
         .map_err(|_| DirectJsonlSourceBackedError::LocatorRangeTooLarge)?;
     let range = JsonlHydrationRange::new(*byte_offset, byte_length, *locator.record_digest())

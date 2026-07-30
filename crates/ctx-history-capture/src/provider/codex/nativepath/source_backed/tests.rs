@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Seek, SeekFrom, Write},
 };
 
 use ctx_history_core::{

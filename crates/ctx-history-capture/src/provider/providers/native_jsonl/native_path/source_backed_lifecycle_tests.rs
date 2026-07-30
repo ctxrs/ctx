@@ -625,6 +625,26 @@ fn route_batch_discovers_and_binds_once_instead_of_per_event() {
 }
 
 #[test]
+fn active_source_family_contract_direct_jsonl_hydration_rejects_crossed_event_identity() {
+    let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let mut events = index.source_event_page(source, None, 10).unwrap().items;
+    events.sort_by_key(|event| event.event_sequence);
+    assert_eq!(events.len(), 2);
+
+    let crossed =
+        EventHydrationRequest::new(events[0].event_id, events[1].locator.clone()).unwrap();
+    let error = registry
+        .resolver_registry()
+        .hydrate_event(&crossed)
+        .unwrap_err();
+    assert_eq!(error.kind, HydrationFailureKind::InvalidLocator);
+}
+
+#[test]
 fn repeated_single_hydration_reuses_one_resident_inventory_and_source_binding() {
     let (temp, _provider_root, transcript, registry) = qwen_route_fixture();
     let index_root = temp.path().join("index");
