@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS source_backed_sessions (
 CREATE INDEX IF NOT EXISTS source_backed_sessions_source
 ON source_backed_sessions(source_id);
 
+CREATE INDEX IF NOT EXISTS source_backed_sessions_parent_reference
+ON source_backed_sessions(parent_ctx_session_id);
+
+CREATE INDEX IF NOT EXISTS source_backed_sessions_root_reference
+ON source_backed_sessions(root_ctx_session_id);
+
 CREATE TABLE IF NOT EXISTS source_backed_events (
     ctx_event_id TEXT PRIMARY KEY,
     event_identity BLOB NOT NULL UNIQUE,
@@ -114,6 +120,12 @@ ON source_backed_files_touched(source_id);
 
 CREATE INDEX IF NOT EXISTS source_backed_files_path
 ON source_backed_files_touched(path);
+
+CREATE INDEX IF NOT EXISTS source_backed_files_event_reference
+ON source_backed_files_touched(ctx_event_id);
+
+CREATE INDEX IF NOT EXISTS source_backed_files_session_reference
+ON source_backed_files_touched(ctx_session_id);
 
 DROP VIEW IF EXISTS ctx_sessions;
 CREATE VIEW ctx_sessions AS

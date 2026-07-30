@@ -1,4 +1,11 @@
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CertifiedSourceDeletion,
@@ -7,7 +14,7 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SessionStatus, SourceAnchor,
     SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
 };
-use rusqlite::ffi::ErrorCode;
+use rusqlite::ffi::{self, ErrorCode};
 use tempfile::TempDir;
 
 use super::*;
@@ -175,7 +182,7 @@ fn records(source: SourceKey, revision: u8, event_count: u64) -> Vec<RelationalP
             },
             LocatorRevisionPolicy::StableRecordEvidence,
             None,
-            [event_index as u8 + 1; 32],
+            [(event_index as u8).wrapping_add(1); 32],
         )
         .unwrap();
         records.push(RelationalProjectionRecord::Event(RelationalEventMetadata {
@@ -239,6 +246,100 @@ fn schema_columns(projection: &SourceBackedRelationalProjection, object: &str) -
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
+}
+
+#[derive(Debug)]
+struct ProjectionWork {
+    vm_steps: u64,
+    page_cache_misses: u64,
+}
+
+fn measured_projection_work(
+    projection: &mut SourceBackedRelationalProjection,
+    operation: impl FnOnce(&mut SourceBackedRelationalProjection),
+) -> ProjectionWork {
+    const PROGRESS_GRANULARITY: u64 = 1;
+
+    projection
+        .conn
+        .execute_batch("PRAGMA cache_size = -64; PRAGMA shrink_memory;")
+        .unwrap();
+    sqlite_cache_misses(&projection.conn, true);
+    let progress_calls = Arc::new(AtomicU64::new(0));
+    let measured_calls = Arc::clone(&progress_calls);
+    projection.conn.progress_handler(
+        PROGRESS_GRANULARITY as i32,
+        Some(move || {
+            measured_calls.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    );
+
+    operation(projection);
+
+    projection.conn.progress_handler(0, None::<fn() -> bool>);
+    ProjectionWork {
+        vm_steps: progress_calls.load(Ordering::Relaxed) * PROGRESS_GRANULARITY,
+        page_cache_misses: sqlite_cache_misses(&projection.conn, false),
+    }
+}
+
+fn sqlite_cache_misses(conn: &Connection, reset: bool) -> u64 {
+    let mut current = 0;
+    let mut highwater = 0;
+    // SAFETY: sqlite3_db_status only reads and optionally resets a counter on
+    // this live connection; both output pointers remain valid for the call.
+    let result = unsafe {
+        ffi::sqlite3_db_status(
+            conn.handle(),
+            ffi::SQLITE_DBSTATUS_CACHE_MISS,
+            &mut current,
+            &mut highwater,
+            i32::from(reset),
+        )
+    };
+    assert_eq!(result, ffi::SQLITE_OK);
+    u64::try_from(current).unwrap()
+}
+
+fn incremental_work_with_unchanged_events(
+    unchanged_event_count: u64,
+) -> (ProjectionWork, ProjectionWork) {
+    let (_temp, mut projection) = projection();
+    let unchanged = source(31);
+    let changing = source(32);
+    let initial_generation = generation(vec![
+        certificate(unchanged.clone(), 1, unchanged_event_count),
+        certificate(changing.clone(), 1, 1),
+    ]);
+    let mut initial_records = records(unchanged.clone(), 1, unchanged_event_count);
+    initial_records.extend(records(changing.clone(), 1, 1));
+    projection
+        .rebuild(&initial_generation, initial_records)
+        .unwrap();
+
+    let append_generation = generation(vec![
+        certificate(unchanged.clone(), 1, unchanged_event_count),
+        certificate(changing.clone(), 2, 2),
+    ]);
+    let append = measured_projection_work(&mut projection, |projection| {
+        let receipt = projection
+            .catch_up(&append_generation, records(changing.clone(), 2, 2))
+            .unwrap();
+        assert_eq!(receipt.event_count, unchanged_event_count + 2);
+    });
+
+    let deletion_generation = generation_with_removals(
+        vec![certificate(unchanged, 1, unchanged_event_count)],
+        vec![removal(&changing, 3)],
+    );
+    let deletion = measured_projection_work(&mut projection, |projection| {
+        let receipt = projection
+            .catch_up(&deletion_generation, Vec::new())
+            .unwrap();
+        assert_eq!(receipt.event_count, unchanged_event_count);
+    });
+    (append, deletion)
 }
 
 #[test]
@@ -545,6 +646,100 @@ fn append_rewrite_deletion_and_rebuild_are_atomic_and_source_scoped() {
             RawSqlValue::Integer(2),
         ]
     );
+}
+
+#[test]
+fn incremental_validation_work_does_not_scale_with_unchanged_rows() {
+    let (small_append, small_deletion) = incremental_work_with_unchanged_events(8);
+    let (large_append, large_deletion) = incremental_work_with_unchanged_events(2_048);
+
+    eprintln!(
+        concat!(
+            "incremental validation work: small_append={:?} ",
+            "large_append={:?} small_deletion={:?} ",
+            "large_deletion={:?}"
+        ),
+        small_append, large_append, small_deletion, large_deletion
+    );
+    assert!(
+        large_append.vm_steps <= small_append.vm_steps + 500,
+        "tiny append VM work grew with unchanged rows: {small_append:?} -> {large_append:?}"
+    );
+    assert!(
+        large_deletion.vm_steps <= small_deletion.vm_steps + 500,
+        "deletion VM work grew with unchanged rows: {small_deletion:?} -> {large_deletion:?}"
+    );
+    for (operation, work) in [
+        ("small append", &small_append),
+        ("large append", &large_append),
+        ("small deletion", &small_deletion),
+        ("large deletion", &large_deletion),
+    ] {
+        assert!(
+            work.page_cache_misses <= 512,
+            "{operation} exceeded the indexed incremental page budget: {work:?}"
+        );
+    }
+}
+
+#[test]
+fn cross_source_lineage_survives_rewrite_and_deletion_fails_closed() {
+    let (_temp, mut projection) = projection();
+    let parent_source = source(41);
+    let child_source = source(42);
+    let (parent_session_id, _) = identities(&parent_source, 0);
+    let mut child_records = records(child_source.clone(), 1, 1);
+    let RelationalProjectionRecord::Session(child_session) = &mut child_records[1] else {
+        panic!("fixture session ordering changed");
+    };
+    child_session.parent_session_id = Some(parent_session_id);
+    child_session.root_session_id = parent_session_id;
+
+    let initial_generation = generation(vec![
+        certificate(parent_source.clone(), 1, 1),
+        certificate(child_source.clone(), 1, 1),
+    ]);
+    let mut initial_records = records(parent_source.clone(), 1, 1);
+    initial_records.extend(child_records);
+    projection
+        .rebuild(&initial_generation, initial_records)
+        .unwrap();
+
+    let rewrite_generation = generation(vec![
+        certificate(parent_source.clone(), 2, 2),
+        certificate(child_source.clone(), 1, 1),
+    ]);
+    let rewrite_receipt = projection
+        .catch_up(&rewrite_generation, records(parent_source.clone(), 2, 2))
+        .unwrap();
+    assert_eq!(
+        (rewrite_receipt.source_count, rewrite_receipt.event_count),
+        (2, 3)
+    );
+
+    let deletion_generation = generation_with_removals(
+        vec![certificate(child_source, 1, 1)],
+        vec![removal(&parent_source, 3)],
+    );
+    let error = projection
+        .catch_up(&deletion_generation, Vec::new())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalProjectionError::InvalidRecord(ref detail)
+            if detail == "session relationships reference absent sessions"
+    ));
+    let metadata = projection.metadata().unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(rewrite_generation.generation_id.as_str())
+    );
+    assert_eq!(
+        metadata.target_core_generation_id.as_deref(),
+        Some(deletion_generation.generation_id.as_str())
+    );
+    assert_eq!(metadata.status, RelationalProjectionStatus::Behind);
+    assert_eq!((metadata.source_count, metadata.session_count), (2, 2));
 }
 
 #[test]
