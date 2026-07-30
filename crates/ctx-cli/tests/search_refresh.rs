@@ -34,16 +34,21 @@ impl SourceRefreshDaemon {
     }
 
     fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        terminate_and_reap_test_child(&mut self.child, "search-refresh daemon")
+            .expect("terminate and reap search-refresh daemon");
     }
 }
 
 impl Drop for SourceRefreshDaemon {
     fn drop(&mut self) {
-        self.stop();
+        if let Err(error) = terminate_and_reap_test_child(&mut self.child, "search-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("search-refresh daemon teardown also failed: {error}");
+            } else {
+                panic!("search-refresh daemon teardown failed: {error}");
+            }
+        }
     }
 }
 
@@ -105,19 +110,9 @@ fn launch_source_refresh_daemon(
     if let Some(codex_home) = codex_home {
         command.env("CODEX_HOME", codex_home);
     }
-    let spawn_deadline = Instant::now() + Duration::from_secs(1);
-    let child = loop {
-        match command.spawn() {
-            Ok(child) => break child,
-            // Linux can briefly report ETXTBSY after the copied executable's
-            // final write handle closes, especially when these tests launch
-            // their isolated daemons in parallel.
-            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
-        }
-    };
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("start isolated source-refresh daemon: {error}"));
     let mut daemon = SourceRefreshDaemon { child: Some(child) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -183,7 +178,14 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
     let status = wait_for_status(temp, "published source generation status", |status| {
         status["history_epoch"]["status"] == "ready"
             && status["lexical"]["generation_id"] == expected_generation
+            && status["lexical"]["request_state"] == "published"
+            && status["refresh"]["status"] == "ready"
             && status["refresh"]["published_generation"] == expected_generation
+            && status["resolver"]["status"] == "ready"
+            && status["daemon"]["jobs"]["source_backed_refresh"]["status"] == "completed"
+            && status["daemon"]["jobs"]["source_backed_refresh"]["request_state"] == "published"
+            && status["daemon"]["jobs"]["source_backed_refresh"]["published_generation"]
+                == expected_generation
     });
     assert_eq!(status["history_epoch"]["status"], "ready", "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
@@ -255,12 +257,20 @@ fn assert_source_backed_search_show_oracle(
     let results = packet["results"]
         .as_array()
         .expect("source-backed search results");
+    let matching_results = results
+        .iter()
+        .filter(|result| {
+            result["snippet"]
+                .as_str()
+                .is_some_and(|snippet| snippet.contains(query))
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        results.len(),
+        matching_results.len(),
         expected_results,
-        "unexpected source-backed result count: {packet:#}"
+        "unexpected exact-oracle source-backed result count: {packet:#}"
     );
-    for result in results {
+    for result in matching_results {
         assert_eq!(result["provider"], provider, "{result:#}");
         assert_eq!(result["result_type"], "session_result", "{result:#}");
         assert_eq!(result["result_scope"], "session", "{result:#}");

@@ -72,6 +72,7 @@ mod native {
 
         fn std_command(&self) -> StdCommand {
             let mut prepared: Command = ctx_from_binary(&self.temp, &self.binary);
+            prepared.env_remove("CTX_DAEMON_AUTOSTART_OFF");
             prepared.env_remove("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS");
             let mut command = StdCommand::new(prepared.get_program());
             for (name, value) in prepared.get_envs() {
@@ -98,16 +99,9 @@ mod native {
                 })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let deadline = Instant::now() + Duration::from_secs(1);
-            let mut child = loop {
-                match command.spawn() {
-                    Ok(child) => break child,
-                    Err(error) if error.raw_os_error() == Some(26) && Instant::now() < deadline => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("spawn ctx {:?}: {error}", args),
-                }
-            };
+            let mut child = command
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn ctx {:?}: {error}", args));
             if let Some(input) = input {
                 child
                     .stdin
