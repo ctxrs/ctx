@@ -142,18 +142,19 @@ pub(crate) fn run_history_source_plugin_import(
     context.telemetry.skipped = Some(count_bucket(summary.skipped as u64));
     context.telemetry.rejected_records = Some(count_bucket(0));
 
-    if context.options.print_human {
-        progress.finish_line();
-        println!("published_generation: {published_generation}");
-    }
-    progress.done(
-        "published",
+    let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
             "Published history source plugin {} in source-backed generation {published_generation}.",
             prepared.source().label()
-        ),
-        stats.bytes,
-    );
+        )
+    } else {
+        format!(
+            "Published history source plugin {}.",
+            prepared.source().label()
+        )
+    };
+    progress.finish_line();
+    progress.done("published", completion, stats.bytes);
 
     Ok(ImportReport {
         resume: context.args.resume,

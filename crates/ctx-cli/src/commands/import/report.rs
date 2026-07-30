@@ -9,12 +9,21 @@ use crate::commands::import::{
 };
 use crate::compact_json;
 use crate::output::print_json;
+use crate::ui::{
+    fields, hint, outcome, section, Action, Document, Field, Hint, Outcome, OutcomeState,
+    RenderContext, Ui,
+};
 
-pub(crate) fn print_import_report(report: &ImportReport, json_output: bool) -> Result<()> {
+pub(crate) fn print_import_report(
+    report: &ImportReport,
+    json_output: bool,
+    ui: &mut Ui,
+) -> Result<()> {
     if json_output {
         print_json(import_report_json(report))
     } else {
-        print_import_report_human(report);
+        let document = render_import_report_human(ui.stdout_context(), report);
+        ui.write_stdout(&document)?;
         Ok(())
     }
 }
@@ -72,62 +81,140 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
     value
 }
 
-fn print_import_report_human(report: &ImportReport) {
-    let (outcome, failure_scope) = import_report_analytics_outcome(&report.totals);
-    println!("outcome: {outcome}");
-    println!("failure_scope: {failure_scope}");
-    println!(
-        "failure_type: {}",
-        import_report_failure_type(&report.totals)
+fn render_import_report_human(context: &RenderContext, report: &ImportReport) -> Document {
+    let totals = &report.totals;
+    let (state, title, detail) = import_outcome_copy(totals);
+    let mut document = outcome(
+        context,
+        Outcome {
+            state,
+            title,
+            detail: Some(&detail),
+        },
     );
-    if report.totals.per_run_counts_available {
-        println!("source_files: {}", report.totals.source_files);
-        println!("source_bytes: {}", report.totals.source_bytes);
-        println!("imported_sources: {}", report.totals.imported_sources);
-        println!(
-            "sources_completed_with_rejections: {}",
-            report.totals.sources_completed_with_rejections
+
+    if totals.per_run_counts_available {
+        let mut imported = vec![("Sources", totals.imported_sources.to_string())];
+        push_nonzero(&mut imported, "Sessions", totals.imported_sessions);
+        push_nonzero(&mut imported, "Events", totals.imported_events);
+        push_nonzero(&mut imported, "Edges", totals.imported_edges);
+        push_nonzero(&mut imported, "Skipped records", totals.skipped);
+        push_nonzero(&mut imported, "Rejected records", totals.failed);
+        push_nonzero(&mut imported, "Failed sources", totals.failed_sources);
+        document.push_blank();
+        document.append(section("Imported", fields_from_owned(context, &imported)));
+    }
+
+    let mut current = Vec::new();
+    push_optional(&mut current, "Sources", totals.current_source_count);
+    push_optional(
+        &mut current,
+        "Searchable events",
+        totals.current_indexed_documents,
+    );
+    push_optional(
+        &mut current,
+        "Rejected records",
+        totals.current_rejected_records,
+    );
+    push_optional(
+        &mut current,
+        "Sources with rejections",
+        totals.current_sources_with_rejections,
+    );
+    push_optional(&mut current, "Removed sources", totals.removed_source_count);
+    if !current.is_empty() {
+        document.push_blank();
+        document.append(section(
+            "Current index",
+            fields_from_owned(context, &current),
+        ));
+    }
+
+    if totals.failed_sources > 0 || totals.failed > 0 {
+        document.push_blank();
+        document.append(hint(
+            context,
+            Hint {
+                text: "Inspect source availability and import support.",
+            },
+            Some(Action {
+                command: "ctx sources",
+            }),
+        ));
+    }
+    document
+}
+
+fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, String) {
+    if totals.imported_sources == 0 && totals.failed_sources > 0 {
+        return (
+            OutcomeState::Error,
+            "History import failed",
+            counted_failure(totals.failed_sources, "source failed", "sources failed"),
         );
-        println!("failed_sources: {}", report.totals.failed_sources);
-        println!("imported_sessions: {}", report.totals.imported_sessions);
-        println!("imported_events: {}", report.totals.imported_events);
-        println!("imported_edges: {}", report.totals.imported_edges);
-        println!("skipped_sessions: {}", report.totals.skipped_sessions);
-        println!("skipped_events: {}", report.totals.skipped_events);
-        println!("skipped_edges: {}", report.totals.skipped_edges);
-        println!("skipped: {}", report.totals.skipped);
-        println!("rejected_records: {}", report.totals.failed);
     }
-    if let Some(value) = report.totals.current_source_count {
-        println!("current_source_count: {value}");
+    if totals.failed_sources > 0 || totals.failed > 0 {
+        let mut details = Vec::new();
+        if totals.failed_sources > 0 {
+            details.push(counted_failure(
+                totals.failed_sources,
+                "source failed",
+                "sources failed",
+            ));
+        }
+        if totals.failed > 0 {
+            details.push(counted_failure(
+                totals.failed,
+                "record was rejected",
+                "records were rejected",
+            ));
+        }
+        return (
+            OutcomeState::Warning,
+            "History import completed with warnings",
+            format!(
+                "{}; imported history remains available.",
+                details.join("; ")
+            ),
+        );
     }
-    if let Some(value) = report.totals.current_indexed_documents {
-        println!("current_indexed_documents: {value}");
+    (
+        OutcomeState::Success,
+        "History import completed",
+        if totals.work_result == ctx_history_capture::ProviderImportWorkResult::Changed {
+            "Local history changed.".to_owned()
+        } else {
+            "No source changes were found.".to_owned()
+        },
+    )
+}
+
+fn counted_failure(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+fn push_nonzero(values: &mut Vec<(&'static str, String)>, label: &'static str, value: usize) {
+    if value > 0 {
+        values.push((label, value.to_string()));
     }
-    if let Some(value) = report.totals.current_complete_records {
-        println!("current_complete_records: {value}");
+}
+
+fn push_optional<T>(values: &mut Vec<(&'static str, String)>, label: &'static str, value: Option<T>)
+where
+    T: ToString,
+{
+    if let Some(value) = value {
+        values.push((label, value.to_string()));
     }
-    if let Some(value) = report.totals.current_retained_records {
-        println!("current_retained_records: {value}");
-    }
-    if let Some(value) = report.totals.current_rejected_records {
-        println!("current_rejected_records: {value}");
-    }
-    if let Some(value) = report.totals.current_ignored_records {
-        println!("current_ignored_records: {value}");
-    }
-    if let Some(value) = report.totals.current_certified_source_bytes {
-        println!("current_certified_source_bytes: {value}");
-    }
-    if let Some(value) = report.totals.current_sources_with_rejections {
-        println!("current_sources_with_rejections: {value}");
-    }
-    if let Some(value) = report.totals.removed_source_count {
-        println!("removed_source_count: {value}");
-    }
-    println!("change: {}", report.totals.work_result.as_str());
-    println!("resume: {}", report.resume);
-    println!("resume_mode: {}", report.resume_mode());
+}
+
+fn fields_from_owned(context: &RenderContext, values: &[(&'static str, String)]) -> Document {
+    let values = values
+        .iter()
+        .map(|(label, value)| Field::new(label, value))
+        .collect::<Vec<_>>();
+    fields(context, &values)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,9 +332,192 @@ pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{io::Write as _, path::Path};
+
+    use ctx_history_capture::ProviderImportWorkResult;
+    use unicode_width::UnicodeWidthStr as _;
+
+    use crate::ui::{ColorMode, StreamKind, TestContext};
 
     use super::*;
+
+    fn context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn changed_report() -> ImportReport {
+        ImportReport {
+            resume: true,
+            totals: ImportTotals {
+                per_run_counts_available: true,
+                source_files: 1,
+                source_bytes: 4096,
+                imported_sources: 1,
+                imported_sessions: 2,
+                imported_events: 7,
+                imported_edges: 1,
+                skipped: 1,
+                current_source_count: Some(1),
+                current_indexed_documents: Some(7),
+                current_complete_records: Some(7),
+                current_retained_records: Some(7),
+                current_rejected_records: Some(0),
+                current_ignored_records: Some(1),
+                current_certified_source_bytes: Some(4096),
+                current_sources_with_rejections: Some(0),
+                removed_source_count: Some(0),
+                work_result: ProviderImportWorkResult::Changed,
+                ..ImportTotals::default()
+            },
+            sources: vec![json!({"status": "published"})],
+        }
+    }
+
+    #[test]
+    fn human_import_report_is_outcome_first_and_omits_internal_fields() {
+        let report = changed_report();
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_import_report_human(&context, &report);
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("✓ History import completed\nLocal history changed.\n"));
+            assert!(rendered.contains("\nImported\n"));
+            assert!(rendered.contains("\nCurrent index\n"));
+            for internal in [
+                "outcome:",
+                "failure_scope",
+                "failure_type",
+                "published_generation",
+                "previous_generation",
+                "generation_changed",
+                "resume_mode",
+                "current_source_count",
+                "source_files",
+            ] {
+                assert!(
+                    !rendered.contains(internal),
+                    "human output exposed {internal:?}: {rendered}"
+                );
+            }
+            let available = context.content_width().unwrap();
+            for line in rendered.lines() {
+                assert!(
+                    line.width() <= available,
+                    "{line:?} exceeded {available} columns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn human_import_report_has_stable_copy_and_warning_recovery() {
+        let success = render_import_report_human(&context(80, ColorMode::Never), &changed_report())
+            .render_plain();
+        assert_eq!(
+            success,
+            "✓ History import completed\n\
+             Local history changed.\n\
+             \n\
+             Imported\n\
+             Sources          1\n\
+             Sessions         2\n\
+             Events           7\n\
+             Edges            1\n\
+             Skipped records  1\n\
+             \n\
+             Current index\n\
+             Sources                  1\n\
+             Searchable events        7\n\
+             Rejected records         0\n\
+             Sources with rejections  0\n\
+             Removed sources          0\n"
+        );
+
+        let report = ImportReport {
+            resume: false,
+            totals: ImportTotals {
+                per_run_counts_available: true,
+                imported_sources: 1,
+                failed_sources: 1,
+                failed: 2,
+                work_result: ProviderImportWorkResult::Changed,
+                ..ImportTotals::default()
+            },
+            sources: Vec::new(),
+        };
+        let warning =
+            render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(warning.starts_with(
+            "! History import completed with warnings\n\
+             1 source failed; 2 records were rejected; imported history remains available.\n"
+        ));
+        assert!(
+            warning.ends_with(concat!(
+                "Hint: Inspect source availability and import support.\n",
+                "\n",
+                "Next\n",
+                "  ctx sources\n",
+            )),
+            "{warning:?}"
+        );
+    }
+
+    #[test]
+    fn import_json_contract_is_unchanged_by_human_renderer() {
+        let value = import_report_json(&changed_report());
+        assert_eq!(
+            value,
+            json!({
+                "schema_version": 2,
+                "outcome": "success",
+                "failure_scope": "none",
+                "failure_type": "none",
+                "resume": true,
+                "resume_mode": "idempotent_rescan",
+                "totals": {
+                    "source_files": 1,
+                    "source_bytes": 4096,
+                    "imported_sources": 1,
+                    "sources_completed_with_rejections": 0,
+                    "failed_sources": 0,
+                    "imported_sessions": 2,
+                    "imported_events": 7,
+                    "imported_edges": 1,
+                    "skipped_sessions": 0,
+                    "skipped_events": 0,
+                    "skipped_edges": 0,
+                    "skipped": 1,
+                    "rejected_records": 0,
+                    "current_source_count": 1,
+                    "current_indexed_documents": 7,
+                    "current_complete_records": 7,
+                    "current_retained_records": 7,
+                    "current_rejected_records": 0,
+                    "current_ignored_records": 1,
+                    "current_certified_source_bytes": 4096,
+                    "current_sources_with_rejections": 0,
+                    "removed_source_count": 0,
+                    "change": "changed"
+                },
+                "sources": [{"status": "published"}],
+            })
+        );
+    }
+
+    #[test]
+    fn import_plain_output_equals_ansi_stripped_styled_output() {
+        let report = changed_report();
+        let context = context(80, ColorMode::Always);
+        let document = render_import_report_human(&context, &report);
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream
+            .write_all(document.render(&context).as_bytes())
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(stream.into_inner()).unwrap(),
+            document.render_plain()
+        );
+    }
 
     #[test]
     fn provider_database_lock_is_source_scoped() {

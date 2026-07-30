@@ -171,11 +171,57 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(stdout["schema_version"], 2);
-    assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() > 0);
+    assert_eq!(stdout["totals"]["imported_sources"], 1);
+    assert_eq!(stdout["sources"][0]["status"], "published");
+    assert!(stdout["sources"][0]["published_generation"].is_string());
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
     assert!(stderr.contains(r#""operation":"import""#), "{stderr}");
+}
+
+#[test]
+fn human_import_is_outcome_first_without_internal_generation_fields() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            &fixture,
+            "--no-daemon",
+            "--progress",
+            "plain",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("✓ History import completed\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\nImported\n"), "{stdout}");
+    for internal in [
+        "failure_scope",
+        "published_generation",
+        "previous_generation",
+        "generation_changed",
+        "resume_mode",
+    ] {
+        assert!(!stdout.contains(internal), "{stdout}");
+    }
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.ends_with("Published the source for indexing.\n"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("generation"), "{stderr}");
 }
 
 #[test]

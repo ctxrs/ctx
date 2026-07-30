@@ -8,6 +8,7 @@ use crate::analytics::{
     ImportFailureType as AnalyticsImportFailureType, ImportOutcome as AnalyticsImportOutcome,
     ImportTelemetry, ProviderRefreshTrigger,
 };
+use crate::ui::Ui;
 use crate::ImportArgs;
 
 use super::provider_refresh::ProviderRefreshCollector;
@@ -20,6 +21,7 @@ pub(crate) fn run_import(
     telemetry: &mut ImportTelemetry,
     provider_refreshes: &mut ProviderRefreshCollector,
     config: &crate::config::AppConfig,
+    ui: &mut Ui,
 ) -> Result<()> {
     if args.partial {
         eprintln!(
@@ -39,7 +41,6 @@ pub(crate) fn run_import(
         ImportRunOptions {
             progress,
             json,
-            print_human: !json,
             operation: "import",
         },
     );
@@ -53,7 +54,7 @@ pub(crate) fn run_import(
     };
     insert_import_report_analytics(telemetry, &report);
     let (outcome, _) = import_report_analytics_outcome(&report.totals);
-    print_import_report(&report, json)?;
+    print_import_report(&report, json, ui)?;
     if outcome == "failure" {
         let detail = report
             .sources

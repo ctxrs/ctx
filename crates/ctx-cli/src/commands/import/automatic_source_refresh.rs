@@ -96,22 +96,16 @@ pub(super) fn run_automatic_source_refresh_import(
         receipt.generation_changed,
     );
 
-    if context.options.print_human {
-        progress.finish_line();
-        if let Some(previous) = receipt.previous_generation.as_deref() {
-            println!("previous_generation: {previous}");
-        }
-        println!("published_generation: {}", receipt.published_generation);
-        println!("generation_changed: {}", receipt.generation_changed);
-    }
-    progress.done(
-        "published",
+    let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
             "Published source-backed generation {}.",
             receipt.published_generation
-        ),
-        current.certified_source_bytes,
-    );
+        )
+    } else {
+        "Finished refreshing local history.".to_owned()
+    };
+    progress.finish_line();
+    progress.done("published", completion, current.certified_source_bytes);
 
     Ok(ImportReport {
         resume: context.args.resume,
