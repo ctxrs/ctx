@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedCoordinatorError,
-        SourceBackedProviderRegistry,
+        refresh_source_backed_generation, source_backed_leaf_worker_budget,
+        SourceBackedCoordinatorError, SourceBackedProviderRegistry,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
     AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -162,11 +162,13 @@ impl SyntheticAdapter {
         leaf.revision = revision;
     }
 
-    fn use_independent_leaf_scans(&self, barrier_participants: usize) {
+    fn use_independent_leaf_scans(&self, requested_workers: usize) -> usize {
         let mut state = self.state.lock().unwrap();
+        let worker_count = effective_test_leaf_worker_count(requested_workers, state.leaves.len());
         state.leaf_execution_policy =
-            DocumentLeafExecutionPolicy::IndependentCapped(barrier_participants);
-        state.scan_barrier = Some(Arc::new(Barrier::new(barrier_participants)));
+            DocumentLeafExecutionPolicy::IndependentCapped(requested_workers);
+        state.scan_barrier = Some(Arc::new(Barrier::new(worker_count)));
+        worker_count
     }
 
     fn peak_scans(&self) -> usize {
@@ -485,6 +487,14 @@ fn writer_options() -> WriterOptions {
     }
 }
 
+fn effective_test_leaf_worker_count(requested_workers: usize, leaf_count: usize) -> usize {
+    requested_workers
+        .min(leaf_count)
+        .min(source_backed_leaf_worker_budget(
+            writer_options().indexer_threads,
+        ))
+}
+
 fn publish(
     root: &Path,
     registry: &SourceBackedProviderRegistry,
@@ -570,7 +580,7 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
     let serial_runner = SyntheticAdapter::new(leaves.clone());
     serial_runner.use_independent_leaf_scans(1);
     let parallel_runner = SyntheticAdapter::new(leaves);
-    parallel_runner.use_independent_leaf_scans(4);
+    let parallel_worker_count = parallel_runner.use_independent_leaf_scans(4);
     let serial_registry = fixture_registry(temp.path(), serial_runner.clone());
     let parallel_registry = fixture_registry(temp.path(), parallel_runner.clone());
     let serial_root = temp.path().join("serial-runner");
@@ -584,7 +594,7 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
     );
     assert_eq!(parallel_cold.sources, serial_cold.sources);
     assert_eq!(serial_runner.peak_scans(), 1);
-    assert_eq!(parallel_runner.peak_scans(), 4);
+    assert_eq!(parallel_runner.peak_scans(), parallel_worker_count);
     assert_eq!(serial_runner.total_scans(), 8);
     assert_eq!(parallel_runner.total_scans(), 8);
 
