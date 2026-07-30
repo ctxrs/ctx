@@ -166,11 +166,12 @@ impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
         let tree_fingerprint = nanoclaw_tree_fingerprint(physical_fingerprint, &self.source);
         Ok(CompleteDocumentTree::new(
             tree_fingerprint,
-            vec![ObservedDocumentLeaf::always_scan(
+            vec![ObservedDocumentLeaf::with_durable_replay(
                 DocumentLeafFingerprint::new(physical_fingerprint),
                 NanoClawDocumentLeaf {
                     source: self.source.clone(),
                 },
+                false,
             )],
             NanoClawDocumentTreeAuthority {
                 project: Mutex::new(project),
