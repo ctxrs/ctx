@@ -102,7 +102,7 @@ pub(crate) fn kiro_provider_session_id(row: &KiroConversationRow, value: &Value)
         .or_else(|| value.get("conversation_id").and_then(Value::as_str))
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("{}:{}:{}", row.table, row.key, row.rowid))
+        .unwrap_or_else(|| format!("{}:{}", row.table, row.key))
 }
 
 pub(crate) fn kiro_session_started_at(

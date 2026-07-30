@@ -33,6 +33,7 @@ pub(super) fn kiro_native_event(
         EventRole::Tool => "tool",
         EventRole::Unknown => "unknown",
     };
+    #[cfg(test)]
     let legacy_provider_event_hash = format!(
         "{}:{}:{}:{role_name}",
         row.table, provider_session_id, history_index
@@ -66,6 +67,7 @@ pub(super) fn kiro_native_event(
             "source_format": KIRO_SQLITE_SOURCE_FORMAT,
             "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
         }),
+        #[cfg(test)]
         metadata: json!({
             "source": row.table,
             "source_format": KIRO_SQLITE_SOURCE_FORMAT,
@@ -86,8 +88,7 @@ pub(crate) struct KiroNativeEvent {
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) payload: Value,
-    // Native row identity remains provenance alongside the normalized payload.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) metadata: Value,
 }
 

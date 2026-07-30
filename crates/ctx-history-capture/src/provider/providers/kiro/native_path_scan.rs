@@ -1,152 +1,168 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params_from_iter, types::ValueRef, Connection, Row};
 
-use crate::{provider::sqlite::SqliteLengthPreflightGuard, Result};
+use crate::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
-use super::super::history::KiroConversationRow;
-use super::KiroPhase;
+use super::{
+    super::history::KiroConversationRow,
+    source_backed::{KiroSourceBackedErrorV0, KiroSourceBackedResultV0},
+    KiroPhase,
+};
 
-pub(super) struct KiroCandidate {
-    pub(super) phase: KiroPhase,
-    pub(super) rowid: i64,
-    // Preserve the admitted row ordinal in the candidate data shape for exact
-    // cross-target scan diagnostics.
-    #[allow(dead_code)]
-    pub(super) row_ordinal: u64,
-    pub(super) retained_bytes: u64,
-    pub(super) type_valid: [bool; 5],
-}
-
-impl KiroCandidate {
-    pub(super) fn rejection_reason(&self) -> Option<&'static str> {
-        let [key, conversation_id, value, created_at, updated_at] = self.type_valid;
-        if !key {
-            return Some("Kiro conversation key has an unsupported SQLite storage class");
-        }
-        if self.phase == KiroPhase::V2 && !conversation_id {
-            return Some(
-                "Kiro conversations_v2.conversation_id has an unsupported SQLite storage class",
-            );
-        }
-        if !value {
-            return Some("Kiro conversation value has an unsupported SQLite storage class");
-        }
-        if self.phase == KiroPhase::V2 && !created_at {
-            return Some(
-                "Kiro conversations_v2.created_at has an unsupported SQLite storage class",
-            );
-        }
-        if self.phase == KiroPhase::V2 && !updated_at {
-            return Some(
-                "Kiro conversations_v2.updated_at has an unsupported SQLite storage class",
-            );
-        }
-        None
-    }
-}
-
-pub(super) fn next_candidate(
+pub(super) fn stream_rows(
     connection: &Connection,
     phase: KiroPhase,
-    after_rowid: Option<i64>,
-    row_ordinal: u64,
-) -> Result<Option<KiroCandidate>> {
-    let table = phase.table();
-    let where_clause = if after_rowid.is_some() {
-        " where rowid > ?1"
-    } else {
-        ""
-    };
-    let fields = match phase {
-        KiroPhase::V2 => {
-            "coalesce(octet_length(key), 0) + coalesce(octet_length(conversation_id), 0) + \
-             coalesce(octet_length(value), 0), typeof(key) = 'text', \
-             typeof(conversation_id) = 'text', typeof(value) = 'text', \
-             typeof(created_at) in ('null', 'integer'), \
-             typeof(updated_at) in ('null', 'integer')"
-        }
-        KiroPhase::Legacy => {
-            "coalesce(octet_length(key), 0) + coalesce(octet_length(value), 0), \
-             typeof(key) = 'text', 1, typeof(value) = 'text', 1, 1"
-        }
-    };
-    let sql = format!("select rowid, {fields} from {table}{where_clause} order by rowid limit 1");
-    let _guard = SqliteLengthPreflightGuard::new(connection);
+    visit: &mut dyn FnMut(KiroConversationRow) -> KiroSourceBackedResultV0<()>,
+) -> KiroSourceBackedResultV0<u64> {
+    let sql = format!(
+        "select {} from {} order by typeof(key), key collate binary, rowid",
+        selected_columns(phase),
+        phase.table()
+    );
     let mut statement = connection.prepare(&sql)?;
-    let read = |row: &rusqlite::Row<'_>| {
-        let bytes = row.get::<_, i64>(1)?;
-        Ok(KiroCandidate {
-            phase,
-            rowid: row.get(0)?,
-            row_ordinal,
-            retained_bytes: u64::try_from(bytes).unwrap_or(u64::MAX),
-            type_valid: [
-                row.get::<_, i64>(2)? != 0,
-                row.get::<_, i64>(3)? != 0,
-                row.get::<_, i64>(4)? != 0,
-                row.get::<_, i64>(5)? != 0,
-                row.get::<_, i64>(6)? != 0,
-            ],
-        })
-    };
-    match after_rowid {
-        Some(rowid) => statement
-            .query_row([rowid], read)
-            .optional()
-            .map_err(Into::into),
-        None => statement.query_row([], read).optional().map_err(Into::into),
+    let mut rows = statement.query([])?;
+    let mut decoded = 0_u64;
+    while let Some(row) = rows.next()? {
+        let row = decode_row(row, phase)?;
+        decoded = decoded
+            .checked_add(1)
+            .ok_or(KiroSourceBackedErrorV0::CountOverflow)?;
+        visit(row)?;
     }
+    Ok(decoded)
 }
 
-pub(super) fn candidate_at(
+pub(super) fn load_key_batch(
     connection: &Connection,
     phase: KiroPhase,
-    rowid: i64,
-    row_ordinal: u64,
-) -> Result<Option<KiroCandidate>> {
-    let candidate = match rowid.checked_sub(1) {
-        Some(prior) => next_candidate(connection, phase, Some(prior), row_ordinal)?,
-        None => next_candidate(connection, phase, None, row_ordinal)?,
-    };
-    Ok(candidate.filter(|candidate| candidate.rowid == rowid))
+    keys: &[String],
+) -> KiroSourceBackedResultV0<Vec<KiroConversationRow>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=keys.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "with matched as (
+             select {}, row_number() over (
+                 partition by key collate binary order by rowid
+             ) as requested_ordinal
+             from {}
+             where typeof(key) = 'text'
+               and key collate binary in ({placeholders})
+         )
+         select {} from matched where requested_ordinal <= 2
+         order by key collate binary, rowid",
+        selected_columns(phase),
+        phase.table(),
+        selected_columns(phase),
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(keys))?;
+    let mut decoded = Vec::with_capacity(keys.len());
+    while let Some(row) = rows.next()? {
+        decoded.push(decode_row(row, phase)?);
+    }
+    Ok(decoded)
 }
 
-pub(super) fn hydrate_row(
-    connection: &Connection,
-    phase: KiroPhase,
-    rowid: i64,
-) -> Result<KiroConversationRow> {
+fn selected_columns(phase: KiroPhase) -> &'static str {
     match phase {
-        KiroPhase::V2 => connection.query_row(
-            "select rowid, key, conversation_id, value, created_at, updated_at \
-             from conversations_v2 where rowid = ?1",
-            [rowid],
-            |row| {
-                Ok(KiroConversationRow {
-                    table: "conversations_v2",
-                    rowid: row.get(0)?,
-                    key: row.get(1)?,
-                    conversation_id: Some(row.get(2)?),
-                    value: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                })
-            },
-        ),
-        KiroPhase::Legacy => connection.query_row(
-            "select rowid, key, value from conversations where rowid = ?1",
-            [rowid],
-            |row| {
-                Ok(KiroConversationRow {
-                    table: "conversations",
-                    rowid: row.get(0)?,
-                    key: row.get(1)?,
-                    conversation_id: None,
-                    value: row.get(2)?,
-                    created_at: None,
-                    updated_at: None,
-                })
-            },
-        ),
+        KiroPhase::V2 => "rowid, key, conversation_id, value, created_at, updated_at",
+        KiroPhase::Legacy => "rowid, key, value",
     }
-    .map_err(Into::into)
+}
+
+fn decode_row(row: &Row<'_>, phase: KiroPhase) -> KiroSourceBackedResultV0<KiroConversationRow> {
+    let rowid = row.get::<_, i64>(0)?;
+    let decoded = match phase {
+        KiroPhase::V2 => KiroConversationRow {
+            table: phase.table(),
+            rowid,
+            key: required_text(row, 1, phase, rowid, "key")?,
+            conversation_id: Some(required_text(row, 2, phase, rowid, "conversation_id")?),
+            value: required_text(row, 3, phase, rowid, "value")?,
+            created_at: optional_integer(row, 4, phase, rowid, "created_at")?,
+            updated_at: optional_integer(row, 5, phase, rowid, "updated_at")?,
+        },
+        KiroPhase::Legacy => KiroConversationRow {
+            table: phase.table(),
+            rowid,
+            key: required_text(row, 1, phase, rowid, "key")?,
+            conversation_id: None,
+            value: required_text(row, 2, phase, rowid, "value")?,
+            created_at: None,
+            updated_at: None,
+        },
+    };
+    let retained_bytes = decoded
+        .key
+        .len()
+        .checked_add(decoded.value.len())
+        .and_then(|bytes| match decoded.conversation_id.as_ref() {
+            Some(value) => bytes.checked_add(value.len()),
+            None => Some(bytes),
+        })
+        .ok_or(KiroSourceBackedErrorV0::CountOverflow)?;
+    if retained_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES {
+        return Err(KiroSourceBackedErrorV0::UncertifiableRow {
+            relation: phase.table(),
+            rowid,
+            reason: "row exceeds the provider SQLite value bound",
+        });
+    }
+    Ok(decoded)
+}
+
+fn required_text(
+    row: &Row<'_>,
+    index: usize,
+    phase: KiroPhase,
+    rowid: i64,
+    field: &'static str,
+) -> KiroSourceBackedResultV0<String> {
+    match row.get_ref(index)? {
+        ValueRef::Text(value) => std::str::from_utf8(value).map(str::to_owned).map_err(|_| {
+            KiroSourceBackedErrorV0::UncertifiableRow {
+                relation: phase.table(),
+                rowid,
+                reason: "text column contains invalid UTF-8",
+            }
+        }),
+        _ => Err(KiroSourceBackedErrorV0::UncertifiableRow {
+            relation: phase.table(),
+            rowid,
+            reason: match field {
+                "key" => "Kiro conversation key has an unsupported SQLite storage class",
+                "conversation_id" => {
+                    "Kiro conversations_v2.conversation_id has an unsupported SQLite storage class"
+                }
+                _ => "Kiro conversation value has an unsupported SQLite storage class",
+            },
+        }),
+    }
+}
+
+fn optional_integer(
+    row: &Row<'_>,
+    index: usize,
+    phase: KiroPhase,
+    rowid: i64,
+    field: &'static str,
+) -> KiroSourceBackedResultV0<Option<i64>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Integer(value) => Ok(Some(value)),
+        _ => Err(KiroSourceBackedErrorV0::UncertifiableRow {
+            relation: phase.table(),
+            rowid,
+            reason: match field {
+                "created_at" => {
+                    "Kiro conversations_v2.created_at has an unsupported SQLite storage class"
+                }
+                _ => "Kiro conversations_v2.updated_at has an unsupported SQLite storage class",
+            },
+        }),
+    }
 }

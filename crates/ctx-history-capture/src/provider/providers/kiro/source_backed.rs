@@ -1,9 +1,11 @@
+//! Kiro legacy-SQLite logical capture, projection, and exact-row resolution.
+
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     convert::Infallible,
     fs,
     io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -11,8 +13,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
     EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    StableEntityId, TypedKey,
+    SourceAnchor, SourceKey, SourceRecordLocator, SourceResolverContractError, StableEntityId,
+    TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use rusqlite::Connection;
@@ -26,32 +28,30 @@ use crate::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
-    CaptureError, KIRO_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    provider_sources::{SqliteLogicalSnapshot, SqliteSourceEvidence},
+    CaptureError, KIRO_SQLITE_SOURCE_FORMAT,
 };
 
 use super::super::history::{
-    kiro_history_entry_events, kiro_history_events, kiro_provider_session_id,
-    kiro_session_started_at, KiroConversationRow,
+    kiro_history_entry_events, kiro_provider_session_id, kiro_session_started_at,
+    KiroConversationRow,
 };
-use super::{
-    absolute_kiro_path,
-    scan::{candidate_at, hydrate_row, next_candidate},
-    KiroPhase, KiroSqliteDatabase, KiroTables,
-};
+use super::{absolute_kiro_path, scan::stream_rows, KiroPhase, KiroSqliteDatabase, KiroTables};
 
 const KIRO_SOURCE_ANCHOR_NAMESPACE: &str = "kiro.legacy-sqlite";
 const KIRO_SOURCE_ANCHOR_KEY: &str = "default-history";
 const KIRO_SOURCE_SCHEMA_VARIANT: &str = "kiro-legacy-conversations-sqlite-v1";
-const KIRO_SOURCE_REVISION_KIND: &str = "kiro-sqlite-read-snapshot-v1";
-const KIRO_SOURCE_BACKED_PARSER_REVISION: &str = "kiro-source-backed-v0";
+const KIRO_SOURCE_BACKED_PARSER_REVISION: &str = "kiro-source-backed-logical-v1";
 const KIRO_NATIVE_SESSION_NAMESPACE: &str = "kiro.conversation";
 const KIRO_NATIVE_EVENT_NAMESPACE: &str = "kiro.history-event";
 const KIRO_LOGICAL_SESSION_KIND: &str = "kiro-conversation";
 const KIRO_LOGICAL_EVENT_KIND: &str = "kiro-history-event";
-const KIRO_SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"ctx.kiro.sqlite-snapshot.v1\0";
+const KIRO_SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"ctx.kiro.logical-snapshot.v2\0";
 const KIRO_ROW_DIGEST_DOMAIN: &[u8] = b"ctx.kiro.conversation-row.v1\0";
+const KIRO_SCHEMA_DIGEST_DOMAIN: &[u8] = b"ctx.kiro.relevant-schema.v1\0";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 const MAX_LEXICAL_METADATA_BYTES: usize = 64 * 1024;
+pub(super) const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 
 #[derive(Debug, Error)]
 pub(crate) enum KiroSourceBackedErrorV0 {
@@ -69,7 +69,10 @@ pub(crate) enum KiroSourceBackedErrorV0 {
     ResolverContract(#[from] SourceResolverContractError),
     #[error("unsupported Kiro history format: {0}")]
     UnsupportedFormat(&'static str),
-    #[error("Kiro source-backed scan cannot certify an invalid row in {relation} at rowid {rowid}: {reason}")]
+    #[error(
+        "Kiro source-backed scan cannot certify an invalid row in {relation} \
+         at rowid {rowid}: {reason}"
+    )]
     UncertifiableRow {
         relation: &'static str,
         rowid: i64,
@@ -91,111 +94,114 @@ pub(crate) enum KiroSourceBackedErrorV0 {
 
 pub(crate) type KiroSourceBackedResultV0<T> = Result<T, KiroSourceBackedErrorV0>;
 
+#[path = "source_backed/hydration.rs"]
+mod hydration;
+#[path = "source_backed/registration.rs"]
+pub(crate) mod registration;
+
+pub(crate) use hydration::KiroLocatorResolverV0;
+
+#[derive(Debug)]
+pub(super) struct KiroSourceBackedScan {
+    pub(super) source: SourceKey,
+    pub(super) certificate: CertifiedSource,
+    pub(super) terminal_fence: KiroSourceTerminalFence,
+    pub(super) emitted_pages: u64,
+    pub(super) row_decode_passes: u64,
+    pub(super) decoded_rows: u64,
+    pub(super) peak_buffered_rows: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct KiroSourceTerminalFence {
+    physical_evidence: SqliteSourceEvidence,
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct KiroSourceBackedScanV0 {
     pub(crate) source: SourceKey,
     pub(crate) documents: Vec<LexicalDocument>,
     pub(crate) certificate: CertifiedSource,
+    pub(super) terminal_fence: KiroSourceTerminalFence,
+    pub(crate) emitted_pages: u64,
+    pub(crate) row_decode_passes: u64,
+    pub(crate) decoded_rows: u64,
+    pub(crate) peak_buffered_rows: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct KiroHydratedRecordV0 {
-    pub(crate) provider_bytes: Vec<u8>,
-    pub(crate) decoded_display_text: String,
+pub(super) fn scan_kiro_source_backed(
+    source_path: &Path,
+    source_format: &str,
+    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> KiroSourceBackedResultV0<()>,
+) -> KiroSourceBackedResultV0<KiroSourceBackedScan> {
+    let source_path = absolute_kiro_path(source_path)?;
+    require_legacy_sqlite_format(&source_path, source_format)?;
+    let source = kiro_source_key()?;
+    let database = KiroSqliteDatabase::open(&source_path)?;
+    let working = {
+        let connection = database.connection(&source_path)?;
+        let tables = KiroTables::probe(connection)?;
+        let schema_evidence = relevant_schema_evidence(connection, tables)?;
+        let indexed_source_path = source_path.display().to_string();
+        let mut scanner = KiroLogicalScan::new(source.clone(), tables, indexed_source_path, emit)?;
+        scanner.scan(connection)?;
+        let streamed = scanner.finish()?;
+        let logical_snapshot = SqliteLogicalSnapshot::new(
+            KIRO_SOURCE_BACKED_PARSER_REVISION,
+            &schema_evidence,
+            streamed.content_digest,
+            streamed.counts,
+        );
+        (logical_snapshot, streamed)
+    };
+    let physical_evidence = database.finish(&source_path)?;
+    let certificate = working.0.certify(source.clone())?;
+    Ok(KiroSourceBackedScan {
+        source,
+        certificate,
+        terminal_fence: KiroSourceTerminalFence { physical_evidence },
+        emitted_pages: working.1.emitted_pages,
+        row_decode_passes: working.1.row_decode_passes,
+        decoded_rows: working.1.decoded_rows,
+        peak_buffered_rows: working.1.peak_buffered_rows,
+    })
 }
 
-#[derive(Debug)]
-pub(crate) struct KiroLocatorResolverV0 {
-    source_path: PathBuf,
-    source: SourceKey,
-}
-
-impl KiroLocatorResolverV0 {
-    pub(crate) fn discover(
-        source_path: impl AsRef<Path>,
-        source_format: &str,
-    ) -> KiroSourceBackedResultV0<Self> {
-        let source_path = absolute_kiro_path(source_path.as_ref())?;
-        let _ = open_kiro_database(&source_path, source_format)?;
-        Ok(Self {
-            source_path,
-            source: kiro_source_key()?,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
-    pub(crate) fn hydrate(
-        &self,
-        locator: &SourceRecordLocator,
-    ) -> KiroSourceBackedResultV0<KiroHydratedRecordV0> {
-        locator.validate_contract()?;
-        let (phase, key, native_event_key) = validate_kiro_locator(&self.source, locator)?;
-        let (database, tables) = open_kiro_database(&self.source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
-        if !phase_is_present(tables, phase) {
-            return Err(KiroSourceBackedErrorV0::InvalidLocator);
-        }
-        let row = database.read(&self.source_path, |connection| {
-            load_exact_conversation_row(connection, phase, &key)
-        })?;
-        let (record_digest, _) = canonical_row_digest(&row)?;
-        if &record_digest != locator.record_digest() {
-            return Err(KiroSourceBackedErrorV0::ConversationRowDigestMismatch);
-        }
-        let value: Value = serde_json::from_str(&row.value)?;
-        let provider_session_id = kiro_provider_session_id(&row, &value);
-        let started_at = kiro_session_started_at(&row, &value, DateTime::<Utc>::UNIX_EPOCH);
-        let decoded = kiro_history_events(&row, &provider_session_id, &value, started_at)
-            .find(|decoded| decoded.event.cursor == native_event_key)
-            .ok_or(KiroSourceBackedErrorV0::MissingConversationEvent)?;
-        let decoded_display_text = decoded.complete_text();
-        Ok(KiroHydratedRecordV0 {
-            provider_bytes: decoded_display_text.as_bytes().to_vec(),
-            decoded_display_text,
-        })
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn scan_kiro_source_backed_v0(
     source_path: impl AsRef<Path>,
     source_format: &str,
 ) -> KiroSourceBackedResultV0<KiroSourceBackedScanV0> {
-    let source_path = absolute_kiro_path(source_path.as_ref())?;
-    let source = kiro_source_key()?;
-    let (database, tables) = open_kiro_database(&source_path, source_format)?;
-    let opening = source_observation(&source, database.evidence())?;
-    let indexed_source_path = source_path.display().to_string();
-    let mut scan = KiroLogicalScan::new(source.clone(), tables, indexed_source_path)?;
-    database.read(&source_path, |connection| scan.scan(connection))?;
-    database.revalidate()?;
-    let closing = source_observation(&source, database.evidence())?;
-    let (documents, counts, content_digest) = scan.finish();
-    let certificate = CertifiedSource::certify(
-        opening,
-        closing,
-        KIRO_SOURCE_BACKED_PARSER_REVISION,
-        content_digest,
-        counts,
-    )?;
+    let mut documents = Vec::new();
+    let scan = scan_kiro_source_backed(source_path.as_ref(), source_format, &mut |page| {
+        documents.extend(page);
+        Ok(())
+    })?;
     Ok(KiroSourceBackedScanV0 {
-        source,
+        source: scan.source,
         documents,
-        certificate,
+        certificate: scan.certificate,
+        terminal_fence: scan.terminal_fence,
+        emitted_pages: scan.emitted_pages,
+        row_decode_passes: scan.row_decode_passes,
+        decoded_rows: scan.decoded_rows,
+        peak_buffered_rows: scan.peak_buffered_rows,
     })
 }
 
-fn open_kiro_database(
+pub(super) fn terminal_fence_matches(
     source_path: &Path,
-    source_format: &str,
-) -> KiroSourceBackedResultV0<(KiroSqliteDatabase, KiroTables)> {
-    require_legacy_sqlite_format(source_path, source_format)?;
-    KiroSqliteDatabase::open(source_path, KiroTables::probe).map_err(Into::into)
+    expected: &KiroSourceTerminalFence,
+) -> KiroSourceBackedResultV0<bool> {
+    let source_path = absolute_kiro_path(source_path)?;
+    require_legacy_sqlite_format(&source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
+    let database = KiroSqliteDatabase::open(&source_path)?;
+    let current = database.finish(&source_path)?;
+    Ok(current == expected.physical_evidence)
 }
 
-fn require_legacy_sqlite_format(
+pub(super) fn require_legacy_sqlite_format(
     source_path: &Path,
     source_format: &str,
 ) -> KiroSourceBackedResultV0<()> {
@@ -231,7 +237,7 @@ fn require_legacy_sqlite_format(
     Ok(())
 }
 
-fn kiro_source_key() -> KiroSourceBackedResultV0<SourceKey> {
+pub(super) fn kiro_source_key() -> KiroSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         KIRO_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(KIRO_SOURCE_ANCHOR_KEY)?,
@@ -245,47 +251,107 @@ fn kiro_source_key() -> KiroSourceBackedResultV0<SourceKey> {
     )?)
 }
 
-fn source_observation(
-    source: &SourceKey,
-    evidence: &crate::provider_sources::SqliteSourceEvidence,
-) -> KiroSourceBackedResultV0<SourceObservation> {
-    Ok(SourceObservation::new(
-        source.clone(),
-        KIRO_SOURCE_REVISION_KIND,
-        format!(
-            "identity={};length={};revision={}",
-            super::hex(evidence.identity()),
-            evidence.length(),
-            super::hex(evidence.revision()),
-        )
-        .into_bytes(),
-    )?)
+fn relevant_schema_evidence(
+    connection: &Connection,
+    tables: KiroTables,
+) -> KiroSourceBackedResultV0<Vec<u8>> {
+    let mut digest = Sha256::new();
+    digest.update(KIRO_SCHEMA_DIGEST_DOMAIN);
+    let user_version =
+        connection.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+    digest.update(user_version.to_le_bytes());
+    for phase in [KiroPhase::V2, KiroPhase::Legacy] {
+        digest.update([phase.tag(), u8::from(phase_is_present(tables, phase))]);
+        if !phase_is_present(tables, phase) {
+            continue;
+        }
+        let mut statement =
+            connection.prepare(&format!("pragma table_xinfo('{}')", phase.table()))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        let columns = rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|column| (column.0.clone(), column))
+            .collect::<BTreeMap<_, _>>();
+        for required in required_columns(phase) {
+            let column = columns.get(*required).ok_or_else(|| {
+                CaptureError::UnsupportedSchema(format!(
+                    "Kiro {} is missing required column {required}",
+                    phase.table()
+                ))
+            })?;
+            hash_bytes(&mut digest, 1, column.0.as_bytes())?;
+            hash_bytes(
+                &mut digest,
+                2,
+                column.1.trim().to_ascii_uppercase().as_bytes(),
+            )?;
+            digest.update(column.2.to_le_bytes());
+            hash_optional_bytes(&mut digest, 3, column.3.as_deref().map(str::as_bytes))?;
+            digest.update(column.4.to_le_bytes());
+            digest.update(column.5.to_le_bytes());
+        }
+    }
+    Ok(digest.finalize().to_vec())
 }
 
-struct KiroLogicalScan {
+fn required_columns(phase: KiroPhase) -> &'static [&'static str] {
+    match phase {
+        KiroPhase::V2 => &[
+            "key",
+            "conversation_id",
+            "value",
+            "created_at",
+            "updated_at",
+        ],
+        KiroPhase::Legacy => &["key", "value"],
+    }
+}
+
+struct KiroLogicalScan<'emit> {
     source: SourceKey,
     tables: KiroTables,
-    documents: Vec<LexicalDocument>,
     counts: ScannedSourceCounts,
     content_digest: Sha256,
     seen_keys: HashSet<(&'static str, String)>,
     indexed_source_path: String,
+    page: Vec<LexicalDocument>,
+    emit: &'emit mut dyn FnMut(Vec<LexicalDocument>) -> KiroSourceBackedResultV0<()>,
+    emitted_pages: u64,
+    row_decode_passes: u64,
+    decoded_rows: u64,
+    peak_buffered_rows: u64,
 }
 
-impl KiroLogicalScan {
+impl<'emit> KiroLogicalScan<'emit> {
     fn new(
         source: SourceKey,
         tables: KiroTables,
         indexed_source_path: String,
+        emit: &'emit mut dyn FnMut(Vec<LexicalDocument>) -> KiroSourceBackedResultV0<()>,
     ) -> KiroSourceBackedResultV0<Self> {
         let mut scan = Self {
             source,
             tables,
-            documents: Vec::new(),
             counts: ScannedSourceCounts::default(),
             content_digest: Sha256::new(),
             seen_keys: HashSet::new(),
             indexed_source_path,
+            page: Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS),
+            emit,
+            emitted_pages: 0,
+            row_decode_passes: 0,
+            decoded_rows: 0,
+            peak_buffered_rows: 0,
         };
         scan.content_digest.update(KIRO_SNAPSHOT_DIGEST_DOMAIN);
         if tables.v2 {
@@ -298,52 +364,36 @@ impl KiroLogicalScan {
     }
 
     fn scan(&mut self, connection: &Connection) -> KiroSourceBackedResultV0<()> {
-        if self.tables.v2 {
-            self.scan_phase(connection, KiroPhase::V2)?;
-        }
-        if self.tables.legacy {
-            self.scan_phase(connection, KiroPhase::Legacy)?;
+        self.row_decode_passes = checked_add(self.row_decode_passes, 1)?;
+        for phase in [KiroPhase::V2, KiroPhase::Legacy] {
+            if !phase_is_present(self.tables, phase) {
+                continue;
+            }
+            let decoded = stream_rows(connection, phase, &mut |row| self.process_row(phase, row))?;
+            self.decoded_rows = checked_add(self.decoded_rows, decoded)?;
         }
         Ok(())
     }
 
-    fn scan_phase(
+    fn process_row(
         &mut self,
-        connection: &Connection,
         phase: KiroPhase,
+        row: KiroConversationRow,
     ) -> KiroSourceBackedResultV0<()> {
-        let mut after_rowid = None;
-        let mut row_ordinal = 0_u64;
-        while let Some(candidate) = next_candidate(connection, phase, after_rowid, row_ordinal)? {
-            after_rowid = Some(candidate.rowid);
-            row_ordinal = checked_add(row_ordinal, 1)?;
-            if let Some(reason) = candidate.rejection_reason() {
-                return Err(KiroSourceBackedErrorV0::UncertifiableRow {
-                    relation: phase.table(),
-                    rowid: candidate.rowid,
-                    reason,
-                });
-            }
-            if candidate.retained_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 {
-                return Err(KiroSourceBackedErrorV0::UncertifiableRow {
-                    relation: phase.table(),
-                    rowid: candidate.rowid,
-                    reason: "row exceeds the provider SQLite value bound",
-                });
-            }
-            let row = hydrate_row(connection, phase, candidate.rowid)?;
-            if !self.seen_keys.insert((row.table, row.key.clone())) {
-                return Err(KiroSourceBackedErrorV0::AmbiguousConversationKey {
-                    relation: row.table,
-                });
-            }
-            let (record_digest, canonical_bytes) = canonical_row_digest(&row)?;
-            self.counts.certified_bytes =
-                checked_add(self.counts.certified_bytes, canonical_bytes)?;
-            self.content_digest.update([phase.tag()]);
-            self.content_digest.update(record_digest);
-            self.project_row(row, record_digest)?;
+        if !self.seen_keys.insert((row.table, row.key.clone())) {
+            return Err(KiroSourceBackedErrorV0::AmbiguousConversationKey {
+                relation: row.table,
+            });
         }
+        let (record_digest, canonical_bytes) = canonical_row_digest(&row)?;
+        self.counts.certified_bytes = checked_add(self.counts.certified_bytes, canonical_bytes)?;
+        self.content_digest.update([phase.tag()]);
+        self.content_digest.update(record_digest);
+        let before = self.counts;
+        let mut projection_digest = Sha256::new();
+        self.project_row(row, record_digest, &mut projection_digest)?;
+        hash_projection_counts(&mut self.content_digest, before, self.counts);
+        self.content_digest.update(projection_digest.finalize());
         Ok(())
     }
 
@@ -351,28 +401,19 @@ impl KiroLogicalScan {
         &mut self,
         row: KiroConversationRow,
         record_digest: [u8; 32],
+        projection_digest: &mut Sha256,
     ) -> KiroSourceBackedResultV0<()> {
         let value: Value = match serde_json::from_str(&row.value) {
             Ok(value) => value,
-            Err(_) => {
-                self.classify_rejected_record()?;
-                return Ok(());
-            }
+            Err(_) => return self.classify_rejected_record(),
         };
         let history = match value.get("history") {
             Some(Value::Array(history)) => history,
-            Some(_) => {
-                self.classify_rejected_record()?;
-                return Ok(());
-            }
-            None => {
-                self.classify_ignored_record()?;
-                return Ok(());
-            }
+            Some(_) => return self.classify_rejected_record(),
+            None => return self.classify_ignored_record(),
         };
         if history.is_empty() {
-            self.classify_ignored_record()?;
-            return Ok(());
+            return self.classify_ignored_record();
         }
 
         let provider_session_id = kiro_provider_session_id(&row, &value);
@@ -401,11 +442,26 @@ impl KiroLogicalScan {
                     native.event,
                     record_digest,
                 )?;
-                self.documents.push(document);
+                hash_projected_document(projection_digest, &document);
+                self.push_document(document)?;
                 self.counts.complete_records = checked_add(self.counts.complete_records, 1)?;
                 self.counts.retained_records = checked_add(self.counts.retained_records, 1)?;
                 self.counts.indexed_documents = checked_add(self.counts.indexed_documents, 1)?;
             }
+        }
+        Ok(())
+    }
+
+    fn push_document(&mut self, document: LexicalDocument) -> KiroSourceBackedResultV0<()> {
+        self.page.push(document);
+        self.peak_buffered_rows = self.peak_buffered_rows.max(
+            u64::try_from(self.page.len()).map_err(|_| KiroSourceBackedErrorV0::CountOverflow)?,
+        );
+        if self.page.len() == SOURCE_BACKED_PAGE_ROWS {
+            let page =
+                std::mem::replace(&mut self.page, Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS));
+            (self.emit)(page)?;
+            self.emitted_pages = checked_add(self.emitted_pages, 1)?;
         }
         Ok(())
     }
@@ -427,27 +483,44 @@ impl KiroLogicalScan {
         let relation = phase.table().as_bytes();
         self.content_digest.update(
             u64::try_from(relation.len())
-                .unwrap_or(u64::MAX)
+                .map_err(|_| KiroSourceBackedErrorV0::CountOverflow)?
                 .to_be_bytes(),
         );
         self.content_digest.update(relation);
         self.counts.certified_bytes = checked_add(
             self.counts.certified_bytes,
-            1_u64
-                .checked_add(8)
-                .and_then(|value| value.checked_add(relation.len() as u64))
+            u64::try_from(relation.len())
+                .map_err(|_| KiroSourceBackedErrorV0::CountOverflow)?
+                .checked_add(9)
                 .ok_or(KiroSourceBackedErrorV0::CountOverflow)?,
         )?;
         Ok(())
     }
 
-    fn finish(self) -> (Vec<LexicalDocument>, ScannedSourceCounts, [u8; 32]) {
-        (
-            self.documents,
-            self.counts,
-            self.content_digest.finalize().into(),
-        )
+    fn finish(mut self) -> KiroSourceBackedResultV0<StreamedLogicalRows> {
+        if !self.page.is_empty() {
+            (self.emit)(std::mem::take(&mut self.page))?;
+            self.emitted_pages = checked_add(self.emitted_pages, 1)?;
+        }
+        Ok(StreamedLogicalRows {
+            counts: self.counts,
+            content_digest: self.content_digest.finalize().into(),
+            emitted_pages: self.emitted_pages,
+            row_decode_passes: self.row_decode_passes,
+            decoded_rows: self.decoded_rows,
+            peak_buffered_rows: self.peak_buffered_rows,
+        })
     }
+}
+
+#[derive(Debug)]
+struct StreamedLogicalRows {
+    counts: ScannedSourceCounts,
+    content_digest: [u8; 32],
+    emitted_pages: u64,
+    row_decode_passes: u64,
+    decoded_rows: u64,
+    peak_buffered_rows: u64,
 }
 
 fn kiro_session_identity(
@@ -494,7 +567,7 @@ fn kiro_lexical_document(
     })?;
     let primary_key = TypedKey::composite(vec![
         TypedKey::utf8(row.key.clone())?,
-        TypedKey::utf8(event.cursor.clone())?,
+        TypedKey::utf8(event.cursor)?,
     ])?;
     let locator = SourceRecordLocator::new(
         source.clone(),
@@ -511,7 +584,7 @@ fn kiro_lexical_document(
     let body = event
         .payload
         .get("text")
-        .and_then(serde_json::Value::as_str)
+        .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
     if body.is_empty() {
@@ -576,7 +649,7 @@ fn projected_touched_files(
     Ok(paths)
 }
 
-fn validate_kiro_locator(
+pub(super) fn validate_kiro_locator(
     expected_source: &SourceKey,
     locator: &SourceRecordLocator,
 ) -> KiroSourceBackedResultV0<(KiroPhase, String, String)> {
@@ -611,56 +684,16 @@ fn validate_kiro_locator(
     Ok((phase, key.clone(), native_event_key.clone()))
 }
 
-fn load_exact_conversation_row(
-    connection: &Connection,
-    phase: KiroPhase,
-    key: &str,
-) -> KiroSourceBackedResultV0<KiroConversationRow> {
-    let sql = format!(
-        "select rowid from {} \
-         where typeof(key) = 'text' and key collate binary = ?1 collate binary \
-         order by rowid limit 2",
-        phase.table()
-    );
-    let mut statement = connection.prepare(&sql)?;
-    let rowids = statement
-        .query_map([key], |row| row.get::<_, i64>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let [rowid] = rowids.as_slice() else {
-        return match rowids.len() {
-            0 => Err(KiroSourceBackedErrorV0::MissingConversationRow),
-            _ => Err(KiroSourceBackedErrorV0::AmbiguousConversationKey {
-                relation: phase.table(),
-            }),
-        };
-    };
-    let candidate = candidate_at(connection, phase, *rowid, 0)?
-        .ok_or(KiroSourceBackedErrorV0::MissingConversationRow)?;
-    if let Some(reason) = candidate.rejection_reason() {
-        return Err(KiroSourceBackedErrorV0::UncertifiableRow {
-            relation: phase.table(),
-            rowid: *rowid,
-            reason,
-        });
-    }
-    if candidate.retained_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 {
-        return Err(KiroSourceBackedErrorV0::UncertifiableRow {
-            relation: phase.table(),
-            rowid: *rowid,
-            reason: "row exceeds the provider SQLite value bound",
-        });
-    }
-    hydrate_row(connection, phase, *rowid).map_err(Into::into)
-}
-
-fn phase_is_present(tables: KiroTables, phase: KiroPhase) -> bool {
+pub(super) fn phase_is_present(tables: KiroTables, phase: KiroPhase) -> bool {
     match phase {
         KiroPhase::V2 => tables.v2,
         KiroPhase::Legacy => tables.legacy,
     }
 }
 
-fn canonical_row_digest(row: &KiroConversationRow) -> KiroSourceBackedResultV0<([u8; 32], u64)> {
+pub(super) fn canonical_row_digest(
+    row: &KiroConversationRow,
+) -> KiroSourceBackedResultV0<([u8; 32], u64)> {
     let mut digest = Sha256::new();
     digest.update(KIRO_ROW_DIGEST_DOMAIN);
     let mut bytes = 0_u64;
@@ -678,6 +711,65 @@ fn canonical_row_digest(row: &KiroConversationRow) -> KiroSourceBackedResultV0<(
     bytes = checked_add(bytes, hash_optional_i64(&mut digest, 5, row.created_at)?)?;
     bytes = checked_add(bytes, hash_optional_i64(&mut digest, 6, row.updated_at)?)?;
     Ok((digest.finalize().into(), bytes))
+}
+
+fn hash_projected_document(digest: &mut Sha256, document: &LexicalDocument) {
+    digest.update(b"retained\0");
+    hash_unchecked(
+        digest,
+        document.provider_session_id.as_deref().unwrap_or_default(),
+    );
+    digest.update(document.event_sequence.to_le_bytes());
+    digest.update(
+        document
+            .occurred_at_unix_ms
+            .unwrap_or_default()
+            .to_le_bytes(),
+    );
+    hash_unchecked(digest, &document.event_type);
+    hash_unchecked(digest, document.role.as_deref().unwrap_or_default());
+    hash_unchecked(digest, &document.body);
+    hash_unchecked(digest, document.cwd.as_deref().unwrap_or_default());
+    for path in &document.touched_files {
+        hash_unchecked(digest, path);
+    }
+}
+
+fn hash_projection_counts(
+    digest: &mut Sha256,
+    before: ScannedSourceCounts,
+    after: ScannedSourceCounts,
+) {
+    digest.update(b"projection-counts\0");
+    digest.update(
+        after
+            .complete_records
+            .saturating_sub(before.complete_records)
+            .to_le_bytes(),
+    );
+    digest.update(
+        after
+            .retained_records
+            .saturating_sub(before.retained_records)
+            .to_le_bytes(),
+    );
+    digest.update(
+        after
+            .rejected_records
+            .saturating_sub(before.rejected_records)
+            .to_le_bytes(),
+    );
+    digest.update(
+        after
+            .ignored_records
+            .saturating_sub(before.ignored_records)
+            .to_le_bytes(),
+    );
+}
+
+fn hash_unchecked(digest: &mut Sha256, value: &str) {
+    digest.update((value.len() as u64).to_le_bytes());
+    digest.update(value.as_bytes());
 }
 
 fn hash_bytes(digest: &mut Sha256, tag: u8, value: &[u8]) -> KiroSourceBackedResultV0<u64> {
@@ -722,7 +814,7 @@ fn hash_optional_i64(
     }
 }
 
-fn checked_add(left: u64, right: u64) -> KiroSourceBackedResultV0<u64> {
+pub(super) fn checked_add(left: u64, right: u64) -> KiroSourceBackedResultV0<u64> {
     left.checked_add(right)
         .ok_or(KiroSourceBackedErrorV0::CountOverflow)
 }
@@ -730,58 +822,3 @@ fn checked_add(left: u64, right: u64) -> KiroSourceBackedResultV0<u64> {
 #[cfg(test)]
 #[path = "source_backed_tests.rs"]
 mod tests;
-pub(crate) mod registration {
-    use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
-
-    use super::{scan_kiro_source_backed_v0, KiroLocatorResolverV0};
-    use crate::provider::source_backed::{
-        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
-        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
-        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
-    };
-    use crate::ProviderSource;
-
-    pub(crate) fn register(
-        registry: &mut SourceBackedProviderRegistry,
-        source: ProviderSource,
-        selection: SourceBackedRouteSelection,
-    ) -> SourceBackedCoordinatorResult<()> {
-        let path = source.path.clone();
-        let source_format = source.source_format;
-        let capture_path = path.clone();
-        let hydration_path = path;
-        let driver = captured_route_driver(
-            &source,
-            move |sink| {
-                let scan = scan_kiro_source_backed_v0(&capture_path, source_format)
-                    .map_err(route_error)?;
-                sink.begin(scan.source)?;
-                for document in scan.documents {
-                    sink.document(document)?;
-                }
-                sink.certify(scan.certificate)
-            },
-            provider_format_scope(CaptureProvider::KiroCli, source_format),
-            move |request| {
-                let resolver = KiroLocatorResolverV0::discover(&hydration_path, source_format)
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                    })?;
-                let hydrated = resolver.hydrate(request.locator()).map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
-                Ok(HydratedProviderRecord {
-                    event_id: request.event_id(),
-                    provider_bytes: hydrated.provider_bytes,
-                })
-            },
-        );
-        registry.register(executable_route(
-            source,
-            selection,
-            SourceBackedSelectorAuthority::DiscoveredWinner,
-            driver,
-        )?);
-        Ok(())
-    }
-}
