@@ -1,6 +1,17 @@
-"""Configured dependency and license inventories for target-exact releases."""
+"""Generated routes and configured inventories for target-exact releases."""
 
 load("@rules_rust//rust:defs.bzl", "rust_common")
+
+# BEGIN GENERATED: contracts/release-targets-v1.json
+PUBLIC_RELEASE_ROUTES = {
+    "freebsd-x64": ("//tools/bazel/platforms:release_freebsd_x64", "x86_64-unknown-freebsd"),
+    "linux-arm64": ("//tools/bazel/platforms:release_linux_arm64", "aarch64-unknown-linux-gnu"),
+    "linux-x64": ("//tools/bazel/platforms:release_linux_x64", "x86_64-unknown-linux-gnu"),
+    "macos-arm64": ("//tools/bazel/platforms:release_macos_arm64", "aarch64-apple-darwin"),
+    "macos-x64": ("//tools/bazel/platforms:release_macos_x64", "x86_64-apple-darwin"),
+    "windows-x64": ("//tools/bazel/platforms:release_windows_x64_gnu", "x86_64-pc-windows-gnu"),
+}
+# END GENERATED: contracts/release-targets-v1.json
 
 ConfiguredDependencyInventoryInfo = provider(
     fields = {
