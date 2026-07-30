@@ -1,205 +1,171 @@
 #!/usr/bin/env python3
-"""Validate the single public release-target vocabulary used by ctx and Pro."""
+"""Validate the public release-target authority and its generated Bazel routes."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
+from typing import Any
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-MATRIX_PATH = REPOSITORY_ROOT / "contracts" / "release-targets-v1.json"
-EXPECTED = {
-    "freebsd-x64": {
-        "os": "freebsd",
-        "arch": "x86_64",
-        "public_rust_target": "x86_64-unknown-freebsd",
-        "helper_rust_target": "x86_64-unknown-freebsd",
-        "public_artifact": "ctx-freebsd-x64",
-        "helper_artifact": "ctx-pro-freebsd-x64",
-        "public_construction_authority": "bazel-release-route-v1",
-        "public_construction_label": "//:ctx_release_freebsd_x64",
-        "archive": "tar.gz",
-        "vault": "secret-service",
-        "runtime_authority": "native-freebsd-x86_64",
-        "diagnostic_authorities": ["freebsd-15.1"],
-        "platform_signature": "release-manifest",
-        "linux_build": None,
-    },
-    "linux-arm64": {
-        "os": "linux",
-        "arch": "aarch64",
-        "public_rust_target": "aarch64-unknown-linux-gnu",
-        "helper_rust_target": "aarch64-unknown-linux-gnu",
-        "public_artifact": "ctx-linux-aarch64",
-        "helper_artifact": "ctx-pro-linux-arm64",
-        "public_construction_authority": "bazel-release-route-v1",
-        "public_construction_label": "//:ctx_release_linux_arm64",
-        "archive": "tar.gz",
-        "vault": "secret-service",
-        "runtime_authority": "native-linux-aarch64",
-        "diagnostic_authorities": ["qemu-user"],
-        "platform_signature": "release-manifest",
-        "linux_build": {
-            "builder_image": "docker.io/library/ubuntu:22.04@sha256:"
-            "0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
-            "ubuntu_snapshot": "20260701T000000Z",
-            "glibc_max": "2.35",
-            "rust_toolchain": "1.97.1",
-            "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
-            "rust_sysroot": "/opt/rustup/toolchains/"
-            "1.97.1-aarch64-unknown-linux-gnu",
-        },
-    },
-    "linux-x64": {
-        "os": "linux",
-        "arch": "x86_64",
-        "public_rust_target": "x86_64-unknown-linux-gnu",
-        "helper_rust_target": "x86_64-unknown-linux-gnu",
-        "public_artifact": "ctx-linux-x64",
-        "helper_artifact": "ctx-pro-linux-x64",
-        "public_construction_authority": "bazel-release-route-v1",
-        "public_construction_label": "//:ctx_release_linux_x64",
-        "archive": "tar.gz",
-        "vault": "secret-service",
-        "runtime_authority": "native-linux-x86_64",
-        "diagnostic_authorities": [],
-        "platform_signature": "release-manifest",
-        "linux_build": {
-            "builder_image": "docker.io/library/ubuntu:22.04@sha256:"
-            "0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
-            "ubuntu_snapshot": "20260701T000000Z",
-            "glibc_max": "2.35",
-            "rust_toolchain": "1.97.1",
-            "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
-            "rust_sysroot": "/opt/rustup/toolchains/"
-            "1.97.1-x86_64-unknown-linux-gnu",
-        },
-    },
-    "macos-arm64": {
-        "os": "macos",
-        "arch": "aarch64",
-        "public_rust_target": "aarch64-apple-darwin",
-        "helper_rust_target": "aarch64-apple-darwin",
-        "public_artifact": "ctx-macos-arm64",
-        "helper_artifact": "ctx-pro-macos-arm64",
-        "public_construction_authority": "bazel-release-route-v1",
-        "public_construction_label": "//:ctx_release_macos_arm64",
-        "archive": "tar.gz",
-        "vault": "keychain",
-        "runtime_authority": "native-apple-arm64",
-        "diagnostic_authorities": [],
-        "platform_signature": "developer-id-notarized",
-        "linux_build": None,
-    },
-    "macos-x64": {
-        "os": "macos",
-        "arch": "x86_64",
-        "public_rust_target": "x86_64-apple-darwin",
-        "helper_rust_target": "x86_64-apple-darwin",
-        "public_artifact": "ctx-macos-x64",
-        "helper_artifact": "ctx-pro-macos-x64",
-        "public_construction_authority": "bazel-release-route-v1",
-        "public_construction_label": "//:ctx_release_macos_x64",
-        "archive": "tar.gz",
-        "vault": "keychain",
-        "runtime_authority": "native-macos-x86_64",
-        "diagnostic_authorities": ["rosetta-2", "non-apple-qemu"],
-        "platform_signature": "developer-id-notarized",
-        "linux_build": None,
-    },
-    "windows-x64": {
-        "os": "windows",
-        "arch": "x86_64",
-        "public_rust_target": "x86_64-pc-windows-gnu",
-        "helper_rust_target": "x86_64-pc-windows-msvc",
-        "public_artifact": "ctx-windows-x64.exe",
-        "helper_artifact": "ctx-pro-windows-x64.exe",
-        "public_construction_authority": "bazel-release-route-v1",
-        "public_construction_label": "//:ctx_release_windows_x64",
-        "archive": "zip",
-        "vault": "credential-manager",
-        "runtime_authority": "native-windows-x86_64",
-        "diagnostic_authorities": [],
-        "platform_signature": "unsigned",
-        "linux_build": None,
-    },
-}
-REQUIRED_STRING_FIELDS = {
-    "id",
-    "os",
-    "arch",
-    "public_rust_target",
-    "helper_rust_target",
-    "public_artifact",
-    "helper_artifact",
-    "public_construction_authority",
-    "public_construction_label",
-    "archive",
-    "vault",
-    "runtime_authority",
-    "platform_signature",
-}
-PLATFORM_SIGNATURES = {
-    "developer-id-notarized",
-    "release-manifest",
-    "unsigned",
-}
+ROOT = Path(__file__).resolve().parents[1]
+MATRIX_PATH = ROOT / "contracts" / "release-targets-v1.json"
+BAZEL_CONSUMER_PATH = ROOT / "tools" / "bazel" / "release_inventory.bzl"
+GENERATED_BEGIN = "# BEGIN GENERATED: contracts/release-targets-v1.json"
+GENERATED_END = "# END GENERATED: contracts/release-targets-v1.json"
+SUPPORTED_TARGET_IDS = tuple(
+    "freebsd-x64 linux-arm64 linux-x64 macos-arm64 macos-x64 windows-x64".split()
+)
+STRING_FIELDS = set(
+    """
+    arch archive bazel_platform helper_artifact helper_rust_target id os
+    platform_signature public_artifact public_construction_authority
+    public_construction_label public_rust_target runtime_authority vault
+    """.split()
+)
+TARGET_FIELDS = STRING_FIELDS | {"diagnostic_authorities", "linux_build"}
+LINUX_FIELDS = set(
+    "builder_image glibc_max rust_commit rust_sysroot rust_toolchain "
+    "ubuntu_snapshot".split()
+)
 
 
-def load_and_validate(path: Path = MATRIX_PATH) -> dict[str, object]:
+def require_string_fields(value: dict[str, Any], fields: set[str], label: str) -> None:
+    if any(not isinstance(value[field], str) or not value[field] for field in fields):
+        raise ValueError(f"{label} string fields must be non-empty")
+
+
+def validate_linux_build(target: dict[str, Any]) -> None:
+    linux_build = target["linux_build"]
+    if target["os"] != "linux":
+        if linux_build is not None:
+            raise ValueError("non-Linux target has a Linux build contract")
+        return
+    if not isinstance(linux_build, dict):
+        raise ValueError("Linux target must have a build contract")
+    if set(linux_build) != LINUX_FIELDS:
+        raise ValueError("Linux build contract has missing or unexpected fields")
+    require_string_fields(linux_build, LINUX_FIELDS, "Linux build contract")
+    if (
+        re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", linux_build["builder_image"])
+        is None
+        or re.fullmatch(r"\d{8}T\d{6}Z", linux_build["ubuntu_snapshot"]) is None
+        or re.fullmatch(r"\d+\.\d+", linux_build["glibc_max"]) is None
+        or re.fullmatch(r"\d+\.\d+\.\d+", linux_build["rust_toolchain"]) is None
+        or re.fullmatch(r"[0-9a-f]{40}", linux_build["rust_commit"]) is None
+        or linux_build["rust_commit"] == "0" * 40
+        or not linux_build["rust_sysroot"].startswith("/opt/rustup/toolchains/")
+    ):
+        raise ValueError("Linux build contract has malformed immutable pins")
+
+
+def validate_target(target: dict[str, Any]) -> None:
+    if set(target) != TARGET_FIELDS:
+        raise ValueError("release target has missing or unexpected fields")
+    require_string_fields(target, STRING_FIELDS, "release target")
+    diagnostics = target["diagnostic_authorities"]
+    if (
+        not isinstance(diagnostics, list)
+        or any(not isinstance(item, str) or not item for item in diagnostics)
+        or len(diagnostics) != len(set(diagnostics))
+    ):
+        raise ValueError("diagnostic authorities must be unique non-empty strings")
+    if target["runtime_authority"] in diagnostics:
+        raise ValueError(f"authoritative runner is also diagnostic for {target['id']}")
+    if target["public_construction_authority"] != "bazel-release-route-v1":
+        raise ValueError("public construction authority must be Bazel release V1")
+    if target["public_construction_label"] != (
+        f"//:ctx_release_{target['id'].replace('-', '_')}"
+    ):
+        raise ValueError("public construction label does not match target ID")
+    suffix = ".exe" if target["os"] == "windows" else ""
+    expected_public = f"ctx-{target['id']}{suffix}"
+    if target["id"] == "linux-arm64":
+        expected_public = "ctx-linux-aarch64"
+    if (
+        target["public_artifact"] != expected_public
+        or target["helper_artifact"] != f"ctx-pro-{target['id']}{suffix}"
+    ):
+        raise ValueError(f"unexpected release contract for {target['id']}")
+    if (
+        target["platform_signature"]
+        not in {"developer-id-notarized", "release-manifest", "unsigned"}
+        or target["archive"] not in {"tar.gz", "zip"}
+        or re.fullmatch(r"native-[a-z0-9_-]+", target["runtime_authority"]) is None
+        or re.fullmatch(r"[A-Za-z0-9._-]+", target["public_artifact"]) is None
+        or re.fullmatch(r"[A-Za-z0-9._-]+", target["helper_artifact"]) is None
+        or re.fullmatch(
+            r"//tools/bazel/platforms:release_[a-z0-9_]+",
+            target["bazel_platform"],
+        )
+        is None
+    ):
+        raise ValueError("release target contains an unsupported policy value or path")
+    validate_linux_build(target)
+
+
+def load_and_validate(path: Path = MATRIX_PATH) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("schema_version") != 1 or set(value) != {"schema_version", "targets"}:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or set(value) != {"schema_version", "targets"}
+        or not isinstance(value["targets"], list)
+    ):
         raise ValueError("release target matrix must use the exact V1 envelope")
-    targets = value.get("targets")
-    if not isinstance(targets, list):
-        raise ValueError("release target matrix targets must be a list")
-    ids: list[str] = []
-    for target in targets:
-        if not isinstance(target, dict):
-            raise ValueError("release target entries must be objects")
-        if set(target) != REQUIRED_STRING_FIELDS | {
-            "diagnostic_authorities",
-            "linux_build",
-        }:
-            raise ValueError("release target entry has missing or unexpected fields")
-        if any(not isinstance(target[field], str) or not target[field] for field in REQUIRED_STRING_FIELDS):
-            raise ValueError("release target string fields must be non-empty")
-        diagnostics = target["diagnostic_authorities"]
-        if not isinstance(diagnostics, list) or any(
-            not isinstance(authority, str) or not authority for authority in diagnostics
-        ):
-            raise ValueError("diagnostic authorities must be non-empty strings")
-        if target["platform_signature"] not in PLATFORM_SIGNATURES:
-            raise ValueError("unsupported platform signature policy")
-        if target["public_construction_authority"] != "bazel-release-route-v1":
-            raise ValueError("public construction authority must be Bazel release V1")
-        if target["public_construction_label"] != (
-            f"//:ctx_release_{target['id'].replace('-', '_')}"
-        ):
-            raise ValueError("public construction label does not match target ID")
-        target_id = target["id"]
-        ids.append(target_id)
-        if target["runtime_authority"] in diagnostics:
-            raise ValueError(f"authoritative runner is also diagnostic for {target_id}")
-        expected = EXPECTED.get(target_id)
-        actual = {
-            field: target[field]
-            for field in REQUIRED_STRING_FIELDS
-            | {"diagnostic_authorities", "linux_build"}
-            if field != "id"
-        }
-        if expected != actual:
-            raise ValueError(f"unexpected release contract for {target_id}")
-    if ids != sorted(EXPECTED) or len(ids) != len(set(ids)):
+    if any(not isinstance(target, dict) for target in value["targets"]):
+        raise ValueError("release target entries must be objects")
+    ids = [target.get("id") for target in value["targets"]]
+    if ids != list(SUPPORTED_TARGET_IDS) or len(ids) != len(set(ids)):
         raise ValueError("release target IDs must be the exact sorted Day One matrix")
+    for target in value["targets"]:
+        validate_target(target)
     return value
+
+
+def generated_bazel_consumer(value: dict[str, Any]) -> str:
+    rows = [
+        f'    "{target["id"]}": ("{target["bazel_platform"]}", '
+        f'"{target["public_rust_target"]}"),'
+        for target in value["targets"]
+    ]
+    return "\n".join(
+        [GENERATED_BEGIN, "PUBLIC_RELEASE_ROUTES = {", *rows, "}", GENERATED_END]
+    )
+
+
+def updated_bazel_consumer(source: str, value: dict[str, Any]) -> str:
+    if source.count(GENERATED_BEGIN) != 1 or source.count(GENERATED_END) != 1:
+        raise ValueError("Bazel release consumer must contain one generated block")
+    before, remainder = source.split(GENERATED_BEGIN, 1)
+    _, after = remainder.split(GENERATED_END, 1)
+    return before + generated_bazel_consumer(value) + after
+
+
+def validate_bazel_consumer(path: Path, value: dict[str, Any]) -> None:
+    source = path.read_text(encoding="utf-8")
+    if updated_bazel_consumer(source, value) != source:
+        raise ValueError(
+            "Bazel release consumer is stale; run "
+            "scripts/check-release-target-matrix.py --write-bazel-consumer"
+        )
 
 
 def main() -> int:
     try:
+        if sys.argv[1:] not in ([], ["--write-bazel-consumer"]):
+            raise ValueError("usage: check-release-target-matrix.py [--write-bazel-consumer]")
         value = load_and_validate()
+        if BAZEL_CONSUMER_PATH.is_file():
+            if sys.argv[1:]:
+                source = BAZEL_CONSUMER_PATH.read_text(encoding="utf-8")
+                BAZEL_CONSUMER_PATH.write_text(
+                    updated_bazel_consumer(source, value),
+                    encoding="utf-8",
+                )
+            validate_bazel_consumer(BAZEL_CONSUMER_PATH, value)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"release target matrix: {error}", file=sys.stderr)
         return 1

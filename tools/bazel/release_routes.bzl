@@ -1,5 +1,7 @@
 """Target-configured public CLI release packaging routes."""
 
+load(":release_inventory.bzl", "PUBLIC_RELEASE_ROUTES")
+
 ReleaseRouteInfo = provider(
     doc = "Selected public release graph identity.",
     fields = {
@@ -10,37 +12,10 @@ ReleaseRouteInfo = provider(
     },
 )
 
-_ROUTES = {
-    "linux-x64": struct(
-        platform = "//tools/bazel/platforms:release_linux_x64",
-        triple = "x86_64-unknown-linux-gnu",
-    ),
-    "linux-arm64": struct(
-        platform = "//tools/bazel/platforms:release_linux_arm64",
-        triple = "aarch64-unknown-linux-gnu",
-    ),
-    "macos-arm64": struct(
-        platform = "//tools/bazel/platforms:release_macos_arm64",
-        triple = "aarch64-apple-darwin",
-    ),
-    "macos-x64": struct(
-        platform = "//tools/bazel/platforms:release_macos_x64",
-        triple = "x86_64-apple-darwin",
-    ),
-    "windows-x64": struct(
-        platform = "//tools/bazel/platforms:release_windows_x64_gnu",
-        triple = "x86_64-pc-windows-gnu",
-    ),
-    "freebsd-x64": struct(
-        platform = "//tools/bazel/platforms:release_freebsd_x64",
-        triple = "x86_64-unknown-freebsd",
-    ),
-}
-
 def _route_transition_impl(_settings, attr):
-    route = _ROUTES[attr.target_id]
+    route = PUBLIC_RELEASE_ROUTES[attr.target_id]
     return {
-        "//command_line_option:platforms": route.platform,
+        "//command_line_option:platforms": route[0],
         "//tools/bazel:windows_gnu_release": attr.target_id == "windows-x64",
     }
 
@@ -119,7 +94,7 @@ exec "${{packager}}" \
     )
 
 def _release_route_impl(ctx):
-    route = _ROUTES[ctx.attr.target_id]
+    route = PUBLIC_RELEASE_ROUTES[ctx.attr.target_id]
     launcher = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.write(
         output = launcher,
@@ -166,9 +141,9 @@ def _release_route_impl(ctx):
         DefaultInfo(executable = launcher, runfiles = runfiles),
         ReleaseRouteInfo(
             available = True,
-            platform = route.platform,
+            platform = route[0],
             target_id = ctx.attr.target_id,
-            target_triple = route.triple,
+            target_triple = route[1],
         ),
     ]
 
@@ -213,7 +188,7 @@ _release_route = rule(
             executable = True,
             mandatory = True,
         ),
-        "target_id": attr.string(mandatory = True, values = sorted(_ROUTES.keys())),
+        "target_id": attr.string(mandatory = True, values = sorted(PUBLIC_RELEASE_ROUTES.keys())),
         "target_matrix": attr.label(allow_single_file = True, mandatory = True),
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
@@ -357,7 +332,7 @@ _release_advisory_gate = rule(
             executable = True,
             mandatory = True,
         ),
-        "target_id": attr.string(mandatory = True, values = sorted(_ROUTES.keys())),
+        "target_id": attr.string(mandatory = True, values = sorted(PUBLIC_RELEASE_ROUTES.keys())),
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
         ),
@@ -378,7 +353,7 @@ def public_cli_release_advisory_gate(name, target_id, inventory):
 
 def public_cli_release_advisory_gates(name_prefix, inventory):
     """Declares the advisory gate for every owned public release route."""
-    for target_id in sorted(_ROUTES.keys()):
+    for target_id in sorted(PUBLIC_RELEASE_ROUTES.keys()):
         public_cli_release_advisory_gate(
             name = "{}_{}".format(name_prefix, target_id.replace("-", "_")),
             inventory = inventory,
