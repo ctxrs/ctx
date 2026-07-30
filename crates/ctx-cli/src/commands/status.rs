@@ -23,6 +23,52 @@ pub(super) fn upgrade_report(config: &config::AppConfig) -> serde_json::Value {
     crate::upgrade::upgrade_diagnostics(config).report
 }
 
+pub(crate) struct StatusReadModel {
+    pub(crate) report: Value,
+    local_usage: local_usage::UsageReport,
+    initialized: bool,
+    indexed_items: Option<u64>,
+    indexed_sessions: Option<u64>,
+    indexed_events: Option<u64>,
+    indexed_sources: Option<u64>,
+}
+
+pub(crate) fn status_read_model(
+    data_root: &Path,
+    config: &config::AppConfig,
+) -> Result<StatusReadModel> {
+    let source = source_epoch_status_report(data_root, config)?;
+    let mut pro = crate::pro::lifecycle_status_json(data_root);
+    if let Some(object) = pro.as_object_mut() {
+        object.insert(
+            "conversion_action".to_owned(),
+            local_usage::pro_conversion_action(object.get("access_state").and_then(Value::as_str))
+                .unwrap_or(Value::Null),
+        );
+    }
+    let upgrade = upgrade_report(config);
+    let local_usage = local_usage::read_report(data_root, config.local_usage.enabled, false);
+    let mut report = source.report;
+    if let Some(object) = report.as_object_mut() {
+        object.insert("upgrade".to_owned(), upgrade);
+        object.insert("pro".to_owned(), pro);
+        object.insert(
+            "local_usage".to_owned(),
+            compact_usage_health_json(&local_usage),
+        );
+        object.insert("read_only".to_owned(), json!(true));
+    }
+    Ok(StatusReadModel {
+        report,
+        local_usage,
+        initialized: source.initialized,
+        indexed_items: source.indexed_items,
+        indexed_sessions: source.indexed_sessions,
+        indexed_events: source.indexed_events,
+        indexed_sources: source.indexed_sources,
+    })
+}
+
 pub(crate) fn run_status(
     args: StatusArgs,
     data_root: PathBuf,
@@ -37,43 +83,23 @@ pub(crate) fn run_status(
     let Some(config) = load_status_config(&data_root) else {
         return malformed_config_failure(args.format.is_json());
     };
-    let source = source_epoch_status_report(&data_root, &config)?;
-    telemetry.initialized = Some(source.initialized);
-    telemetry.indexed_items = source.indexed_items.map(count_bucket);
-    telemetry.indexed_sessions = source.indexed_sessions.map(count_bucket);
-    telemetry.indexed_events = source.indexed_events.map(count_bucket);
-    telemetry.indexed_sources = source.indexed_sources.map(count_bucket);
-    let mut pro = crate::pro::lifecycle_status_json(&data_root);
-    if let Some(object) = pro.as_object_mut() {
-        object.insert(
-            "conversion_action".to_owned(),
-            local_usage::pro_conversion_action(object.get("access_state").and_then(Value::as_str))
-                .unwrap_or(Value::Null),
-        );
-    }
-    let upgrade = upgrade_report(&config);
-    let local_usage = local_usage::read_report(&data_root, config.local_usage.enabled, false);
+    let status = status_read_model(&data_root, &config)?;
+    telemetry.initialized = Some(status.initialized);
+    telemetry.indexed_items = status.indexed_items.map(count_bucket);
+    telemetry.indexed_sessions = status.indexed_sessions.map(count_bucket);
+    telemetry.indexed_events = status.indexed_events.map(count_bucket);
+    telemetry.indexed_sources = status.indexed_sources.map(count_bucket);
     if args.format.is_json() {
-        let mut report = source.report;
-        if let Some(object) = report.as_object_mut() {
-            object.insert("upgrade".to_owned(), upgrade);
-            object.insert("pro".to_owned(), pro);
-            object.insert(
-                "local_usage".to_owned(),
-                compact_usage_health_json(&local_usage),
-            );
-            object.insert("read_only".to_owned(), json!(true));
-        }
-        print_json(report)?;
+        print_json(status.report)?;
     } else if !quiet {
         let document = render_status_human(
             ui.stdout_context(),
-            &source.report,
+            &status.report,
             &data_root,
             &config_path,
-            &upgrade,
-            &pro,
-            &local_usage,
+            &status.report["upgrade"],
+            &status.report["pro"],
+            &status.local_usage,
         );
         ui.write_stdout(&document)?;
     }

@@ -1,6 +1,144 @@
 mod support;
 
+use std::collections::BTreeMap;
+
 use support::*;
+
+fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, directory: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                snapshot.insert(relative, None);
+                visit(root, &path, snapshot);
+            } else if file_type.is_file() {
+                snapshot.insert(relative, Some(fs::read(path).unwrap()));
+            } else if file_type.is_symlink() {
+                snapshot.insert(
+                    relative,
+                    Some(
+                        fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    ),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    if root.is_dir() {
+        visit(root, root, &mut snapshot);
+    }
+    snapshot
+}
+
+fn assert_status_facts_stay_machine_only(result: &Value) {
+    let text = mcp_content_text(result);
+    for machine_only in ["local_usage", "pro_status", "automatic_upgrades"] {
+        assert!(
+            !text.contains(machine_only),
+            "MCP status machine fact {machine_only:?} leaked into text content:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn mcp_status_exactly_matches_cli_json_for_pristine_unavailable_state() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let before = tree_snapshot(&root);
+
+    let (cli, result) =
+        assert_cli_mcp_status_parity(&temp, &[("CTX_LOCAL_USAGE_ENABLED", "false")]);
+
+    assert_eq!(cli["initialized"], false, "{cli:#}");
+    assert_eq!(cli["history_epoch"]["status"], "unavailable", "{cli:#}");
+    assert_eq!(cli["lexical"]["status"], "unavailable", "{cli:#}");
+    assert!(cli["upgrade"].is_object(), "{cli:#}");
+    assert_eq!(cli["upgrade"]["auto"], "apply", "{cli:#}");
+    assert_eq!(cli["upgrade"]["install"]["marker"], "absent", "{cli:#}");
+    assert_eq!(cli["pro"]["installed"], false, "{cli:#}");
+    assert_eq!(
+        cli["local_usage"],
+        json!({
+            "schema_version": 2,
+            "enabled": false,
+            "state": "disabled",
+            "definition_version": 2,
+            "retention_days": 400,
+            "error": null,
+        }),
+        "{cli:#}"
+    );
+    assert_eq!(cli["read_only"], true, "{cli:#}");
+    assert_status_facts_stay_machine_only(&result);
+    assert_eq!(
+        tree_snapshot(&root),
+        before,
+        "CLI and MCP status must not create or mutate data-root entries"
+    );
+}
+
+#[test]
+fn mcp_status_exactly_matches_cli_json_for_existing_healthy_generation() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    initialize_generation_only_sql_projection(&root);
+
+    let (cli, result) =
+        assert_cli_mcp_status_parity(&temp, &[("CTX_LOCAL_USAGE_ENABLED", "false")]);
+
+    assert_eq!(cli["initialized"], true, "{cli:#}");
+    assert_eq!(cli["history_epoch"]["status"], "ready", "{cli:#}");
+    assert_eq!(cli["lexical"]["status"], "ready", "{cli:#}");
+    assert_eq!(cli["relational"]["status"], "ready", "{cli:#}");
+    assert_eq!(cli["read_only"], true, "{cli:#}");
+    assert_status_facts_stay_machine_only(&result);
+}
+
+#[test]
+fn mcp_status_matches_cli_compact_error_for_malformed_usage_store() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let marker = "PRIVATE_MCP_STATUS_USAGE_MARKER_7f98";
+    fs::write(
+        root.join("usage.sqlite"),
+        format!("not sqlite: /tmp/{marker}/bearer-secret"),
+    )
+    .unwrap();
+    let before = tree_snapshot(&root);
+
+    let (cli, result) = assert_cli_mcp_status_parity(&temp, &[("CTX_LOCAL_USAGE_ENABLED", "true")]);
+
+    assert_eq!(cli["local_usage"]["enabled"], true, "{cli:#}");
+    assert_eq!(cli["local_usage"]["state"], "error", "{cli:#}");
+    assert_eq!(
+        cli["local_usage"]["error"]["code"], "usage_store_unavailable",
+        "{cli:#}"
+    );
+    assert!(cli["local_usage"].get("definitions").is_none(), "{cli:#}");
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains(marker), "{encoded}");
+    assert!(!encoded.contains("bearer-secret"), "{encoded}");
+    assert_status_facts_stay_machine_only(&result);
+    assert_eq!(
+        tree_snapshot(&root),
+        before,
+        "malformed usage reporting must remain content-free and filesystem read-only"
+    );
+}
 
 #[test]
 fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {

@@ -77,6 +77,35 @@ fn mcp_advertises_read_only_status_and_locally_mutating_blame() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn generic_mcp_status_exactly_matches_cli_json_with_pro_present() {
+    let temp = tempdir();
+    let helper = temp.path().join("ctx-pro-status");
+    write_status_helper(&helper);
+    let root = data_root(&temp);
+    assert!(!root.exists());
+
+    let (cli, result) = assert_cli_mcp_status_parity(
+        &temp,
+        &[
+            ("CTX_LOCAL_USAGE_ENABLED", "false"),
+            ("CTX_PRO_HELPER", helper.to_str().unwrap()),
+        ],
+    );
+
+    assert_eq!(cli["pro"]["installed"], true, "{cli:#}");
+    assert_ne!(cli["pro"]["state"], "not_setup", "{cli:#}");
+    assert_eq!(cli["pro"]["payload_type"], "pro_status", "{cli:#}");
+    assert_eq!(cli["read_only"], true, "{cli:#}");
+    let text = mcp_content_text(&result);
+    assert!(!text.contains("pro_status"), "{text}");
+    assert!(
+        !root.exists(),
+        "CLI and generic MCP status must not initialize the data root for Pro status"
+    );
+}
+
 #[test]
 fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
     let temp = tempdir();
