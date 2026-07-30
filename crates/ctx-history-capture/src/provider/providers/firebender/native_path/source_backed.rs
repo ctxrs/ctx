@@ -10,7 +10,6 @@ use ctx_history_core::{
 };
 use ctx_history_index::LexicalDocument;
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::super::{
@@ -31,6 +30,17 @@ use crate::{
     CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
 };
 
+mod direct;
+mod hydration;
+
+pub(crate) use direct::register_source_backed_route;
+#[cfg(test)]
+pub(crate) use direct::{
+    cache_terminal_fence_result, revalidate_missing_after_for_test, scan_for_test,
+};
+#[cfg(test)]
+pub(crate) use hydration::resolver_for_test;
+
 const FIREBENDER_SOURCE_ANCHOR_NAMESPACE: &str = "firebender.explicit-chat-history";
 const FIREBENDER_NATIVE_SESSION_NAMESPACE: &str = "firebender.chat-session";
 const FIREBENDER_NATIVE_EVENT_NAMESPACE: &str = "firebender.message";
@@ -41,7 +51,6 @@ const FIREBENDER_SOURCE_SCHEMA_VARIANT: &str = "firebender-chat-sessions-v1";
 const FIREBENDER_SOURCE_REVISION_KIND: &str = "firebender-sqlite-snapshot-v1";
 const FIREBENDER_SOURCE_PARSER_REVISION: &str = "firebender-source-backed-v1";
 const FIREBENDER_LOCATOR_RELATION: &str = "chat_sessions.messages_json";
-const FIREBENDER_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-source-revision-digest-v1\0";
 
 #[derive(Debug, Error)]
 pub(crate) enum FirebenderSourceBackedError {
@@ -241,7 +250,6 @@ impl FirebenderSourceBackedScanner {
         }
 
         let session_id = firebender_session_id(&self.source, &row.id)?;
-        let source_revision_digest = source_revision_digest(&self.opening);
         let row_digest = firebender_raw_row_digest(&row.logical_values());
         let mut documents = Vec::with_capacity(page.message_end.saturating_sub(page.message_start));
         for (relative_index, message) in row.messages[page.message_start..page.message_end]
@@ -253,7 +261,6 @@ impl FirebenderSourceBackedScanner {
             let Some(document) = firebender_document(
                 &self.source,
                 session_id,
-                source_revision_digest,
                 &self.source_path,
                 self.workspace.as_deref(),
                 row,
@@ -281,9 +288,8 @@ pub(crate) fn hydrate_firebender_source_backed_row(
     if !opened.source.exact_descriptor_eq(locator.source()) {
         return Err(FirebenderSourceBackedError::LocatorSourceMismatch);
     }
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || locator.certified_source_revision_digest()
-            != Some(&source_revision_digest(&opened.observation))
+    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
     {
         return Err(FirebenderSourceBackedError::StaleSourceEvidence);
     }
@@ -339,7 +345,9 @@ impl OpenedFirebenderSource {
     }
 }
 
-fn firebender_source_key(route_identity: &str) -> FirebenderSourceBackedResult<SourceKey> {
+pub(super) fn firebender_source_key(
+    route_identity: &str,
+) -> FirebenderSourceBackedResult<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         FIREBENDER_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(route_identity)?,
@@ -365,17 +373,7 @@ fn source_observation(
     )?)
 }
 
-fn source_revision_digest(observation: &SourceObservation) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(FIREBENDER_REVISION_DIGEST_DOMAIN);
-    digest.update((observation.revision_kind().len() as u64).to_be_bytes());
-    digest.update(observation.revision_kind().as_bytes());
-    digest.update((observation.revision().len() as u64).to_be_bytes());
-    digest.update(observation.revision());
-    digest.finalize().into()
-}
-
-fn firebender_session_id(
+pub(super) fn firebender_session_id(
     source: &SourceKey,
     provider_session_id: &str,
 ) -> FirebenderSourceBackedResult<StableEntityId> {
@@ -391,10 +389,9 @@ fn firebender_session_id(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn firebender_document(
+pub(super) fn firebender_document(
     source: &SourceKey,
     session_id: StableEntityId,
-    source_revision_digest: [u8; 32],
     source_path: &str,
     workspace: Option<&str>,
     row: &FirebenderRow,
@@ -443,8 +440,8 @@ fn firebender_document(
                 TypedKey::U64(message_index_u64),
             ])?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         row_digest,
     )?;
     Ok(Some(LexicalDocument {
@@ -470,7 +467,7 @@ fn firebender_document(
     }))
 }
 
-fn firebender_workspace(database_path: &Path) -> Option<String> {
+pub(super) fn firebender_workspace(database_path: &Path) -> Option<String> {
     let firebender_dir = database_path.parent()?;
     if firebender_dir.file_name().and_then(|name| name.to_str()) != Some("firebender") {
         return None;
@@ -529,7 +526,7 @@ fn sparse_output_body(evidence: &FirebenderOutputEvidence) -> String {
     )
 }
 
-fn canonical_row_bytes(row: &FirebenderRow) -> FirebenderSourceBackedResult<u64> {
+pub(super) fn canonical_row_bytes(row: &FirebenderRow) -> FirebenderSourceBackedResult<u64> {
     let values = row.logical_values();
     values.iter().try_fold(8_u64, |total, value| {
         let value_bytes = match value {
@@ -548,14 +545,14 @@ fn checked_len(value: usize) -> FirebenderSourceBackedResult<u64> {
     u64::try_from(value).map_err(|_| FirebenderSourceBackedError::CountOverflow)
 }
 
-fn increment(target: &mut u64, value: u64) -> FirebenderSourceBackedResult<()> {
+pub(super) fn increment(target: &mut u64, value: u64) -> FirebenderSourceBackedResult<()> {
     *target = target
         .checked_add(value)
         .ok_or(FirebenderSourceBackedError::CountOverflow)?;
     Ok(())
 }
 
-fn decode_locator_coordinate(
+pub(super) fn decode_locator_coordinate(
     locator: &SourceRecordLocator,
 ) -> FirebenderSourceBackedResult<(i64, String, i64, u64)> {
     let NativeRecordCoordinate::ProviderSqlite {
@@ -577,7 +574,10 @@ fn decode_locator_coordinate(
     Ok((*rowid, session_id.clone(), *updated_at, *message_index))
 }
 
-fn load_exact_row(conn: &Connection, rowid: i64) -> CaptureResult<Option<FirebenderRow>> {
+pub(super) fn load_exact_row(
+    conn: &Connection,
+    rowid: i64,
+) -> CaptureResult<Option<FirebenderRow>> {
     let columns = sqlite_table_columns(conn, "chat_sessions")?;
     let deleted_filter = if columns.contains("deleted_at") {
         " and deleted_at is null"
