@@ -325,12 +325,14 @@ fn render_setup_human(
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));
 
-    let data_root = data_root.display().to_string();
-    document.push_blank();
-    document.append(section(
-        "Data",
-        fields(context, &[Field::new("Root", &data_root)]),
-    ));
+    if mode != "ready" && !queued {
+        let data_root = data_root.display().to_string();
+        document.push_blank();
+        document.append(section(
+            "Data",
+            fields(context, &[Field::new("Root", &data_root)]),
+        ));
+    }
 
     let next_command = if mode == "ready" {
         "ctx search \"test failure\""
@@ -504,6 +506,8 @@ mod tests {
             assert!(rendered.contains("Next\n  ctx search \"test failure\"\n"));
             assert!(!rendered.contains("Generation"));
             assert!(!rendered.contains("PID"));
+            assert!(!rendered.contains("\nData\n"));
+            assert!(!rendered.contains("/tmp/ctx"));
             assert_eq!(rendered.matches("\nNext\n").count(), 1);
             assert_fits(&document, &context);
         }
@@ -574,6 +578,8 @@ mod tests {
             assert!(!rendered.contains("Estimated"));
             assert!(!rendered.contains("ctx search"));
             assert!(!rendered.contains("42"));
+            assert!(!rendered.contains("\nData\n"));
+            assert!(!rendered.contains("/tmp/ctx"));
             assert_fits(&document, &context);
         }
     }
@@ -609,6 +615,7 @@ mod tests {
             let rendered = document.render_plain();
             assert!(rendered.starts_with("! History is not ready\n"));
             assert!(rendered.contains("Background  disabled\n"));
+            assert!(rendered.contains("Data\nRoot  /tmp/ctx\n"));
             assert!(rendered.contains("Next\n  ctx daemon enable\n"));
             assert!(!rendered.contains("ctx index watch"));
             assert_fits(&document, &context);
