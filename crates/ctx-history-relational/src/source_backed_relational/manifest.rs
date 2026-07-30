@@ -11,14 +11,14 @@ use super::{hex, CommittedCoreGeneration, RelationalProjectionError, Result};
 
 pub(super) const GENERATION_MANIFEST_VERSION: u32 = 3;
 pub(super) const REQUIRED_LEXICAL_SCHEMA_VERSION: u32 = 5;
-pub(super) const REQUIRED_LEXICAL_ANALYZER_VERSION: u32 = 1;
+pub(super) const REQUIRED_LEXICAL_ANALYZER_VERSION: u32 = 2;
 /// Exact hash of the active manifest-v3/schema-v5 source generation policy.
 ///
 /// This independent consumer intentionally pins the published compatibility
 /// boundary instead of importing the lexical implementation. Any policy change
 /// must update this hash and bump both relational projection versions.
 pub(super) const REQUIRED_SOURCE_GENERATION_POLICY_HASH: &str =
-    "255eb2b901f1dfb1c9c521c1d177dbe7a416491b5c0b8532494135bcb8b42ede";
+    "a17e860b6d719dfde065256ec070970b3d12e4d76ff0e59f16aabbc1666b71b9";
 const MAX_GENERATION_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

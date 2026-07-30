@@ -24,11 +24,12 @@ pub(super) fn materialize_records<I>(
     records: I,
 ) -> Result<()>
 where
-    I: Iterator<Item = RelationalProjectionRecord>,
+    I: Iterator<Item = Result<RelationalProjectionRecord>>,
 {
     let mut current: Option<OpenSource> = None;
     let mut received = BTreeSet::new();
     for record in records {
+        let record = record?;
         match record {
             RelationalProjectionRecord::BeginSource(metadata) => {
                 if current.is_some() {

@@ -597,6 +597,54 @@ fn committed_core_remains_current_when_sql_projection_fails_then_catches_up() {
 }
 
 #[test]
+fn fallible_record_stream_error_rolls_back_generation_transaction() {
+    let (_temp, mut projection) = projection();
+    let source = source(8);
+    let generation_one = generation(vec![certificate(source.clone(), 1, 1)]);
+    projection
+        .rebuild(&generation_one, records(source.clone(), 1, 1))
+        .unwrap();
+    let old_event_id = query_rows(&projection, "SELECT ctx_event_id FROM ctx_events");
+
+    let generation_two = generation(vec![certificate(source.clone(), 2, 2)]);
+    let stream = records(source, 2, 2)
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            if index == 2 {
+                Err(RelationalProjectionError::InvalidRecord(
+                    "injected page read failure".to_owned(),
+                ))
+            } else {
+                Ok(record)
+            }
+        });
+    let error = projection
+        .catch_up_stream(&generation_two, stream)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RelationalProjectionError::InvalidRecord(ref detail)
+            if detail == "injected page read failure"
+    ));
+    assert_eq!(
+        old_event_id,
+        query_rows(&projection, "SELECT ctx_event_id FROM ctx_events")
+    );
+    let failed = projection.metadata().unwrap();
+    assert_eq!(
+        failed.active_core_generation_id.as_deref(),
+        Some(generation_one.generation_id.as_str())
+    );
+    assert_eq!(
+        failed.target_core_generation_id.as_deref(),
+        Some(generation_two.generation_id.as_str())
+    );
+    assert_eq!(failed.status, RelationalProjectionStatus::Behind);
+}
+
+#[test]
 fn manifest_v3_schema_v5_and_exact_policy_hash_fail_closed() {
     let (_temp, mut projection) = projection();
     let source = source(9);
@@ -604,9 +652,10 @@ fn manifest_v3_schema_v5_and_exact_policy_hash_fail_closed() {
     let manifest: GenerationManifest = serde_json::from_slice(&current.manifest_json).unwrap();
     assert_eq!(manifest.manifest_version, 3);
     assert_eq!(manifest.lexical_schema_version, 5);
+    assert_eq!(manifest.lexical_analyzer_version, 2);
     assert_eq!(
         manifest.policy_schema_hash,
-        "255eb2b901f1dfb1c9c521c1d177dbe7a416491b5c0b8532494135bcb8b42ede"
+        "a17e860b6d719dfde065256ec070970b3d12e4d76ff0e59f16aabbc1666b71b9"
     );
     assert_eq!(
         manifest.policy_schema_hash,
@@ -632,6 +681,15 @@ fn manifest_v3_schema_v5_and_exact_policy_hash_fail_closed() {
     replace_manifest(&mut old_schema, &old_schema_contract);
     assert!(matches!(
         projection.rebuild(&old_schema, Vec::new()),
+        Err(RelationalProjectionError::InvalidCoreGeneration(_))
+    ));
+
+    let mut old_analyzer = current.clone();
+    let mut old_analyzer_contract = manifest.clone();
+    old_analyzer_contract.lexical_analyzer_version = 1;
+    replace_manifest(&mut old_analyzer, &old_analyzer_contract);
+    assert!(matches!(
+        projection.rebuild(&old_analyzer, Vec::new()),
         Err(RelationalProjectionError::InvalidCoreGeneration(_))
     ));
 

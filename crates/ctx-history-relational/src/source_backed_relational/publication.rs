@@ -28,6 +28,19 @@ impl SourceBackedRelationalProjection {
     where
         I: IntoIterator<Item = RelationalProjectionRecord>,
     {
+        self.rebuild_stream(generation, records.into_iter().map(Ok))
+    }
+
+    /// Replaces the complete relational projection from a fallible record
+    /// stream. A producer error rolls back the generation transaction.
+    pub fn rebuild_stream<I>(
+        &mut self,
+        generation: &CommittedCoreGeneration,
+        records: I,
+    ) -> Result<RelationalProjectionReceipt>
+    where
+        I: IntoIterator<Item = Result<RelationalProjectionRecord>>,
+    {
         self.apply_generation(BuildMode::Rebuild, generation, records)
     }
 
@@ -41,6 +54,19 @@ impl SourceBackedRelationalProjection {
     where
         I: IntoIterator<Item = RelationalProjectionRecord>,
     {
+        self.catch_up_stream(generation, records.into_iter().map(Ok))
+    }
+
+    /// Advances changed sources from a fallible record stream. A producer
+    /// error rolls back the generation transaction.
+    pub fn catch_up_stream<I>(
+        &mut self,
+        generation: &CommittedCoreGeneration,
+        records: I,
+    ) -> Result<RelationalProjectionReceipt>
+    where
+        I: IntoIterator<Item = Result<RelationalProjectionRecord>>,
+    {
         self.apply_generation(BuildMode::CatchUp, generation, records)
     }
 
@@ -51,7 +77,7 @@ impl SourceBackedRelationalProjection {
         records: I,
     ) -> Result<RelationalProjectionReceipt>
     where
-        I: IntoIterator<Item = RelationalProjectionRecord>,
+        I: IntoIterator<Item = Result<RelationalProjectionRecord>>,
     {
         if self.read_only {
             return Err(RelationalProjectionError::InvalidStreamOrder(
@@ -81,7 +107,7 @@ fn apply_transaction<I>(
     records: I,
 ) -> Result<RelationalProjectionReceipt>
 where
-    I: Iterator<Item = RelationalProjectionRecord>,
+    I: Iterator<Item = Result<RelationalProjectionRecord>>,
 {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let prior = stored_certificate_digests(&tx)?;
