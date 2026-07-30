@@ -507,7 +507,7 @@
     "@@rules_go~//go:extensions.bzl%go_sdk": {
       "os:linux,arch:amd64": {
         "bzlTransitiveDigest": "dLR/r0t1m+SyUKsz55ig+g+0fz2HdirOkSZyQu6tcc0=",
-        "usagesDigest": "1BXalFJx21gdYjMbsMOjCJ54eSFmlUPySeoOL9mtfwM=",
+        "usagesDigest": "2wd8XnzP877mUouDjNriOBlfIvnvJnx5+QfND28UoNE=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -537,6 +537,10 @@
                 "darwin_arm64": [
                   "go1.22.12.darwin-arm64.tar.gz",
                   "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d"
+                ],
+                "freebsd_amd64": [
+                  "go1.22.12.freebsd-amd64.tar.gz",
+                  "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a"
                 ],
                 "linux_amd64": [
                   "go1.22.12.linux-amd64.tar.gz",
@@ -580,6 +584,10 @@
                   "go1.22.12.darwin-arm64.tar.gz",
                   "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d"
                 ],
+                "freebsd_amd64": [
+                  "go1.22.12.freebsd-amd64.tar.gz",
+                  "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a"
+                ],
                 "linux_amd64": [
                   "go1.22.12.linux-amd64.tar.gz",
                   "4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43"
@@ -617,6 +625,10 @@
                 "darwin_arm64": [
                   "go1.22.12.darwin-arm64.tar.gz",
                   "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d"
+                ],
+                "freebsd_amd64": [
+                  "go1.22.12.freebsd-amd64.tar.gz",
+                  "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a"
                 ],
                 "linux_amd64": [
                   "go1.22.12.linux-amd64.tar.gz",
@@ -656,6 +668,10 @@
                   "go1.22.12.darwin-arm64.tar.gz",
                   "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d"
                 ],
+                "freebsd_amd64": [
+                  "go1.22.12.freebsd-amd64.tar.gz",
+                  "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a"
+                ],
                 "linux_amd64": [
                   "go1.22.12.linux-amd64.tar.gz",
                   "4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43"
@@ -694,6 +710,10 @@
                   "go1.22.12.darwin-arm64.tar.gz",
                   "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d"
                 ],
+                "freebsd_amd64": [
+                  "go1.22.12.freebsd-amd64.tar.gz",
+                  "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a"
+                ],
                 "linux_amd64": [
                   "go1.22.12.linux-amd64.tar.gz",
                   "4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43"
@@ -731,6 +751,10 @@
                 "darwin_arm64": [
                   "go1.22.12.darwin-arm64.tar.gz",
                   "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d"
+                ],
+                "freebsd_amd64": [
+                  "go1.22.12.freebsd-amd64.tar.gz",
+                  "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a"
                 ],
                 "linux_amd64": [
                   "go1.22.12.linux-amd64.tar.gz",
@@ -2488,7 +2512,7 @@
           "@@//crates/ctx-protocol/Cargo.toml": "e9e75a7c7ca116f86e58ee0e09d174612607c8c45cce0213e66825e403046bce",
           "@@//crates/ctx-history-index/Cargo.toml": "8e09d9228679f7f38d22e35c5647a3a7776d5d943311c0af07907ab671c6e7d7",
           "@@//crates/ctx-history-relational/Cargo.toml": "54f3fd0815836aaf69a1bbe953d73ab9801ca4f63833cb48d6d82eae8a3dfcfc",
-          "@@//MODULE.bazel": "faf2abb2365bf6df0a6195744bb6b5743cf76801569f50aa1b0523403c846206",
+          "@@//MODULE.bazel": "20834b3d9327e513b0c131704b5a05dac4c5e27c30dbb5356fab07ca524eb200",
           "@@rules_rust~~rust_host_tools~rust_host_tools//rust_host_tools": "ENOENT",
           "@@//crates/ctx-history-capture/Cargo.toml": "5b60b509f7e6069c1bd54261fd3eecaf704359a6082f76824ae9c1931a1afe52",
           "@@//crates/ctx-pro-host-protocol/Cargo.toml": "1aa86e40470c86e45ca2b9aca084ed2b9bc42ffefbaf5bac45db33f3b0465138"
