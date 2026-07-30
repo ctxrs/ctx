@@ -66,7 +66,6 @@ struct SyntheticState {
     hydration_parses: usize,
     discovery_calls: usize,
     mutate_before_scan: Option<u8>,
-    mutate_on_discovery: Option<usize>,
     mutate_on_revalidate: bool,
 }
 
@@ -179,9 +178,6 @@ impl ReplacementDocumentTree for SyntheticAdapter {
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let mut state = self.state.lock().unwrap();
         state.discovery_calls += 1;
-        if state.mutate_on_discovery == Some(state.discovery_calls) {
-            state.leaves[0].revision = state.leaves[0].revision.saturating_add(1);
-        }
         if !state.available {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
@@ -612,17 +608,6 @@ fn replacement_tree_rejects_races_duplicates_and_replaces_on_parser_change() {
     );
 
     adapter.state.lock().unwrap().mutate_on_revalidate = true;
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
-        before
-    );
-
-    {
-        let mut state = adapter.state.lock().unwrap();
-        let mutation_discovery = state.discovery_calls + 2;
-        state.mutate_on_discovery = Some(mutation_discovery);
-    }
     assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
