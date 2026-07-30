@@ -5,7 +5,6 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
-use ctx_history_capture::ingest_codex_source_backed_v0;
 use support::*;
 
 const BEGIN_SENTINEL: &str = "CTX_HYDRATION_BEGIN-";
@@ -16,9 +15,7 @@ const SOURCE_INDEX_PROVIDER_SESSION_ID: &str = "019fa000-0000-7000-8000-00000000
 struct SourceIndexedMessage {
     _daemon: SourceHydrationDaemon,
     temp: TempDir,
-    source_root: PathBuf,
     source: PathBuf,
-    index_root: PathBuf,
     event_id: String,
     session_id: String,
     complete_text: String,
@@ -44,12 +41,14 @@ impl Drop for SourceHydrationDaemon {
 }
 
 fn start_source_hydration_daemon(temp: &TempDir) -> SourceHydrationDaemon {
+    let root = data_root(temp);
+    fs::create_dir_all(&root).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        root.join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
-    let binary = copied_ctx_binary(temp);
+    let binary = bind_test_ctx_binary(temp);
     let prepared = ctx_from_binary(temp, &binary);
     let mut command = StdCommand::new(prepared.get_program());
     for (name, value) in prepared.get_envs() {
@@ -127,7 +126,6 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
     let source = source_root.join(format!(
         "2026/07/28/rollout-{SOURCE_INDEX_PROVIDER_SESSION_ID}.jsonl"
     ));
-    let index_root = temp.path().join("search").join("lexical");
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     let complete_text = format!(
         "{SOURCE_INDEX_QUERY} {BEGIN_SENTINEL}{}{END_SENTINEL}",
@@ -193,9 +191,7 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
     SourceIndexedMessage {
         _daemon: daemon,
         temp,
-        source_root,
         source,
-        index_root,
         event_id,
         session_id,
         complete_text,
@@ -283,10 +279,7 @@ fn assert_provider_authoritative_event(
         event.get("preview").is_none(),
         "show must not duplicate hydrated text in a preview field: {event:#}"
     );
-    assert!(
-        event["content"].get("stored_truncated").is_none(),
-        "provider-authoritative metadata must not expose stored-body truncation: {event:#}"
-    );
+    assert_eq!(event["content"]["stored_truncated"], false, "{event:#}");
 }
 
 #[test]
@@ -513,7 +506,27 @@ fn unavailable_source_hydration_fails_closed_for_both_policy_tokens() {
 fn confirmed_source_deletion_retires_show_without_store_fallback() {
     let fixture = source_indexed_codex_message();
     fs::remove_file(&fixture.source).unwrap();
-    ingest_codex_source_backed_v0(&fixture.source_root, &fixture.index_root).unwrap();
+    let refreshed = json_output(ctx(&fixture.temp).args([
+        "search",
+        SOURCE_INDEX_QUERY,
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_eq!(
+        refreshed["freshness"]["status"], "completed",
+        "{refreshed:#}"
+    );
+    assert_eq!(
+        refreshed["retrieval"]["indexed_documents"], 0,
+        "{refreshed:#}"
+    );
+    assert!(
+        refreshed["results"].as_array().is_some_and(Vec::is_empty),
+        "{refreshed:#}"
+    );
 
     let stderr = failure_stderr(ctx(&fixture.temp).args([
         "show",

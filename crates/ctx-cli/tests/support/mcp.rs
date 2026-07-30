@@ -139,8 +139,7 @@ pub(crate) fn import_codex_fixture_through_daemon(
         "--progress",
         "none",
     ]));
-    let source =
-        assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
+    let source = assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
     let current_source_count = imported["totals"]["current_source_count"]
         .as_u64()
         .expect("import totals must report the current source count");

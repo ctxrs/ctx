@@ -5,7 +5,26 @@ use support::*;
 use std::{
     io::{Read, Write},
     net::TcpListener,
+    process::{Child, Command as StdCommand, Stdio},
 };
+
+struct OfflineSourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for OfflineSourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Err(error) =
+            terminate_and_reap_test_child(&mut self.child, "offline source-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("offline daemon teardown also failed: {error}");
+            } else {
+                panic!("offline daemon teardown failed: {error}");
+            }
+        }
+    }
+}
 
 fn write_network_endpoints(data_root: &Path, endpoint: &str, analytics_enabled: Option<bool>) {
     fs::create_dir_all(data_root).unwrap();
@@ -16,6 +35,8 @@ fn write_network_endpoints(data_root: &Path, endpoint: &str, analytics_enabled: 
         data_root.join("config.toml"),
         format!(
             "[analytics]\n{enabled}endpoint = \"{endpoint}\"\n\
+             [daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\
+             [search]\nsemantic = false\n\
              [upgrade]\nauto = \"off\"\n"
         ),
     )
@@ -37,6 +58,76 @@ fn local_command(temp: &TempDir, data_root: &Path) -> Command {
     command
 }
 
+fn start_offline_source_refresh_daemon(
+    temp: &TempDir,
+    data_root: &Path,
+) -> OfflineSourceRefreshDaemon {
+    bind_test_ctx_binary(temp);
+    let prepared = local_command(temp, data_root);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .current_dir(temp.path())
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "source-refresh-only")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("start isolated offline daemon: {error}"));
+    let mut daemon = OfflineSourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("offline daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = local_command(temp, data_root)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for offline daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[test]
 fn local_import_status_and_daemon_are_network_inert_when_analytics_are_disabled() {
     let temp = tempdir();
@@ -50,6 +141,7 @@ fn local_import_status_and_daemon_are_network_inert_when_analytics_are_disabled(
 
     let import_root = temp.path().join("import");
     write_network_endpoints(&import_root, &endpoint, Some(false));
+    let _daemon = start_offline_source_refresh_daemon(&temp, &import_root);
     local_command(&temp, &import_root)
         .env("CTX_CLOUD_API_BASE", &endpoint)
         .args([

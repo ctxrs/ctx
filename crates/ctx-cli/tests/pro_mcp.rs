@@ -22,6 +22,52 @@ fn initialized_notification() -> Value {
     })
 }
 
+fn take_status_observation_time(status: &mut Value) -> Value {
+    status["daemon"]["supervisor"]["environment_snapshot"]
+        .as_object_mut()
+        .and_then(|snapshot| snapshot.remove("current_observed_at_ms"))
+        .expect("status environment snapshot observation time")
+}
+
+fn assert_pro_cli_mcp_status_parity(temp: &TempDir, envs: &[(&str, &str)]) -> (Value, Value) {
+    let mut command = ctx(temp);
+    command
+        .args(["status", "--format=json"])
+        .env("CTX_DAEMON_AUTOSTART_OFF", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let cli = json_output(&mut command);
+
+    let mut mcp_envs = vec![("CTX_DAEMON_AUTOSTART_OFF", "1")];
+    mcp_envs.extend_from_slice(envs);
+    let responses = mcp_roundtrip_with_env(
+        temp,
+        &[
+            initialize_request(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "status",
+                "method": "tools/call",
+                "params": { "name": "status", "arguments": {} }
+            }),
+        ],
+        &mcp_envs,
+    );
+    assert_eq!(responses.len(), 2, "{responses:#?}");
+    let result = responses[1]["result"].clone();
+    assert!(result["isError"].is_null(), "{result:#}");
+
+    let mut comparable_cli = cli.clone();
+    let mut comparable_mcp = result["structuredContent"].clone();
+    let cli_observed_at = take_status_observation_time(&mut comparable_cli);
+    let mcp_observed_at = take_status_observation_time(&mut comparable_mcp);
+    assert!(cli_observed_at.is_number(), "{cli:#}");
+    assert!(mcp_observed_at.is_number(), "{result:#}");
+    assert_eq!(comparable_mcp, comparable_cli, "{result:#}");
+    (cli, result)
+}
+
 #[test]
 fn mcp_advertises_read_only_status_and_locally_mutating_blame() {
     let disclosure = "Blame may perform bounded local catch-up that updates the canonical Core index, writes the encrypted derived Pro graph, and writes the projection acknowledgement. It never writes provider history or repositories.";
@@ -86,7 +132,7 @@ fn generic_mcp_status_exactly_matches_cli_json_with_pro_present() {
     let root = data_root(&temp);
     assert!(!root.exists());
 
-    let (cli, result) = assert_cli_mcp_status_parity(
+    let (cli, result) = assert_pro_cli_mcp_status_parity(
         &temp,
         &[
             ("CTX_LOCAL_USAGE_ENABLED", "false"),
