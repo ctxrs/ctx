@@ -21,6 +21,25 @@ cp -L "${repo_root}/contracts/release-targets-v1.json" \
   "${release_root}/contracts/release-targets-v1.json"
 test -f "${release_root}/contracts/release-targets-v1.json"
 test ! -L "${release_root}/contracts/release-targets-v1.json"
+cat > "${tmp}/ubuntu-22.04-os-release" <<'EOF'
+ID=ubuntu
+VERSION_ID="22.04"
+EOF
+mv \
+  "${release_root}/scripts/public-cli-host-runtime-evidence.sh" \
+  "${release_root}/scripts/public-cli-host-runtime-evidence-real.sh"
+cat > "${release_root}/scripts/public-cli-host-runtime-evidence.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "\$@"; do
+  if [[ "\${argument}" == "--os-baseline-only" ]]; then
+    exec "${release_root}/scripts/public-cli-host-runtime-evidence-real.sh" \
+      "\$@" --os-release "${tmp}/ubuntu-22.04-os-release"
+  fi
+done
+exec "${release_root}/scripts/public-cli-host-runtime-evidence-real.sh" "\$@"
+EOF
+chmod 0755 "${release_root}/scripts/public-cli-host-runtime-evidence.sh"
 smoke="${release_root}/scripts/smoke-daemon-semantic-release.sh"
 
 fake_ctx="${tmp}/ctx-macos-artifact"

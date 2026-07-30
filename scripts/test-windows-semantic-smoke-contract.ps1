@@ -5,6 +5,74 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     throw "This contract test must run on Windows"
 }
 
+function Test-Windows11WorkstationBaseline {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Caption,
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+        [Parameter(Mandatory = $true)]
+        [int]$ProductType
+    )
+
+    $parsedVersion = $null
+    if (-not [System.Version]::TryParse($Version, [ref]$parsedVersion)) {
+        return $false
+    }
+    return (
+        $Caption -cmatch '^Microsoft\s+Windows\s+11(?:\s|$)' -and
+        $ProductType -eq 1 -and
+        $parsedVersion.Major -eq 10 -and
+        $parsedVersion.Minor -eq 0 -and
+        $parsedVersion.Build -ge 22000
+    )
+}
+
+if (-not (Test-Windows11WorkstationBaseline `
+    -Caption "Microsoft Windows 11 Pro" `
+    -Version "10.0.22000" `
+    -ProductType 1)) {
+    throw "Exact synthetic Windows 11 workstation baseline was rejected"
+}
+foreach ($wrongBaseline in @(
+    [PSCustomObject]@{
+        Caption = "Microsoft Windows 10 Pro"
+        Version = "10.0.19045"
+        ProductType = 1
+    },
+    [PSCustomObject]@{
+        Caption = "Microsoft Windows 11 Pro"
+        Version = "10.0.21999"
+        ProductType = 1
+    },
+    [PSCustomObject]@{
+        Caption = "Microsoft Windows Server 2025 Datacenter"
+        Version = "10.0.26100"
+        ProductType = 3
+    }
+)) {
+    if (Test-Windows11WorkstationBaseline `
+        -Caption $wrongBaseline.Caption `
+        -Version $wrongBaseline.Version `
+        -ProductType $wrongBaseline.ProductType) {
+        throw "Wrong synthetic Windows OS baseline was accepted: $($wrongBaseline.Caption)"
+    }
+}
+
+$hostWindows = Get-CimInstance Win32_OperatingSystem
+if (
+    $null -eq $hostWindows -or
+    -not (Test-Windows11WorkstationBaseline `
+        -Caption ([string]$hostWindows.Caption).Trim() `
+        -Version ([string]$hostWindows.Version) `
+        -ProductType ([int]$hostWindows.ProductType))
+) {
+    throw (
+        "Windows semantic smoke requires a Windows 11 workstation at build 22000 or newer; " +
+        "got $($hostWindows.Caption) $($hostWindows.Version) ProductType=$($hostWindows.ProductType)"
+    )
+}
+
 $smokeScript = Join-Path $PSScriptRoot "smoke-daemon-semantic-release.ps1"
 $tokens = $null
 $parseErrors = $null
@@ -142,23 +210,32 @@ $canaryCheck = $smokeSource.IndexOf(
     '$embeddingRuntime.canary -cne "passed"',
     [System.StringComparison]::Ordinal
 )
-$passedCanaryProof = $smokeSource.IndexOf(
-    '$runtimeProofLines += "semantic_contract_canary=passed"',
+$exactLoadedRuntimeCheck = $smokeSource.IndexOf(
+    '$actualOnnxRuntime.Equals($runtimeDylib',
     [System.StringComparison]::Ordinal
 )
-$proofWrite = $smokeSource.IndexOf(
-    '[System.IO.File]::WriteAllText(',
-    $passedCanaryProof,
+$exactWindowsMlModuleCheck = $smokeSource.IndexOf(
+    '$actualModule.Equals($expectedModule',
+    [System.StringComparison]::Ordinal
+)
+$directSuccess = $smokeSource.IndexOf(
+    'Write-Host "ctx semantic smoke ok:',
+    [System.StringComparison]::Ordinal
+)
+$directSuccessExit = $smokeSource.IndexOf(
+    'exit 0',
     [System.StringComparison]::Ordinal
 )
 if (
     $selectedBackendCheck -lt 0 -or
-    $archiveBindingCheck -lt $selectedBackendCheck -or
-    $canaryCheck -lt $archiveBindingCheck -or
-    $passedCanaryProof -lt $canaryCheck -or
-    $proofWrite -lt $passedCanaryProof
+    $canaryCheck -lt $selectedBackendCheck -or
+    $archiveBindingCheck -lt $canaryCheck -or
+    $exactLoadedRuntimeCheck -lt $archiveBindingCheck -or
+    $exactWindowsMlModuleCheck -lt $exactLoadedRuntimeCheck -or
+    $directSuccess -lt $exactWindowsMlModuleCheck -or
+    $directSuccessExit -lt $directSuccess
 ) {
-    throw "Windows ML proof must follow selected-backend, exact-archive, and passed-canary checks"
+    throw "Windows ML smoke must directly pass selected-backend, exact-archive canary, and loaded-module checks before success"
 }
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-windows-smoke-contract-" + [Guid]::NewGuid().ToString("n"))

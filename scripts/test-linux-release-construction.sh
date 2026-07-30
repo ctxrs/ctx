@@ -226,11 +226,22 @@ test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic none absent 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed unknown unknown unknown unknown unknown 0)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh macos-arm64 Darwin arm64 passed arm64 0 apple none absent 1)" = authoritative
-test "$(scripts/public-cli-runtime-authority.sh linux-aarch64 Linux aarch64 passed aarch64 0 generic none present 1)" = authoritative
-test "$(scripts/public-cli-runtime-authority.sh linux-aarch64 Linux aarch64 passed aarch64 0 generic qemu-user present 1)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0 generic none absent 1)" = authoritative
-test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1)" = authoritative
-test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-aarch64 Linux aarch64 passed aarch64 0 generic none present 1 "" ubuntu 22.04 unknown)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-aarch64 Linux aarch64 passed aarch64 0 generic qemu-user present 1 "" ubuntu 22.04 unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0 generic none absent 1 "" ubuntu 22.04 unknown)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0 generic none absent 1 "" ubuntu 24.04 unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0 generic none absent 1 "" debian 22.04 unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0 generic none absent 1 "" unknown unknown unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1 "" "Microsoft Windows 11 Pro" 10.0.22631 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1 "" "Microsoft Windows 11 Pro" 10.0.21999 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1 "" "Microsoft Windows 10 Pro" 10.0.22631 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1 "" "Microsoft Windows 11 Server" 10.0.26100 3)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1 "" unknown unknown unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1 "" freebsd 14.4-RELEASE unknown)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1 "" freebsd 14.4-RELEASE-p3 unknown)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1 "" freebsd 14.3-RELEASE unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1 "" freebsd 14.4-STABLE unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1 "" unknown unknown unknown)" = non_authoritative
 test "$(CTX_HARDWARE_IDENTITY=apple CTX_EXECUTION_EMULATION=none scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh linux-x64 Darwin arm64 passed arm64 0 apple none absent 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 not_run)" = not_run
@@ -293,7 +304,19 @@ esac
 EOF
 cat > "${tmp_dir}/fixture-powershell" <<'EOF'
 #!/usr/bin/env bash
-printf '1\n'
+case "$*" in
+  *Win32_OperatingSystem*)
+    printf 'Microsoft Windows 11 Pro\t10.0.22631\t1\r\n'
+    ;;
+  *)
+    printf '1\n'
+    ;;
+esac
+EOF
+cat > "${tmp_dir}/fixture-freebsd-version" <<'EOF'
+#!/usr/bin/env bash
+test "${1:-}" = "-u"
+printf '14.4-RELEASE-p3\n'
 EOF
 chmod +x \
   "${tmp_dir}/native-sysctl" \
@@ -303,7 +326,8 @@ chmod +x \
   "${tmp_dir}/fixture-ioreg" \
   "${tmp_dir}/fixture-kvm-ioreg" \
   "${tmp_dir}/fixture-system-profiler" \
-  "${tmp_dir}/fixture-powershell"
+  "${tmp_dir}/fixture-powershell" \
+  "${tmp_dir}/fixture-freebsd-version"
 test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl" \
   --ioreg "${tmp_dir}/fixture-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
@@ -332,6 +356,37 @@ test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system MINGW64_NT-10.0 --host-arch x86_64 \
   --powershell "${tmp_dir}/fixture-powershell")" = \
   $'Windows_NT\tAMD64\tX64\t0\tuname\tgeneric\tnone\tpresent\t1'
+
+cat > "${tmp_dir}/ubuntu-22.04-os-release" <<'EOF'
+NAME="Ubuntu"
+ID=ubuntu
+VERSION_ID="22.04"
+EOF
+cat > "${tmp_dir}/ubuntu-24.04-os-release" <<'EOF'
+NAME="Ubuntu"
+ID=ubuntu
+VERSION_ID="24.04"
+EOF
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Linux --host-arch x86_64 \
+  --os-release "${tmp_dir}/ubuntu-22.04-os-release" --os-baseline-only)" = \
+  $'ubuntu\t22.04\tunknown'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Linux --host-arch x86_64 \
+  --os-release "${tmp_dir}/ubuntu-24.04-os-release" --os-baseline-only)" = \
+  $'ubuntu\t24.04\tunknown'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Linux --host-arch x86_64 \
+  --os-release "${tmp_dir}/missing-os-release" --os-baseline-only)" = \
+  $'unknown\tunknown\tunknown'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system FreeBSD --host-arch amd64 \
+  --freebsd-version "${tmp_dir}/fixture-freebsd-version" --os-baseline-only)" = \
+  $'freebsd\t14.4-RELEASE-p3\tunknown'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Windows_NT --host-arch AMD64 \
+  --powershell "${tmp_dir}/fixture-powershell" --os-baseline-only)" = \
+  $'Microsoft Windows 11 Pro\t10.0.22631\t1'
 
 printf 'processor : 0\nFeatures : fp asimd aes sha2\n' > "${tmp_dir}/arm-cpuinfo"
 printf '/usr/bin/ctx-pro\n' > "${tmp_dir}/arm-maps"
