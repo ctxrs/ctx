@@ -101,10 +101,7 @@ use super::providers::{
     pi::nativepath::{
         project_pi_source_backed_root_cold, PiSourceBackedResolver, PiSourceBackedRoot,
     },
-    rovodev::native_path::{
-        discover_rovodev_source_backed, hydrate_rovodev_source_record,
-        RovoDevSourceBackedDisposition, RovoDevSourceBackedReader,
-    },
+    rovodev::native_path::RovoDevDocumentTreeAdapter,
     shelley::native_path::source_backed::{
         discover_shelley_source_backed_exact_cwd, ShelleySourceBackedAdapter,
     },

@@ -89,10 +89,6 @@ impl RovoDevSessionObservation {
         })
     }
 
-    pub(super) fn canonical_path(&self) -> &Path {
-        &self.canonical_path
-    }
-
     pub(super) fn context_length(&self) -> u64 {
         self.context_file.length
     }
