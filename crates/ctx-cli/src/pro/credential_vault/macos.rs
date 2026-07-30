@@ -268,14 +268,6 @@ struct NativeBackend<B = SecurityFrameworkBackend> {
     backend: B,
 }
 
-impl NativeBackend<SecurityFrameworkBackend> {
-    const fn production() -> Self {
-        Self {
-            backend: SecurityFrameworkBackend { service: SERVICE },
-        }
-    }
-}
-
 impl<B> NativeBackend<B> {
     const fn new(backend: B) -> Self {
         Self { backend }

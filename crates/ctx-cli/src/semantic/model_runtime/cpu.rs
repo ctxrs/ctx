@@ -370,6 +370,7 @@ impl SemanticNativeAcceleratorTarget {
         }
     }
 
+    #[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
     fn backend_kind(self) -> SemanticBackendKind {
         match self {
             Self::CoreMl => SemanticBackendKind::CoreMl,
@@ -537,7 +538,7 @@ fn backend_fingerprint(
     format!("sha256:{:x}", Sha256::digest(descriptor.as_bytes()))
 }
 
-#[cfg(ctx_semantic_fastembed)]
+#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
 pub(super) fn automatic_ort_accelerator_backend() -> Option<SemanticBackendKind> {
     semantic_native_accelerator_target()
         .map(SemanticNativeAcceleratorTarget::backend_kind)
