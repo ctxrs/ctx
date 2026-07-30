@@ -116,6 +116,7 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
         long.as_bytes()
     );
 
+    reset_prompt_history_work_counters();
     let (noop, noop_documents, noop_pages) = collect(&input, Some(&cold.certificate));
     assert!(matches!(
         noop.disposition,
@@ -123,6 +124,17 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     ));
     assert!(noop_documents.is_empty());
     assert!(noop_pages.is_empty());
+    revalidate_codex_prompt_history_source_backed_v0(&noop.source, &noop.certificate).unwrap();
+    assert_eq!(
+        prompt_history_full_scan_bytes(),
+        0,
+        "exact no-op must not parse prompt-history bodies"
+    );
+    assert_eq!(
+        prompt_history_prefix_hash_bytes(),
+        0,
+        "exact no-op must not hash the certified source prefix"
+    );
 
     let appended = prompt_line("session-a", 1_785_139_270, "appended prompt");
     append(&path, &appended);
@@ -164,18 +176,16 @@ fn active_source_family_contract_prompt_history_freezes_eof_and_defers_append() 
     let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [46; 32]);
     let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
     let mut documents = Vec::new();
-    let mut appended = false;
+    let expected_length = (first.len() + second.len()) as u64;
+    let append_path = path.clone();
+    set_after_prompt_history_prefix_hash_hook(move || append(&append_path, &second));
     let first_scan = scan_codex_prompt_history_source_backed_v0(source, None, |page| {
         documents.extend(page.documents);
-        if !appended {
-            append(&path, &second);
-            appended = true;
-        }
         Ok(())
     })
     .unwrap();
 
-    assert!(appended);
+    assert_eq!(fs::metadata(&path).unwrap().len(), expected_length);
     assert_eq!(documents.len(), 1);
     assert_eq!(documents[0].body, "first prompt");
     revalidate_codex_prompt_history_source_backed_v0(&first_scan.source, &first_scan.certificate)
@@ -197,6 +207,47 @@ fn active_source_family_contract_prompt_history_freezes_eof_and_defers_append() 
     ));
     assert_eq!(catch_up_documents.len(), 1);
     assert_eq!(catch_up_documents[0].body, "second prompt");
+}
+
+#[test]
+fn prefix_hash_observation_rejects_in_place_mutation() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let first = prompt_line("mutation-session", 1_785_139_200, "first prompt");
+    fs::write(&path, &first).unwrap();
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [47; 32]);
+    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
+    let rewrite_path = path.clone();
+    set_after_prompt_history_prefix_hash_hook(move || {
+        let mut file = OpenOptions::new().write(true).open(rewrite_path).unwrap();
+        file.write_all(b"[").unwrap();
+        file.sync_all().unwrap();
+    });
+
+    let error = scan_codex_prompt_history_source_backed_v0(source, None, |_| Ok(())).unwrap_err();
+    assert!(matches!(
+        error,
+        CodexPromptHistorySourceBackedErrorV0::SourceChanged
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn prefix_hash_observation_rejects_named_replacement() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let moved = temp.path().join("old-history.jsonl");
+    let first = prompt_line("replacement-session", 1_785_139_200, "first prompt");
+    fs::write(&path, &first).unwrap();
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [48; 32]);
+    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
+    let replacement_path = path.clone();
+    set_after_prompt_history_prefix_hash_hook(move || {
+        fs::rename(&replacement_path, moved).unwrap();
+        fs::write(replacement_path, first).unwrap();
+    });
+
+    assert!(scan_codex_prompt_history_source_backed_v0(source, None, |_| Ok(())).is_err());
 }
 
 #[test]

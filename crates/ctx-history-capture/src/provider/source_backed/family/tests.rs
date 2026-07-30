@@ -1,7 +1,10 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use super::jsonl::*;
@@ -56,10 +59,16 @@ fn active_source_family_contract_jsonl_physical_lifecycle_matrix_is_fail_closed(
     assert_eq!(change, JsonlSourceChange::Cold);
     assert_eq!(cold.len(), 2);
 
+    reset_jsonl_prefix_hash_bytes();
     let (change, unchanged, unchanged_checkpoint) = drain(&path, Some(&cold_checkpoint));
     assert_eq!(change, JsonlSourceChange::Unchanged);
     assert!(unchanged.is_empty());
     assert_eq!(unchanged_checkpoint, cold_checkpoint);
+    assert_eq!(
+        jsonl_prefix_hash_bytes(),
+        0,
+        "exact no-op must not rehash the certified source prefix"
+    );
 
     fs::write(&path, b"{\"n\":9}\n{\"n\":2}\n{\"n\":3}\n").unwrap();
     let (change, replacement, _) = drain(&path, Some(&cold_checkpoint));
@@ -318,6 +327,43 @@ fn active_source_family_contract_jsonl_rewrite_truncate_and_replacement_fail_clo
         );
         assert!(reader.outcome().is_none());
     }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("events.jsonl");
+    let initial = b"{\"n\":1}\n{\"n\":2}\n";
+    fs::write(&path, initial).unwrap();
+    let (_, _, checkpoint) = drain(&path, None);
+    let source = opened(&path);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"n\":3}\n")
+        .unwrap();
+    let rewrite_path = path.clone();
+    let rewrite_ran = Arc::new(AtomicBool::new(false));
+    let observed_rewrite = Arc::clone(&rewrite_ran);
+    set_after_jsonl_prefix_hash_hook(move || {
+        OpenOptions::new()
+            .write(true)
+            .open(rewrite_path)
+            .unwrap()
+            .write_all(b"{\"n\":9}\n")
+            .unwrap();
+        observed_rewrite.store(true, Ordering::SeqCst);
+    });
+    let revalidation = revalidate_frozen_prefix(
+        &path,
+        source.as_ref(),
+        checkpoint.source_observation(),
+        checkpoint.complete_prefix_end(),
+        *checkpoint.complete_prefix_sha256(),
+    );
+    assert!(rewrite_ran.load(Ordering::SeqCst), "test hook did not run");
+    assert!(
+        revalidation.is_err(),
+        "a rewrite between prefix hashing and terminal observation must fail closed"
+    );
 }
 
 #[test]
@@ -332,12 +378,15 @@ fn active_source_family_contract_jsonl_hydration_tolerates_append_only() {
     let source = opened(&path);
     let range = JsonlHydrationRange::new(0, first.len(), Sha256::digest(first).into()).unwrap();
 
-    OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(b"{\"message\":\"active\"}\n")
-        .unwrap();
+    let append_path = path.clone();
+    set_after_jsonl_hydration_observation_hook(move || {
+        OpenOptions::new()
+            .append(true)
+            .open(append_path)
+            .unwrap()
+            .write_all(b"{\"message\":\"active\"}\n")
+            .unwrap();
+    });
     let hydrated = visit_verified_ranges(
         &path,
         &source,

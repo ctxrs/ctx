@@ -20,10 +20,48 @@ use crate::provider::source_backed::{
 };
 use crate::ProviderSource;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DirectJsonlRegistrationTestEvent {
+    BeginSource,
+    BeginSourceAppend,
+    SourceRevalidated,
+    CompleteInventoryAccepted,
+    CompleteInventoryRejected,
+}
+
+#[cfg(test)]
+pub(super) type DirectJsonlRegistrationTestObserver =
+    Arc<dyn Fn(DirectJsonlRegistrationTestEvent) + Send + Sync>;
+
 pub(crate) fn register(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+) -> SourceBackedCoordinatorResult<()> {
+    #[cfg(test)]
+    {
+        register_inner(registry, source, selection, None)
+    }
+    #[cfg(not(test))]
+    register_inner(registry, source, selection)
+}
+
+#[cfg(test)]
+pub(super) fn register_with_test_observer(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    observer: DirectJsonlRegistrationTestObserver,
+) -> SourceBackedCoordinatorResult<()> {
+    register_inner(registry, source, selection, Some(observer))
+}
+
+fn register_inner(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    #[cfg(test)] test_observer: Option<DirectJsonlRegistrationTestObserver>,
 ) -> SourceBackedCoordinatorResult<()> {
     let adapter = adapter(source.provider).ok_or_else(|| {
         invalid_route(
@@ -42,6 +80,13 @@ pub(crate) fn register(
     let terminal_evidence = Arc::new(DirectJsonlTerminalEvidenceSet::default());
     let capture_terminal_evidence = Arc::clone(&terminal_evidence);
     let revalidation_terminal_evidence = Arc::clone(&terminal_evidence);
+    let inventory_terminal_evidence = terminal_evidence;
+    #[cfg(test)]
+    let capture_test_observer = test_observer.clone();
+    #[cfg(test)]
+    let revalidation_test_observer = test_observer.clone();
+    #[cfg(test)]
+    let inventory_test_observer = test_observer;
     let route_sources = Arc::new(Mutex::new(None::<HashMap<[u8; 32], SourceKey>>));
     let capture_route_sources = Arc::clone(&route_sources);
     let owns_route_sources = Arc::clone(&route_sources);
@@ -50,6 +95,18 @@ pub(crate) fn register(
     let batch_hydration_catalog = Arc::clone(&hydration_catalog);
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
+            #[cfg(test)]
+            {
+                capture(
+                    adapter,
+                    &capture_root,
+                    &capture_terminal_evidence,
+                    &capture_route_sources,
+                    sink,
+                    capture_test_observer.as_ref(),
+                )
+            }
+            #[cfg(not(test))]
             capture(
                 adapter,
                 &capture_root,
@@ -70,13 +127,23 @@ pub(crate) fn register(
                 })
         },
         move |target| {
-            revalidate_target(
+            #[cfg(test)]
+            let is_source = matches!(&target, SourceBackedRevalidationTarget::Source(_));
+            let valid = revalidate_target(
                 adapter,
                 &source_revalidation_root,
                 &revalidation_terminal_evidence,
                 target,
             )
-            .unwrap_or(false)
+            .unwrap_or(false);
+            #[cfg(test)]
+            if valid && is_source {
+                notify_test_observer(
+                    revalidation_test_observer.as_ref(),
+                    DirectJsonlRegistrationTestEvent::SourceRevalidated,
+                );
+            }
+            valid
         },
         move |request| hydrate_single(adapter, &hydration_root, &single_hydration_catalog, request),
     )
@@ -89,9 +156,23 @@ pub(crate) fn register(
         )
     })
     .with_complete_inventory_revalidation(move |expected| {
-        adapter
-            .revalidate_inventory(&inventory_revalidation_root, expected)
-            .unwrap_or(false)
+        let valid = adapter
+            .revalidate_inventory_with_evidence(
+                &inventory_revalidation_root,
+                &inventory_terminal_evidence,
+                expected,
+            )
+            .unwrap_or(false);
+        #[cfg(test)]
+        notify_test_observer(
+            inventory_test_observer.as_ref(),
+            if valid {
+                DirectJsonlRegistrationTestEvent::CompleteInventoryAccepted
+            } else {
+                DirectJsonlRegistrationTestEvent::CompleteInventoryRejected
+            },
+        );
+        valid
     });
     registry.register(executable_route(
         source,
@@ -123,6 +204,7 @@ fn capture(
     terminal_evidence: &DirectJsonlTerminalEvidenceSet,
     route_sources: &Mutex<Option<HashMap<[u8; 32], SourceKey>>>,
     sink: &mut SourceBackedGenerationSink<'_>,
+    #[cfg(test)] test_observer: Option<&DirectJsonlRegistrationTestObserver>,
 ) -> SourceBackedRouteResult<()> {
     terminal_evidence.reset().map_err(route_error)?;
     let inventory = adapter.discover(root).map_err(route_error)?;
@@ -188,6 +270,11 @@ fn capture(
         }
         match reader.disposition() {
             DirectJsonlDisposition::Unchanged | DirectJsonlDisposition::Append => {
+                #[cfg(test)]
+                notify_test_observer(
+                    test_observer,
+                    DirectJsonlRegistrationTestEvent::BeginSourceAppend,
+                );
                 let staged_base = sink
                     .begin_source_append(source.clone())
                     .map_err(route_coordinator_error)?
@@ -199,9 +286,12 @@ fn capture(
                     ));
                 }
             }
-            DirectJsonlDisposition::Cold | DirectJsonlDisposition::Replace => sink
-                .begin_source(source.clone())
-                .map_err(route_coordinator_error)?,
+            DirectJsonlDisposition::Cold | DirectJsonlDisposition::Replace => {
+                #[cfg(test)]
+                notify_test_observer(test_observer, DirectJsonlRegistrationTestEvent::BeginSource);
+                sink.begin_source(source.clone())
+                    .map_err(route_coordinator_error)?;
+            }
         }
         reader
             .visit_documents(&mut |document| {
@@ -287,5 +377,15 @@ fn revalidate_target(
         SourceBackedRevalidationTarget::Deletion(deletion) => {
             adapter.revalidate_deletion(root, deletion)
         }
+    }
+}
+
+#[cfg(test)]
+fn notify_test_observer(
+    observer: Option<&DirectJsonlRegistrationTestObserver>,
+    event: DirectJsonlRegistrationTestEvent,
+) {
+    if let Some(observer) = observer {
+        observer(event);
     }
 }

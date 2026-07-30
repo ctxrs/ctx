@@ -1,5 +1,31 @@
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static CODEX_HYDRATION_AFTER_SOURCE_OPEN_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn install_codex_hydration_after_source_open_hook(hook: impl FnOnce() + 'static) {
+    CODEX_HYDRATION_AFTER_SOURCE_OPEN_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex hydration post-open hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_codex_hydration_after_source_open_hook() {
+    let hook = CODEX_HYDRATION_AFTER_SOURCE_OPEN_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHydratedRecordV0 {
     pub provider_bytes: Vec<u8>,
@@ -252,6 +278,8 @@ fn hydrate_codex_source_record(
     let byte_length =
         usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
     let opened = open_codex_hydration_source(source)?;
+    #[cfg(test)]
+    run_codex_hydration_after_source_open_hook();
     if byte_offset != 0 {
         let boundary = opened.read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
         if boundary != *b"\n" {
@@ -277,7 +305,7 @@ fn hydrate_codex_source_record(
     }
     let decoded_display_text = decode_exact_display_text(&provider_bytes, physical_ordinal)?;
     opened
-        .revalidate()
+        .revalidate_same_object()
         .map_err(normalize_codex_hydration_capture_error)?;
     Ok(CodexHydratedRecordV0 {
         provider_bytes,

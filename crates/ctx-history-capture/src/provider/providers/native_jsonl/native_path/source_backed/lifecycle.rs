@@ -55,6 +55,7 @@ impl DirectJsonlSourceAdapter {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(crate) fn revalidate_inventory(
         self,
         root: &Path,
@@ -68,6 +69,37 @@ impl DirectJsonlSourceAdapter {
         }
         let current = self.discover(root)?;
         Ok(current.is_exact_complete() && &current.observation == expected.observation())
+    }
+
+    pub(super) fn revalidate_inventory_with_evidence(
+        self,
+        root: &Path,
+        terminal_evidence: &DirectJsonlTerminalEvidenceSet,
+        expected: &CertifiedSourceInventory,
+    ) -> DirectJsonlSourceBackedResult<bool> {
+        if expected.validate_contract().is_err()
+            || expected.discovery_revision() != DIRECT_JSONL_DISCOVERY_REVISION
+            || expected.observation().provider() != self.provider.as_str()
+        {
+            return Ok(false);
+        }
+        let current = self.discover(root)?;
+        let evidence = terminal_evidence.all()?;
+        if !current.is_exact_complete()
+            || &current.observation != expected.observation()
+            || evidence.len() != expected.observed_sources()
+            || evidence
+                .iter()
+                .any(|source| !expected.contains(source.certificate.observation().source()))
+        {
+            return Ok(false);
+        }
+        for source in evidence {
+            if !self.revalidate_certificate(terminal_evidence, &source.certificate)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn revalidate_deletion(
@@ -472,6 +504,20 @@ impl DirectJsonlTerminalEvidenceSet {
             })?
             .get(&source.exact_descriptor_digest())
             .cloned())
+    }
+
+    fn all(&self) -> DirectJsonlSourceBackedResult<Vec<DirectJsonlTerminalEvidence>> {
+        Ok(self
+            .sources
+            .lock()
+            .map_err(|_| {
+                DirectJsonlSourceBackedError::Publication(
+                    "terminal evidence lock was poisoned".to_owned(),
+                )
+            })?
+            .values()
+            .cloned()
+            .collect())
     }
 }
 

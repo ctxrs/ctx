@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -8,7 +10,31 @@ use ctx_history_core::{
     HydrationFailure, HydrationFailureKind,
 };
 
-use super::{discover, hydration_error, observe_opened_file, FamilyResident, JsonlFamilyAdapter};
+use super::{
+    discover, hydration_error, observe_opened_file_same_object, FamilyResident, JsonlFamilyAdapter,
+};
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_GROUP_OPEN_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_after_jsonl_group_open_hook(hook: impl FnOnce() + 'static) {
+    AFTER_GROUP_OPEN_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_jsonl_group_open_hook() {
+    AFTER_GROUP_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
 
 pub(super) fn hydrate_single(
     adapter: &dyn JsonlFamilyAdapter,
@@ -95,6 +121,8 @@ fn hydrate_group(
         let (opened, opening_observation) = leaf
             .open_for_hydration()
             .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
+        #[cfg(test)]
+        run_after_jsonl_group_open_hook();
         let mut hydrator = adapter.hydrator(leaf, Arc::clone(&opened))?;
         let mut records = Vec::with_capacity(requests.len());
         for request in requests {
@@ -108,8 +136,10 @@ fn hydrate_group(
             records.push(record);
         }
         hydrator.finish()?;
-        let closing_observation = observe_opened_file(leaf.source_path(), opened.as_ref())
-            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
+        let closing_observation =
+            observe_opened_file_same_object(leaf.source_path(), opened.as_ref()).map_err(
+                |error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error),
+            )?;
         if !leaf.accepts_hydration_closing(&opening_observation, &closing_observation)
             || inventory.revalidate_root().is_err()
         {

@@ -731,6 +731,7 @@ pub(crate) struct DirectJsonlInventoryLeaf {
 }
 
 impl DirectJsonlInventoryLeaf {
+    #[cfg(test)]
     pub(super) fn open_verified(
         &self,
     ) -> DirectJsonlSourceBackedResult<Arc<OpenedProviderSourceFile>> {
@@ -756,6 +757,19 @@ impl DirectJsonlInventoryLeaf {
         let mut leaf = self.clone();
         leaf.observation = current;
         Ok((leaf, Arc::new(opened)))
+    }
+
+    pub(super) fn open_for_hydration(
+        &self,
+    ) -> DirectJsonlSourceBackedResult<Arc<OpenedProviderSourceFile>> {
+        self.authority.revalidate()?;
+        let opened = self.authority.root.open_file(&self.authority_path)?;
+        let current = observe_opened_file(&self.path, &opened)?;
+        if current != self.observation && !self.observation.is_same_file_growth_to(&current) {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        self.authority.revalidate()?;
+        Ok(Arc::new(opened))
     }
 }
 
@@ -810,7 +824,7 @@ fn inventory_observation(
     failures: &[DirectJsonlInventoryFailure],
 ) -> DirectJsonlSourceBackedResult<SourceInventoryObservation> {
     let mut digest = Sha256::new();
-    digest.update(b"ctx.direct-jsonl.inventory\0");
+    digest.update(b"ctx.direct-jsonl.inventory.v2\0");
     digest.update([u8::from(root_missing)]);
     digest.update((leaves.len() as u64).to_be_bytes());
     for leaf in leaves {

@@ -344,11 +344,14 @@ impl OpenedProviderSourceFile {
     /// This performs no second filesystem observation; [`Self::revalidate_leaf`]
     /// is the proof that the stamp still describes the opened object and route.
     pub(crate) fn ordinary_file_token(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(ORDINARY_FILE_TOKEN_DOMAIN);
-        digest.update(b"platform\0");
-        digest.update(platform::object_change_token(&self.opened));
-        digest.finalize().into()
+        ordinary_file_token(&self.opened)
+    }
+
+    /// Strong token for the retained file's current metadata observation.
+    pub(crate) fn current_ordinary_file_token(&self) -> Result<[u8; 32]> {
+        let metadata = self.file.metadata()?;
+        let current = platform::object_stamp(&self.file, &metadata)?;
+        Ok(ordinary_file_token(&current))
     }
 
     pub(crate) fn file(&self) -> &File {
@@ -537,6 +540,14 @@ impl OpenedProviderSourceFile {
             ProviderSourceFileRoute::Relative { relative_path, .. } => relative_path,
         }
     }
+}
+
+fn ordinary_file_token(stamp: &platform::ObjectStamp) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(ORDINARY_FILE_TOKEN_DOMAIN);
+    digest.update(b"platform\0");
+    digest.update(platform::object_change_token(stamp));
+    digest.finalize().into()
 }
 
 /// Opens an ordinary provider file with a no-follow component walk and retains
