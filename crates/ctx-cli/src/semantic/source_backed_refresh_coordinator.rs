@@ -293,17 +293,23 @@ fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
 }
 
 fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
-    let generation_id = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root))
-        .and_then(|job| {
+    let receipt_generation =
+        read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root)).and_then(|job| {
             job.get("published_generation")
                 .and_then(Value::as_str)
                 .filter(|generation_id| !generation_id.is_empty())
                 .map(str::to_owned)
         });
-    let Some(generation_id) = generation_id else {
-        return Ok(None);
-    };
     let meta_path = source_backed_index_root(data_root).join("meta.json");
+    if !meta_path.is_file() {
+        if let Some(generation_id) = receipt_generation {
+            bail!(
+                "retained lexical generation hint {generation_id} has no metadata at {}",
+                meta_path.display()
+            );
+        }
+        return Ok(None);
+    }
     let meta: Value = serde_json::from_slice(
         &fs::read(&meta_path)
             .with_context(|| format!("read retained lexical metadata {}", meta_path.display()))?,
@@ -320,12 +326,12 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("retained lexical metadata has no generation ID"))?;
-    if meta_generation != generation_id {
-        bail!(
-            "retained lexical generation hint {generation_id} does not match metadata generation {meta_generation}"
-        );
-    }
-    Ok(Some(generation_id))
+    // Tantivy's atomically published payload is the data-plane authority. The
+    // daemon job receipt can lag it when the process dies after commit but
+    // before the coordinator persists its final status. A successor refresh
+    // rewrites that stale bookkeeping; startup must not reject the valid
+    // generation or require a foreground writer first.
+    Ok(Some(meta_generation.to_owned()))
 }
 
 fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
