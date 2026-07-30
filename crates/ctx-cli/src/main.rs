@@ -31,6 +31,8 @@ mod semantic;
 mod skill;
 mod source_sql;
 mod transcript;
+#[allow(dead_code, unused_imports)]
+mod ui;
 mod upgrade;
 mod value_parsers;
 
@@ -62,6 +64,7 @@ const DEFAULT_VISIBLE_SOURCE_PROVIDERS: &[CaptureProvider] = &[
 ];
 
 fn main() -> ExitCode {
+    ui::bootstrap_color_choice(std::env::args_os());
     if release_build_identity::print_if_requested() {
         return ExitCode::SUCCESS;
     }

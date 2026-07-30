@@ -728,6 +728,8 @@ dependencies = [
 name = "ctx"
 version = "1.0.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "anyhow",
  "assert_cmd",
  "base64 0.22.1",
@@ -765,11 +767,14 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "supports-unicode",
  "tar",
  "tempfile",
+ "terminal_size",
  "thiserror 1.0.69",
  "tokenizers",
  "toml_edit 0.22.27",
+ "unicode-width",
  "ureq 2.12.1",
  "url",
  "uuid",
@@ -3446,6 +3451,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "supports-unicode"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7401a30af6cb5818bb64852270bb722533397edcfc7344954a38f420819ece2"
+
+[[package]]
 name = "syn"
 version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3654,6 +3665,16 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]

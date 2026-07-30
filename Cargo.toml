@@ -20,6 +20,8 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1.0"
+anstream = "1.0"
+anstyle = "1.0"
 assert_cmd = "2.0"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
@@ -44,14 +46,17 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 serde_yaml = { version = "0.9", default-features = false }
 semver = "1.0"
 sha2 = "0.10"
+supports-unicode = "3.0"
 tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }
 tempfile = "3.10"
+terminal_size = "0.4"
 thiserror = "1.0"
 toml_edit = { version = "0.22", default-features = false, features = ["parse", "serde"] }
 tar = "0.4"
 url = "2.5"
 uuid = { version = "1.10", features = ["serde", "v4", "v7"] }
 ureq = { version = "2.10", default-features = true }
+unicode-width = "0.2"
 xz2 = "0.1"
 zeroize = "1.8"
 zstd = "0.13"
