@@ -10,6 +10,9 @@ cpuinfo_path="/proc/cpuinfo"
 process_maps_path="/proc/$$/maps"
 platform_facts_path=""
 powershell_bin=""
+os_release_path="/etc/os-release"
+freebsd_version_bin="/bin/freebsd-version"
+os_baseline_only=0
 
 while (($# > 0)); do
   case "$1" in
@@ -49,6 +52,17 @@ while (($# > 0)); do
       shift
       powershell_bin="${1:-}"
       ;;
+    --os-release)
+      shift
+      os_release_path="${1:-}"
+      ;;
+    --freebsd-version)
+      shift
+      freebsd_version_bin="${1:-}"
+      ;;
+    --os-baseline-only)
+      os_baseline_only=1
+      ;;
     *)
       echo "unsupported host evidence argument: $1" >&2
       exit 2
@@ -65,6 +79,81 @@ if [[ "${host_system}" == Windows_NT && "${host_arch}" == x86_64 ]]; then
 fi
 if [[ "${host_system}" == FreeBSD && ! -x "${sysctl_bin}" && -x /sbin/sysctl ]]; then
   sysctl_bin=/sbin/sysctl
+fi
+if [[ "${host_system}" == FreeBSD && ! -x "${freebsd_version_bin}" \
+  && -x /usr/bin/freebsd-version ]]; then
+  freebsd_version_bin=/usr/bin/freebsd-version
+fi
+
+os_release_value() {
+  local key="$1"
+  awk -F= -v wanted="${key}" '
+    $1 == wanted {
+      value = substr($0, index($0, "=") + 1)
+      if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      print value
+      exit
+    }
+  ' "${os_release_path}"
+}
+
+emit_os_baseline() {
+  local os_identity=unknown
+  local os_version=unknown
+  local os_product_type=unknown
+  local windows_facts=""
+
+  case "${host_system}" in
+    Linux)
+      if [[ -r "${os_release_path}" ]]; then
+        os_identity="$(os_release_value ID)"
+        os_version="$(os_release_value VERSION_ID)"
+      fi
+      ;;
+    FreeBSD)
+      os_identity=freebsd
+      if [[ -x "${freebsd_version_bin}" ]]; then
+        os_version="$(
+          "${freebsd_version_bin}" -u 2>/dev/null \
+            | tr -d '\r' \
+            | sed -n '1p' \
+            || true
+        )"
+      fi
+      ;;
+    Windows_NT)
+      if [[ -z "${powershell_bin}" ]]; then
+        powershell_bin="$(command -v powershell.exe 2>/dev/null || true)"
+      fi
+      if [[ -n "${powershell_bin}" && -x "${powershell_bin}" ]]; then
+        windows_facts="$(
+          "${powershell_bin}" -NoLogo -NoProfile -NonInteractive -Command \
+            '$os = Get-CimInstance Win32_OperatingSystem; Write-Output (($os.Caption.Trim(), $os.Version, [string]$os.ProductType) -join "`t")' \
+            2>/dev/null \
+            | tr -d '\r' \
+            | sed -n '1p' \
+            || true
+        )"
+        if [[ -n "${windows_facts}" ]]; then
+          IFS=$'\t' read -r os_identity os_version os_product_type \
+            <<<"${windows_facts}"
+        fi
+      fi
+      ;;
+  esac
+
+  [[ -n "${os_identity}" ]] || os_identity=unknown
+  [[ -n "${os_version}" ]] || os_version=unknown
+  [[ -n "${os_product_type}" ]] || os_product_type=unknown
+  printf '%s\t%s\t%s\n' \
+    "${os_identity}" "${os_version}" "${os_product_type}"
+}
+
+if [[ "${os_baseline_only}" == "1" ]]; then
+  emit_os_baseline
+  exit 0
 fi
 
 host_native_arch="${host_arch}"
