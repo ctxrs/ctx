@@ -223,6 +223,7 @@ export interface SearchHit {
   title?: string | null;
   snippet?: string | null;
   rank?: number | null;
+  retrievalScore?: number | null;
   resultType?: string | null;
   resultScope: string;
   provider?: string | null;

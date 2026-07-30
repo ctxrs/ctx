@@ -181,6 +181,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
     public var title: String?
     public var snippet: String?
     public var rank: Double?
+    public var retrievalScore: Double?
     public var resultType: String?
     public var resultScope: String
     public var provider: String?
@@ -202,6 +203,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         title: String? = nil,
         snippet: String? = nil,
         rank: Double? = nil,
+        retrievalScore: Double? = nil,
         resultType: String? = nil,
         resultScope: String,
         provider: String? = nil,
@@ -222,6 +224,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         self.title = title
         self.snippet = snippet
         self.rank = rank
+        self.retrievalScore = retrievalScore
         self.resultType = resultType
         self.resultScope = resultScope
         self.provider = provider
@@ -244,6 +247,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         case title
         case snippet
         case rank
+        case retrievalScore
         case resultType
         case resultScope
         case provider
@@ -267,6 +271,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title)
         snippet = try container.decodeIfPresent(String.self, forKey: .snippet)
         rank = try container.decodeIfPresent(Double.self, forKey: .rank)
+        retrievalScore = try container.decodeIfPresent(Double.self, forKey: .retrievalScore)
         resultType = try container.decodeIfPresent(String.self, forKey: .resultType)
         resultScope = try container.decodeIfPresent(String.self, forKey: .resultScope) ?? "unknown"
         provider = try container.decodeIfPresent(String.self, forKey: .provider)

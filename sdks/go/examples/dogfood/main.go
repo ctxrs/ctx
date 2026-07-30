@@ -179,14 +179,15 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 			},
 			"results": []map[string]any{
 				{
-					"ctxEventId":   fixtureEventID,
-					"ctxSessionId": fixtureSessionID,
-					"title":        "Dogfood fixture",
-					"snippet":      "local agent history search result",
-					"rank":         1.0,
-					"resultScope":  "event",
-					"provider":     "codex",
-					"whyMatched":   []string{"text"},
+					"ctxEventId":     fixtureEventID,
+					"ctxSessionId":   fixtureSessionID,
+					"title":          "Dogfood fixture",
+					"snippet":        "local agent history search result",
+					"rank":           1,
+					"retrievalScore": 0.98,
+					"resultScope":    "event",
+					"provider":       "codex",
+					"whyMatched":     []string{"text"},
 				},
 			},
 			"resultWindow": map[string]any{
@@ -234,14 +235,14 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 
 func dogfoodEvent() map[string]any {
 	return map[string]any{
-		"ctxEventId":     fixtureEventID,
-		"ctxSessionId":   fixtureSessionID,
-		"sequence":       1,
-		"eventType":      "message",
-		"role":           "assistant",
-		"source":         "codex",
-		"cursor":         "line:1",
-		"text":           "local agent history search result",
+		"ctxEventId":   fixtureEventID,
+		"ctxSessionId": fixtureSessionID,
+		"sequence":     1,
+		"eventType":    "message",
+		"role":         "assistant",
+		"source":       "codex",
+		"cursor":       "line:1",
+		"text":         "local agent history search result",
 	}
 }
 

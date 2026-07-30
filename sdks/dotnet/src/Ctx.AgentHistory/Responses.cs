@@ -407,6 +407,7 @@ public sealed record SearchHit
         Title = JsonHelpers.GetString(json, "title");
         Snippet = JsonHelpers.GetString(json, "snippet");
         Rank = JsonHelpers.GetDouble(json, "rank");
+        RetrievalScore = JsonHelpers.GetDouble(json, "retrievalScore");
         ResultType = JsonHelpers.GetString(json, "resultType");
         ResultScope = JsonHelpers.GetString(json, "resultScope");
         Provider = JsonHelpers.GetString(json, "provider");
@@ -428,6 +429,7 @@ public sealed record SearchHit
     public string? Title { get; }
     public string? Snippet { get; }
     public double? Rank { get; }
+    public double? RetrievalScore { get; }
     public string? ResultType { get; }
     public string? ResultScope { get; }
     public string? Provider { get; }

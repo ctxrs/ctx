@@ -259,6 +259,7 @@ type SearchHit struct {
 	Title                 string      `json:"title,omitempty"`
 	Snippet               string      `json:"snippet,omitempty"`
 	Rank                  float64     `json:"rank,omitempty"`
+	RetrievalScore        *float64    `json:"retrievalScore,omitempty"`
 	ResultType            string      `json:"resultType,omitempty"`
 	ResultScope           ResultScope `json:"resultScope"`
 	Provider              string      `json:"provider,omitempty"`
@@ -332,17 +333,17 @@ type SessionRecord struct {
 
 // Event is the agent-history-v1 event shape.
 type Event struct {
-	CtxEventID     string     `json:"ctxEventId,omitempty"`
-	CtxSessionID   string     `json:"ctxSessionId,omitempty"`
-	Sequence       int        `json:"sequence,omitempty"`
-	EventType      string     `json:"eventType,omitempty"`
-	Role           string     `json:"role,omitempty"`
-	OccurredAt     string     `json:"occurredAt,omitempty"`
-	Source         string     `json:"source,omitempty"`
-	Cursor         string     `json:"cursor,omitempty"`
-	Text           string     `json:"text,omitempty"`
-	Preview        string     `json:"preview,omitempty"`
-	Citations      []Citation `json:"citations,omitempty"`
+	CtxEventID   string     `json:"ctxEventId,omitempty"`
+	CtxSessionID string     `json:"ctxSessionId,omitempty"`
+	Sequence     int        `json:"sequence,omitempty"`
+	EventType    string     `json:"eventType,omitempty"`
+	Role         string     `json:"role,omitempty"`
+	OccurredAt   string     `json:"occurredAt,omitempty"`
+	Source       string     `json:"source,omitempty"`
+	Cursor       string     `json:"cursor,omitempty"`
+	Text         string     `json:"text,omitempty"`
+	Preview      string     `json:"preview,omitempty"`
+	Citations    []Citation `json:"citations,omitempty"`
 }
 
 // LocateEventResponse is returned by Client.LocateEvent.

@@ -138,6 +138,8 @@ test("builds search flags and normalizes nested CLI search output", async () => 
           event_seq: 7,
           result_type: "event",
           result_scope: "event",
+          rank: 1,
+          retrieval_score: 0.98,
           source_path: "/tmp/session.jsonl",
           source_exists: true,
           why_matched: ["text"],
@@ -184,6 +186,8 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   assert.equal(result.search.results[0].eventSeq, 7);
   assert.equal(result.search.results[0].resultType, "event");
   assert.equal(result.search.results[0].resultScope, "event");
+  assert.equal(result.search.results[0].rank, 1);
+  assert.equal(result.search.results[0].retrievalScore, 0.98);
   assert.equal(result.search.results[0].sourcePath, "/tmp/session.jsonl");
   assert.equal(result.search.results[0].sourceExists, true);
   assert.equal(result.search.results[0].whyMatched[0], "text");
@@ -459,6 +463,12 @@ function assertFixturePayload(entry, fixture) {
           typeof fixture.search.results[0].resultScope,
           "string",
           `${entry} search.results[0].resultScope`,
+        );
+        assert.equal(fixture.search.results[0].rank, 1, `${entry} search.results[0].rank`);
+        assert.equal(
+          fixture.search.results[0].retrievalScore,
+          0.98,
+          `${entry} search.results[0].retrievalScore`,
         );
       }
       break;

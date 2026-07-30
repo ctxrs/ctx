@@ -139,7 +139,15 @@
         "eventSeq": { "type": ["integer", "null"] },
         "title": { "type": ["string", "null"] },
         "snippet": { "type": ["string", "null"] },
-        "rank": { "type": ["number", "null"] },
+        "rank": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "One-based position in the final shaped result window."
+        },
+        "retrievalScore": {
+          "type": ["number", "null"],
+          "description": "Optional backend diagnostic score; not an ordering contract."
+        },
         "resultType": { "type": ["string", "null"] },
         "resultScope": { "type": "string" },
         "provider": { "type": ["string", "null"] },

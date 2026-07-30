@@ -122,7 +122,9 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 			"diagnostics": {"query_embed_ms": 2}
 		},
 		"results": [{
-			"result_scope": "event"
+			"result_scope": "event",
+			"rank": 1,
+			"retrieval_score": 0.98
 		}]
 	}`}))
 
@@ -143,6 +145,10 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 	coverage, ok := retrieval["coverage"].(map[string]any)
 	if !ok || coverage["embeddedItems"] != float64(4) || coverage["indexedNow"] != float64(1) {
 		t.Fatalf("retrieval coverage was not camelized: %#v", retrieval)
+	}
+	hit := response.Search.Results[0]
+	if hit.Rank != 1 || hit.RetrievalScore == nil || *hit.RetrievalScore != 0.98 {
+		t.Fatalf("search hit rank fields were not decoded: %#v", hit)
 	}
 	diagnostics, ok := retrieval["diagnostics"].(map[string]any)
 	if !ok || diagnostics["queryEmbedMs"] != float64(2) {
@@ -357,6 +363,9 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	}
 	if len(search.Search.Results) != 1 || search.Search.Results[0].WhyMatched[0] != "text" {
 		t.Fatalf("unexpected typed search results: %+v", search.Search.Results)
+	}
+	if search.Search.Results[0].Rank != 1 || search.Search.Results[0].RetrievalScore == nil || *search.Search.Results[0].RetrievalScore != 0.98 {
+		t.Fatalf("unexpected typed rank fields: %+v", search.Search.Results[0])
 	}
 	if search.Search.Results[0].ResultType != "event" || search.Search.Results[0].Citations[0].TargetType != "event" {
 		t.Fatalf("unexpected typed result/citation type: %+v", search.Search.Results[0])
