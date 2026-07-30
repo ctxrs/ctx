@@ -13,9 +13,8 @@ load(
 )
 load(
     "//tools/bazel:test_tiers.bzl",
-    "NATIVE_RUST_TESTS",
-    "PROVIDER_CONTRACT_TESTS",
-    "RELEASE_QUALIFICATION_TESTS",
+    "CI_TESTS",
+    "NIGHTLY_TESTS",
     "RUST_FORMAT_TARGETS",
 )
 
@@ -68,7 +67,10 @@ NON_RUST_GATE_DATA = glob([
     "sdks/**",
     "skills/**",
     "tests/**",
-])
+]) + [
+    "//sdks/go:repository_gate_data",
+    "//sdks/go/examples/dogfood:repository_gate_data",
+]
 
 CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-cli:cargo_package_data",
@@ -93,6 +95,8 @@ LOC_CHECK_DATA = [
     "//crates/ctx-pro-host-protocol:loc_check_inputs",
     "//crates/ctx-protocol:loc_check_inputs",
     "//crates/ctx-sdk:loc_check_inputs",
+    "//sdks/go:loc_check_inputs",
+    "//sdks/go/examples/dogfood:loc_check_inputs",
     "//tools/bazel:loc_check_inputs",
     "//tools/bazel/mingw:loc_check_inputs",
     "//tools/bazel/patches:loc_check_inputs",
@@ -191,13 +195,6 @@ filegroup(
     name = "public_test_fixtures",
     srcs = glob(["tests/fixtures/**"]),
     visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "perf_smoke_runfiles",
-    srcs = ["scripts/public-ctx/perf-smoke.sh"] + glob([
-        "scripts/public-ctx/perf-smoke/*.sh",
-    ]),
 )
 
 filegroup(
@@ -301,13 +298,12 @@ py_test(
 )
 
 py_test(
-    name = "perf_smoke_tests",
-    srcs = ["scripts/public-ctx/perf-smoke_test.py"],
-    data = [
-        ":perf_smoke_runfiles",
-        "Cargo.toml",
-    ],
-    main = "scripts/public-ctx/perf-smoke_test.py",
+    name = "performance_sanity_tests",
+    srcs = ["scripts/tests/performance_sanity_test.py"],
+    args = ["$(rootpath //crates/ctx-cli:ctx)"],
+    data = ["//crates/ctx-cli:ctx"],
+    main = "scripts/tests/performance_sanity_test.py",
+    tags = ["release-gate"],
 )
 
 sh_test(
@@ -388,7 +384,10 @@ py_test(
     name = "release_target_matrix_check",
     srcs = ["scripts/check-release-target-matrix.py"],
     main = "scripts/check-release-target-matrix.py",
-    data = [":release_contracts"],
+    data = [
+        ":release_contracts",
+        "//tools/bazel:release_inventory.bzl",
+    ],
     tags = ["release-gate"],
 )
 
@@ -814,155 +813,19 @@ sh_test(
     tags = ["non-rust-action"],
 )
 
-test_suite(name = "cli_contract_tests", tests = [
-    "//crates/ctx-cli:cli_public_help_docs_tests",
-    "//crates/ctx-cli:search_source_identity_filters_tests",
-    "//crates/ctx-cli:stats_tests",
-    "//crates/ctx-cli:upgrade_tests",
-])
-test_suite(name = "slash_command_e2e", tests = ["//crates/ctx-cli:slash_command_e2e_tests"])
-test_suite(name = "mcp_integration_e2e", tests = ["//crates/ctx-cli:mcp_integration_e2e_tests"])
-test_suite(name = "fresh_home_e2e", tests = ["//crates/ctx-cli:search_show_locate_sql_tests"])
-test_suite(name = "provider_fixture_e2e", tests = [
-    "//crates/ctx-cli:native_providers_tests",
-    "//crates/ctx-cli:search_show_locate_sql_tests",
-])
-test_suite(name = "local_transcript_oracle", tests = ["//crates/ctx-cli:search_show_locate_sql_tests"])
-test_suite(name = "show_complete_content_tests", tests = [
-    "//crates/ctx-cli:complete_content_tests",
-    "//crates/ctx-history-capture:complete_content_tests",
-])
-
-test_suite(
-    name = "native_rust_smoke",
-    tests = [
-        ":native_ctx_binary_smoke",
-        "//crates/ctx-history-core:unit_tests",
-        "//crates/ctx-history-index:unit_tests",
-        "//crates/ctx-pro-host-protocol:conformance_tests",
-        "//crates/ctx-protocol:unit_tests",
-        "//crates/ctx-sdk:unit_tests",
-    ],
-)
-
-test_suite(name = "native_rust", tests = NATIVE_RUST_TESTS)
-
-test_suite(
-    name = "provider_contracts",
-    tests = PROVIDER_CONTRACT_TESTS,
-)
-
-test_suite(
-    name = "native_platform_contracts",
-    tests = [
-        ":provider_contracts",
-        "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
-    ],
-    tags = ["release-gate"],
-)
-
-test_suite(
-    name = "release_qualification",
-    tests = RELEASE_QUALIFICATION_TESTS,
-    tags = ["release-gate"],
-)
-
-test_suite(
-    name = "real_harness",
-    tests = [
-        ":real_harness_codex_mcp_e2e",
-        ":real_harness_codex_skill_e2e",
-        ":real_harness_gemini_slash_e2e",
-        ":real_harness_qwen_slash_e2e",
-        ":real_harness_qwen_mcp_e2e",
-        ":real_harness_claude_mcp_e2e",
-        ":real_harness_gemini_mcp_e2e",
-        ":real_harness_opencode_mcp_e2e",
-    ],
-)
-
-test_suite(
-    name = "fast",
-    tests = [
-        ":buildkite_pipeline_check",
-        ":bazel_affected_mutation_tests",
-        ":bazel_affected_script_tests",
-        ":bazel_wrapper_tests",
-        ":cargo_diagnostic_tests",
-        ":check_force_rerun_tests",
-        ":cli_build_cfg_parity_check",
-        ":cli_contract_tests",
-        ":docs_check",
-        ":dependency_advisory_gate_tests",
-        ":freebsd_ort_exit_contract",
-        ":freebsd_ort_exit_contract_mutation_tests",
-        ":installer_path_smoke",
-        ":linux_release_construction_tests",
-        ":loc_check",
-        ":macos_release_signing_tests",
-        ":native_bazel_packaging_contract_tests",
-        ":native_candidate_smoke_tests",
-        ":native_rust_smoke",
-        ":package_audit_fast",
-        ":perf_smoke_tests",
-        ":public_control_surface_check",
-        ":public_cli_bazel_build_info_tests",
-        ":public_cli_bazel_release_contract",
-        ":public_cli_artifact_cleanup_tests",
-        ":public_cli_release_targets_tests",
-        "//tools/bazel:release_route_analysis_tests",
-        ":release_binary_compat_tests",
-        ":release_binary_string_audit_tests",
-        ":release_sbom_tests",
-        ":release_source_surface_audit_tests",
-        ":release_target_matrix_check",
-        ":release_target_matrix_tests",
-        ":rust_target_inventory_check",
-        ":rust_toolchain_pin_check",
-        ":rust_toolchain_pin_mutation_tests",
-        ":stage_github_release_assets_tests",
-        ":rustfmt_check",
-        ":sdk_contract_checks",
-        ":source_diff_check",
-    ],
-)
-
-# Presubmit owns deterministic unit, contract, and bounded integration tests.
-# Serialized upgrade acceptance, daemon soak, and injected process/filesystem
-# faults remain explicit release qualification rather than running after every
-# ordinary source or BUILD-file change.
-test_suite(
-    name = "presubmit",
-    tests = [
-        ":fast",
-        ":native_rust",
-        ":provider_contracts",
-    ],
-)
-
 test_suite(
     name = "ci",
-    tests = [
-        ":presubmit",
-        ":sdk_package_dry_run",
-        ":package_audit_release",
-        "//crates/ctx-cli:daemon_config_reload_tests",
-    ],
+    tests = CI_TESTS,
 )
 
 test_suite(
     name = "nightly",
     tests = [
         ":ci",
-        ":release_qualification",
-    ],
+    ] + NIGHTLY_TESTS,
 )
 
 test_suite(
     name = "release",
-    tests = [
-        ":ci",
-        ":release_qualification",
-    ],
+    tests = [":nightly"],
 )
-test_suite(name = "smoke", tests = [":fast", ":fresh_home_e2e", ":provider_fixture_e2e"])

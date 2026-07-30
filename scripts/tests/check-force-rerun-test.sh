@@ -27,8 +27,9 @@ unset RUST_TEST_THREADS
 : >"${CTX_FAKE_BAZEL_LOG}"
 "${repo_root}/scripts/check.sh" --mode ci --force-rerun \
   >"${test_root}/ci.out" 2>"${test_root}/ci.err"
-[[ "$(grep -c '^arg=query$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-  || fail 'ci mode did not query exactly once'
+if grep -Fqx 'arg=query' "${CTX_FAKE_BAZEL_LOG}"; then
+  fail 'ci mode ran a redundant Bazel query'
+fi
 [[ "$(grep -c '^arg=build$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
   || fail 'ci mode did not build exactly once'
 [[ "$(grep -c '^arg=test$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
@@ -36,7 +37,6 @@ unset RUST_TEST_THREADS
 [[ "$(grep -c '^arg=--cache_test_results=no$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
   || fail 'force flag was not added exactly once'
 awk '
-  /^arg=query$/ { action = "query" }
   /^arg=build$/ { action = "build" }
   /^arg=test$/ { action = "test" }
   /^arg=--cache_test_results=no$/ {
@@ -53,7 +53,7 @@ if grep -Eq '^arg=(clean|--expunge)$' "${CTX_FAKE_BAZEL_LOG}"; then
 fi
 
 : >"${CTX_FAKE_BAZEL_LOG}"
-"${repo_root}/scripts/check.sh" --mode fast \
+"${repo_root}/scripts/check.sh" --mode ci \
   >"${test_root}/normal.out" 2>"${test_root}/normal.err"
 if grep -Fqx 'arg=--cache_test_results=no' "${CTX_FAKE_BAZEL_LOG}"; then
   fail 'normal mode disabled Bazel test-result reuse'
@@ -77,9 +77,18 @@ grep -Fq -- '--force-rerun disables test-result reuse' \
   <("${repo_root}/scripts/check.sh" --help) \
   || fail 'help does not document force-rerun cache behavior'
 
-expected_modes="$(printf '%s\n' fast presubmit smoke ci nightly release)"
+expected_modes="$(printf '%s\n' ci nightly release)"
 [[ "$("${repo_root}/scripts/check.sh" --list-modes)" == "${expected_modes}" ]] \
-  || fail 'mode inventory does not include the explicit nightly/release tiers'
+  || fail 'mode inventory is not the canonical three-tier taxonomy'
+
+for removed_mode in fast presubmit smoke; do
+  if "${repo_root}/scripts/check.sh" --mode "${removed_mode}" \
+    >"${test_root}/${removed_mode}.out" 2>"${test_root}/${removed_mode}.err"; then
+    fail "removed ${removed_mode} mode still succeeds"
+  fi
+  grep -Fq "unknown check mode: ${removed_mode}" "${test_root}/${removed_mode}.err" \
+    || fail "removed ${removed_mode} mode did not fail explicitly"
+done
 
 for mode in nightly release; do
   : >"${CTX_FAKE_BAZEL_LOG}"

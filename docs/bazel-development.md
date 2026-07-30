@@ -15,14 +15,20 @@ Start with the narrowest real Bazel test that covers the change:
 
 ```bash
 scripts/bazelw build //crates/ctx-cli:ctx --config=dev-linux
-scripts/bazelw test //crates/ctx-history-search:unit_tests --config=dev-linux
+scripts/bazelw test //crates/ctx-history-index:unit_tests --config=dev-linux
 scripts/bazelw test //crates/ctx-protocol:unit_tests //crates/ctx-sdk:unit_tests --config=dev-linux
-scripts/bazelw test //:native_rust_smoke --config=dev-linux
+scripts/bazelw test //crates/ctx-cli:unit_tests --config=dev-linux
 ```
 
-The two SDK unit-test targets above are the authoritative Rust SDK test path;
-the language-agnostic contract and non-Rust SDK checks remain in
-`//:sdk_contract_checks`.
+The two Rust SDK unit-test targets above are their authoritative test path.
+The Go SDK is modeled by `rules_go` targets such as
+`//sdks/go:go_sdk_tests`; Bazel downloads Go 1.22.12 through its repository
+cache instead of reinstalling it in the CI wrapper. The Buildkite wrapper uses
+`.buildkite-cache/bazel-repository` as its stable hosted cache-volume mount
+contract. Cross-job reuse requires that path to be configured as a Buildkite
+cache volume; without the mount, it is an isolated job-local cache and a hosted
+cache miss downloads the pinned SDK again. Language-agnostic contract and
+other non-Rust SDK checks remain in `//:sdk_contract_checks`.
 
 `dev-linux` uses `fastbuild`, Rust `debuginfo=0`, and the content-pinned mold
 archive declared in `MODULE.bazel`. `dev-debug` deliberately has a different
@@ -47,7 +53,7 @@ when needed:
 
 ```bash
 export CTX_BAZEL_CACHE_ROOT=/mnt/shared/ctx-bazel
-scripts/bazelw test //:native_rust --config=test
+scripts/bazelw test //crates/ctx-cli:unit_tests --config=test
 ```
 
 `CTX_BAZEL_SPACIOUS_MIN_FREE_KIB` and
@@ -105,8 +111,6 @@ wrapper defaults unless the host or concurrent workload needs an override.
 ## Focused, affected, and complete checks
 
 ```bash
-scripts/check.sh --mode=fast
-scripts/check.sh --mode=presubmit
 scripts/check.sh --mode=ci
 scripts/check.sh --mode=nightly
 scripts/check.sh --mode=release
@@ -114,18 +118,18 @@ scripts/bazel-affected.sh origin/main
 ```
 
 Run focused tests repeatedly while editing, then run the affected selector
-against the comparison base. Use `presubmit` when the change
-touches build configuration, affected selection expands or fails closed, or
-ownership is uncertain. Use `ci` for the complete public repository check.
-Serialized auto-upgrade acceptance, persistent-daemon soak, and process/fault
-injection run in `nightly` and `release`; they are intentionally outside the
-per-change `presubmit` and `ci` loops.
+against the comparison base. Build-configuration changes, uncertain ownership,
+unmapped changes, and selector failures all expand to `ci`, the complete public
+repository check.
+Performance sanity, serialized auto-upgrade acceptance, persistent-daemon soak,
+and process/fault injection run in `nightly` and `release`; they are
+intentionally outside the per-change `ci` loop.
 
 The affected command uses pinned bazel-diff, an ephemeral detached base
 worktree, a commit-keyed cached base hash, and complete-content hashes for both
 graphs. BUILD, `.bzl`, module, lock, and configuration changes select the full
-presubmit suite. A diff/query/filter failure or a changed file with no mapped
-test also fails closed to presubmit. Non-routine external, manual, network,
+`ci` suite. A diff/query/filter failure or a changed file with no mapped test
+also fails closed to `ci`. Non-routine external, manual, network,
 platform, stress, and release targets stay outside affected execution.
 
 `tools/bazel/rust-target-inventory.json` records native ownership for every

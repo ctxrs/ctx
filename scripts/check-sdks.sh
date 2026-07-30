@@ -46,10 +46,17 @@ else
   skip "Python SDK tests (python3 unavailable or SDK absent)"
 fi
 
-if command -v go >/dev/null 2>&1 && [ -f sdks/go/go.mod ]; then
-  run_in_dir sdks/go go test ./...
+if [ -f sdks/go/go.mod ]; then
+  if [[ -z "${TEST_SRCDIR:-}" ]]; then
+    run scripts/bazelw test \
+      //sdks/go:go_sdk_tests \
+      //sdks/go/examples/dogfood:dogfood_tests \
+      --config=test
+  else
+    printf '\n==> Go SDK tests are sibling rules_go targets in the owning Bazel suite\n'
+  fi
 else
-  skip "Go SDK tests (go unavailable or SDK absent)"
+  skip "Go SDK tests (SDK absent)"
 fi
 
 if command -v javac >/dev/null 2>&1 && [ -f sdks/jvm/README.md ]; then

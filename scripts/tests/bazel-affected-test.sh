@@ -121,17 +121,17 @@ generate_count_after="$(grep -c '^event=generate-hashes ' "${fake_log}")"
   CTX_TOTAL_MEMORY_GB=16 \
     scripts/bazel-affected.sh HEAD
 ) >"${test_root}/failure.out" 2>"${test_root}/failure.err"
-[[ "$(cat "${test_root}/failure.out")" == '//:presubmit' ]] \
-  || fail 'bazel-diff failure did not select presubmit'
-grep -Fq 'bazel-diff failed; selecting //:presubmit' "${test_root}/failure.err" \
+[[ "$(cat "${test_root}/failure.out")" == '//:ci' ]] \
+  || fail 'bazel-diff failure did not select ci'
+grep -Fq 'bazel-diff failed; selecting //:ci' "${test_root}/failure.err" \
   || fail 'fail-closed diagnostic was not emitted'
 
 (
   cd "${repo_root}"
   CTX_AFFECTED_DRY_RUN=1 scripts/bazel-affected.sh refs/heads/missing
 ) >"${test_root}/missing-base.out" 2>"${test_root}/missing-base.err"
-[[ "$(cat "${test_root}/missing-base.out")" == '//:presubmit' ]] \
-  || fail 'missing base did not select presubmit'
+[[ "$(cat "${test_root}/missing-base.out")" == '//:ci' ]] \
+  || fail 'missing base did not select ci'
 grep -Fq 'could not resolve affected-test base' "${test_root}/missing-base.err" \
   || fail 'missing-base fail-closed diagnostic was not emitted'
 
