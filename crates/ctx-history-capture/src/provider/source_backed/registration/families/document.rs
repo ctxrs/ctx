@@ -63,49 +63,15 @@ pub fn register_nanoclaw_source_backed_route(
     source: ProviderSource,
     catalog_lineage: [u8; 32],
 ) -> SourceBackedCoordinatorResult<()> {
-    let path = source.path.clone();
-    let capture_path = path.clone();
-    let hydration_path = path;
-    let owned_source = nanoclaw_source_key(catalog_lineage)
+    let adapter = NanoClawDocumentTreeAdapter::new(source.path.clone(), catalog_lineage)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            sink.begin(owned_source.clone())?;
-            let receipt =
-                scan_nanoclaw_source_backed(&capture_path, catalog_lineage, |page| {
-                    for document in page.documents {
-                        sink.document(document).map_err(|error| {
-                            crate::provider::providers::nanoclaw::native_path::source_backed::NanoClawSourceBackedError::Capture(
-                                CaptureError::InvalidPayload(error.to_string()),
-                            )
-                        })?;
-                    }
-                    Ok(())
-                })
-                .map_err(route_error)?;
-            sink.certify(receipt.source)
-        },
-        provider_format_scope(CaptureProvider::NanoClaw, "nanoclaw_project"),
-        move |request| {
-            let record = hydrate_nanoclaw_source_backed_exact(
-                &hydration_path,
-                catalog_lineage,
-                request.locator(),
-            )
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: record.text.into_bytes(),
-            })
-        },
-    );
-    registry.register(SourceBackedRoute::explicit_manual(
+    crate::provider::source_backed::family::document::register_replacement_document_tree_route_with_authority(
+        registry,
         source,
+        SourceBackedRouteSelection::ExplicitManual,
         SourceBackedSelectorAuthority::CatalogLineage,
-        driver,
-    )?);
-    Ok(())
+        adapter,
+    )
 }
 
 pub(super) fn register_rovodev_route(
