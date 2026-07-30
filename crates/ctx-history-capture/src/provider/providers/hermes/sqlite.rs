@@ -1,6 +1,10 @@
 //! Bounded provider-owned Hermes SQLite traversal.
 
-use rusqlite::{Connection, OptionalExtension, Statement};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::VecDeque;
+
+use rusqlite::{params_from_iter, Connection, Statement};
 
 use crate::provider::{
     native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES,
@@ -22,6 +26,7 @@ pub(super) const HERMES_FRONTIER_VERSION: u32 = 1;
 pub(super) const HERMES_LOCATOR_KIND: &str = "hermes-sqlite-row-v1";
 const HERMES_FRONTIER_BYTES: usize = 1 + 8 + 8;
 const HERMES_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 9;
+const HERMES_NATIVE_ROW_BATCH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) enum HermesPhase {
@@ -130,7 +135,7 @@ pub(super) fn hermes_session_candidate_sql(
     };
     format!(
         "select s.rowid, {retained_bytes}, {storage_error} from sessions s{rowid_bound} \
-         order by s.rowid limit 1"
+         order by s.rowid limit {HERMES_NATIVE_ROW_BATCH}"
     )
 }
 
@@ -155,7 +160,7 @@ pub(super) fn hermes_message_candidate_sql(
     format!(
         "select m.rowid, {retained_bytes}, {storage_error}, m.role = 'tool' \
          from messages m{where_clause} \
-         order by m.rowid limit 1"
+         order by m.rowid limit {HERMES_NATIVE_ROW_BATCH}"
     )
 }
 
@@ -164,12 +169,26 @@ pub(super) struct HermesRowReader<'connection> {
     schema: HermesSchema,
     first_session_candidate: Statement<'connection>,
     next_session_candidate: Statement<'connection>,
-    session_hydration: Statement<'connection>,
     first_message_candidate: Statement<'connection>,
     next_message_candidate: Statement<'connection>,
-    message_hydration: Statement<'connection>,
+    #[cfg(test)]
+    buffered: VecDeque<HermesNativeRow>,
+    #[cfg(test)]
+    buffered_frontier: Option<HermesFrontier>,
+    candidate_query_batches: u64,
+    hydration_query_batches: u64,
+    max_hydration_rows: u64,
     #[cfg(test)]
     pub(super) session_hydration_queries: usize,
+    #[cfg(test)]
+    pub(super) message_hydration_queries: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct HermesRowReaderCounters {
+    pub(super) candidate_query_batches: u64,
+    pub(super) hydration_query_batches: u64,
+    pub(super) max_hydration_rows: u64,
 }
 
 impl<'connection> HermesRowReader<'connection> {
@@ -189,10 +208,6 @@ impl<'connection> HermesRowReader<'connection> {
                 &sessions.storage_class_error_expr(),
                 true,
             ))?,
-            session_hydration: conn.prepare(&format!(
-                "select {} from sessions s where s.rowid = ?1",
-                sessions.projection()
-            ))?,
             first_message_candidate: conn.prepare(&hermes_message_candidate_sql(
                 &messages.retained_length_expr(),
                 &messages.storage_class_error_expr(),
@@ -205,32 +220,69 @@ impl<'connection> HermesRowReader<'connection> {
                 schema.message_visibility(),
                 true,
             ))?,
-            message_hydration: conn.prepare(&format!(
-                "select {} from messages m where m.rowid = ?1",
-                messages.projection()
-            ))?,
+            #[cfg(test)]
+            buffered: VecDeque::new(),
+            #[cfg(test)]
+            buffered_frontier: None,
+            candidate_query_batches: 0,
+            hydration_query_batches: 0,
+            max_hydration_rows: 0,
             #[cfg(test)]
             session_hydration_queries: 0,
+            #[cfg(test)]
+            message_hydration_queries: 0,
         })
     }
 
+    #[cfg(test)]
     pub(super) fn next(&mut self, frontier: HermesFrontier) -> Result<Option<HermesNativeRow>> {
-        if frontier.phase == HermesPhase::Sessions {
-            let after = (frontier.next_ordinal != 0).then_some(frontier.rowid);
-            if let Some(candidate) = self.session_candidate(after)? {
-                return self.hydrate(candidate, frontier.next_ordinal).map(Some);
-            }
-            return self.message_candidate(None)?.map_or(Ok(None), |candidate| {
-                self.hydrate(candidate, frontier.next_ordinal).map(Some)
-            });
+        if self.buffered_frontier != Some(frontier) || self.buffered.is_empty() {
+            self.buffered = self.read_page(frontier)?.into();
+            self.buffered_frontier = Some(frontier);
         }
-        self.message_candidate(Some(frontier.rowid))?
-            .map_or(Ok(None), |candidate| {
-                self.hydrate(candidate, frontier.next_ordinal).map(Some)
-            })
+        let row = self.buffered.pop_front();
+        if let Some(row) = &row {
+            self.buffered_frontier = Some(row.next_frontier);
+        }
+        Ok(row)
     }
 
-    fn session_candidate(&mut self, after: Option<i64>) -> Result<Option<HermesCandidate>> {
+    pub(super) fn next_page(&mut self, frontier: HermesFrontier) -> Result<Vec<HermesNativeRow>> {
+        #[cfg(test)]
+        {
+            self.buffered.clear();
+            self.buffered_frontier = None;
+        }
+        self.read_page(frontier)
+    }
+
+    pub(super) fn counters(&self) -> HermesRowReaderCounters {
+        HermesRowReaderCounters {
+            candidate_query_batches: self.candidate_query_batches,
+            hydration_query_batches: self.hydration_query_batches,
+            max_hydration_rows: self.max_hydration_rows,
+        }
+    }
+
+    fn read_page(&mut self, frontier: HermesFrontier) -> Result<Vec<HermesNativeRow>> {
+        let candidates = if frontier.phase == HermesPhase::Sessions {
+            let after = (frontier.next_ordinal != 0).then_some(frontier.rowid);
+            let sessions = self.session_candidates(after)?;
+            if sessions.is_empty() {
+                self.message_candidates(None)?
+            } else {
+                sessions
+            }
+        } else {
+            self.message_candidates(Some(frontier.rowid))?
+        };
+        let candidates = bounded_candidate_prefix(candidates)?;
+        self.hydrate_candidates(candidates, frontier.next_ordinal)
+    }
+
+    fn session_candidates(&mut self, after: Option<i64>) -> Result<Vec<HermesCandidate>> {
+        self.candidate_query_batches =
+            checked_reader_counter(self.candidate_query_batches, "candidate query batches")?;
         let conn = self.conn;
         with_length_preflight(conn, || {
             let read = |row: &rusqlite::Row<'_>| {
@@ -242,17 +294,17 @@ impl<'connection> HermesRowReader<'connection> {
                     indivisible: true,
                 })
             };
-            match after {
-                Some(rowid) => self
-                    .next_session_candidate
-                    .query_row([rowid], read)
-                    .optional(),
-                None => self.first_session_candidate.query_row([], read).optional(),
-            }
+            let rows = match after {
+                Some(rowid) => self.next_session_candidate.query_map([rowid], read)?,
+                None => self.first_session_candidate.query_map([], read)?,
+            };
+            rows.collect()
         })
     }
 
-    fn message_candidate(&mut self, after: Option<i64>) -> Result<Option<HermesCandidate>> {
+    fn message_candidates(&mut self, after: Option<i64>) -> Result<Vec<HermesCandidate>> {
+        self.candidate_query_batches =
+            checked_reader_counter(self.candidate_query_batches, "candidate query batches")?;
         let conn = self.conn;
         with_length_preflight(conn, || {
             let read = |row: &rusqlite::Row<'_>| {
@@ -264,17 +316,120 @@ impl<'connection> HermesRowReader<'connection> {
                     indivisible: row.get::<_, i64>(3)? != 0,
                 })
             };
-            match after {
-                Some(rowid) => self
-                    .next_message_candidate
-                    .query_row([rowid], read)
-                    .optional(),
-                None => self.first_message_candidate.query_row([], read).optional(),
-            }
+            let rows = match after {
+                Some(rowid) => self.next_message_candidate.query_map([rowid], read)?,
+                None => self.first_message_candidate.query_map([], read)?,
+            };
+            rows.collect()
         })
     }
 
-    fn hydrate(&mut self, candidate: HermesCandidate, ordinal: u64) -> Result<HermesNativeRow> {
+    fn hydrate_candidates(
+        &mut self,
+        candidates: Vec<HermesCandidate>,
+        first_ordinal: u64,
+    ) -> Result<Vec<HermesNativeRow>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let phase = candidates[0].phase;
+        if candidates.iter().any(|candidate| candidate.phase != phase) {
+            return Err(CaptureError::SystemInvariant(
+                "Hermes native row batch crossed traversal phases",
+            ));
+        }
+        let mut hydratable_rowids = Vec::with_capacity(candidates.len());
+        for candidate in &candidates {
+            if candidate.requires_hydration()? {
+                hydratable_rowids.push(candidate.rowid);
+            }
+        }
+        let mut hydrated = if hydratable_rowids.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.load_values(phase, &hydratable_rowids)?
+        };
+        candidates
+            .into_iter()
+            .enumerate()
+            .map(|(offset, candidate)| {
+                let offset = u64::try_from(offset).map_err(|_| {
+                    CaptureError::SystemInvariant("Hermes native row batch ordinal overflowed")
+                })?;
+                let ordinal =
+                    first_ordinal
+                        .checked_add(offset)
+                        .ok_or(CaptureError::SystemInvariant(
+                            "Hermes native row ordinal overflowed",
+                        ))?;
+                let values = hydrated.remove(&candidate.rowid);
+                self.hydrate_candidate(candidate, ordinal, values)
+            })
+            .collect()
+    }
+
+    fn load_values(
+        &mut self,
+        phase: HermesPhase,
+        rowids: &[i64],
+    ) -> Result<BTreeMap<i64, Vec<HermesSqliteValue>>> {
+        self.hydration_query_batches =
+            checked_reader_counter(self.hydration_query_batches, "hydration query batches")?;
+        self.max_hydration_rows = self.max_hydration_rows.max(rowids.len() as u64);
+        #[cfg(test)]
+        match phase {
+            HermesPhase::Sessions => self.session_hydration_queries += 1,
+            HermesPhase::Messages => self.message_hydration_queries += 1,
+        }
+        let placeholders = (1..=rowids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (table, alias, projection, visibility) = match phase {
+            HermesPhase::Sessions => (
+                "sessions",
+                "s",
+                self.schema.sessions().projection(),
+                String::new(),
+            ),
+            HermesPhase::Messages => {
+                let visibility = self.schema.message_visibility();
+                (
+                    "messages",
+                    "m",
+                    self.schema.messages().projection(),
+                    if visibility.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" and {visibility}")
+                    },
+                )
+            }
+        };
+        let sql = format!(
+            "select {alias}.rowid, {projection} from {table} {alias}
+             where {alias}.rowid in ({placeholders}){visibility}
+             order by {alias}.rowid"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(rowids), |row| {
+            let rowid = row.get::<_, i64>(0)?;
+            let values = match phase {
+                HermesPhase::Sessions => self.schema.sessions().capture_values(row, 1)?,
+                HermesPhase::Messages => self.schema.messages().capture_values(row, 1)?,
+            };
+            Ok((rowid, values))
+        })?;
+        rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .map_err(CaptureError::from)
+    }
+
+    fn hydrate_candidate(
+        &self,
+        candidate: HermesCandidate,
+        ordinal: u64,
+        values: Option<Vec<HermesSqliteValue>>,
+    ) -> Result<HermesNativeRow> {
         let next_frontier = HermesFrontier {
             phase: candidate.phase,
             next_ordinal: ordinal.checked_add(1).ok_or(CaptureError::SystemInvariant(
@@ -327,16 +482,9 @@ impl<'connection> HermesRowReader<'connection> {
                 record: HermesNativeRecord::Rejected(reason),
             });
         }
+        let values = values.ok_or(CaptureError::SourceChangedDuringCapture)?;
         let record = match candidate.phase {
             HermesPhase::Sessions => {
-                #[cfg(test)]
-                {
-                    self.session_hydration_queries += 1;
-                }
-                let layout = self.schema.sessions();
-                let values = self
-                    .session_hydration
-                    .query_row([candidate.rowid], |row| layout.capture_values(row, 0))?;
                 let row = decode_hermes_session(&self.schema, &values, 0)?;
                 let validation = provider_required_timestamp_seconds(
                     row.started_at,
@@ -360,10 +508,7 @@ impl<'connection> HermesRowReader<'connection> {
                 }
             }
             HermesPhase::Messages => {
-                let layout = self.schema.messages();
-                let mut values = self
-                    .message_hydration
-                    .query_row([candidate.rowid], |row| layout.capture_values(row, 0))?;
+                let mut values = values;
                 let mut row = decode_hermes_message(&self.schema, &values)?;
                 let validation = provider_nonnegative_i64_to_u64(row.id, "Hermes message id")
                     .and_then(|_| {
@@ -420,6 +565,31 @@ impl<'connection> HermesRowReader<'connection> {
     }
 }
 
+fn bounded_candidate_prefix(candidates: Vec<HermesCandidate>) -> Result<Vec<HermesCandidate>> {
+    let mut selected = Vec::with_capacity(candidates.len());
+    let mut hydrated_bytes = 0_usize;
+    for candidate in candidates {
+        let candidate_bytes = if candidate.requires_hydration()? {
+            candidate.observed_bytes()?
+        } else {
+            0
+        };
+        let next = hydrated_bytes.saturating_add(candidate_bytes);
+        if !selected.is_empty() && next > NATIVE_INGESTION_PAGE_MAX_BYTES {
+            break;
+        }
+        hydrated_bytes = next;
+        selected.push(candidate);
+    }
+    Ok(selected)
+}
+
+fn checked_reader_counter(value: u64, name: &str) -> Result<u64> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| CaptureError::InvalidPayload(format!("Hermes SQLite {name} overflowed")))
+}
+
 fn rejection_owned_bytes(reason: &str) -> usize {
     // Ordinal, locator, frontier, record tag, and the length-prefixed reason.
     (8 + 9 + HERMES_FRONTIER_BYTES + 1 + 8).saturating_add(reason.len())
@@ -442,6 +612,13 @@ struct HermesCandidate {
 }
 
 impl HermesCandidate {
+    fn requires_hydration(&self) -> Result<bool> {
+        let observed_bytes = self.observed_bytes()?;
+        Ok(self.storage_error_code == 0
+            && observed_bytes <= MAX_PROVIDER_SQLITE_VALUE_BYTES
+            && (observed_bytes <= NATIVE_INGESTION_PAGE_MAX_BYTES || !self.indivisible))
+    }
+
     fn observed_bytes(&self) -> Result<usize> {
         let payload = u64::try_from(self.retained_bytes).map_err(|_| {
             CaptureError::InvalidPayload(

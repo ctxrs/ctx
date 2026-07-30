@@ -104,7 +104,11 @@ fn direct_jsonl_family_streams_documents_and_owns_physical_work() {
         assert!(!production.contains("captured_route_driver"));
     }
     assert!(!projector.contains("reader_source"));
-    assert!(registration.contains("sink.add_document(document)"));
+    assert!(registration.contains("emitter.emit_document(document)"));
+    assert!(registration.contains("sink.run_parallel_leaf_scans_discovering_sources"));
+    assert!(registration.contains("sink.recommended_leaf_workers"));
+    assert!(!registration.contains("thread::scope"));
+    assert!(!registration.contains("thread::spawn"));
     assert!(hydration.contains("open_hydration_catalog"));
     assert!(registration.contains(".with_batch_hydration"));
     assert!(hydration.contains("hydrate_resident_records"));

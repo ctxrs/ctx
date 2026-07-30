@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use super::super::super::workspace::trae_workspace_id;
 use super::super::scanner::{validate_schema, TraeSqliteDatabase};
 use super::*;
+use crate::provider::sqlite::SqliteLengthPreflightGuard;
 
 const TRAE_HYDRATION_NATIVE_KEY_BATCH: usize = 256;
 
@@ -54,37 +55,51 @@ impl TraeLocatorResolverV0 {
             }
             coordinates.push(decode_locator(locator)?);
         }
-        let (_, values) = TraeSqliteDatabase::open(&self.data_root, &canonical_path, |conn| {
-            validate_schema(conn, &canonical_path)?;
-            let mut values = BTreeMap::new();
-            let mut keys = coordinates
-                .iter()
-                .map(|coordinate| coordinate.chat_key.as_str())
-                .collect::<Vec<_>>();
-            keys.sort_unstable();
-            keys.dedup();
-            for chunk in keys.chunks(TRAE_HYDRATION_NATIVE_KEY_BATCH) {
-                for chat_key in chunk {
-                    let key_index = TRAE_CHAT_KEYS
-                        .iter()
-                        .position(|candidate| candidate == chat_key)
-                        .and_then(|index| u16::try_from(index).ok())
-                        .ok_or_else(|| {
-                            CaptureError::InvalidPayload(
-                                "Trae locator has an unsupported ItemTable key".to_owned(),
-                            )
-                        })?;
-                    let value = super::super::super::trae_complete_value(conn, key_index)?
-                        .ok_or_else(|| {
-                            CaptureError::InvalidPayload(
-                                "Trae locator ItemTable value is unavailable".to_owned(),
-                            )
-                        })?;
-                    values.insert((*chat_key).to_owned(), (key_index, value));
+        let (database, values) =
+            TraeSqliteDatabase::open(&self.data_root, &canonical_path, |conn| {
+                validate_schema(conn, &canonical_path)?;
+                let mut values = BTreeMap::new();
+                let mut keys = coordinates
+                    .iter()
+                    .map(|coordinate| coordinate.chat_key.as_str())
+                    .collect::<Vec<_>>();
+                keys.sort_unstable();
+                keys.dedup();
+                for chunk in keys.chunks(TRAE_HYDRATION_NATIVE_KEY_BATCH) {
+                    let placeholders = std::iter::repeat_n("?", chunk.len())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!(
+                        "select [key], cast(value as text) from ItemTable \
+                     where [key] in ({placeholders}) and typeof(value) = 'text' \
+                       and octet_length(value) <= {}",
+                        crate::MAX_PROVIDER_JSONL_LINE_BYTES
+                    );
+                    let _guard = SqliteLengthPreflightGuard::new(conn);
+                    let mut statement = conn.prepare(&sql)?;
+                    let mut rows = statement.query(rusqlite::params_from_iter(chunk))?;
+                    while let Some(row) = rows.next()? {
+                        let chat_key = row.get::<_, String>(0)?;
+                        let key_index = TRAE_CHAT_KEYS
+                            .iter()
+                            .position(|candidate| *candidate == chat_key)
+                            .and_then(|index| u16::try_from(index).ok())
+                            .ok_or_else(|| {
+                                CaptureError::InvalidPayload(
+                                    "Trae locator has an unsupported ItemTable key".to_owned(),
+                                )
+                            })?;
+                        let value = row.get::<_, String>(1)?.into_bytes();
+                        if values.insert(chat_key, (key_index, value)).is_some() {
+                            return Err(CaptureError::InvalidPayload(
+                                "Trae ItemTable chat key is ambiguous".to_owned(),
+                            ));
+                        }
+                    }
                 }
-            }
-            Ok(values)
-        })?;
+                Ok(values)
+            })?;
+        database.seal(&canonical_path)?;
         let mut hydrated = Vec::with_capacity(locators.len());
         for (locator, coordinate) in locators.iter().zip(coordinates) {
             let (key_index, value) = values

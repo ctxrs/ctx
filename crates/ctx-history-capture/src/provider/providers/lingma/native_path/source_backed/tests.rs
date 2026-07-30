@@ -6,6 +6,7 @@ use ctx_history_core::{
 };
 use rusqlite::{config::DbConfig, Connection};
 
+use super::super::{lingma_query_counters, reset_lingma_query_counters, LingmaQueryCounters};
 use super::{
     discovery::LingmaRootAuthorizedSource,
     hydration::LingmaSourceBackedResolverV0,
@@ -102,6 +103,150 @@ fn request_with_locator_evidence(
     )
     .unwrap();
     EventHydrationRequest::new(record.document.event_id, locator).unwrap()
+}
+
+#[test]
+fn source_backed_scan_and_hydration_queries_are_bounded_by_row_sets() {
+    const ROW_COUNT: i64 = 257;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("local.db");
+    let connection = create_database(&path);
+    for rowid in 1..=ROW_COUNT {
+        insert_row(
+            &connection,
+            &format!("session-{rowid}"),
+            &format!("request-{rowid}"),
+            &format!("prompt-{rowid}"),
+            None,
+        );
+    }
+    drop(connection);
+    let source_inventory = inventory(vec![database(&path, "vscode:stable:bounded-sets")]);
+
+    reset_lingma_query_counters();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source_inventory.clone(),
+        || Ok(source_inventory.clone()),
+    )
+    .unwrap();
+    let records = all_records(&scan);
+    assert_eq!(records.len(), usize::try_from(ROW_COUNT).unwrap());
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.document.body.as_str())
+            .collect::<Vec<_>>(),
+        (1..=ROW_COUNT)
+            .map(|rowid| format!("prompt-{rowid}"))
+            .collect::<Vec<_>>()
+    );
+    for (index, record) in records.iter().enumerate() {
+        let expected_rowid = i64::try_from(index).unwrap() + 1;
+        assert!(matches!(
+            record.document.locator.coordinate(),
+            NativeRecordCoordinate::ProviderSqlite {
+                logical_relation,
+                primary_key: TypedKey::Composite(parts),
+                ..
+            } if logical_relation == LOGICAL_RELATION
+                && matches!(
+                    parts.as_slice(),
+                    [TypedKey::I64(rowid), TypedKey::Utf8(kind), TypedKey::Composite(_)]
+                        if *rowid == expected_rowid && kind == USER_PROMPT_COORDINATE
+                )
+        ));
+    }
+    assert_eq!(
+        lingma_query_counters(),
+        LingmaQueryCounters {
+            candidate_set_reads: 5,
+            raw_row_set_reads: 4,
+            raw_rows_read: 257,
+            identity_set_reads: 0,
+        }
+    );
+
+    reset_lingma_query_counters();
+    let replay = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source_inventory.clone(),
+        || Ok(source_inventory.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        all_records(&replay)
+            .iter()
+            .map(|record| (
+                record.document.event_id,
+                record.document.locator.coordinate().clone(),
+                record.document.body.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        records
+            .iter()
+            .map(|record| (
+                record.document.event_id,
+                record.document.locator.coordinate().clone(),
+                record.document.body.clone(),
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        lingma_query_counters(),
+        LingmaQueryCounters {
+            candidate_set_reads: 5,
+            raw_row_set_reads: 4,
+            raw_rows_read: 257,
+            identity_set_reads: 0,
+        }
+    );
+
+    let requested = records
+        .iter()
+        .rev()
+        .map(|record| event_request(record))
+        .collect::<Vec<_>>();
+    reset_lingma_query_counters();
+    let hydrated = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &source_inventory,
+    )
+    .unwrap()
+    .hydrate_batch_request(&BatchHydrationRequest::new(requested.clone()).unwrap())
+    .unwrap();
+    assert_eq!(
+        hydrated
+            .records()
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        requested
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        hydrated
+            .records()
+            .iter()
+            .map(|record| String::from_utf8(record.provider_bytes.clone()).unwrap())
+            .collect::<Vec<_>>(),
+        (1..=ROW_COUNT)
+            .rev()
+            .map(|rowid| format!("prompt-{rowid}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        lingma_query_counters(),
+        LingmaQueryCounters {
+            candidate_set_reads: 0,
+            raw_row_set_reads: 2,
+            raw_rows_read: 257,
+            identity_set_reads: 2,
+        }
+    );
 }
 
 #[test]

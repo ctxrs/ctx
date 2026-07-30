@@ -22,7 +22,7 @@ use std::{
     ops::Deref,
     path::{Component, Path, PathBuf},
     ptr,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use ctx_history_core::platform_security::create_private_directory_all;
@@ -117,6 +117,180 @@ pub(crate) enum SqliteSourceSnapshotStrategy {
     CopiedFamily,
 }
 
+/// Content-free work and concurrency counters for one retained SQLite
+/// directory authority and all snapshots opened through its clones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SqliteSourceSnapshotCounters {
+    immutable_snapshot_opens: u64,
+    copied_snapshot_opens: u64,
+    source_bytes_copied: u64,
+    terminal_fences: u64,
+    terminal_revalidations: u64,
+    active_snapshots: u64,
+    active_snapshot_bytes: u64,
+    max_active_snapshots: u64,
+    max_active_snapshot_bytes: u64,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "counter accessors are consumed by the downstream SQLite family integration"
+    )
+)]
+impl SqliteSourceSnapshotCounters {
+    pub(crate) const fn immutable_snapshot_opens(self) -> u64 {
+        self.immutable_snapshot_opens
+    }
+
+    pub(crate) const fn copied_snapshot_opens(self) -> u64 {
+        self.copied_snapshot_opens
+    }
+
+    pub(crate) const fn source_bytes_copied(self) -> u64 {
+        self.source_bytes_copied
+    }
+
+    pub(crate) const fn terminal_fences(self) -> u64 {
+        self.terminal_fences
+    }
+
+    pub(crate) const fn terminal_revalidations(self) -> u64 {
+        self.terminal_revalidations
+    }
+
+    pub(crate) const fn active_snapshots(self) -> u64 {
+        self.active_snapshots
+    }
+
+    pub(crate) const fn active_snapshot_bytes(self) -> u64 {
+        self.active_snapshot_bytes
+    }
+
+    pub(crate) const fn max_active_snapshots(self) -> u64 {
+        self.max_active_snapshots
+    }
+
+    pub(crate) const fn max_active_snapshot_bytes(self) -> u64 {
+        self.max_active_snapshot_bytes
+    }
+}
+
+#[derive(Debug)]
+struct SqliteSourceSnapshotContext {
+    data_root: PathBuf,
+    counters: Mutex<SqliteSourceSnapshotCounters>,
+}
+
+impl SqliteSourceSnapshotContext {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "counter snapshots are consumed by the downstream SQLite family integration"
+        )
+    )]
+    fn snapshot(&self) -> SqliteSourceSnapshotCounters {
+        *self.lock()
+    }
+
+    fn record_source_bytes_copied(&self, bytes: u64) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.source_bytes_copied =
+            checked_counter_add(counters.source_bytes_copied, bytes, "source bytes copied")?;
+        Ok(())
+    }
+
+    fn record_open(
+        self: &Arc<Self>,
+        strategy: SqliteSourceSnapshotStrategy,
+        active_bytes: u64,
+    ) -> SqliteSourceAccessResult<SqliteSourceSnapshotActivity> {
+        let mut counters = self.lock();
+        let mut next = *counters;
+        match strategy {
+            #[cfg(target_os = "linux")]
+            SqliteSourceSnapshotStrategy::ImmutableMain => {
+                next.immutable_snapshot_opens = checked_counter_add(
+                    next.immutable_snapshot_opens,
+                    1,
+                    "immutable snapshot opens",
+                )?;
+            }
+            SqliteSourceSnapshotStrategy::CopiedFamily => {
+                next.copied_snapshot_opens =
+                    checked_counter_add(next.copied_snapshot_opens, 1, "copied snapshot opens")?;
+            }
+        }
+        next.active_snapshots = checked_counter_add(next.active_snapshots, 1, "active snapshots")?;
+        next.active_snapshot_bytes = checked_counter_add(
+            next.active_snapshot_bytes,
+            active_bytes,
+            "active snapshot bytes",
+        )?;
+        next.max_active_snapshots = next.max_active_snapshots.max(next.active_snapshots);
+        next.max_active_snapshot_bytes = next
+            .max_active_snapshot_bytes
+            .max(next.active_snapshot_bytes);
+        *counters = next;
+        drop(counters);
+        Ok(SqliteSourceSnapshotActivity {
+            context: Arc::clone(self),
+            active_bytes,
+        })
+    }
+
+    fn record_terminal_fence(&self) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.terminal_fences =
+            checked_counter_add(counters.terminal_fences, 1, "terminal fences")?;
+        Ok(())
+    }
+
+    fn record_terminal_revalidation(&self) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.terminal_revalidations =
+            checked_counter_add(counters.terminal_revalidations, 1, "terminal revalidations")?;
+        Ok(())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SqliteSourceSnapshotCounters> {
+        match self.counters.lock() {
+            Ok(counters) => counters,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SqliteSourceSnapshotActivity {
+    context: Arc<SqliteSourceSnapshotContext>,
+    active_bytes: u64,
+}
+
+impl Drop for SqliteSourceSnapshotActivity {
+    fn drop(&mut self) {
+        let mut counters = self.context.lock();
+        counters.active_snapshots = counters.active_snapshots.saturating_sub(1);
+        counters.active_snapshot_bytes = counters
+            .active_snapshot_bytes
+            .saturating_sub(self.active_bytes);
+    }
+}
+
+fn checked_counter_add(
+    value: u64,
+    increment: u64,
+    counter: &'static str,
+) -> SqliteSourceAccessResult<u64> {
+    value
+        .checked_add(increment)
+        .ok_or_else(|| SqliteSourceAccessError::SnapshotUnavailable {
+            reason: format!("SQLite snapshot accounting overflowed {counter}"),
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SqliteSourceEvidence {
     identity: [u8; 32],
@@ -161,7 +335,7 @@ pub(crate) struct SqliteSourceDirectoryAuthority {
     directory: Arc<ProviderSourceDirectory>,
     path: PathBuf,
     identity: NativeFileIdentity,
-    data_root: PathBuf,
+    snapshot_context: Arc<SqliteSourceSnapshotContext>,
 }
 
 impl SqliteSourceDirectoryAuthority {
@@ -206,12 +380,26 @@ impl SqliteSourceDirectoryAuthority {
             directory: Arc::new(directory),
             path: approved_path.to_path_buf(),
             identity: retained.identity,
-            data_root: data_root.to_path_buf(),
+            snapshot_context: Arc::new(SqliteSourceSnapshotContext {
+                data_root: data_root.to_path_buf(),
+                counters: Mutex::new(SqliteSourceSnapshotCounters::default()),
+            }),
         })
     }
 
     fn data_root(&self) -> &Path {
-        &self.data_root
+        &self.snapshot_context.data_root
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "counter snapshots are consumed by the downstream SQLite family integration"
+        )
+    )]
+    pub(crate) fn snapshot_counters(&self) -> SqliteSourceSnapshotCounters {
+        self.snapshot_context.snapshot()
     }
 
     pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
@@ -244,12 +432,80 @@ impl SqliteSourceDirectoryAuthority {
     }
 }
 
+/// A sealed physical fence over the exact retained SQLite family that backed
+/// one completed read snapshot.
+///
+/// Revalidation uses retained DB/WAL/SHM handles and approved relative names;
+/// it does not reopen SQLite or copy provider bytes.
+#[must_use = "revalidate the terminal fence before publishing snapshot observations"]
+#[derive(Debug)]
+struct SqliteSourceTerminalFenceInner {
+    family: SqliteSourceFamily,
+    native_evidence: SqliteFamilyEvidence,
+    evidence: SqliteSourceEvidence,
+    snapshot_context: Arc<SqliteSourceSnapshotContext>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SqliteSourceTerminalFence {
+    inner: Arc<SqliteSourceTerminalFenceInner>,
+}
+
+impl SqliteSourceTerminalFence {
+    pub(crate) fn evidence(&self) -> &SqliteSourceEvidence {
+        &self.inner.evidence
+    }
+
+    /// Revalidates the exact retained source family without opening SQLite or
+    /// acquiring another source snapshot.
+    pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
+        self.inner.family.revalidate(&self.inner.native_evidence)?;
+        self.inner.snapshot_context.record_terminal_revalidation()
+    }
+}
+
+#[derive(Debug, Default)]
+struct SqliteSourceTerminalFenceSlot {
+    fence: Mutex<Option<SqliteSourceTerminalFence>>,
+}
+
+impl SqliteSourceTerminalFenceSlot {
+    fn install(&self, fence: SqliteSourceTerminalFence) -> SqliteSourceAccessResult<()> {
+        let mut retained =
+            self.fence
+                .lock()
+                .map_err(|_| SqliteSourceAccessError::SnapshotUnavailable {
+                    reason: "the retained SQLite terminal fence lock was poisoned".to_owned(),
+                })?;
+        if retained.is_some() {
+            return Err(SqliteSourceAccessError::SnapshotUnavailable {
+                reason: "the SQLite snapshot published more than one terminal fence".to_owned(),
+            });
+        }
+        *retained = Some(fence);
+        Ok(())
+    }
+
+    fn revalidate(&self) -> SqliteSourceAccessResult<()> {
+        let retained =
+            self.fence
+                .lock()
+                .map_err(|_| SqliteSourceAccessError::SnapshotUnavailable {
+                    reason: "the retained SQLite terminal fence lock was poisoned".to_owned(),
+                })?;
+        retained
+            .as_ref()
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?
+            .revalidate()
+    }
+}
+
 /// A stock read-only SQLite connection with a pinned read transaction.
-#[must_use = "call finish() after provider queries and before publishing observations"]
+#[must_use = "call seal() or finish() after provider queries and before publishing observations"]
 #[derive(Debug)]
 pub(crate) struct SqliteSourceReadSnapshot {
     connection: Option<Connection>,
-    family: SqliteSourceFamily,
+    family: Option<SqliteSourceFamily>,
     native_evidence: SqliteFamilyEvidence,
     sqlite_evidence: SqliteSnapshotEvidence,
     evidence: SqliteSourceEvidence,
@@ -264,6 +520,9 @@ pub(crate) struct SqliteSourceReadSnapshot {
     )]
     copied_bytes: u64,
     _snapshot_directory: Option<TempDir>,
+    snapshot_activity: Option<SqliteSourceSnapshotActivity>,
+    snapshot_context: Arc<SqliteSourceSnapshotContext>,
+    terminal_fence_slot: Arc<SqliteSourceTerminalFenceSlot>,
 }
 
 impl SqliteSourceReadSnapshot {
@@ -280,6 +539,17 @@ impl SqliteSourceReadSnapshot {
         &self.evidence
     }
 
+    /// Retains a content-free terminal revalidator before ownership of this
+    /// snapshot is passed to a scanner that closes it through [`Self::finish`].
+    ///
+    /// The callback fails closed until the snapshot has sealed successfully.
+    pub(crate) fn terminal_revalidator(
+        &self,
+    ) -> Box<dyn Fn() -> SqliteSourceAccessResult<()> + Send + Sync + 'static> {
+        let slot = Arc::clone(&self.terminal_fence_slot);
+        Box::new(move || slot.revalidate())
+    }
+
     #[cfg(test)]
     pub(crate) fn strategy(&self) -> SqliteSourceSnapshotStrategy {
         self.strategy
@@ -292,7 +562,10 @@ impl SqliteSourceReadSnapshot {
 
     #[cfg(test)]
     pub(crate) fn family_revalidation_count(&self) -> u32 {
-        self.family.revalidation_count()
+        self.family
+            .as_ref()
+            .map(SqliteSourceFamily::revalidation_count)
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -310,12 +583,15 @@ impl SqliteSourceReadSnapshot {
         if current_sqlite_evidence != self.sqlite_evidence {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        self.family.revalidate(&self.native_evidence)
+        self.family
+            .as_ref()
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?
+            .revalidate(&self.native_evidence)
     }
 
-    /// Revalidates the source while the read transaction is pinned, ends the
-    /// transaction, closes SQLite, then checks the approved names once more.
-    pub(crate) fn finish(mut self) -> SqliteSourceAccessResult<SqliteSourceEvidence> {
+    /// Ends this read snapshot and retains its exact physical source-family
+    /// authority for cheap commit-time revalidation.
+    pub(crate) fn seal(mut self) -> SqliteSourceAccessResult<SqliteSourceTerminalFence> {
         self.revalidate()?;
         let connection = self
             .connection
@@ -326,8 +602,33 @@ impl SqliteSourceReadSnapshot {
             .execute_batch("ROLLBACK")
             .map_err(|source| sqlite_error("ending the provider read snapshot", source))?;
         self.connection.take();
-        self.family.revalidate(&self.native_evidence)?;
-        Ok(self.evidence.clone())
+        let family = self
+            .family
+            .take()
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        let fence = SqliteSourceTerminalFence {
+            inner: Arc::new(SqliteSourceTerminalFenceInner {
+                family,
+                native_evidence: self.native_evidence.clone(),
+                evidence: self.evidence.clone(),
+                snapshot_context: Arc::clone(&self.snapshot_context),
+            }),
+        };
+        fence.revalidate()?;
+        self.terminal_fence_slot.install(fence.clone())?;
+        self.snapshot_context.record_terminal_fence()?;
+        drop(self.snapshot_activity.take());
+        drop(self._snapshot_directory.take());
+        Ok(fence)
+    }
+
+    /// Compatibility path for callers that need only closing evidence.
+    ///
+    /// New shared lifecycles should keep the fence returned by [`Self::seal`]
+    /// through commit-time physical revalidation.
+    pub(crate) fn finish(self) -> SqliteSourceAccessResult<SqliteSourceEvidence> {
+        let fence = self.seal()?;
+        Ok(fence.evidence().clone())
     }
 }
 

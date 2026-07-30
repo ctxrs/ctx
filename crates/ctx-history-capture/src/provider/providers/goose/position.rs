@@ -16,25 +16,3 @@ pub(super) fn decode_goose_message_locator(value: &[u8]) -> Option<i64> {
 fn goose_ordered_i64(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GooseNativeRowKeyset {
-    Unstarted,
-    After(i64),
-}
-
-impl GooseNativeRowKeyset {
-    pub(super) fn sql_operator(self) -> &'static str {
-        match self {
-            Self::Unstarted => ">=",
-            Self::After(_) => ">",
-        }
-    }
-
-    pub(super) fn bound(self) -> i64 {
-        match self {
-            Self::Unstarted => i64::MIN,
-            Self::After(rowid) => rowid,
-        }
-    }
-}

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Barrier, Mutex},
 };
 
 use ctx_history_core::{
@@ -67,6 +67,10 @@ struct SyntheticState {
     discovery_calls: usize,
     mutate_before_scan: Option<u8>,
     mutate_on_revalidate: bool,
+    leaf_execution_policy: DocumentLeafExecutionPolicy,
+    scan_barrier: Option<Arc<Barrier>>,
+    active_scans: usize,
+    peak_scans: usize,
 }
 
 #[derive(Clone)]
@@ -116,7 +120,10 @@ impl SyntheticAdapter {
     }
 
     fn reset_scan_counts(&self) {
-        self.state.lock().unwrap().scan_counts.clear();
+        let mut state = self.state.lock().unwrap();
+        assert_eq!(state.active_scans, 0);
+        state.scan_counts.clear();
+        state.peak_scans = 0;
     }
 
     fn scan_count(&self, physical_id: u8) -> usize {
@@ -153,6 +160,36 @@ impl SyntheticAdapter {
             .unwrap();
         leaf.revision = revision;
     }
+
+    fn use_independent_leaf_scans(&self, barrier_participants: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.leaf_execution_policy =
+            DocumentLeafExecutionPolicy::IndependentWithWorkers(barrier_participants);
+        state.scan_barrier = Some(Arc::new(Barrier::new(barrier_participants)));
+    }
+
+    fn peak_scans(&self) -> usize {
+        self.state.lock().unwrap().peak_scans
+    }
+
+    fn clear_scan_barrier(&self) {
+        self.state.lock().unwrap().scan_barrier = None;
+    }
+
+    fn total_scans(&self) -> usize {
+        self.state.lock().unwrap().scan_counts.values().sum()
+    }
+}
+
+struct SyntheticScanActivity {
+    state: Arc<Mutex<SyntheticState>>,
+}
+
+impl Drop for SyntheticScanActivity {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        state.active_scans = state.active_scans.saturating_sub(1);
+    }
 }
 
 impl ReplacementDocumentTree for SyntheticAdapter {
@@ -171,6 +208,18 @@ impl ReplacementDocumentTree for SyntheticAdapter {
         source.provider() == CaptureProvider::Auggie.as_str()
             && source.source_format() == AUGGIE_SESSION_JSON_SOURCE_FORMAT
             && source.schema_variant() == "synthetic-document-family-v1"
+    }
+
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        self.state.lock().unwrap().leaf_execution_policy
+    }
+
+    fn independent_leaf_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<SourceKey> {
+        Ok(leaf.source())
     }
 
     fn discover_complete(
@@ -193,6 +242,18 @@ impl ReplacementDocumentTree for SyntheticAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let barrier = {
+            let mut state = self.state.lock().unwrap();
+            state.active_scans += 1;
+            state.peak_scans = state.peak_scans.max(state.active_scans);
+            state.scan_barrier.clone()
+        };
+        let _activity = SyntheticScanActivity {
+            state: Arc::clone(&self.state),
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
         let mut state = self.state.lock().unwrap();
         if state.mutate_before_scan == Some(leaf.physical_id) {
             let live = state
@@ -430,6 +491,195 @@ fn publish(
     refresh_source_backed_generation(root, registry, writer_options()).unwrap()
 }
 
+fn membership_source(logical_id: u64, schema_variant: &str) -> SourceKey {
+    let mut lineage = [0; 32];
+    lineage[..size_of::<u64>()].copy_from_slice(&logical_id.to_be_bytes());
+    SourceKey::derive(
+        CaptureProvider::Auggie.as_str(),
+        AUGGIE_SESSION_JSON_SOURCE_FORMAT,
+        schema_variant,
+        1,
+        SourceAnchor::CatalogLineage(lineage),
+    )
+    .unwrap()
+}
+
+#[test]
+fn document_membership_indexes_are_linear_exact_and_source_ordered() {
+    const BASE_SOURCE_COUNT: usize = 1_000;
+    const SCHEMA: &str = "synthetic-document-membership-v1";
+
+    let sources = (0..BASE_SOURCE_COUNT)
+        .filter(|logical_id| logical_id % 2 == 0)
+        .map(|logical_id| membership_source(logical_id as u64, SCHEMA))
+        .collect::<Vec<_>>();
+    let mut current = CurrentDocumentSources::with_capacity(sources.len());
+    for source in &sources {
+        assert!(!current.contains_canonical(source));
+        assert!(current.insert(source.clone()));
+    }
+
+    assert!(current
+        .ordered_inventory_sources()
+        .iter()
+        .zip(&sources)
+        .all(|(actual, expected)| actual.exact_descriptor_eq(expected)));
+    assert_eq!(
+        current.operations(),
+        DocumentMembershipOperations {
+            source_insertions: sources.len(),
+            canonical_lookups: sources.len(),
+            exact_lookups: 0,
+            exact_comparisons: 0,
+        }
+    );
+
+    current.reset_operations();
+    let retained = (0..BASE_SOURCE_COUNT)
+        .map(|logical_id| membership_source(logical_id as u64, SCHEMA))
+        .filter(|source| current.contains_exact(source))
+        .count();
+    assert_eq!(retained, sources.len());
+
+    let changed_descriptor = membership_source(0, "synthetic-document-membership-schema-change");
+    assert!(current.contains_canonical(&changed_descriptor));
+    assert!(!current.contains_exact(&changed_descriptor));
+    assert_eq!(
+        current.operations(),
+        DocumentMembershipOperations {
+            source_insertions: 0,
+            canonical_lookups: 1,
+            exact_lookups: BASE_SOURCE_COUNT + 1,
+            exact_comparisons: sources.len(),
+        }
+    );
+}
+
+#[test]
+fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let leaves = (0_u8..8)
+        .map(|id| SyntheticLeaf {
+            physical_id: id,
+            logical_id: id,
+            revision: 1,
+            body: format!("independent leaf {id}"),
+        })
+        .collect::<Vec<_>>();
+    let serial_runner = SyntheticAdapter::new(leaves.clone());
+    serial_runner.use_independent_leaf_scans(1);
+    let parallel_runner = SyntheticAdapter::new(leaves);
+    parallel_runner.use_independent_leaf_scans(4);
+    let serial_registry = fixture_registry(temp.path(), serial_runner.clone());
+    let parallel_registry = fixture_registry(temp.path(), parallel_runner.clone());
+    let serial_root = temp.path().join("serial-runner");
+    let parallel_root = temp.path().join("parallel-runner");
+
+    let serial_cold = publish(&serial_root, &serial_registry);
+    let parallel_cold = publish(&parallel_root, &parallel_registry);
+    assert_eq!(
+        parallel_cold.commit.generation_id,
+        serial_cold.commit.generation_id
+    );
+    assert_eq!(parallel_cold.sources, serial_cold.sources);
+    assert_eq!(serial_runner.peak_scans(), 1);
+    assert_eq!(parallel_runner.peak_scans(), 4);
+    assert_eq!(serial_runner.total_scans(), 8);
+    assert_eq!(parallel_runner.total_scans(), 8);
+
+    serial_runner.reset_scan_counts();
+    parallel_runner.reset_scan_counts();
+    let serial_noop = publish(&serial_root, &serial_registry);
+    let parallel_noop = publish(&parallel_root, &parallel_registry);
+    assert_eq!(
+        serial_noop.commit.generation_id,
+        serial_cold.commit.generation_id
+    );
+    assert_eq!(
+        parallel_noop.commit.generation_id,
+        parallel_cold.commit.generation_id
+    );
+    assert_eq!(parallel_noop.sources, serial_noop.sources);
+    assert_eq!(serial_runner.total_scans(), 0);
+    assert_eq!(parallel_runner.total_scans(), 0);
+
+    serial_runner.clear_scan_barrier();
+    parallel_runner.clear_scan_barrier();
+    serial_runner.replace(3, 2, "independent leaf 3 changed");
+    parallel_runner.replace(3, 2, "independent leaf 3 changed");
+    let serial_changed = publish(&serial_root, &serial_registry);
+    let parallel_changed = publish(&parallel_root, &parallel_registry);
+    assert_eq!(
+        parallel_changed.commit.generation_id,
+        serial_changed.commit.generation_id
+    );
+    assert_eq!(parallel_changed.sources, serial_changed.sources);
+    assert_eq!(serial_runner.scan_count(3), 1);
+    assert_eq!(parallel_runner.scan_count(3), 1);
+
+    let retained_source = serial_runner.source(3);
+    let retained_event = VerifiedIndex::open(&serial_root)
+        .unwrap()
+        .source_event_page(&retained_source, None, 8)
+        .unwrap()
+        .items
+        .remove(0);
+    let retained_hydration =
+        EventHydrationRequest::new(retained_event.event_id, retained_event.locator).unwrap();
+    assert_eq!(
+        serial_registry
+            .resolver_registry()
+            .hydrate_event(&retained_hydration)
+            .unwrap(),
+        parallel_registry
+            .resolver_registry()
+            .hydrate_event(&retained_hydration)
+            .unwrap()
+    );
+
+    let deleted_source = serial_runner.source(0);
+    serial_runner
+        .state
+        .lock()
+        .unwrap()
+        .leaves
+        .retain(|leaf| leaf.logical_id != 0);
+    parallel_runner
+        .state
+        .lock()
+        .unwrap()
+        .leaves
+        .retain(|leaf| leaf.logical_id != 0);
+    serial_runner.reset_scan_counts();
+    parallel_runner.reset_scan_counts();
+    let serial_deleted = publish(&serial_root, &serial_registry);
+    let parallel_deleted = publish(&parallel_root, &parallel_registry);
+    assert_eq!(
+        parallel_deleted.commit.generation_id,
+        serial_deleted.commit.generation_id
+    );
+    assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+    assert_eq!(parallel_deleted.removals, serial_deleted.removals);
+    assert!(parallel_deleted.removals.iter().any(|removal| removal
+        .deletion
+        .source()
+        .exact_descriptor_eq(&deleted_source)));
+    assert_eq!(serial_runner.total_scans(), 0);
+    assert_eq!(parallel_runner.total_scans(), 0);
+
+    let retained_generation = parallel_deleted.commit.generation_id;
+    parallel_runner.replace(1, 2, "terminal tree race");
+    parallel_runner.state.lock().unwrap().mutate_on_revalidate = true;
+    assert!(
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+            .is_err()
+    );
+    assert_eq!(
+        VerifiedIndex::open(&parallel_root).unwrap().generation_id(),
+        retained_generation
+    );
+}
+
 #[test]
 fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -454,6 +704,7 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
     assert_eq!(cold.sources.len(), 2);
     assert_eq!(adapter.scan_count(1), 1);
     assert_eq!(adapter.scan_count(2), 1);
+    assert_eq!(adapter.peak_scans(), 1);
 
     adapter.reset_scan_counts();
     let unchanged = publish(&index_root, &registry);

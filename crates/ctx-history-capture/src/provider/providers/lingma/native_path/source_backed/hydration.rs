@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
@@ -7,16 +10,17 @@ use ctx_history_core::{
     NativeRecordCoordinate, NativeSessionKey, SessionHydrationRequest, SessionIdentityInput,
     SourceKey, SourceRecordLocator, SubrecordSelector, TypedKey,
 };
+use rusqlite::{params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 
 use crate::{provider_sources::SqliteSourceAccessError, CaptureError};
 
 use super::super::{
-    detect_schema, load_raw_row,
+    detect_schema, record_identity_set_read,
     records::{
         assistant_text, lingma_logical_record_sha256, native_values, row_from_native_values,
     },
-    LingmaRow,
+    visit_raw_rows, LingmaRow, LINGMA_SET_READ_ROWS,
 };
 #[cfg(test)]
 use super::identity::LingmaSourceBackedRecordV0;
@@ -86,9 +90,9 @@ enum LingmaNativeIdentityCoordinate {
 impl LingmaNativeIdentityCoordinate {
     fn validate_and_build(
         &self,
-        connection: &rusqlite::Connection,
         row: &LingmaRow,
         current_record_scope: &TypedKey,
+        evidence: &LingmaIdentityEvidence,
     ) -> Result<NativeItemKey, HydrationFailure> {
         match self {
             Self::Request {
@@ -104,18 +108,11 @@ impl LingmaNativeIdentityCoordinate {
                         "Lingma request-native key does not match the reopened row",
                     ));
                 }
-                let matching_rows: i64 = connection
-                    .query_row(
-                        "select count(*)
-                           from chat_record
-                          where cast(session_id as text) = ?1
-                            and cast(request_id as text) = ?2",
-                        rusqlite::params![session_id, request_id],
-                        |result| result.get(0),
-                    )
-                    .map_err(CaptureError::from)
-                    .map_err(map_capture_hydration)?;
-                if matching_rows != 1 {
+                if evidence
+                    .request_counts
+                    .get(&(session_id.clone(), request_id.clone()))
+                    != Some(&1)
+                {
                     return Err(hydration_failure(
                         HydrationFailureKind::InvalidLocator,
                         "Lingma request-native key is not unique in the reopened source",
@@ -140,15 +137,7 @@ impl LingmaNativeIdentityCoordinate {
                         "Lingma position-native key has the wrong row revision scope",
                     ));
                 }
-                let observed_ordinal: i64 = connection
-                    .query_row(
-                        "select count(*) from chat_record where rowid < ?1",
-                        [row.rowid],
-                        |result| result.get(0),
-                    )
-                    .map_err(CaptureError::from)
-                    .map_err(map_capture_hydration)?;
-                if u64::try_from(observed_ordinal).ok() != Some(*ordinal) {
+                if evidence.position_ordinals.get(&row.rowid) != Some(ordinal) {
                     return Err(hydration_failure(
                         HydrationFailureKind::InvalidLocator,
                         "Lingma position-native key does not match the row ordinal",
@@ -163,6 +152,144 @@ impl LingmaNativeIdentityCoordinate {
             }
         }
     }
+}
+
+#[derive(Default)]
+struct LingmaIdentityEvidence {
+    request_counts: BTreeMap<(String, String), u64>,
+    position_ordinals: BTreeMap<i64, u64>,
+}
+
+fn load_identity_evidence(
+    connection: &rusqlite::Connection,
+    coordinates: &[LingmaCoordinate],
+) -> Result<LingmaIdentityEvidence, HydrationFailure> {
+    let request_identities = coordinates
+        .iter()
+        .filter_map(|coordinate| match &coordinate.native_identity {
+            LingmaNativeIdentityCoordinate::Request {
+                session_id,
+                request_id,
+            } => Some((session_id.clone(), request_id.clone())),
+            LingmaNativeIdentityCoordinate::Position { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let position_rowids = coordinates
+        .iter()
+        .filter_map(|coordinate| {
+            matches!(
+                coordinate.native_identity,
+                LingmaNativeIdentityCoordinate::Position { .. }
+            )
+            .then_some(coordinate.rowid)
+        })
+        .collect::<BTreeSet<_>>();
+    Ok(LingmaIdentityEvidence {
+        request_counts: load_request_identity_counts(connection, &request_identities)?,
+        position_ordinals: load_position_ordinals(connection, &position_rowids)?,
+    })
+}
+
+fn load_request_identity_counts(
+    connection: &rusqlite::Connection,
+    identities: &BTreeSet<(String, String)>,
+) -> Result<BTreeMap<(String, String), u64>, HydrationFailure> {
+    if identities.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let identities = identities.iter().cloned().collect::<Vec<_>>();
+    let mut counts = BTreeMap::new();
+    for identities in identities.chunks(LINGMA_SET_READ_ROWS) {
+        record_identity_set_read();
+        let values = std::iter::repeat_n("(?, ?)", identities.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "with requested(session_id, request_id) as (values {values})
+             select requested.session_id, requested.request_id, count(c.rowid)
+               from requested
+               left join chat_record c
+                 on cast(c.session_id as text) = requested.session_id
+                and cast(c.request_id as text) = requested.request_id
+              group by requested.session_id, requested.request_id
+              order by requested.session_id, requested.request_id"
+        );
+        let parameters = identities.iter().flat_map(|(session_id, request_id)| {
+            [
+                Value::Text(session_id.clone()),
+                Value::Text(request_id.clone()),
+            ]
+        });
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(CaptureError::from)
+            .map_err(map_capture_hydration)?;
+        let rows = statement
+            .query_map(params_from_iter(parameters), |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, u64>(2)?,
+                ))
+            })
+            .map_err(CaptureError::from)
+            .map_err(map_capture_hydration)?;
+        counts.extend(
+            rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+                .map_err(CaptureError::from)
+                .map_err(map_capture_hydration)?,
+        );
+    }
+    if counts.len() != identities.len() {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "Lingma identity evidence omitted a requested key",
+        ));
+    }
+    Ok(counts)
+}
+
+fn load_position_ordinals(
+    connection: &rusqlite::Connection,
+    rowids: &BTreeSet<i64>,
+) -> Result<BTreeMap<i64, u64>, HydrationFailure> {
+    if rowids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    record_identity_set_read();
+    let mut statement = connection
+        .prepare("select rowid from chat_record order by rowid")
+        .map_err(CaptureError::from)
+        .map_err(map_capture_hydration)?;
+    let mut rows = statement
+        .query([])
+        .map_err(CaptureError::from)
+        .map_err(map_capture_hydration)?;
+    let last_requested = rowids.last().copied().unwrap_or(i64::MAX);
+    let mut ordinals = BTreeMap::new();
+    let mut ordinal = 0_u64;
+    while let Some(row) = rows
+        .next()
+        .map_err(CaptureError::from)
+        .map_err(map_capture_hydration)?
+    {
+        let rowid = row
+            .get::<_, i64>(0)
+            .map_err(CaptureError::from)
+            .map_err(map_capture_hydration)?;
+        if rowids.contains(&rowid) {
+            ordinals.insert(rowid, ordinal);
+        }
+        if rowid >= last_requested {
+            break;
+        }
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "Lingma row ordinal exceeds u64",
+            )
+        })?;
+    }
+    Ok(ordinals)
 }
 
 #[derive(Debug, Clone)]
@@ -452,23 +579,26 @@ impl LingmaSourceBackedResolverV0 {
         let hydration = (|| {
             let connection = sqlite_snapshot.connection().map_err(map_sqlite_hydration)?;
             let encoding = detect_schema(connection).map_err(map_parser_hydration)?;
+            let identity_evidence = load_identity_evidence(connection, &coordinates)?;
+            let rowids = coordinates
+                .iter()
+                .map(|coordinate| coordinate.rowid)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
             let mut values_by_row = BTreeMap::new();
+            visit_raw_rows(connection, &rowids, |raw| {
+                let row = super::super::decode_raw_row(raw, encoding).map_err(|rowid| {
+                    CaptureError::InvalidPayload(format!(
+                        "Lingma SQLite row {rowid} is malformed for the certified parser"
+                    ))
+                })?;
+                values_by_row.insert(row.rowid, native_values(&row));
+                Ok(())
+            })
+            .map_err(map_capture_hydration)?;
             let mut hydrated = Vec::with_capacity(requests.len());
             for (request, coordinate) in requests.iter().zip(coordinates) {
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    values_by_row.entry(coordinate.rowid)
-                {
-                    let raw = load_raw_row(connection, coordinate.rowid)
-                        .map_err(map_capture_hydration)?;
-                    let row = super::super::decode_raw_row(raw, encoding).map_err(|_| {
-                        hydration_failure(
-                            HydrationFailureKind::StaleRecordEvidence,
-                            "Lingma SQLite row is malformed for the certified parser",
-                        )
-                    })?;
-                    let values = native_values(&row);
-                    entry.insert(values);
-                }
                 let values = values_by_row.get(&coordinate.rowid).ok_or_else(|| {
                     hydration_failure(
                         HydrationFailureKind::MissingRecord,
@@ -485,9 +615,9 @@ impl LingmaSourceBackedResolverV0 {
                 let current_record_scope =
                     TypedKey::bytes(coordinate.row_digest.to_vec()).map_err(invalid_locator)?;
                 let native_item_key = coordinate.native_identity.validate_and_build(
-                    connection,
                     &row,
                     &current_record_scope,
+                    &identity_evidence,
                 )?;
                 let session_key = NativeSessionKey::native_id(
                     NATIVE_SESSION_NAMESPACE,

@@ -32,6 +32,8 @@ pub(super) struct SourceBackedRelationalCatchUpStatus {
     build_generation: Option<u64>,
     pub(super) attempts: u64,
     last_attempt_at_ms: i64,
+    #[serde(default)]
+    last_attempt_duration_us: u64,
     error_code: Option<String>,
     last_error: Option<String>,
 }
@@ -57,6 +59,7 @@ impl SourceBackedRelationalCatchUpStatus {
             build_generation: frontier.map(|metadata| metadata.build_generation),
             attempts,
             last_attempt_at_ms: ctx_history_core::utc_now().timestamp_millis(),
+            last_attempt_duration_us: 0,
             error_code: None,
             last_error: None,
         }
@@ -90,6 +93,11 @@ impl SourceBackedRelationalCatchUpStatus {
         self.build_generation = Some(receipt.build_generation);
         self.error_code = None;
         self.last_error = None;
+        self
+    }
+
+    pub(super) fn with_duration(mut self, duration_us: u64) -> Self {
+        self.last_attempt_duration_us = duration_us;
         self
     }
 

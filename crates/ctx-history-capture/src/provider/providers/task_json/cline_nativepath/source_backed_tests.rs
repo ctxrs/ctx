@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Barrier, Mutex,
     },
 };
 
@@ -18,7 +18,10 @@ use tempfile::TempDir;
 use crate::{
     discover_provider_sources_for_provider_with_context,
     provider::source_backed::{
-        family::document::register_replacement_document_tree_route,
+        family::document::{
+            register_replacement_document_tree_route, DocumentLeafExecutionPolicy,
+            ReplacementDocumentTree,
+        },
         refresh_source_backed_generation, SourceBackedCoordinatorError,
         SourceBackedProviderRegistry, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
@@ -32,7 +35,63 @@ use super::source::ClineFileStamp;
 use super::source_backed::{
     cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
     roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
+    TaskJsonFixtureOperations,
 };
+
+#[derive(Debug)]
+pub(super) struct TaskJsonScanActivity {
+    barrier: Mutex<Option<Arc<Barrier>>>,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl TaskJsonScanActivity {
+    fn new(participants: usize) -> Arc<Self> {
+        Arc::new(Self {
+            barrier: Mutex::new(Some(Arc::new(Barrier::new(participants)))),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        })
+    }
+
+    pub(super) fn begin(self: &Arc<Self>) -> TaskJsonScanActivityGuard {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        let barrier = self
+            .barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+        TaskJsonScanActivityGuard {
+            activity: Arc::clone(self),
+        }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    fn disable_barrier(&self) {
+        *self
+            .barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+pub(super) struct TaskJsonScanActivityGuard {
+    activity: Arc<TaskJsonScanActivity>,
+}
+
+impl Drop for TaskJsonScanActivityGuard {
+    fn drop(&mut self) {
+        let previous = self.activity.active.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0);
+    }
+}
 
 #[test]
 fn task_json_routes_cold_noop_replace_and_delete_through_shared_engine() {
@@ -42,15 +101,160 @@ fn task_json_routes_cold_noop_replace_and_delete_through_shared_engine() {
 }
 
 #[test]
-fn task_json_grouped_hydration_is_ordered_single_scan_and_atomic() {
+fn task_json_production_routes_declare_exact_independent_leaves() {
+    for adapter in [
+        cline_task_json_source_backed_adapter(&[]),
+        roo_task_json_source_backed_adapter(&[]),
+    ] {
+        assert_eq!(
+            adapter.leaf_execution_policy(),
+            DocumentLeafExecutionPolicy::Independent
+        );
+    }
+}
+
+#[test]
+fn task_json_thousand_task_cold_membership_and_scan_work_is_linear() {
+    const TASKS: usize = 1_000;
+
     for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
-        let fixture = Fixture::new(provider);
-        let hydration_scans = Arc::new(AtomicUsize::new(0));
+        let fixture = ManyTaskFixture::new(provider, TASKS);
+        let operations = Arc::new(TaskJsonFixtureOperations::default());
         let registry = registry(
             provider,
             fixture.source(),
+            Some(Arc::clone(&operations)),
             None,
-            Some(Arc::clone(&hydration_scans)),
+        );
+        let index_root = fixture._temp.path().join("linear-cold-index");
+
+        let cold = refresh_source_backed_generation(&index_root, &registry, writer_options())
+            .expect("cold-index 1,000 deterministic task JSON fixtures");
+
+        assert_eq!(cold.sources.len(), TASKS);
+        assert_eq!(
+            operations.ordinal_membership_probes(),
+            TASKS,
+            "cold membership must use one stable-ordinal probe per task"
+        );
+        assert_eq!(
+            operations.projection_scans(),
+            TASKS,
+            "cold projection must scan each task exactly once"
+        );
+        assert_eq!(operations.hydration_scans(), 0);
+    }
+}
+
+#[test]
+fn task_json_independent_leaves_have_one_vs_four_generation_and_event_parity() {
+    const TASKS: usize = 8;
+
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = ManyTaskFixture::new_with_messages(provider, TASKS);
+        let serial_activity = TaskJsonScanActivity::new(1);
+        let parallel_activity = TaskJsonScanActivity::new(4);
+        let serial_registry = registry_with_execution(
+            provider,
+            fixture.source(),
+            None,
+            None,
+            Some((1, Arc::clone(&serial_activity))),
+        );
+        let parallel_registry = registry_with_execution(
+            provider,
+            fixture.source(),
+            None,
+            None,
+            Some((4, Arc::clone(&parallel_activity))),
+        );
+        let serial_root = fixture._temp.path().join("serial-leaves-index");
+        let parallel_root = fixture._temp.path().join("parallel-leaves-index");
+
+        let serial_cold =
+            refresh_source_backed_generation(&serial_root, &serial_registry, writer_options())
+                .expect("cold task JSON generation with one leaf worker");
+        let parallel_cold =
+            refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+                .expect("cold task JSON generation with four leaf workers");
+        assert_eq!(
+            parallel_cold.commit.generation_id,
+            serial_cold.commit.generation_id
+        );
+        assert_eq!(parallel_cold.sources, serial_cold.sources);
+        assert_eq!(
+            all_retained_events(&parallel_root),
+            all_retained_events(&serial_root)
+        );
+        assert_eq!(serial_activity.peak(), 1);
+        assert_eq!(parallel_activity.peak(), 4);
+
+        let serial_noop =
+            refresh_source_backed_generation(&serial_root, &serial_registry, writer_options())
+                .expect("no-op task JSON generation with one leaf worker");
+        let parallel_noop =
+            refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+                .expect("no-op task JSON generation with four leaf workers");
+        assert_eq!(
+            serial_noop.commit.generation_id,
+            serial_cold.commit.generation_id
+        );
+        assert_eq!(
+            parallel_noop.commit.generation_id,
+            parallel_cold.commit.generation_id
+        );
+
+        serial_activity.disable_barrier();
+        parallel_activity.disable_barrier();
+        fixture.replace_task_api(3, "parallel replacement body");
+        let serial_changed =
+            refresh_source_backed_generation(&serial_root, &serial_registry, writer_options())
+                .expect("changed task JSON generation with one leaf worker");
+        let parallel_changed =
+            refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+                .expect("changed task JSON generation with four leaf workers");
+        assert_eq!(
+            parallel_changed.commit.generation_id,
+            serial_changed.commit.generation_id
+        );
+        assert_eq!(parallel_changed.sources, serial_changed.sources);
+        let serial_events = all_retained_events(&serial_root);
+        let parallel_events = all_retained_events(&parallel_root);
+        assert_eq!(parallel_events, serial_events);
+        assert_eq!(
+            hydrate_events(&parallel_registry, &parallel_events),
+            hydrate_events(&serial_registry, &serial_events)
+        );
+
+        fixture.delete_task(0);
+        let serial_deleted =
+            refresh_source_backed_generation(&serial_root, &serial_registry, writer_options())
+                .expect("deleted task JSON generation with one leaf worker");
+        let parallel_deleted =
+            refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
+                .expect("deleted task JSON generation with four leaf workers");
+        assert_eq!(
+            parallel_deleted.commit.generation_id,
+            serial_deleted.commit.generation_id
+        );
+        assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+        assert_eq!(parallel_deleted.removals, serial_deleted.removals);
+        assert_eq!(
+            all_retained_events(&parallel_root),
+            all_retained_events(&serial_root)
+        );
+    }
+}
+
+#[test]
+fn task_json_grouped_hydration_is_ordered_single_scan_and_atomic() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let operations = Arc::new(TaskJsonFixtureOperations::default());
+        let registry = registry(
+            provider,
+            fixture.source(),
+            Some(Arc::clone(&operations)),
             None,
         );
         let index_root = fixture._temp.path().join("hydration-index");
@@ -82,7 +286,7 @@ fn task_json_grouped_hydration_is_ordered_single_scan_and_atomic() {
                 .map(EventHydrationRequest::event_id)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(hydration_scans.load(Ordering::Relaxed), 1);
+        assert_eq!(operations.hydration_scans(), 1);
         assert!(hydrated
             .records()
             .iter()
@@ -94,7 +298,7 @@ fn task_json_grouped_hydration_is_ordered_single_scan_and_atomic() {
             .hydrate_batch(&batch)
             .expect_err("changed task must fail the whole hydration group");
         assert_eq!(error.kind, HydrationFailureKind::StaleSourceEvidence);
-        assert_eq!(hydration_scans.load(Ordering::Relaxed), 1);
+        assert_eq!(operations.hydration_scans(), 1);
     }
 }
 
@@ -102,7 +306,7 @@ fn task_json_grouped_hydration_is_ordered_single_scan_and_atomic() {
 fn task_json_unavailable_root_is_explicit_and_preserves_generation() {
     for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
         let fixture = Fixture::new(provider);
-        let registry = registry(provider, fixture.source(), None, None, None);
+        let registry = registry(provider, fixture.source(), None, None);
         let index_root = fixture._temp.path().join("unavailable-index");
         let cold = refresh_source_backed_generation(&index_root, &registry, writer_options())
             .expect("publish retained task JSON generation");
@@ -139,7 +343,7 @@ fn task_json_commit_time_inventory_race_fails_closed() {
                 replace_json(&api, &messages("commit fence race"));
             }
         });
-        let registry = registry(provider, fixture.source(), None, None, Some(hook));
+        let registry = registry(provider, fixture.source(), None, Some(hook));
         let index_root = fixture._temp.path().join("race-index");
         let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
             .expect_err("terminal task inventory race must abort publication");
@@ -196,7 +400,7 @@ fn task_json_production_registration_uses_shared_document_route() {
 fn source_backed_resolvers_reject_swapped_authority_roots() {
     for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
         let fixture = Fixture::new(provider);
-        let registry = registry(provider, fixture.source(), None, None, None);
+        let registry = registry(provider, fixture.source(), None, None);
         let index_root = fixture._temp.path().join("swap-index");
         refresh_source_backed_generation(&index_root, &registry, writer_options())
             .expect("index task before root swap");
@@ -261,12 +465,11 @@ fn roo_external_workspace_root_requires_discovery_consent() {
 
 fn lifecycle_case(provider: CaptureProvider) {
     let fixture = Fixture::new(provider);
-    let projection_scans = Arc::new(AtomicUsize::new(0));
+    let operations = Arc::new(TaskJsonFixtureOperations::default());
     let registry = registry(
         provider,
         fixture.source(),
-        Some(Arc::clone(&projection_scans)),
-        None,
+        Some(Arc::clone(&operations)),
         None,
     );
     let index_root = fixture._temp.path().join("lifecycle-index");
@@ -274,7 +477,8 @@ fn lifecycle_case(provider: CaptureProvider) {
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options())
         .expect("cold task JSON route");
     assert_eq!(cold.sources.len(), 1);
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 1);
+    assert_eq!(operations.ordinal_membership_probes(), 1);
+    assert_eq!(operations.projection_scans(), 1);
     let source = cold.sources[0].observation().source().clone();
     let cold_events = retained_events(&index_root);
     assert_eq!(cold_events.len(), 2);
@@ -306,7 +510,12 @@ fn lifecycle_case(provider: CaptureProvider) {
         .expect("unchanged task JSON route");
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(
-        projection_scans.load(Ordering::Relaxed),
+        operations.ordinal_membership_probes(),
+        1,
+        "cheap unchanged discovery must perform zero membership probes"
+    );
+    assert_eq!(
+        operations.projection_scans(),
         1,
         "cheap unchanged discovery must perform zero parses"
     );
@@ -315,7 +524,8 @@ fn lifecycle_case(provider: CaptureProvider) {
     let replacement = refresh_source_backed_generation(&index_root, &registry, writer_options())
         .expect("replacement task JSON route");
     assert_ne!(replacement.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(operations.ordinal_membership_probes(), 2);
+    assert_eq!(operations.projection_scans(), 2);
     let replacement_events = retained_events(&index_root);
     assert_eq!(event_ids(&replacement_events), cold_ids);
     assert!(hydrate_events(&registry, &replacement_events)
@@ -331,7 +541,12 @@ fn lifecycle_case(provider: CaptureProvider) {
         .iter()
         .any(|removal| removal.deletion.source().exact_descriptor_eq(&source)));
     assert_eq!(
-        projection_scans.load(Ordering::Relaxed),
+        operations.ordinal_membership_probes(),
+        2,
+        "complete deletion inventory must not probe a removed source"
+    );
+    assert_eq!(
+        operations.projection_scans(),
         2,
         "complete deletion inventory must not parse a removed source"
     );
@@ -340,9 +555,18 @@ fn lifecycle_case(provider: CaptureProvider) {
 fn registry(
     provider: CaptureProvider,
     source: ProviderSource,
-    projection_scans: Option<Arc<AtomicUsize>>,
-    hydration_scans: Option<Arc<AtomicUsize>>,
+    operations: Option<Arc<TaskJsonFixtureOperations>>,
     terminal_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> SourceBackedProviderRegistry {
+    registry_with_execution(provider, source, operations, terminal_hook, None)
+}
+
+fn registry_with_execution(
+    provider: CaptureProvider,
+    source: ProviderSource,
+    operations: Option<Arc<TaskJsonFixtureOperations>>,
+    terminal_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    execution: Option<(usize, Arc<TaskJsonScanActivity>)>,
 ) -> SourceBackedProviderRegistry {
     let selected = vec![source.clone()];
     let mut resolver = match provider {
@@ -351,8 +575,8 @@ fn registry(
         _ => unreachable!(),
     }
     .expect("task JSON resolver");
-    if let Some(scans) = hydration_scans {
-        resolver = resolver.with_hydration_scans(scans);
+    if let Some(operations) = operations.as_ref() {
+        resolver = resolver.with_fixture_operations(Arc::clone(operations));
     }
     let mut adapter = match provider {
         CaptureProvider::Cline => cline_task_json_source_backed_adapter(&selected),
@@ -360,11 +584,16 @@ fn registry(
         _ => unreachable!(),
     }
     .with_resolver(resolver);
-    if let Some(scans) = projection_scans {
-        adapter = adapter.with_projection_scans(scans);
+    if let Some(operations) = operations {
+        adapter = adapter.with_fixture_operations(operations);
     }
     if let Some(hook) = terminal_hook {
         adapter = adapter.with_terminal_revalidation_hook(hook);
+    }
+    if let Some((leaf_workers, scan_activity)) = execution {
+        adapter = adapter
+            .with_leaf_workers(leaf_workers)
+            .with_scan_activity(scan_activity);
     }
     let mut registry = SourceBackedProviderRegistry::new();
     register_replacement_document_tree_route(
@@ -393,6 +622,21 @@ fn retained_events(index_root: &Path) -> Vec<ctx_history_index::EventRecord> {
         .items;
     events.sort_by_key(|event| event.event_sequence);
     events
+}
+
+fn all_retained_events(index_root: &Path) -> Vec<ctx_history_index::EventRecord> {
+    let index = VerifiedIndex::open(index_root).expect("open retained task index");
+    index
+        .manifest()
+        .sources
+        .iter()
+        .flat_map(|source| {
+            index
+                .source_event_page(source.observation().source(), None, 8)
+                .expect("task event page")
+                .items
+        })
+        .collect()
 }
 
 fn event_ids(events: &[ctx_history_index::EventRecord]) -> Vec<ctx_history_core::StableEntityId> {
@@ -443,6 +687,82 @@ struct Fixture {
     api: PathBuf,
     provider: CaptureProvider,
     task_id: &'static str,
+}
+
+struct ManyTaskFixture {
+    _temp: TempDir,
+    root: PathBuf,
+    provider: CaptureProvider,
+}
+
+impl ManyTaskFixture {
+    fn new(provider: CaptureProvider, tasks: usize) -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join(match provider {
+            CaptureProvider::Cline => "cline-many-data",
+            CaptureProvider::RooCode => "roo-many-data",
+            _ => unreachable!(),
+        });
+        for ordinal in 0..tasks {
+            let task_id = format!("task-{ordinal:04}");
+            let task = root.join("tasks").join(&task_id);
+            fs::create_dir_all(&task).expect("linear task directory");
+            let metadata = json!({
+                "id": task_id,
+                "task": format!("deterministic task metadata {ordinal:04}"),
+                "workspaceDirectory": "/workspace/task-json",
+                "createdAt": "2026-07-28T10:00:00Z"
+            });
+            write_json(
+                &task.join(match provider {
+                    CaptureProvider::Cline => "task_metadata.json",
+                    CaptureProvider::RooCode => "history_item.json",
+                    _ => unreachable!(),
+                }),
+                &metadata,
+            );
+        }
+        Self {
+            _temp: temp,
+            root,
+            provider,
+        }
+    }
+
+    fn source(&self) -> ProviderSource {
+        exact_source(self.provider, self.root.clone())
+    }
+
+    fn new_with_messages(provider: CaptureProvider, tasks: usize) -> Self {
+        let fixture = Self::new(provider, tasks);
+        for ordinal in 0..tasks {
+            write_json(
+                &fixture
+                    .root
+                    .join("tasks")
+                    .join(format!("task-{ordinal:04}"))
+                    .join("api_conversation_history.json"),
+                &messages(&format!("parallel task body {ordinal:04}")),
+            );
+        }
+        fixture
+    }
+
+    fn replace_task_api(&self, ordinal: usize, body: &str) {
+        replace_json(
+            &self
+                .root
+                .join("tasks")
+                .join(format!("task-{ordinal:04}"))
+                .join("api_conversation_history.json"),
+            &messages(body),
+        );
+    }
+
+    fn delete_task(&self, ordinal: usize) {
+        fs::remove_dir_all(self.root.join("tasks").join(format!("task-{ordinal:04}")))
+            .expect("delete deterministic task");
+    }
 }
 
 impl Fixture {

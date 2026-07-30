@@ -20,24 +20,22 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
     let mut timings = CodexSourceBackedPhaseTimingsV0::default();
     let mut counters = CodexSourceBackedCountersV0::default();
 
-    let phase_started = Instant::now();
-    let opening_inventory = discover_codex_root_inventory_v0(session_root)?;
-    timings.discovery = phase_started.elapsed();
-
     let writer_options = WriterOptions::default();
     let phase_started = Instant::now();
     let mut writer = GenerationWriter::open(global_index_root, writer_options.clone())?;
     timings.writer_open = phase_started.elapsed();
     let base_sources = writer_base_sources(&writer);
-    let CodexRootInventoryV0 {
-        sources,
-        certificate: opening_certificate,
-        root: opening_root,
-    } = opening_inventory;
+    let session_roots = vec![session_root.to_path_buf()];
+    let phase_started = Instant::now();
+    let opening_inventory =
+        discover_codex_session_tree_inventory_from_base_v0(&session_roots, &base_sources)?;
+    timings.discovery = phase_started.elapsed();
+    let opening_certificate = opening_inventory.certificate.clone();
+    counters.add_catalog_work(opening_inventory.work);
     let mut revalidation = HashMap::<SourceKey, CodexTerminalSourceEvidenceV0>::new();
 
     ingest_codex_sources_with_options_v0(
-        sources,
+        opening_inventory.sources.clone(),
         &base_sources,
         &mut writer,
         &mut revalidation,
@@ -67,7 +65,11 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
     // degenerate inventory explicitly; every non-empty refresh is fenced
     // inside prepare_commit below.
     if revalidation.is_empty() && counters.deleted_sources == 0 {
-        let closing = rediscover_codex_root_inventory_v0(session_root, &opening_root)?;
+        let closing = discover_codex_session_tree_inventory_from_plans_v0(
+            &session_roots,
+            &opening_inventory,
+        )?;
+        counters.add_catalog_work(closing.work);
         if closing.certificate != opening_certificate {
             return Err(CodexSourceBackedErrorV0::Capture(
                 CaptureError::SourceChangedDuringCapture,
@@ -76,15 +78,19 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
     }
 
     let commit_started = Instant::now();
-    let mut closing_inventory = None::<Option<CertifiedSourceInventory>>;
+    let mut closing_inventory = None::<Option<CodexSessionTreeInventoryV0>>;
     let commit = writer.commit(|target| {
         if closing_inventory.is_none() {
             closing_inventory = Some(
-                rediscover_codex_root_inventory_v0(session_root, &opening_root)
-                    .ok()
-                    .and_then(|closing| {
-                        (closing.certificate == opening_certificate).then_some(closing.certificate)
-                    }),
+                discover_codex_session_tree_inventory_from_plans_v0(
+                    &session_roots,
+                    &opening_inventory,
+                )
+                .ok()
+                .and_then(|closing| {
+                    counters.add_catalog_work(closing.work);
+                    (closing.certificate == opening_certificate).then_some(closing)
+                }),
             );
         }
         let Some(closing) = closing_inventory
@@ -97,11 +103,11 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
             RevalidationTarget::Source(certificate) => revalidation
                 .get_key_value(certificate.observation().source())
                 .is_some_and(|(source_key, evidence)| {
-                    closing.contains(source_key)
+                    closing.certificate.contains(source_key)
                         && source_key.exact_descriptor_eq(certificate.observation().source())
                         && evidence.revalidate()
                 }),
-            RevalidationTarget::Deletion(deletion) => deletion.verifies(closing),
+            RevalidationTarget::Deletion(deletion) => deletion.verifies(&closing.certificate),
         }
     })?;
     timings.commit = commit_started.elapsed();
@@ -138,6 +144,8 @@ pub(crate) fn ingest_codex_sources_v0(
             fail_source_index: None,
             #[cfg(test)]
             before_commit_revalidation: None,
+            #[cfg(test)]
+            scanner_rendezvous: None,
         },
     )
 }
@@ -158,36 +166,61 @@ fn ingest_codex_sources_with_options_v0(
     counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
         total.saturating_add(source.catalog_observation.len)
     });
-    let use_parallel_cold = sources.len() > 1
-        && sources
-            .iter()
-            .all(|(_, source_key, _)| !base_sources.contains_key(source_key));
-    if use_parallel_cold {
-        sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
-        let worker_count = cold_scanner_worker_count(
-            counters.catalog_sources,
-            indexer_threads,
-            cold_options.scanner_workers,
-        )?;
-        ingest_codex_cold_parallel_v0(
-            sources,
+    sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
+    let mut changed_sources = Vec::new();
+    for (source, source_key, native_session_id) in sources {
+        let base = base_sources.get(&source_key).cloned();
+        if base
+            .as_ref()
+            .is_some_and(|base| !base.observation().source().exact_descriptor_eq(&source_key))
+        {
+            return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
+                native_session_id,
+            ));
+        }
+        let proof = base
+            .as_ref()
+            .filter(|base| base.parser_revision() == CODEX_PARSER_REVISION)
+            .and_then(|base| decode_append_proof(&source, &source_key, base).ok());
+        if replay_unchanged_source_v0(
+            &source,
+            &source_key,
+            base.as_ref(),
+            proof.as_ref(),
             writer,
             revalidation,
             timings,
             counters,
-            worker_count,
-            cold_options,
-        )
-    } else {
-        ingest_codex_sources_serial_v0(
-            sources,
-            base_sources,
-            writer,
-            revalidation,
-            timings,
-            counters,
-        )
+        )? {
+            continue;
+        }
+        changed_sources.push(super::cold::ChangedSourceV0 {
+            source,
+            source_key,
+            native_session_id,
+            base,
+            proof,
+        });
     }
+    if changed_sources.is_empty() {
+        return Ok(());
+    }
+    let changed_source_count = u64::try_from(changed_sources.len())
+        .map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
+    let worker_count = cold_scanner_worker_count(
+        changed_source_count,
+        indexer_threads,
+        cold_options.scanner_workers,
+    )?;
+    ingest_codex_cold_parallel_v0(
+        changed_sources,
+        writer,
+        revalidation,
+        timings,
+        counters,
+        worker_count,
+        cold_options,
+    )
 }
 
 pub(crate) fn ingest_codex_sources_serial_v0(
@@ -213,41 +246,17 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             .filter(|base| base.parser_revision() == CODEX_PARSER_REVISION)
             .and_then(|base| decode_append_proof(&source, &source_key, base).ok());
 
-        // An unchanged strong file observation (identity + ctime-backed change
-        // token + length + mtime) means the already-certified generation is
-        // still the provider source. Rehashing every byte here made a no-op
-        // refresh O(total history bytes). Final commit revalidation repeats
-        // the observation before publishing.
-        if let (Some(base), Some(proof)) = (base.as_ref(), proof.as_ref()) {
-            if proof.checkpoint.observation == source.catalog_observation {
-                let certification_started = Instant::now();
-                let writer_base = writer.begin_source_append(source_key.clone())?;
-                if writer_base != base {
-                    return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
-                }
-                let base_frontier = base
-                    .frontier()
-                    .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
-                let append = CertifiedSourceAppend::certify(
-                    base,
-                    base.clone(),
-                    base_frontier.certified_prefix_bytes(),
-                    *base_frontier.certified_prefix_digest(),
-                )?;
-                writer.certify_source_append(append)?;
-                timings.certification += certification_started.elapsed();
-                counters.replayed_sources = counters.replayed_sources.saturating_add(1);
-                revalidation.insert(
-                    source_key,
-                    CodexTerminalSourceEvidenceV0::new(
-                        source,
-                        proof.checkpoint.observation.clone(),
-                        proof.checkpoint.observation.len,
-                        proof.checkpoint.full_revision_sha256,
-                    ),
-                );
-                continue;
-            }
+        if replay_unchanged_source_v0(
+            &source,
+            &source_key,
+            base.as_ref(),
+            proof.as_ref(),
+            writer,
+            revalidation,
+            timings,
+            counters,
+        )? {
+            continue;
         }
 
         let scan_started = Instant::now();
@@ -271,16 +280,20 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                 if writer_base != base {
                     return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
                 }
+                counters.writer_mutated_sources = counters.writer_mutated_sources.saturating_add(1);
                 (Some(base), scanner)
             }
             None => {
                 writer.begin_source(source_key.clone())?;
+                counters.writer_mutated_sources = counters.writer_mutated_sources.saturating_add(1);
                 (
                     None,
                     CodexNativeScanner::new_source_backed_v0(source.clone(), None)?,
                 )
             }
         };
+        counters.scanner_sources_started = counters.scanner_sources_started.saturating_add(1);
+        counters.peak_active_scanners = counters.peak_active_scanners.max(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
         let mut staged_for_source = 0_u64;
@@ -319,6 +332,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         }
         let scanner_started = Instant::now();
         let scan = scanner.finish()?;
+        counters.scanner_sources_completed = counters.scanner_sources_completed.saturating_add(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         timings.scan_and_stage += scan_started.elapsed();
         let scan_counters = scan.counters;
@@ -378,6 +392,58 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         );
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_unchanged_source_v0(
+    source: &CodexCatalogSource,
+    source_key: &SourceKey,
+    base: Option<&CertifiedSource>,
+    proof: Option<&CodexAppendProof>,
+    writer: &mut GenerationWriter,
+    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+    timings: &mut CodexSourceBackedPhaseTimingsV0,
+    counters: &mut CodexSourceBackedCountersV0,
+) -> CodexSourceBackedResultV0<bool> {
+    let (Some(base), Some(proof)) = (base, proof) else {
+        return Ok(false);
+    };
+    // An unchanged strong file observation (identity + ctime-backed change
+    // token + length + mtime) means the already-certified generation is still
+    // the provider source. Final commit revalidation repeats the observation
+    // before publishing, so exact replay does not need a scanner body pass.
+    if proof.checkpoint.observation != source.catalog_observation {
+        return Ok(false);
+    }
+
+    let certification_started = Instant::now();
+    let writer_base = writer.begin_source_append(source_key.clone())?;
+    if writer_base != base {
+        return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
+    }
+    let base_frontier = base
+        .frontier()
+        .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
+    let append = CertifiedSourceAppend::certify(
+        base,
+        base.clone(),
+        base_frontier.certified_prefix_bytes(),
+        *base_frontier.certified_prefix_digest(),
+    )?;
+    writer.certify_source_append(append)?;
+    timings.certification += certification_started.elapsed();
+    counters.replayed_sources = counters.replayed_sources.saturating_add(1);
+    counters.writer_exact_replay_sources = counters.writer_exact_replay_sources.saturating_add(1);
+    revalidation.insert(
+        source_key.clone(),
+        CodexTerminalSourceEvidenceV0 {
+            source: source.clone(),
+            observation: proof.checkpoint.observation.clone(),
+            certified_len: proof.checkpoint.observation.len,
+            full_revision_sha256: proof.checkpoint.full_revision_sha256,
+        },
+    );
+    Ok(true)
 }
 
 fn invalid_append_proof(error: &CaptureError) -> bool {

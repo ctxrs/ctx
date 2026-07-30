@@ -1,4 +1,6 @@
-use rusqlite::{types::ValueRef, Connection, OptionalExtension};
+use std::collections::HashMap;
+
+use rusqlite::{params_from_iter, types::ValueRef, Connection};
 
 use crate::{
     native_source::NativeSqliteValue, provider::sqlite::SqliteLengthPreflightGuard, CaptureError,
@@ -35,16 +37,32 @@ pub(super) fn row_decode_error_is_local(error: &CaptureError) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(super) struct CrushCandidate {
     pub(super) rowid: i64,
     pub(super) observed_bytes: u64,
 }
 
+#[cfg(test)]
 pub(super) fn next_candidate(
     conn: &Connection,
     schema: &CrushNativeSchema,
     frontier: &CrushNativeFrontier,
 ) -> Result<Option<CrushCandidate>> {
+    Ok(next_candidate_batch(conn, schema, frontier, 1)?
+        .into_iter()
+        .next())
+}
+
+pub(super) fn next_candidate_batch(
+    conn: &Connection,
+    schema: &CrushNativeSchema,
+    frontier: &CrushNativeFrontier,
+    limit: usize,
+) -> Result<Vec<CrushCandidate>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let (rowid, retained, from) = match frontier.phase {
         CrushNativePhase::Sessions => (
             "s.rowid".to_owned(),
@@ -98,7 +116,7 @@ pub(super) fn next_candidate(
                 .as_ref()
                 .filter(|columns| columns.contains("session_id"))
             else {
-                return Ok(None);
+                return Ok(Vec::new());
             };
             (
                 "f.rowid".to_owned(),
@@ -112,7 +130,7 @@ pub(super) fn next_candidate(
         }
         CrushNativePhase::ReadFiles => {
             let Some(columns) = schema.read_file_columns.as_ref() else {
-                return Ok(None);
+                return Ok(Vec::new());
             };
             (
                 "r.rowid".to_owned(),
@@ -126,38 +144,138 @@ pub(super) fn next_candidate(
     } else {
         String::new()
     };
-    let sql = format!("select {rowid}, {retained} from {from}{after} order by {rowid} limit 1");
+    let sql =
+        format!("select {rowid}, {retained} from {from}{after} order by {rowid} limit {limit}");
     let _guard = SqliteLengthPreflightGuard::new(conn);
+    let mut statement = conn.prepare(&sql)?;
     let read = |row: &rusqlite::Row<'_>| {
         let rowid = row.get::<_, i64>(0)?;
         let retained = row.get::<_, i64>(1)?;
         Ok((rowid, retained))
     };
-    let candidate = match frontier.after_rowid {
-        Some(rowid) => conn.query_row(&sql, [rowid], read).optional()?,
-        None => conn.query_row(&sql, [], read).optional()?,
+    let rows = match frontier.after_rowid {
+        Some(rowid) => statement.query_map([rowid], read)?,
+        None => statement.query_map([], read)?,
     };
-    let Some((rowid, retained)) = candidate else {
-        return Ok(None);
-    };
-    if rowid <= 0 || retained < 0 {
-        return Err(CaptureError::InvalidPayload(format!(
-            "Crush {} keyset metadata is invalid",
-            frontier.phase.label()
-        )));
+    rows.map(|row| {
+        let (rowid, retained) = row?;
+        if rowid <= 0 || retained < 0 {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Crush {} keyset metadata is invalid",
+                frontier.phase.label()
+            )));
+        }
+        let retained = u64::try_from(retained).map_err(|_| {
+            CaptureError::InvalidPayload("Crush retained byte count is invalid".to_owned())
+        })?;
+        let observed_bytes = CRUSH_SQLITE_VALUE_OVERHEAD_BYTES
+            .checked_add(retained)
+            .ok_or(CaptureError::SystemInvariant(
+                "Crush retained byte count overflowed",
+            ))?;
+        Ok(CrushCandidate {
+            rowid,
+            observed_bytes,
+        })
+    })
+    .collect()
+}
+
+pub(super) fn hydrate_message_batch(
+    connection: &Connection,
+    schema: &CrushNativeSchema,
+    candidates: &[CrushCandidate],
+) -> Result<HashMap<i64, Result<CrushHydratedRow>>> {
+    if candidates.is_empty() {
+        return Ok(HashMap::new());
     }
-    let retained = u64::try_from(retained).map_err(|_| {
-        CaptureError::InvalidPayload("Crush retained byte count is invalid".to_owned())
-    })?;
-    let observed_bytes = CRUSH_SQLITE_VALUE_OVERHEAD_BYTES
-        .checked_add(retained)
-        .ok_or(CaptureError::SystemInvariant(
-            "Crush retained byte count overflowed",
+    let parent_created_at = optional_session_column(&schema.session_columns, "created_at");
+    let parent_updated_at = optional_session_column(&schema.session_columns, "updated_at");
+    let parent_session_id = optional_session_column(&schema.session_columns, "parent_session_id");
+    let projection = message_projection(&schema.message_columns, "m");
+    let placeholders = std::iter::repeat_n("?", candidates.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = connection.prepare(&format!(
+        "select m.rowid, s.rowid, {parent_created_at}, {parent_updated_at}, \
+         {projection}, {parent_session_id} \
+         from {} where m.rowid in ({placeholders}) order by m.rowid",
+        message_session_join()
+    ))?;
+    let observed = candidates
+        .iter()
+        .map(|candidate| (candidate.rowid, candidate.observed_bytes))
+        .collect::<HashMap<_, _>>();
+    let rowids = candidates.iter().map(|candidate| candidate.rowid);
+    let mut rows = statement.query(params_from_iter(rowids))?;
+    let mut hydrated = HashMap::with_capacity(candidates.len());
+    while let Some(row) = rows.next()? {
+        let rowid = row.get::<_, i64>(0)?;
+        let mut values = raw_sqlite_values_offset(row, 1, 14)?;
+        let decoded = (|| {
+            let parent_session_id = optional_text(&values, 13)?;
+            values.pop();
+            let child = decode_message_child(&values[..13])?;
+            let retained_bytes = usize::try_from(
+                *observed
+                    .get(&rowid)
+                    .ok_or(CaptureError::SourceChangedDuringCapture)?,
+            )
+            .unwrap_or(usize::MAX)
+            .saturating_add(CRUSH_NATIVE_PAGE_OVERHEAD_BYTES);
+            let session = child.parent_rowid.map(|_| CrushSessionRow {
+                id: child.message.session_id.clone(),
+                parent_session_id,
+                title: None,
+                created_at: child.parent_created_at,
+                updated_at: child.parent_updated_at,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cost: None,
+                summary_message_id: None,
+            });
+            Ok(CrushHydratedRow::Message {
+                row: child.message,
+                session,
+                digest_values: values,
+                retained_bytes,
+            })
+        })();
+        hydrated.insert(rowid, decoded);
+    }
+    Ok(hydrated)
+}
+
+pub(super) fn load_session_parents(
+    connection: &Connection,
+    columns: &std::collections::BTreeSet<String>,
+) -> Result<HashMap<String, Option<String>>> {
+    const PAGE: usize = 256;
+    let parent = optional_session_column(columns, "parent_session_id");
+    let mut after = 0_i64;
+    let mut parents = HashMap::new();
+    loop {
+        let mut statement = connection.prepare(&format!(
+            "select s.rowid, s.id, {parent} from sessions s \
+             where s.rowid > ?1 order by s.rowid limit {PAGE}"
         ))?;
-    Ok(Some(CrushCandidate {
-        rowid,
-        observed_bytes,
-    }))
+        let page = statement
+            .query_map([after], |row| {
+                Ok((row.get::<_, i64>(0)?, raw_sqlite_values_offset(row, 1, 2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if page.is_empty() {
+            break;
+        }
+        for (rowid, values) in page {
+            after = rowid;
+            let NativeSqliteValue::Text(id) = &values[0] else {
+                continue;
+            };
+            parents.insert(id.clone(), optional_text(&values, 1)?);
+        }
+    }
+    Ok(parents)
 }
 
 pub(super) fn hydrate_row_from_connection(
@@ -247,6 +365,16 @@ pub(super) fn hydrate_row_from_connection(
     }
 }
 
+// Keep the full NativePath row decoder linked for the direct single-row test
+// seam while production source-backed hydration uses bounded message sets.
+const _: fn(
+    &Connection,
+    &CrushNativeSchema,
+    CrushNativePhase,
+    i64,
+    u64,
+) -> Result<CrushHydratedRow> = hydrate_row_from_connection;
+
 fn message_parent_session(
     conn: &Connection,
     columns: &std::collections::BTreeSet<String>,
@@ -283,6 +411,16 @@ fn raw_sqlite_values(
     count: usize,
 ) -> rusqlite::Result<Vec<NativeSqliteValue>> {
     (0..count)
+        .map(|index| row.get_ref(index).map(raw_sqlite_value))
+        .collect()
+}
+
+fn raw_sqlite_values_offset(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+    count: usize,
+) -> rusqlite::Result<Vec<NativeSqliteValue>> {
+    (offset..offset + count)
         .map(|index| row.get_ref(index).map(raw_sqlite_value))
         .collect()
 }

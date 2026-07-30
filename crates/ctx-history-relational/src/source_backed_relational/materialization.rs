@@ -4,7 +4,7 @@ use ctx_history_core::{
     EventRole, FileChangeKind, ProjectionContractError, SourceKey, SourceResolverContractError,
     StableEntityId, StableEntityKind,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Statement};
 
 use super::{
     hex,
@@ -26,6 +26,9 @@ pub(super) fn materialize_records<I>(
 where
     I: Iterator<Item = Result<RelationalProjectionRecord>>,
 {
+    configure_bulk_materialization(conn)?;
+    let deferred_indexes = defer_secondary_indexes_for_full_load(conn, &expected, manifest)?;
+    let mut statements = MaterializationStatements::prepare(conn)?;
     let mut current: Option<OpenSource> = None;
     let mut received = BTreeSet::new();
     for record in records {
@@ -54,7 +57,7 @@ where
                     .validate_exact_descriptor(source.certificate.observation().source())
                     .map_err(contract_record_error)?;
                 validate_source_metadata(&metadata)?;
-                insert_source(conn, &metadata, source)?;
+                statements.insert_source(&metadata, source)?;
                 current = Some(OpenSource {
                     source_id,
                     source: metadata.source,
@@ -65,12 +68,12 @@ where
             RelationalProjectionRecord::Session(session) => {
                 let open = current_source(&current)?;
                 validate_session(&session, &open.source)?;
-                insert_session(conn, &open.source_id, &session)?;
+                statements.insert_session(&open.source_id, &session)?;
             }
             RelationalProjectionRecord::Event(event) => {
                 let open = current_source_mut(&mut current)?;
                 validate_event(&event, &open.source)?;
-                insert_event(conn, &open.source_id, &event)?;
+                statements.insert_event(&open.source_id, &event)?;
                 open.received_events = open.received_events.checked_add(1).ok_or(
                     RelationalProjectionError::CountOverflow("source event count"),
                 )?;
@@ -78,7 +81,7 @@ where
             RelationalProjectionRecord::FileTouch(file) => {
                 let open = current_source(&current)?;
                 validate_file_touch(&file, &open.source)?;
-                insert_file_touch(conn, &open.source_id, &file)?;
+                statements.insert_file_touch(&open.source_id, &file)?;
             }
             RelationalProjectionRecord::EndSource { source_id } => {
                 let open = current.take().ok_or_else(|| {
@@ -110,7 +113,77 @@ where
             received: received.into_iter().collect(),
         });
     }
+    drop(statements);
+    restore_secondary_indexes(conn, deferred_indexes)?;
     Ok(())
+}
+
+fn configure_bulk_materialization(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA cache_size = -65536;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+    Ok(())
+}
+
+fn defer_secondary_indexes_for_full_load(
+    conn: &Connection,
+    expected: &BTreeSet<String>,
+    manifest: &ValidatedManifest,
+) -> Result<Vec<String>> {
+    if expected.is_empty() || expected.len() != manifest.sources.len() {
+        return Ok(Vec::new());
+    }
+    let table_rows_exist: bool = conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM source_backed_sources
+            UNION ALL SELECT 1 FROM source_backed_sessions
+            UNION ALL SELECT 1 FROM source_backed_events
+            UNION ALL SELECT 1 FROM source_backed_files_touched
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_rows_exist {
+        return Ok(Vec::new());
+    }
+
+    let indexes = {
+        let mut statement = conn.prepare(
+            "SELECT name, sql
+             FROM sqlite_schema
+             WHERE type = 'index'
+               AND sql IS NOT NULL
+               AND tbl_name IN (
+                   'source_backed_sources',
+                   'source_backed_sessions',
+                   'source_backed_events',
+                   'source_backed_files_touched'
+               )
+             ORDER BY name",
+        )?;
+        let indexes = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        indexes
+    };
+    for (name, _) in &indexes {
+        conn.execute_batch(&format!("DROP INDEX {}", quoted_identifier(name)))?;
+    }
+    Ok(indexes.into_iter().map(|(_, sql)| sql).collect())
+}
+
+fn restore_secondary_indexes(conn: &Connection, indexes: Vec<String>) -> Result<()> {
+    for sql in indexes {
+        conn.execute_batch(&sql)?;
+    }
+    Ok(())
+}
+
+fn quoted_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 struct OpenSource {
@@ -134,15 +207,18 @@ pub(super) struct SourceProjectionSnapshot {
     session_ids: BTreeSet<String>,
 }
 
-fn insert_source(
-    conn: &Connection,
-    metadata: &RelationalSourceMetadata,
-    manifest: &ManifestSource,
-) -> Result<()> {
-    let certificate = &manifest.certificate;
-    let source = certificate.observation().source();
-    conn.execute(
-        "INSERT INTO source_backed_sources (
+struct MaterializationStatements<'conn> {
+    source: Statement<'conn>,
+    session: Statement<'conn>,
+    event: Statement<'conn>,
+    file_touch: Statement<'conn>,
+}
+
+impl<'conn> MaterializationStatements<'conn> {
+    fn prepare(conn: &'conn Connection) -> Result<Self> {
+        Ok(Self {
+            source: conn.prepare(
+                "INSERT INTO source_backed_sources (
             source_id, source_identity, source_descriptor_json, certificate_json,
             certificate_digest, provider, source_format, source_root, source_path, cwd,
             revision_kind, parser_revision, certified_bytes, content_digest_hex,
@@ -150,7 +226,63 @@ fn insert_source(
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
          )",
-        params![
+            )?,
+            session: conn.prepare(
+                "INSERT INTO source_backed_sessions (
+            ctx_session_id, session_identity, source_id, parent_ctx_session_id,
+            parent_session_identity, root_ctx_session_id, root_session_identity,
+            provider_session_id, external_agent_id, agent_type, role_hint, is_primary,
+            branch, workspace, cwd, source_path, status, fidelity, started_at_ms,
+            ended_at_ms
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18, ?19, ?20
+         )
+         ON CONFLICT(ctx_session_id) DO UPDATE SET
+            parent_ctx_session_id = excluded.parent_ctx_session_id,
+            parent_session_identity = excluded.parent_session_identity,
+            root_ctx_session_id = excluded.root_ctx_session_id,
+            root_session_identity = excluded.root_session_identity,
+            provider_session_id = excluded.provider_session_id,
+            external_agent_id = excluded.external_agent_id,
+            agent_type = excluded.agent_type,
+            role_hint = excluded.role_hint,
+            is_primary = excluded.is_primary,
+            branch = excluded.branch,
+            workspace = excluded.workspace,
+            cwd = excluded.cwd,
+            source_path = excluded.source_path,
+            status = excluded.status,
+            fidelity = excluded.fidelity,
+            started_at_ms = excluded.started_at_ms,
+            ended_at_ms = excluded.ended_at_ms
+         WHERE source_backed_sessions.session_identity = excluded.session_identity
+           AND source_backed_sessions.source_id = excluded.source_id",
+            )?,
+            event: conn.prepare(
+                "INSERT INTO source_backed_events (
+            ctx_event_id, event_identity, source_id, ctx_session_id, session_identity, event_seq,
+            event_type, role, occurred_at_ms, fidelity, native_locator_json, record_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )?,
+            file_touch: conn.prepare(
+                "INSERT INTO source_backed_files_touched (
+            ctx_file_touch_id, source_id, ctx_event_id, event_identity, ctx_session_id,
+            session_identity, path, old_path, change_kind, line_count_delta,
+            confidence, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?,
+        })
+    }
+
+    fn insert_source(
+        &mut self,
+        metadata: &RelationalSourceMetadata,
+        manifest: &ManifestSource,
+    ) -> Result<()> {
+        let certificate = &manifest.certificate;
+        let source = certificate.observation().source();
+        self.source.execute(params![
             source.identity().as_uuid().to_string(),
             source
                 .identity()
@@ -173,28 +305,16 @@ fn insert_source(
                 certificate.counts().indexed_documents,
                 "source indexed documents"
             )?,
-        ],
-    )?;
-    Ok(())
-}
+        ])?;
+        Ok(())
+    }
 
-fn insert_session(
-    conn: &Connection,
-    source_id: &str,
-    session: &RelationalSessionMetadata,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO source_backed_sessions (
-            ctx_session_id, session_identity, source_id, parent_ctx_session_id,
-            parent_session_identity, root_ctx_session_id, root_session_identity,
-            provider_session_id, external_agent_id, agent_type, role_hint, is_primary,
-            branch, workspace, cwd, source_path, status, fidelity, started_at_ms,
-            ended_at_ms
-         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18, ?19, ?20
-         )",
-        params![
+    fn insert_session(
+        &mut self,
+        source_id: &str,
+        session: &RelationalSessionMetadata,
+    ) -> Result<()> {
+        let changed = self.session.execute(params![
             session.session_id.as_uuid().to_string(),
             session
                 .session_id
@@ -228,18 +348,16 @@ fn insert_session(
             session.fidelity.as_str(),
             session.started_at_unix_ms,
             session.ended_at_unix_ms,
-        ],
-    )?;
-    Ok(())
-}
+        ])?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            invalid_record("session UUID collides with a different stable identity")
+        }
+    }
 
-fn insert_event(conn: &Connection, source_id: &str, event: &RelationalEventMetadata) -> Result<()> {
-    conn.execute(
-        "INSERT INTO source_backed_events (
-            ctx_event_id, event_identity, source_id, ctx_session_id, session_identity, event_seq,
-            event_type, role, occurred_at_ms, fidelity, native_locator_json, record_digest
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![
+    fn insert_event(&mut self, source_id: &str, event: &RelationalEventMetadata) -> Result<()> {
+        self.event.execute(params![
             event.event_id.as_uuid().to_string(),
             event
                 .event_id
@@ -260,23 +378,16 @@ fn insert_event(conn: &Connection, source_id: &str, event: &RelationalEventMetad
             event.fidelity.as_str(),
             serde_json::to_vec(&event.locator)?,
             event.locator.record_digest().as_slice(),
-        ],
-    )?;
-    Ok(())
-}
+        ])?;
+        Ok(())
+    }
 
-fn insert_file_touch(
-    conn: &Connection,
-    source_id: &str,
-    file: &RelationalFileTouchMetadata,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO source_backed_files_touched (
-            ctx_file_touch_id, source_id, ctx_event_id, event_identity, ctx_session_id,
-            session_identity, path, old_path, change_kind, line_count_delta,
-            confidence, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![
+    fn insert_file_touch(
+        &mut self,
+        source_id: &str,
+        file: &RelationalFileTouchMetadata,
+    ) -> Result<()> {
+        self.file_touch.execute(params![
             file.file_touch_id.to_string(),
             source_id,
             file.event_id.map(|id| id.as_uuid().to_string()),
@@ -298,9 +409,9 @@ fn insert_file_touch(
             file.confidence.as_str(),
             file.created_at_unix_ms,
             file.updated_at_unix_ms,
-        ],
-    )?;
-    Ok(())
+        ])?;
+        Ok(())
+    }
 }
 
 fn validate_source_metadata(metadata: &RelationalSourceMetadata) -> Result<()> {

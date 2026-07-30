@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::native_source::NativeLocator;
@@ -187,6 +187,121 @@ pub(super) enum NanoClawNativeUnit {
         ordinal: u64,
         reason: String,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum NanoClawPreparedUnit {
+    Session {
+        ordinal: u64,
+        session_rowid: i64,
+        session: NanoClawSessionRow,
+    },
+    Message {
+        ordinal: u64,
+        session_rowid: i64,
+        source: NanoClawMessageSource,
+        message_rowid: i64,
+        session: Box<NanoClawSessionRow>,
+        message: NanoClawPreparedMessageRow,
+    },
+    Rejection {
+        ordinal: u64,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct NanoClawPreparedMessageRow {
+    id: String,
+    seq: Option<i64>,
+    kind: Option<String>,
+    timestamp: Option<i64>,
+    status: Option<String>,
+    in_reply_to: Option<String>,
+    platform_id: Option<String>,
+    channel_type: Option<String>,
+    thread_id: Option<String>,
+    content: Option<String>,
+    trigger: Option<String>,
+    source_session_id: Option<String>,
+    on_wake: Option<i64>,
+}
+
+impl NanoClawPreparedUnit {
+    pub(super) fn from_native(unit: NanoClawNativeUnit) -> Self {
+        match unit {
+            NanoClawNativeUnit::Session {
+                ordinal,
+                session_rowid,
+                session,
+            } => Self::Session {
+                ordinal,
+                session_rowid,
+                session,
+            },
+            NanoClawNativeUnit::Message {
+                ordinal,
+                session_rowid,
+                source,
+                message_rowid,
+                session,
+                message,
+                ..
+            } => Self::Message {
+                ordinal,
+                session_rowid,
+                source,
+                message_rowid,
+                session: Box::new(session),
+                message: NanoClawPreparedMessageRow::from(*message),
+            },
+            NanoClawNativeUnit::Rejection { ordinal, reason } => {
+                Self::Rejection { ordinal, reason }
+            }
+        }
+    }
+}
+
+impl From<NanoClawMessageRow> for NanoClawPreparedMessageRow {
+    fn from(row: NanoClawMessageRow) -> Self {
+        Self {
+            id: row.id,
+            seq: row.seq,
+            kind: row.kind,
+            timestamp: row.timestamp,
+            status: row.status,
+            in_reply_to: row.in_reply_to,
+            platform_id: row.platform_id,
+            channel_type: row.channel_type,
+            thread_id: row.thread_id,
+            content: row.content,
+            trigger: row.trigger,
+            source_session_id: row.source_session_id,
+            on_wake: row.on_wake,
+        }
+    }
+}
+
+impl NanoClawPreparedMessageRow {
+    pub(super) fn into_native(self, source: NanoClawMessageSource) -> NanoClawMessageRow {
+        NanoClawMessageRow {
+            source: source.label(),
+            id: self.id,
+            seq: self.seq,
+            kind: self.kind,
+            timestamp: self.timestamp,
+            status: self.status,
+            in_reply_to: self.in_reply_to,
+            platform_id: self.platform_id,
+            channel_type: self.channel_type,
+            thread_id: self.thread_id,
+            content: self.content,
+            trigger: self.trigger,
+            source_session_id: self.source_session_id,
+            on_wake: self.on_wake,
+        }
+    }
 }
 
 #[derive(Debug)]

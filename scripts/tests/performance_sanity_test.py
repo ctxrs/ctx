@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small real-product refresh/query/show sanity for the nightly test tier."""
+"""Real-product refresh, resource, and top-provider nightly sanity."""
 
 from __future__ import annotations
 
@@ -18,10 +18,25 @@ import unittest
 EVENT_COUNT = 64
 QUERY = "nightly performance sentinel"
 APPEND_QUERY = f"{QUERY} tiny append"
+TOP_PROVIDER_QUERY = "ctxtopproviderperfsentinel"
 COMMAND_TIMEOUT_SECONDS = 30.0
 MAX_COMMAND_SECONDS = 15.0
 MAX_PEAK_RSS_BYTES = 512 * 1024 * 1024
 SAMPLE_COUNT = 3
+
+# Normal CI keeps the small provider/scheduler contracts. Nightly and release
+# add enough independent leaves to require multiple source workers while
+# keeping the generated corpus bounded to tens of MiB.
+TOP_PROVIDER_FILE_COUNT = 64
+TOP_PROVIDER_EVENTS_PER_FILE = 64
+TOP_PROVIDER_TEXT_BYTES = 1_536
+TOP_PROVIDER_COUNT = 3
+
+# Process CPU divided by wall time has a physical single-CPU ceiling of 1.0.
+# This speed-independent margin rejects serialization while tolerating ordinary
+# scheduler/accounting noise over the complete multi-second cold refresh.
+MIN_COLD_CPU_PER_WALL = 1.10
+FORCE_SINGLE_CPU_ENV = "CTX_PERFORMANCE_FORCE_SINGLE_CPU"
 
 
 def ctx_binary_argument() -> Path:
@@ -41,6 +56,49 @@ class CommandSample:
     packet: dict[str, object]
     elapsed_seconds: float
     peak_rss_bytes: int | None
+
+
+@dataclass(frozen=True)
+class RepresentativeCorpus:
+    codex_root: Path
+    claude_root: Path
+    cursor_root: Path
+    fixture_bytes: int
+
+    @property
+    def source_count(self) -> int:
+        return TOP_PROVIDER_COUNT * TOP_PROVIDER_FILE_COUNT
+
+    @property
+    def retained_records(self) -> int:
+        return (
+            TOP_PROVIDER_COUNT
+            * TOP_PROVIDER_FILE_COUNT
+            * TOP_PROVIDER_EVENTS_PER_FILE
+        )
+
+    @property
+    def ignored_records(self) -> int:
+        return TOP_PROVIDER_FILE_COUNT
+
+    @property
+    def complete_records(self) -> int:
+        return self.retained_records + self.ignored_records
+
+    def root(self, provider: str) -> Path:
+        return {
+            "codex": self.codex_root,
+            "claude": self.claude_root,
+            "cursor": self.cursor_root,
+        }[provider]
+
+
+@dataclass(frozen=True)
+class RefreshSample:
+    packet: dict[str, object]
+    elapsed_seconds: float
+    cpu_seconds: float
+    cpu_per_wall: float
 
 
 @dataclass(frozen=True)
@@ -146,6 +204,169 @@ def append_codex_event(session_path: Path) -> int:
     return len(body)
 
 
+def representative_timestamp(event_index: int) -> str:
+    instant = dt.datetime(
+        2026, 7, 30, 12, tzinfo=dt.timezone.utc
+    ) + dt.timedelta(milliseconds=event_index)
+    return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def representative_text(label: str) -> str:
+    prefix = f"{label} "
+    if len(prefix) >= TOP_PROVIDER_TEXT_BYTES:
+        raise ValueError("representative fixture label exceeds its fixed body size")
+    filler = "0123456789abcdef"
+    text = prefix + (
+        filler
+        * (
+            (TOP_PROVIDER_TEXT_BYTES - len(prefix) + len(filler) - 1)
+            // len(filler)
+        )
+    )[: TOP_PROVIDER_TEXT_BYTES - len(prefix)]
+    if len(text.encode("ascii")) != TOP_PROVIDER_TEXT_BYTES:
+        raise AssertionError("representative fixture text has the wrong byte count")
+    return text
+
+
+def write_json_lines(path: Path, records: list[object]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as output:
+        for record in records:
+            output.write(json_line(record).encode("utf-8"))
+    return path.stat().st_size
+
+
+def codex_session_id(file_index: int) -> str:
+    return f"019fb4a0-1111-7777-8888-{file_index:012x}"
+
+
+def codex_message(file_index: int, event_index: int) -> object:
+    assistant = event_index % 2 == 1
+    return {
+        "timestamp": representative_timestamp(event_index + 1),
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant" if assistant else "user",
+            "content": [
+                {
+                    "type": "output_text" if assistant else "input_text",
+                    "text": representative_text(
+                        f"{TOP_PROVIDER_QUERY} provider=codex"
+                        f" file={file_index:03d} event={event_index:03d}"
+                    ),
+                }
+            ],
+            **({"phase": "commentary"} if assistant else {}),
+        },
+    }
+
+
+def claude_message(file_index: int, event_index: int) -> object:
+    role = "assistant" if event_index % 2 == 1 else "user"
+    return {
+        "sessionId": f"claude-perf-{file_index:03d}",
+        "timestamp": representative_timestamp(event_index + 1),
+        "cwd": "/workspace/claude",
+        "version": "test",
+        "type": role,
+        "message": {
+            "role": role,
+            "content": [
+                {
+                    "type": "text",
+                    "text": representative_text(
+                        f"{TOP_PROVIDER_QUERY} provider=claude"
+                        f" file={file_index:03d} event={event_index:03d}"
+                    ),
+                }
+            ],
+        },
+        "uuid": f"claude-perf-{file_index:03d}-{event_index:03d}",
+    }
+
+
+def cursor_message(file_index: int, event_index: int) -> object:
+    role = "assistant" if event_index % 2 == 1 else "user"
+    return {
+        "timestamp": representative_timestamp(event_index + 1),
+        "role": role,
+        "message": {
+            "role": role,
+            "content": [
+                {
+                    "type": "text",
+                    "text": representative_text(
+                        f"{TOP_PROVIDER_QUERY} provider=cursor"
+                        f" file={file_index:03d} event={event_index:03d}"
+                    ),
+                }
+            ],
+        },
+    }
+
+
+def write_representative_corpus(home: Path) -> RepresentativeCorpus:
+    codex_root = home / ".codex" / "sessions"
+    claude_root = home / ".claude" / "projects"
+    cursor_root = home / ".cursor" / "projects"
+    fixture_bytes = 0
+    for file_index in range(TOP_PROVIDER_FILE_COUNT):
+        session_id = codex_session_id(file_index)
+        codex_records = [
+            {
+                "timestamp": representative_timestamp(0),
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "timestamp": representative_timestamp(0),
+                    "cwd": "/workspace/codex",
+                    "originator": "codex-cli",
+                    "cli_version": "1.0.0-test",
+                    "source": "cli",
+                    "model_provider": "openai",
+                },
+            }
+        ]
+        codex_records.extend(
+            codex_message(file_index, event_index)
+            for event_index in range(TOP_PROVIDER_EVENTS_PER_FILE)
+        )
+        fixture_bytes += write_json_lines(
+            codex_root / "2026" / "07" / "30" / f"{session_id}.jsonl",
+            codex_records,
+        )
+
+        fixture_bytes += write_json_lines(
+            claude_root
+            / "-workspace"
+            / f"claude-perf-{file_index:03d}.jsonl",
+            [
+                claude_message(file_index, event_index)
+                for event_index in range(TOP_PROVIDER_EVENTS_PER_FILE)
+            ],
+        )
+
+        cursor_session = f"cursor-perf-{file_index:03d}"
+        fixture_bytes += write_json_lines(
+            cursor_root
+            / "workspace"
+            / "agent-transcripts"
+            / cursor_session
+            / f"{cursor_session}.jsonl",
+            [
+                cursor_message(file_index, event_index)
+                for event_index in range(TOP_PROVIDER_EVENTS_PER_FILE)
+            ],
+        )
+    return RepresentativeCorpus(
+        codex_root=codex_root,
+        claude_root=claude_root,
+        cursor_root=cursor_root,
+        fixture_bytes=fixture_bytes,
+    )
+
+
 def isolated_env(root: Path, home: Path) -> dict[str, str]:
     temp_root = root / "tmp"
     temp_root.mkdir()
@@ -241,7 +462,9 @@ def refresh_snapshot(
         or job["status"] != "completed"
         or job["request_state"] != "published"
     ):
-        raise RuntimeError(f"refresh did not use the ready daemon product seam: {job!r}")
+        raise RuntimeError(
+            f"refresh did not use the ready daemon product seam: {job!r}"
+        )
     if (
         job["published_generation"] != generation_id
         or receipt["published_generation"] != generation_id
@@ -297,6 +520,34 @@ def linux_peak_rss_bytes(pid: int) -> int | None:
     return values.get("VmHWM", values.get("VmRSS"))
 
 
+def linux_process_cpu_seconds(pid: int) -> float:
+    stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+    fields = stat.rsplit(")", 1)[1].split()
+    clock_ticks = os.sysconf("SC_CLK_TCK")
+    return (int(fields[11]) + int(fields[12])) / clock_ticks
+
+
+def run_refresh_measured(
+    args: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    daemon_pid: int,
+) -> RefreshSample:
+    started = time.monotonic()
+    initial_cpu = linux_process_cpu_seconds(daemon_pid)
+    packet = run_json(args, env, cwd)
+    finished = time.monotonic()
+    final_cpu = linux_process_cpu_seconds(daemon_pid)
+    elapsed_seconds = finished - started
+    cpu_seconds = final_cpu - initial_cpu
+    return RefreshSample(
+        packet=packet,
+        elapsed_seconds=elapsed_seconds,
+        cpu_seconds=cpu_seconds,
+        cpu_per_wall=cpu_seconds / elapsed_seconds,
+    )
+
+
 def run_measured(
     args: list[str], env: dict[str, str], cwd: Path
 ) -> CommandSample:
@@ -342,7 +593,9 @@ def run_measured(
 
 
 def start_daemon(
-    root: Path, env: dict[str, str]
+    root: Path,
+    env: dict[str, str],
+    affinity: set[int] | None = None,
 ) -> tuple[subprocess.Popen[bytes], object, object]:
     stdout_file = (root / "daemon.stdout").open("w+b")
     stderr_file = (root / "daemon.stderr").open("w+b")
@@ -362,7 +615,10 @@ def start_daemon(
         env=env,
         stdout=stdout_file,
         stderr=stderr_file,
+        start_new_session=os.name == "posix",
     )
+    if affinity is not None:
+        os.sched_setaffinity(process.pid, affinity)
     deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
     last_status: object = None
     while time.monotonic() < deadline:
@@ -406,8 +662,13 @@ def start_daemon(
 
 
 def stop_daemon(
-    process: subprocess.Popen[bytes], stdout_file: object, stderr_file: object
+    process: subprocess.Popen[bytes],
+    stdout_file: object,
+    stderr_file: object,
+    root: Path,
+    env: dict[str, str],
 ) -> None:
+    daemon_pid = process.pid
     if process.poll() is None:
         process.terminate()
         try:
@@ -417,6 +678,19 @@ def stop_daemon(
             process.wait(timeout=5)
     stdout_file.close()
     stderr_file.close()
+    status = run_json(["daemon", "status", "--format=json"], env, root)
+    daemon = status.get("daemon", {})
+    if isinstance(daemon, dict) and daemon.get("running") is True:
+        raise RuntimeError(f"daemon {daemon_pid} remained live after teardown")
+    if os.name == "posix":
+        try:
+            os.killpg(daemon_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise RuntimeError(
+                f"daemon process group {daemon_pid} survived teardown"
+            )
 
 
 class SmallQueryShowPerformanceTest(unittest.TestCase):
@@ -586,7 +860,13 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                     for _ in range(SAMPLE_COUNT)
                 ]
             finally:
-                stop_daemon(daemon, daemon_stdout, daemon_stderr)
+                stop_daemon(
+                    daemon,
+                    daemon_stdout,
+                    daemon_stderr,
+                    root,
+                    env,
+                )
 
         shown_id = show_samples[-1].packet.get(
             "ctx_session_id", show_samples[-1].packet.get("id")
@@ -647,6 +927,230 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             f" search_max_seconds={search_max:.3f}"
             f" show_max_seconds={show_max:.3f}"
             f" peak_rss_bytes={rss_max}"
+        )
+
+
+@unittest.skipUnless(
+    sys.platform.startswith("linux")
+    and hasattr(os, "sched_getaffinity")
+    and Path("/proc/self/stat").is_file(),
+    "top-provider CPU overlap evidence requires Linux /proc and affinity",
+)
+class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
+    def assert_representative_refresh(
+        self,
+        search: dict[str, object],
+        root: Path,
+        env: dict[str, str],
+        corpus: RepresentativeCorpus,
+    ) -> RefreshSnapshot:
+        self.assertEqual(
+            search["freshness"],
+            {
+                "mode": "wait",
+                "source_count": TOP_PROVIDER_COUNT,
+                "status": "completed",
+            },
+        )
+        snapshot = refresh_snapshot(search, root, env)
+        status = run_json(["status", "--format=json"], env, root)
+        job = status["daemon"]["jobs"]["source_backed_refresh"]
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["request_state"], "published")
+        self.assertEqual(job["source_count"], TOP_PROVIDER_COUNT)
+        self.assertEqual(job["scanned_routes"], TOP_PROVIDER_COUNT)
+        self.assertEqual(job["unsupported_routes"], 0)
+        self.assertEqual(
+            job["progress"],
+            {
+                "completed_sources": TOP_PROVIDER_COUNT,
+                "phase": "published",
+                "total_sources": TOP_PROVIDER_COUNT,
+            },
+        )
+        self.assertTrue(job["generation_changed"])
+        self.assertEqual(job["certified_source_count"], corpus.source_count)
+        self.assertEqual(job["certified_source_bytes"], corpus.fixture_bytes)
+        expected_current = {
+            "current_certified_source_bytes": corpus.fixture_bytes,
+            "current_complete_records": corpus.complete_records,
+            "current_ignored_records": corpus.ignored_records,
+            "current_indexed_documents": corpus.retained_records,
+            "current_rejected_records": 0,
+            "current_retained_records": corpus.retained_records,
+            "current_source_count": corpus.source_count,
+            "current_sources_with_rejections": 0,
+            "removed_source_count": 0,
+        }
+        self.assertEqual(snapshot.current, expected_current)
+        self.assertEqual(snapshot.indexed_documents, corpus.retained_records)
+        self.assertEqual(status["indexed_events"], corpus.retained_records)
+        self.assertEqual(status["indexed_items"], corpus.retained_records)
+        self.assertEqual(status["indexed_sources"], corpus.source_count)
+        self.assertEqual(
+            status["lexical"]["indexed_documents"], corpus.retained_records
+        )
+        self.assertEqual(
+            status["lexical"]["certified_sources"], corpus.source_count
+        )
+        self.assertEqual(
+            status["lexical"]["certified_source_bytes"],
+            corpus.fixture_bytes,
+        )
+        self.assertEqual(
+            status["lexical"]["generation_id"], snapshot.generation_id
+        )
+        self.assertGreater(job["timings_us"]["scan_stage"], 0)
+        self.assertTrue(snapshot.segments)
+        return snapshot
+
+    def assert_complete_hydration(
+        self,
+        root: Path,
+        env: dict[str, str],
+        corpus: RepresentativeCorpus,
+    ) -> None:
+        source_formats = {
+            "codex": "codex_session_jsonl",
+            "claude": "claude_projects_jsonl_tree",
+            "cursor": "cursor_agent_transcript_jsonl_tree",
+        }
+        for provider in ("codex", "claude", "cursor"):
+            search = run_json(
+                [
+                    "search",
+                    TOP_PROVIDER_QUERY,
+                    "--provider",
+                    provider,
+                    "--refresh",
+                    "off",
+                    "--format=json",
+                    "--limit",
+                    "1",
+                ],
+                env,
+                root,
+            )
+            results = search.get("results")
+            self.assertIsInstance(results, list)
+            self.assertEqual(len(results), 1)
+            result = results[0]
+            self.assertEqual(result["provider"], provider)
+            self.assertEqual(result["source_format"], source_formats[provider])
+            self.assertTrue(
+                Path(result["source_path"])
+                .resolve()
+                .is_relative_to(corpus.root(provider).resolve())
+            )
+            show = run_json(
+                [
+                    "show",
+                    "event",
+                    result["ctx_event_id"],
+                    "--content",
+                    "complete",
+                    "--format=json",
+                ],
+                env,
+                root,
+            )
+            self.assertEqual(show["payload_type"], "event_window")
+            self.assertEqual(show["content_policy"], "complete")
+            event = show["event"]
+            self.assertEqual(event["provider"], provider)
+            self.assertEqual(event["ctx_event_id"], result["ctx_event_id"])
+            self.assertEqual(
+                len(event["text"].encode("ascii")),
+                TOP_PROVIDER_TEXT_BYTES,
+            )
+            self.assertIn(TOP_PROVIDER_QUERY, event["text"])
+            self.assertIn(f"provider={provider}", event["text"])
+            self.assertEqual(
+                event["content"],
+                {
+                    "complete": True,
+                    "complete_content_available": True,
+                    "origin": "provider_source",
+                    "requested": "complete",
+                    "source_verified": True,
+                    "stored_truncated": False,
+                },
+            )
+
+    def test_representative_top_provider_cold_refresh_overlaps_work(self) -> None:
+        available_cpus = set(os.sched_getaffinity(0))
+        self.assertGreaterEqual(
+            len(available_cpus),
+            2,
+            "nightly parallelism gate requires at least two available CPUs",
+        )
+        forced_single_cpu = os.environ.get(FORCE_SINGLE_CPU_ENV) == "1"
+        daemon_affinity = (
+            {min(available_cpus)} if forced_single_cpu else None
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix="ctx-top-provider-performance-"
+        ) as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir()
+            corpus = write_representative_corpus(home)
+            self.assertGreaterEqual(corpus.fixture_bytes, 20 * 1024 * 1024)
+            self.assertLessEqual(corpus.fixture_bytes, 64 * 1024 * 1024)
+            env = isolated_env(root, home)
+            run_checked(
+                ["setup", "--catalog-only", "--no-daemon", "--progress", "none"],
+                env,
+                root,
+            )
+            daemon, daemon_stdout, daemon_stderr = start_daemon(
+                root, env, daemon_affinity
+            )
+            try:
+                cold = run_refresh_measured(
+                    [
+                        "search",
+                        TOP_PROVIDER_QUERY,
+                        "--refresh",
+                        "wait",
+                        "--format=json",
+                        "--limit",
+                        "3",
+                    ],
+                    env,
+                    root,
+                    daemon.pid,
+                )
+                snapshot = self.assert_representative_refresh(
+                    cold.packet, root, env, corpus
+                )
+                self.assert_complete_hydration(root, env, corpus)
+            finally:
+                stop_daemon(
+                    daemon,
+                    daemon_stdout,
+                    daemon_stderr,
+                    root,
+                    env,
+                )
+
+        self.assertGreaterEqual(
+            cold.cpu_per_wall,
+            MIN_COLD_CPU_PER_WALL,
+            "cold refresh did not use more than one CPU; "
+            f"set {FORCE_SINGLE_CPU_ENV}=1 to exercise the serialization control",
+        )
+        print(
+            "top-provider performance:"
+            f" fixture_files={corpus.source_count}"
+            f" fixture_events={corpus.retained_records}"
+            f" fixture_bytes={corpus.fixture_bytes}"
+            f" generation={snapshot.generation_id}"
+            f" refresh_seconds={cold.elapsed_seconds:.3f}"
+            f" daemon_cpu_seconds={cold.cpu_seconds:.3f}"
+            f" cpu_per_wall={cold.cpu_per_wall:.3f}"
+            f" forced_single_cpu={forced_single_cpu}"
         )
 
 

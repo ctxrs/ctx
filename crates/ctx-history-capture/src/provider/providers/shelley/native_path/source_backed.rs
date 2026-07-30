@@ -32,6 +32,8 @@ use crate::{
     SHELLEY_SQLITE_SOURCE_FORMAT,
 };
 
+#[cfg(test)]
+use super::scanner::{record_shelley_buffered_results, record_shelley_page_emission};
 use super::{
     super::{
         normalization::{shelley_output_classification, shelley_timestamp},
@@ -46,9 +48,11 @@ use super::{
         },
         SHELLEY_CAPTURE_REVISION, SHELLEY_POLICY_REVISION,
     },
-    scanner::next_message_unit,
+    scanner::next_message_units,
     ShelleyMessage, ShelleyUnit, SHELLEY_PAGE_MAX_BYTES, SHELLEY_PAGE_MAX_UNITS,
 };
+
+mod hydration;
 
 const SHELLEY_SOURCE_ANCHOR_NAMESPACE: &str = "shelley.exact-cwd-slot";
 const SHELLEY_SOURCE_ANCHOR_KEY: &str = "shelley.db";
@@ -162,79 +166,12 @@ impl ShelleySourceBackedAdapter {
             has_message_sequence_id,
             context,
             after_rowid: None,
+            pending_units: VecDeque::new(),
             source_exhausted: false,
             content_digest,
             counts: ScannedSourceCounts::default(),
             session_lineages: HashMap::new(),
-            validated_pages: VecDeque::new(),
             receipt: None,
-        })
-    }
-
-    /// Reopens and verifies one exact compound message/conversation row.
-    pub(crate) fn hydrate(
-        &self,
-        locator: &SourceRecordLocator,
-    ) -> ShelleySourceBackedResult<ShelleyHydratedMessage> {
-        locator.validate_contract()?;
-        if !self.source.exact_descriptor_eq(locator.source())
-            || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        {
-            return Err(ShelleySourceBackedError::InvalidLocator);
-        }
-        let (parent_bearing, message_rowid, conversation_rowid) = decode_compound_locator(locator)?;
-
-        let (source_root, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.data_root, &self.database_path)?;
-        let evidence = sqlite_snapshot.evidence().clone();
-        let conn = sqlite_snapshot.connection()?;
-        let conversation_columns = shelley_conversation_columns(conn)?;
-        let message_columns = shelley_message_columns(conn)?;
-        let has_message_sequence_id = message_columns.contains("sequence_id");
-        shelley_require_message_index(conn, has_message_sequence_id)?;
-        let conversation_select =
-            shelley_conversation_select_expressions(&conversation_columns, "c");
-        let message_select = shelley_message_select_expressions(&message_columns, "m");
-        let after = message_rowid.checked_sub(1);
-        let Some((unit, _)) = next_message_unit(
-            conn,
-            &message_select,
-            &conversation_select,
-            has_message_sequence_id,
-            after,
-            Some(message_rowid),
-        )?
-        else {
-            return Err(ShelleySourceBackedError::MissingRecord);
-        };
-        let ShelleyUnit::Accepted { rowid, value, .. } = unit else {
-            return Err(ShelleySourceBackedError::MissingRecord);
-        };
-        if rowid != message_rowid
-            || value.conversation.rowid != conversation_rowid
-            || value.parent_bearing != parent_bearing
-        {
-            return Err(ShelleySourceBackedError::MissingRecord);
-        }
-        let values = shelley_verified_record_values(
-            &value.message,
-            &value.conversation,
-            value.parent_bearing,
-        );
-        let digest = shelley_logical_record_digest(&values);
-        if &digest != locator.record_digest() {
-            return Err(ShelleySourceBackedError::StaleRecordEvidence);
-        }
-        let closing_evidence = sqlite_snapshot.finish()?;
-        if closing_evidence != evidence {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        source_root.revalidate()?;
-        let text = shelley_message_complete_text(&value.message)
-            .unwrap_or_else(|| format!("Shelley {} message", value.message.entry_type));
-        Ok(ShelleyHydratedMessage {
-            text,
-            native_record_digest: digest,
         })
     }
 }
@@ -292,35 +229,51 @@ pub(crate) struct ShelleySourceBackedScan {
     has_message_sequence_id: bool,
     context: ProviderAdapterContext,
     after_rowid: Option<i64>,
+    pending_units: VecDeque<(ShelleyUnit<ShelleyMessage>, [u8; 32])>,
     source_exhausted: bool,
     content_digest: Sha256,
     counts: ScannedSourceCounts,
     session_lineages: HashMap<String, ShelleyDocumentLineage>,
-    validated_pages: VecDeque<ShelleySourceBackedPage>,
     receipt: Option<ShelleySourceBackedReceipt>,
 }
 
 impl ShelleySourceBackedScan {
     /// Returns at most 64 native records with each retained record's full
-    /// lexical body after the complete source read has finished and passed
-    /// terminal revalidation.
+    /// lexical body. Pages are forwarded immediately into the rollback-capable
+    /// replacement staging generation; the source certificate remains
+    /// unavailable until the complete scan passes terminal revalidation.
     pub(crate) fn next_page(
         &mut self,
     ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedPage>> {
-        if let Some(page) = self.validated_pages.pop_front() {
-            return Ok(Some(page));
-        }
         if self.receipt.is_some() {
             return Ok(None);
         }
-        while let Some(page) = self.next_unvalidated_page()? {
-            self.validated_pages.push_back(page);
+        if let Some(page) = self.next_projected_page()? {
+            self.sqlite_snapshot
+                .as_ref()
+                .ok_or(ShelleySourceBackedError::ScanIncomplete)?
+                .revalidate()?;
+            #[cfg(test)]
+            {
+                let pending_bytes = self
+                    .pending_units
+                    .iter()
+                    .map(|(unit, _)| unit.retained_bytes())
+                    .fold(0_usize, usize::saturating_add);
+                record_shelley_page_emission(
+                    usize::try_from(page.counts.complete_records)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(self.pending_units.len()),
+                    page.retained_bytes.saturating_add(pending_bytes),
+                );
+            }
+            return Ok(Some(page));
         }
         self.finalize()?;
-        Ok(self.validated_pages.pop_front())
+        Ok(None)
     }
 
-    fn next_unvalidated_page(
+    fn next_projected_page(
         &mut self,
     ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedPage>> {
         if self.source_exhausted {
@@ -334,25 +287,47 @@ impl ShelleySourceBackedScan {
             retained_bytes: 0,
         };
         while page.counts.complete_records < SHELLEY_PAGE_MAX_UNITS as u64 {
-            let Some((unit, scanner_digest)) = next_message_unit(
-                self.connection()?,
-                &self.message_select,
-                &self.conversation_select,
-                self.has_message_sequence_id,
-                self.after_rowid,
-                None,
-            )?
-            else {
-                self.source_exhausted = true;
-                break;
-            };
+            if self.pending_units.is_empty() {
+                let units = next_message_units(
+                    self.connection()?,
+                    &self.message_select,
+                    &self.conversation_select,
+                    self.has_message_sequence_id,
+                    self.after_rowid,
+                    None,
+                )?;
+                #[cfg(test)]
+                {
+                    record_shelley_buffered_results(
+                        usize::try_from(page.counts.complete_records)
+                            .unwrap_or(usize::MAX)
+                            .saturating_add(units.len()),
+                        page.retained_bytes.saturating_add(
+                            units
+                                .iter()
+                                .map(|(unit, _)| unit.retained_bytes())
+                                .fold(0_usize, usize::saturating_add),
+                        ),
+                    );
+                }
+                let Some(last_rowid) = units.last().map(|(unit, _)| unit.rowid()) else {
+                    self.source_exhausted = true;
+                    break;
+                };
+                self.after_rowid = Some(last_rowid);
+                self.pending_units.extend(units);
+            }
+            let (unit, scanner_digest) = self
+                .pending_units
+                .pop_front()
+                .ok_or(ShelleySourceBackedError::ScanIncomplete)?;
             let unit_bytes = unit.retained_bytes();
             if page.counts.complete_records != 0
                 && page.retained_bytes.saturating_add(unit_bytes) > SHELLEY_PAGE_MAX_BYTES
             {
+                self.pending_units.push_front((unit, scanner_digest));
                 break;
             }
-            self.after_rowid = Some(unit.rowid());
             page.retained_bytes = page.retained_bytes.saturating_add(unit_bytes);
             checked_add_count(&mut page.counts.complete_records, 1)?;
             checked_add_count(
@@ -430,9 +405,6 @@ impl ShelleySourceBackedScan {
     }
 
     pub(crate) fn finish(self) -> ShelleySourceBackedResult<ShelleySourceBackedReceipt> {
-        if !self.validated_pages.is_empty() {
-            return Err(ShelleySourceBackedError::ScanIncomplete);
-        }
         self.receipt.ok_or(ShelleySourceBackedError::ScanIncomplete)
     }
 
@@ -638,6 +610,7 @@ pub(crate) struct ShelleySourceBackedReceipt {
 pub(crate) struct ShelleyHydratedMessage {
     pub(crate) text: String,
     pub(crate) native_record_digest: [u8; 32],
+    pub(crate) event_id: StableEntityId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -669,6 +642,29 @@ fn shelley_session_identity(
         source,
         logical_session_kind: SHELLEY_LOGICAL_SESSION_KIND,
         native_session_key: &native_session_key,
+    })
+    .map_err(Into::into)
+}
+
+fn shelley_event_identity(
+    source: &SourceKey,
+    message: &super::super::relationships::ShelleyMessageRow,
+) -> ShelleySourceBackedResult<StableEntityId> {
+    let session_id = shelley_session_identity(source, &message.conversation_id)?;
+    let native_item_key = NativeItemKey::composite(
+        SHELLEY_NATIVE_MESSAGE_NAMESPACE,
+        vec![
+            TypedKey::utf8(message.conversation_id.clone())?,
+            TypedKey::I64(message.sequence_id),
+            TypedKey::utf8(message.message_id.clone())?,
+        ],
+    )?;
+    derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: SHELLEY_LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
     })
     .map_err(Into::into)
 }
@@ -745,21 +741,7 @@ fn build_document(
         return Ok(None);
     }
     let role = shelley_event_role(&value.message.entry_type);
-    let native_item_key = NativeItemKey::composite(
-        SHELLEY_NATIVE_MESSAGE_NAMESPACE,
-        vec![
-            TypedKey::utf8(value.message.conversation_id.clone())?,
-            TypedKey::I64(value.message.sequence_id),
-            TypedKey::utf8(value.message.message_id.clone())?,
-        ],
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source,
-        session_id: lineage.session_id,
-        logical_item_kind: SHELLEY_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
+    let event_id = shelley_event_identity(source, &value.message)?;
     let primary_key = TypedKey::composite(vec![
         TypedKey::Bool(value.parent_bearing),
         TypedKey::I64(value.message.rowid),

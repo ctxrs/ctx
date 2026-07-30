@@ -10,7 +10,7 @@ use tantivy::{
     collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
     schema::Value as TantivyValue,
 };
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
 
 use super::*;
 
@@ -263,6 +263,57 @@ fn publish_unchecked_generation(
     prepared.commit().unwrap();
     writer.wait_merging_threads().unwrap();
     sync_directory(root).unwrap();
+}
+
+fn open_unverified_generation(root: &Path) -> (Searcher, GenerationManifest) {
+    let directory = DurableMmapDirectory::open(root).unwrap();
+    let index = Index::open(directory).unwrap();
+    let metas = index.load_metas().unwrap();
+    let manifest = load_manifest_for_metas(root, &metas).unwrap();
+    let reader = index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()
+        .unwrap();
+    (reader.searcher(), manifest)
+}
+
+fn multisegment_fixture(
+    source_count: usize,
+    documents_per_source: u64,
+) -> (TempDir, Vec<SourceKey>) {
+    assert!(source_count < LEXICAL_SEGMENT_MERGE_FAN_IN);
+    let temp = tempdir().unwrap();
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
+    };
+    let mut sources = Vec::with_capacity(source_count);
+    for source_index in 0..source_count {
+        let current = source(&format!("verification-{source_index}.jsonl"));
+        let mut writer = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+        writer.begin_source(current.clone()).unwrap();
+        for sequence in 1..=documents_per_source {
+            writer
+                .add_document(document_for_session(
+                    &current,
+                    &format!("session-{source_index}"),
+                    sequence,
+                    "representative verifier fixture",
+                ))
+                .unwrap();
+        }
+        writer
+            .certify_source(certificate(
+                &current,
+                (source_index + 1) as u8,
+                documents_per_source,
+            ))
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+        sources.push(current);
+    }
+    (temp, sources)
 }
 
 mod query;

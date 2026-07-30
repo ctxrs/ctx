@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use ctx_history_core::{
     BatchHydrationRequest, BatchHydrationResult, HydratedProviderRecord, HydrationFailure,
     HydrationFailureKind,
@@ -13,6 +11,7 @@ use crate::provider::source_backed::{
     },
     route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
 };
+use crate::provider_sources::SqliteSourceAccessError;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraeReplacementTree {
@@ -32,7 +31,8 @@ impl TraeReplacementTree {
 pub(crate) struct TraeTreeAuthority {
     canonical_path: PathBuf,
     source: TraeSourceAuthority,
-    fence: Mutex<Option<TraeSourceTerminalFence>>,
+    terminal_revalidate:
+        Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
 }
 
 impl ReplacementDocumentTree for TraeReplacementTree {
@@ -63,18 +63,18 @@ impl ReplacementDocumentTree for TraeReplacementTree {
         )
         .map_err(route_error)?;
         let source = source_key(&authority).map_err(route_error)?;
-        let fingerprint = DocumentLeafFingerprint::new(*authority.database.evidence().revision());
+        let fingerprint = DocumentLeafFingerprint::new(authority.logical_fingerprint);
+        let terminal_revalidate = authority
+            .database
+            .terminal_revalidator()
+            .map_err(route_error)?;
         Ok(CompleteDocumentTree::new(
             fingerprint.as_bytes(),
-            vec![ObservedDocumentLeaf::with_durable_replay(
-                fingerprint,
-                source,
-                false,
-            )],
+            vec![ObservedDocumentLeaf::new(fingerprint, source)],
             TraeTreeAuthority {
                 canonical_path,
                 source: authority,
-                fence: Mutex::new(None),
+                terminal_revalidate,
             },
         ))
     }
@@ -124,11 +124,6 @@ impl ReplacementDocumentTree for TraeReplacementTree {
                 "Trae source changed between physical discovery and logical scan",
             ));
         }
-        *authority
-            .fence
-            .lock()
-            .map_err(|_| trae_internal("Trae terminal fence lock was poisoned"))? =
-            Some(scan.terminal_fence);
         Ok(document_terminal(scan.source))
     }
 
@@ -136,25 +131,13 @@ impl ReplacementDocumentTree for TraeReplacementTree {
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
-        let fence = tree
-            .authority
-            .fence
-            .lock()
-            .map_err(|_| trae_internal("Trae terminal fence lock was poisoned"))?
-            .clone()
-            .ok_or_else(|| trae_changed("Trae scan has no terminal fence"))?;
-        let current = acquire_source(
-            &self.data_root,
-            &tree.authority.canonical_path,
-            DateTime::<Utc>::UNIX_EPOCH,
-        )
-        .map_err(route_error)?;
-        current.database.revalidate().map_err(route_error)?;
-        if current.database.evidence() == &fence.evidence {
-            Ok(tree.tree_fingerprint)
-        } else {
-            Err(trae_changed("Trae physical source changed before commit"))
-        }
+        tree.authority
+            .source
+            .database
+            .seal_if_active(&tree.authority.canonical_path)
+            .map_err(route_error)?;
+        (tree.authority.terminal_revalidate)().map_err(route_error)?;
+        Ok(tree.tree_fingerprint)
     }
 
     fn hydrate_group(

@@ -23,8 +23,8 @@ use crate::{
             source::{visit_mux_session_sources, MuxSessionSource},
         },
         source_backed::family::jsonl::{
-            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
+            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
         },
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
@@ -102,6 +102,10 @@ impl JsonlFamilyAdapter for MuxJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {

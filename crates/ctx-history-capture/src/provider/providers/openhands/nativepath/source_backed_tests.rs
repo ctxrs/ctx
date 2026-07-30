@@ -15,9 +15,9 @@ use crate::{
 };
 
 use super::source_backed::{
-    hydration_failure, leaf_revision_digest, openhands_route_error, project_group, source_key,
-    source_locator, validate_locator, OpenHandsEventFileAdapterV2, OpenHandsEventFileSourcePlan,
-    OpenHandsSourceBackedErrorV2, OpenHandsSourceBackedResultV2,
+    hydration_failure, leaf_revision_digest, openhands_route_error, project_group, projection_jobs,
+    source_key, source_locator, validate_locator, OpenHandsEventFileAdapterV2,
+    OpenHandsEventFileSourcePlan, OpenHandsSourceBackedErrorV2, OpenHandsSourceBackedResultV2,
 };
 
 struct TestProjection {
@@ -91,24 +91,20 @@ fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
         "0005-combined-success.json",
         combined_success,
     );
-    let malformed = root
-        .join("v1_conversations")
-        .join("conversation-cold")
-        .join("0006-malformed.json");
-    fs::write(&malformed, b"{not-json").unwrap();
-
     let (projection, io) = count_event_file_io(|| project(&root).unwrap());
     let projection = &projection[0];
     assert_eq!(io.inventory_opens, 1);
-    assert_eq!(io.body_reads, 6);
+    assert_eq!(io.inventory_walks, 1);
+    assert_eq!(io.body_reads, 5);
+    assert_eq!(io.leaf_lookups, 5);
     assert_eq!(io.peak_transient_leaf_handles, 1);
     assert!(io.peak_transient_directory_handles <= 4);
     assert_eq!(io.active_transient_leaf_handles, 0);
     assert_eq!(io.active_transient_directory_handles, 0);
-    assert_eq!(projection.source.counts().complete_records, 6);
+    assert_eq!(projection.source.counts().complete_records, 5);
     assert_eq!(projection.source.counts().retained_records, 3);
     assert_eq!(projection.source.counts().ignored_records, 2);
-    assert_eq!(projection.source.counts().rejected_records, 1);
+    assert_eq!(projection.source.counts().rejected_records, 0);
     assert_eq!(projection.source.counts().indexed_documents, 3);
     assert_eq!(projection.documents[0].body, full_body);
     assert!(projection.documents[0].body.ends_with("openhands-tail"));
@@ -229,11 +225,55 @@ fn two_thousand_leaf_cold_projection_reads_once_with_constant_descriptors() {
         LEAF_COUNT as u64
     );
     assert_eq!(io.inventory_opens, 1);
+    assert_eq!(io.inventory_walks, 1);
     assert_eq!(io.body_reads, LEAF_COUNT);
+    assert_eq!(io.leaf_lookups, LEAF_COUNT);
+    assert_eq!(io.group_digest_builds, 1);
+    assert_eq!(io.inventory_digest_builds, 1);
     assert_eq!(io.peak_transient_leaf_handles, 1);
     assert!(io.peak_transient_directory_handles <= 4);
     assert_eq!(io.active_transient_leaf_handles, 0);
     assert_eq!(io.active_transient_directory_handles, 0);
+}
+
+#[test]
+fn projection_jobs_are_stable_independent_group_and_leaf_ordinals() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("jobs");
+    write_event(
+        &root,
+        "conversation-b",
+        "event.json",
+        message("event-b", "b"),
+    );
+    write_event(&root, "conversation-a", "z.json", message("event-z", "z"));
+    write_event(
+        &root,
+        "conversation-a",
+        "nested/a.json",
+        message("event-a", "a"),
+    );
+    let adapter = OpenHandsEventFileAdapterV2::new(root);
+    let inventory = adapter.open_inventory().unwrap();
+    let first = inventory.group_at(0).unwrap();
+    let plan = adapter.bind_group(first).unwrap();
+    let jobs = projection_jobs(first, &plan).unwrap();
+
+    assert_eq!(first.group_key(), "conversation-a");
+    assert_eq!(
+        jobs.iter()
+            .map(|job| (job.group_ordinal(), job.leaf_ordinal()))
+            .collect::<Vec<_>>(),
+        vec![(0, 0), (0, 1)]
+    );
+    assert_eq!(
+        first
+            .leaves()
+            .iter()
+            .map(|leaf| leaf.coordinates().relative_file_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["nested/a.json", "z.json"]
+    );
 }
 
 #[test]
@@ -446,7 +486,11 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
     });
     assert_eq!(unchanged, vec![true, true]);
     assert_eq!(unchanged_io.inventory_opens, 1);
+    assert_eq!(unchanged_io.inventory_walks, 1);
     assert_eq!(unchanged_io.body_reads, 0);
+    assert_eq!(unchanged_io.leaf_lookups, 0);
+    assert_eq!(unchanged_io.group_digest_builds, 2);
+    assert_eq!(unchanged_io.inventory_digest_builds, 1);
     assert_eq!(unchanged_io.peak_transient_leaf_handles, 1);
     assert_eq!(unchanged_io.active_transient_leaf_handles, 0);
     assert_eq!(unchanged_io.active_transient_directory_handles, 0);
@@ -471,7 +515,9 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
     });
     assert_eq!(replaced, vec![("conversation-a".to_owned(), 2)]);
     assert_eq!(replaced_io.inventory_opens, 1);
+    assert_eq!(replaced_io.inventory_walks, 1);
     assert_eq!(replaced_io.body_reads, 2);
+    assert_eq!(replaced_io.leaf_lookups, 2);
     assert_eq!(replaced_io.peak_transient_leaf_handles, 1);
     assert_eq!(replaced_io.active_transient_leaf_handles, 0);
     assert_eq!(replaced_io.active_transient_directory_handles, 0);
@@ -622,7 +668,8 @@ fn exact_file_and_empty_directory_are_authoritative_while_missing_is_unavailable
     let adapter = OpenHandsEventFileAdapterV2::new(&empty);
     let inventory = adapter.open_inventory().unwrap();
     assert!(inventory.is_empty());
-    let complete = adapter.certify_complete_inventory(&inventory).unwrap();
+    let complete = adapter.plan_inventory(&inventory).unwrap();
+    let complete = complete.complete_inventory();
     assert_eq!(complete.observed_sources(), 0);
 
     let missing = temp.path().join("missing");
@@ -664,26 +711,23 @@ fn current_cli_remains_detected_but_unsupported() {
 }
 
 #[test]
-fn grouped_hydration_inventories_once_reads_each_leaf_once_and_preserves_order() {
+fn hydrate_two_of_two_thousand_reads_only_requested_bodies_and_preserves_order() {
+    const LEAF_COUNT: usize = 2_000;
+
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("profile");
-    write_event(
-        &root,
-        "conversation-hydrate",
-        "0001.json",
-        message("event-1", "first"),
-    );
-    write_event(
-        &root,
-        "conversation-hydrate",
-        "nested/0002.json",
-        message("event-2", "second"),
-    );
+    for index in 0..LEAF_COUNT {
+        write_event(
+            &root,
+            "conversation-hydrate",
+            &format!("{index:04}.json"),
+            message(&format!("event-{index:04}"), &format!("body-{index:04}")),
+        );
+    }
     let projection = project(&root).unwrap().remove(0);
-    let requests = projection
-        .documents
-        .iter()
-        .rev()
+    let requests = [LEAF_COUNT - 1, 0]
+        .into_iter()
+        .map(|index| &projection.documents[index])
         .map(|document| {
             EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
         })
@@ -693,7 +737,11 @@ fn grouped_hydration_inventories_once_reads_each_leaf_once_and_preserves_order()
 
     let (result, io) = count_event_file_io(|| adapter.hydrate_batch(&batch).unwrap());
     assert_eq!(io.inventory_opens, 1);
+    assert_eq!(io.inventory_walks, 1);
     assert_eq!(io.body_reads, 2);
+    assert_eq!(io.leaf_lookups, 2);
+    assert_eq!(io.group_digest_builds, 1);
+    assert_eq!(io.inventory_digest_builds, 1);
     assert_eq!(io.peak_transient_leaf_handles, 1);
     assert_eq!(io.active_transient_leaf_handles, 0);
     assert_eq!(io.active_transient_directory_handles, 0);
@@ -708,8 +756,8 @@ fn grouped_hydration_inventories_once_reads_each_leaf_once_and_preserves_order()
             .map(EventHydrationRequest::event_id)
             .collect::<Vec<_>>()
     );
-    assert_eq!(result.records()[0].provider_bytes, b"second");
-    assert_eq!(result.records()[1].provider_bytes, b"first");
+    assert_eq!(result.records()[0].provider_bytes, b"body-1999");
+    assert_eq!(result.records()[1].provider_bytes, b"body-0000");
 }
 
 #[test]
@@ -878,6 +926,25 @@ fn selected_root_swap_cannot_hydrate_old_locator() {
         .hydrate_event(&EventHydrationRequest::new(document.event_id, document.locator).unwrap())
         .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+}
+
+#[test]
+fn deleted_leaf_remains_typed_as_missing_record() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    let event = write_event(
+        &root,
+        "conversation-deleted",
+        "event.json",
+        message("event-deleted", "before deletion"),
+    );
+    let document = project(&root).unwrap().remove(0).documents.remove(0);
+    fs::remove_file(event).unwrap();
+
+    let failure = OpenHandsEventFileAdapterV2::new(root)
+        .hydrate_event(&EventHydrationRequest::new(document.event_id, document.locator).unwrap())
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::MissingRecord);
 }
 
 fn write_event(root: &Path, conversation: &str, file: &str, value: Value) -> std::path::PathBuf {

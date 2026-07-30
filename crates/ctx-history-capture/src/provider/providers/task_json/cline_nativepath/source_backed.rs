@@ -26,9 +26,11 @@ use thiserror::Error;
 
 use crate::{
     provider::source_backed::{
+        document_leaf_execution_policy,
         family::document::{
-            ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
-            DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+            ChangedDocumentSink, CompleteDocumentTree, DocumentLeafExecutionPolicy,
+            DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
+            ReplacementDocumentTree,
         },
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
@@ -50,6 +52,9 @@ use super::{
 mod support;
 
 use support::*;
+
+#[cfg(test)]
+use super::source_backed_tests::TaskJsonScanActivity;
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
 const SOURCE_SCHEMA_VARIANT: &str = "task-directory-v1";
@@ -115,7 +120,7 @@ pub(crate) struct TaskJsonSourceBackedResolver {
     dialect: TaskJsonNativeDialect,
     selected: Box<[ProviderSource]>,
     #[cfg(test)]
-    hydration_scans: Option<Arc<AtomicUsize>>,
+    fixture_operations: Option<Arc<TaskJsonFixtureOperations>>,
 }
 
 pub(crate) struct TaskJsonDocumentTreeAdapter {
@@ -123,9 +128,83 @@ pub(crate) struct TaskJsonDocumentTreeAdapter {
     selected: Box<[ProviderSource]>,
     resolver: TaskJsonSourceBackedResolver,
     #[cfg(test)]
-    projection_scans: Option<Arc<AtomicUsize>>,
+    fixture_operations: Option<Arc<TaskJsonFixtureOperations>>,
     #[cfg(test)]
     terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    leaf_workers: Option<usize>,
+    #[cfg(test)]
+    scan_activity: Option<Arc<TaskJsonScanActivity>>,
+}
+
+/// Immutable task identity carried with one independently scannable leaf.
+///
+/// The shared bounded runner may pass this leaf between workers because its
+/// exact source descriptor and retained task observation were both certified
+/// during content-free discovery.
+#[derive(Debug, Clone)]
+pub(crate) struct TaskJsonDocumentLeaf {
+    ordinal: usize,
+    source: SourceKey,
+    task: ClineLiveTaskObservation,
+}
+
+#[derive(Debug)]
+pub(crate) struct TaskJsonTreeAuthority {
+    discovery: ClineDiscovery,
+}
+
+impl TaskJsonTreeAuthority {
+    fn retained_task<'authority>(
+        &'authority self,
+        dialect: TaskJsonNativeDialect,
+        leaf: &TaskJsonDocumentLeaf,
+    ) -> SourceBackedRouteResult<&'authority ClineLiveTaskObservation> {
+        let current = self
+            .discovery
+            .task_routes()
+            .get(leaf.ordinal)
+            .ok_or_else(|| {
+                source_changed("task leaf disappeared from its retained root authority")
+            })?;
+        let current_source = task_source_key(dialect, current).map_err(task_route_error)?;
+        if !current_source.exact_descriptor_eq(&leaf.source)
+            || current.canonical_task_path != leaf.task.canonical_task_path
+        {
+            return Err(source_changed(
+                "task leaf lost exact descriptor/path membership in its retained root authority",
+            ));
+        }
+        if current != &leaf.task {
+            return Err(source_changed(
+                "task leaf changed between cheap discovery and projection",
+            ));
+        }
+        Ok(current)
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct TaskJsonFixtureOperations {
+    ordinal_membership_probes: AtomicUsize,
+    projection_scans: AtomicUsize,
+    hydration_scans: AtomicUsize,
+}
+
+#[cfg(test)]
+impl TaskJsonFixtureOperations {
+    pub(super) fn ordinal_membership_probes(&self) -> usize {
+        self.ordinal_membership_probes.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn projection_scans(&self) -> usize {
+        self.projection_scans.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn hydration_scans(&self) -> usize {
+        self.hydration_scans.load(Ordering::Relaxed)
+    }
 }
 
 pub(crate) fn cline_task_json_source_backed_adapter(
@@ -165,9 +244,13 @@ impl TaskJsonDocumentTreeAdapter {
             selected: selected.to_vec().into_boxed_slice(),
             resolver: TaskJsonSourceBackedResolver::new(dialect, selected),
             #[cfg(test)]
-            projection_scans: None,
+            fixture_operations: None,
             #[cfg(test)]
             terminal_revalidation_hook: None,
+            #[cfg(test)]
+            leaf_workers: None,
+            #[cfg(test)]
+            scan_activity: None,
         }
     }
 
@@ -177,8 +260,11 @@ impl TaskJsonDocumentTreeAdapter {
     }
 
     #[cfg(test)]
-    pub(super) fn with_projection_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
-        self.projection_scans = Some(scans);
+    pub(super) fn with_fixture_operations(
+        mut self,
+        operations: Arc<TaskJsonFixtureOperations>,
+    ) -> Self {
+        self.fixture_operations = Some(operations);
         self
     }
 
@@ -190,11 +276,23 @@ impl TaskJsonDocumentTreeAdapter {
         self.terminal_revalidation_hook = Some(hook);
         self
     }
+
+    #[cfg(test)]
+    pub(super) fn with_leaf_workers(mut self, leaf_workers: usize) -> Self {
+        self.leaf_workers = Some(leaf_workers);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_scan_activity(mut self, activity: Arc<TaskJsonScanActivity>) -> Self {
+        self.scan_activity = Some(activity);
+        self
+    }
 }
 
 impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
-    type Leaf = ClineLiveTaskObservation;
-    type TreeAuthority = ClineDiscovery;
+    type Leaf = TaskJsonDocumentLeaf;
+    type TreeAuthority = TaskJsonTreeAuthority;
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
@@ -202,6 +300,22 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
 
     fn owns_source(&self, source: &SourceKey) -> bool {
         owns_task_source(self.dialect, source)
+    }
+
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        #[cfg(test)]
+        if let Some(leaf_workers) = self.leaf_workers {
+            return DocumentLeafExecutionPolicy::IndependentWithWorkers(leaf_workers);
+        }
+        document_leaf_execution_policy(self.dialect.provider)
+    }
+
+    fn independent_leaf_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<SourceKey> {
+        Ok(leaf.source.clone())
     }
 
     fn discover_complete(
@@ -217,25 +331,21 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        let current = authority
-            .task_routes()
-            .iter()
-            .find(|task| task.canonical_task_path == leaf.canonical_task_path)
-            .ok_or_else(|| {
-                source_changed("task leaf disappeared from its retained root authority")
-            })?;
-        if current != leaf {
-            return Err(source_changed(
-                "task leaf changed between cheap discovery and projection",
-            ));
-        }
         #[cfg(test)]
-        if let Some(scans) = self.projection_scans.as_ref() {
-            scans.fetch_add(1, Ordering::Relaxed);
+        let _scan_activity = self.scan_activity.as_ref().map(TaskJsonScanActivity::begin);
+        #[cfg(test)]
+        if let Some(operations) = self.fixture_operations.as_ref() {
+            operations
+                .ordinal_membership_probes
+                .fetch_add(1, Ordering::Relaxed);
         }
-        let source = task_source_key(self.dialect, leaf).map_err(task_route_error)?;
-        sink.begin_source(source.clone())?;
-        scan_task(self.dialect, authority, leaf, |document| {
+        let current = authority.retained_task(self.dialect, leaf)?;
+        #[cfg(test)]
+        if let Some(operations) = self.fixture_operations.as_ref() {
+            operations.projection_scans.fetch_add(1, Ordering::Relaxed);
+        }
+        sink.begin_source(leaf.source.clone())?;
+        scan_task(self.dialect, &authority.discovery, current, |document| {
             sink.emit_document(document)
         })
     }
@@ -265,13 +375,16 @@ impl TaskJsonSourceBackedResolver {
             dialect,
             selected: selected.to_vec().into_boxed_slice(),
             #[cfg(test)]
-            hydration_scans: None,
+            fixture_operations: None,
         }
     }
 
     #[cfg(test)]
-    pub(super) fn with_hydration_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
-        self.hydration_scans = Some(scans);
+    pub(super) fn with_fixture_operations(
+        mut self,
+        operations: Arc<TaskJsonFixtureOperations>,
+    ) -> Self {
+        self.fixture_operations = Some(operations);
         self
     }
 
@@ -292,7 +405,8 @@ impl TaskJsonSourceBackedResolver {
             .map_err(|error| {
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?
-            .authority;
+            .authority
+            .discovery;
         let mut matched = None;
         for task in discovery.task_routes() {
             let source = task_source_key(self.dialect, task)
@@ -336,8 +450,8 @@ impl TaskJsonSourceBackedResolver {
 
         let mut records = vec![None; request.len()];
         #[cfg(test)]
-        if let Some(scans) = self.hydration_scans.as_ref() {
-            scans.fetch_add(1, Ordering::Relaxed);
+        if let Some(operations) = self.fixture_operations.as_ref() {
+            operations.hydration_scans.fetch_add(1, Ordering::Relaxed);
         }
         scan_task(self.dialect, &discovery, task, |document| {
             let Some(position) = positions.get(&document.event_id).copied() else {
@@ -427,11 +541,11 @@ fn selected_root(
 fn discover_document_tree(
     dialect: TaskJsonNativeDialect,
     root: &Path,
-) -> TaskJsonSourceBackedResult<CompleteDocumentTree<ClineLiveTaskObservation, ClineDiscovery>> {
+) -> TaskJsonSourceBackedResult<CompleteDocumentTree<TaskJsonDocumentLeaf, TaskJsonTreeAuthority>> {
     let discovery = discover_root(dialect, root)?;
     let mut sources = BTreeMap::new();
     let mut leaves = Vec::with_capacity(discovery.task_routes().len());
-    for task in discovery.task_routes() {
+    for (ordinal, task) in discovery.task_routes().iter().enumerate() {
         let source = task_source_key(dialect, task)?;
         if sources
             .insert(source.identity().digest(), task.directory_task_id.clone())
@@ -442,21 +556,21 @@ fn discover_document_tree(
                 task_id: task.directory_task_id.to_string(),
             });
         }
-        leaves.push(observed_task_leaf(dialect, task)?);
+        leaves.push(observed_task_leaf(ordinal, source, task)?);
     }
     let tree_fingerprint = task_tree_fingerprint(dialect, &discovery, &leaves);
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
         leaves,
-        discovery,
+        TaskJsonTreeAuthority { discovery },
     ))
 }
 
 fn observed_task_leaf(
-    dialect: TaskJsonNativeDialect,
+    ordinal: usize,
+    source: SourceKey,
     task: &ClineLiveTaskObservation,
-) -> TaskJsonSourceBackedResult<ObservedDocumentLeaf<ClineLiveTaskObservation>> {
-    let source = task_source_key(dialect, task)?;
+) -> TaskJsonSourceBackedResult<ObservedDocumentLeaf<TaskJsonDocumentLeaf>> {
     let observation = task_observation(&source, task)?;
     let mut digest = Sha256::new();
     digest.update(b"ctx-task-json-document-leaf-v1\0");
@@ -467,14 +581,18 @@ fn observed_task_leaf(
     digest.update(path);
     Ok(ObservedDocumentLeaf::new(
         DocumentLeafFingerprint::new(digest.finalize().into()),
-        task.clone(),
+        TaskJsonDocumentLeaf {
+            ordinal,
+            source,
+            task: task.clone(),
+        },
     ))
 }
 
 fn task_tree_fingerprint(
     dialect: TaskJsonNativeDialect,
     discovery: &ClineDiscovery,
-    leaves: &[ObservedDocumentLeaf<ClineLiveTaskObservation>],
+    leaves: &[ObservedDocumentLeaf<TaskJsonDocumentLeaf>],
 ) -> [u8; 32] {
     let mut fingerprints = leaves
         .iter()
@@ -494,10 +612,11 @@ fn task_tree_fingerprint(
 
 fn revalidate_document_tree(
     dialect: TaskJsonNativeDialect,
-    tree: &CompleteDocumentTree<ClineLiveTaskObservation, ClineDiscovery>,
+    tree: &CompleteDocumentTree<TaskJsonDocumentLeaf, TaskJsonTreeAuthority>,
 ) -> SourceBackedRouteResult<[u8; 32]> {
     if !tree
         .authority
+        .discovery
         .root_authority()
         .revalidate_catalog()
         .map_err(|error| task_route_error(error.into()))?
@@ -506,7 +625,7 @@ fn revalidate_document_tree(
             "task document tree changed before terminal revalidation",
         ));
     }
-    for task in tree.authority.task_routes() {
+    for task in tree.authority.discovery.task_routes() {
         if !task
             .revalidate_all_components()
             .map_err(|error| task_route_error(error.into()))?
@@ -516,7 +635,7 @@ fn revalidate_document_tree(
             ));
         }
     }
-    let current = task_tree_fingerprint(dialect, &tree.authority, &tree.leaves);
+    let current = task_tree_fingerprint(dialect, &tree.authority.discovery, &tree.leaves);
     if current != tree.tree_fingerprint {
         return Err(source_changed(
             "task document tree fingerprint changed before certification",

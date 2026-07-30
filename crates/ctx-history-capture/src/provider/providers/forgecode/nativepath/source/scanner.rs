@@ -21,6 +21,8 @@ impl ForgeCodeScanner {
             wants_outputs,
             exhausted: false,
             active_decoded: None,
+            active_terminal: false,
+            pending_candidates: VecDeque::new(),
             decoded_rows: 0,
         })
     }
@@ -73,7 +75,7 @@ impl ForgeCodeScanner {
             if expected_frontier.rowid != Some(active.rowid) {
                 return Err(CaptureError::SourceChangedDuringCapture);
             }
-            let page = self.project_row(connection, expected_frontier, active)?;
+            let page = self.project_row(expected_frontier, active)?;
             self.frontier = page.next_frontier.clone();
             if page.next_frontier.row_complete {
                 self.active_decoded = None;
@@ -100,7 +102,7 @@ impl ForgeCodeScanner {
             };
             return Ok(Some(page));
         };
-        let page = self.page_for_candidate(connection, expected_frontier, candidate)?;
+        let page = self.page_for_candidate(expected_frontier, candidate)?;
         self.frontier = page.next_frontier.clone();
         if page.next_frontier.row_complete {
             self.active_decoded = None;
@@ -111,42 +113,34 @@ impl ForgeCodeScanner {
         Ok(Some(page))
     }
 
-    fn next_candidate(&self, connection: &Connection) -> Result<Option<ForgeCodeRowCandidate>> {
-        if self.frontier.rowid.is_some() && !self.frontier.row_complete {
-            return self.candidate_at(connection, self.frontier.rowid);
+    fn next_candidate(&mut self, connection: &Connection) -> Result<Option<ForgeCodeRowCandidate>> {
+        if let Some(candidate) = self.pending_candidates.pop_front() {
+            return Ok(Some(candidate));
         }
-        self.candidate_after(connection, self.frontier.rowid)
-    }
-
-    fn candidate_at(
-        &self,
-        connection: &Connection,
-        rowid: Option<i64>,
-    ) -> Result<Option<ForgeCodeRowCandidate>> {
-        let rowid = rowid.ok_or(CaptureError::SystemInvariant(
-            "ForgeCode partial frontier has no rowid",
-        ))?;
-        let sql = self.candidate_sql("where rowid = ?1");
-        with_length_preflight(connection, || {
-            connection
-                .query_row(&sql, [rowid], row_candidate)
-                .optional()
-        })
-    }
-
-    fn candidate_after(
-        &self,
-        connection: &Connection,
-        rowid: Option<i64>,
-    ) -> Result<Option<ForgeCodeRowCandidate>> {
-        let predicate = rowid.map_or("", |_| "where rowid > ?1");
+        let after = self.frontier.rowid;
+        let predicate = after.map_or("", |_| "where rowid > ?1");
         let sql = self.candidate_sql(predicate);
-        with_length_preflight(connection, || match rowid {
-            Some(rowid) => connection
-                .query_row(&sql, [rowid], row_candidate)
-                .optional(),
-            None => connection.query_row(&sql, [], row_candidate).optional(),
-        })
+        let mut candidates = with_length_preflight(connection, || {
+            let mut statement = connection.prepare(&sql)?;
+            let mut rows = match after {
+                Some(rowid) => statement.query([rowid])?,
+                None => statement.query([])?,
+            };
+            let mut candidates = Vec::with_capacity(65);
+            while let Some(row) = rows.next()? {
+                candidates.push(row_candidate(row)?);
+            }
+            Ok(candidates)
+        })?;
+        let has_more = candidates.len() > 64;
+        candidates.truncate(64);
+        if !has_more {
+            if let Some(last) = candidates.last_mut() {
+                last.terminal = true;
+            }
+        }
+        self.pending_candidates.extend(candidates);
+        Ok(self.pending_candidates.pop_front())
     }
 
     fn candidate_sql(&self, predicate: &str) -> String {
@@ -163,33 +157,51 @@ impl ForgeCodeScanner {
             updated_at,
             metrics,
         ]);
+        let valid = format!(
+            "typeof(conversation_id) in ('integer', 'real', 'text') \
+             and typeof({title}) in ('null', 'text') \
+             and typeof(workspace_id) = 'integer' \
+             and typeof({context}) in ('null', 'text') \
+             and typeof(created_at) in ('integer', 'real', 'text') \
+             and typeof({updated_at}) in ('null', 'integer', 'real', 'text') \
+             and typeof({metrics}) in ('null', 'text') \
+             and {retained} <= {}",
+            MAX_PROVIDER_SQLITE_VALUE_BYTES.saturating_sub(
+                usize::try_from(FORGECODE_SQLITE_VALUE_OVERHEAD_BYTES).unwrap_or(usize::MAX)
+            )
+        );
         format!(
             "select rowid, {retained}, typeof(conversation_id), typeof({title}), \
-             typeof(workspace_id), typeof({context}), typeof(created_at), \
-             typeof({updated_at}), typeof({metrics}) from conversations {predicate} \
-             order by rowid limit 1"
+                    typeof(workspace_id), typeof({context}), typeof(created_at), \
+                    typeof({updated_at}), typeof({metrics}), \
+                    case when {valid} then cast(conversation_id as blob) end, \
+                    case when {valid} then cast({title} as blob) end, \
+                    case when {valid} then workspace_id end, \
+                    case when {valid} then cast({context} as blob) end, \
+                    case when {valid} then cast(created_at as blob) end, \
+                    case when {valid} then cast({updated_at} as blob) end, \
+                    case when {valid} then cast({metrics} as blob) end \
+             from conversations {predicate} order by rowid limit 65"
         )
     }
 
     fn page_for_candidate(
         &mut self,
-        connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         candidate: ForgeCodeRowCandidate,
     ) -> Result<ForgeCodePage> {
         let row_line = provider_line_from_index(candidate.rowid.max(0) as u64);
         if let Some(reason) = candidate.rejection_reason() {
             return self.rejected_row_page(
-                connection,
                 expected_frontier,
                 candidate.rowid,
                 row_line,
                 reason.to_owned(),
+                candidate.terminal,
             );
         }
         if candidate.observed_bytes()? > MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 {
             return self.rejected_row_page(
-                connection,
                 expected_frontier,
                 candidate.rowid,
                 row_line,
@@ -197,29 +209,30 @@ impl ForgeCodeScanner {
                     "ForgeCode conversation row exceeds the {}-byte hydration limit",
                     MAX_PROVIDER_SQLITE_VALUE_BYTES
                 ),
+                candidate.terminal,
             );
         }
-        let hydrated = match self.hydrate(connection, candidate.rowid) {
-            Ok(row) => row,
-            Err(error) => {
+        let hydrated = match candidate.hydrated {
+            Some(row) => row,
+            None => {
                 return self.rejected_row_page(
-                    connection,
                     expected_frontier,
                     candidate.rowid,
                     row_line,
-                    error.to_string(),
-                )
+                    "ForgeCode bounded candidate omitted its admitted row".to_owned(),
+                    candidate.terminal,
+                );
             }
         };
         let decoded = match hydrated.decode() {
             Ok(row) => row,
             Err(error) => {
                 return self.rejected_row_page(
-                    connection,
                     expected_frontier,
                     candidate.rowid,
                     row_line,
                     error.reason(),
+                    candidate.terminal,
                 )
             }
         };
@@ -230,16 +243,17 @@ impl ForgeCodeScanner {
                     "ForgeCode decoded-row counter overflowed",
                 ))?;
         self.active_decoded = Some(decoded.clone());
-        self.project_row(connection, expected_frontier, decoded)
+        self.active_terminal = candidate.terminal;
+        self.project_row(expected_frontier, decoded)
     }
 
     fn rejected_row_page(
         &mut self,
-        connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         rowid: i64,
         line: usize,
         error: String,
+        terminal: bool,
     ) -> Result<ForgeCodePage> {
         self.active_decoded = None;
         let next_frontier = ForgeCodeFrontier {
@@ -249,7 +263,7 @@ impl ForgeCodeScanner {
         };
         Ok(ForgeCodePage {
             expected_frontier,
-            terminal: !self.has_row_after(connection, rowid)?,
+            terminal,
             next_frontier,
             row: None,
             events: Vec::new(),
@@ -261,36 +275,8 @@ impl ForgeCodeScanner {
         })
     }
 
-    fn hydrate(&self, connection: &Connection, rowid: i64) -> Result<ForgeCodeHydratedRow> {
-        let title = optional_column_expr(&self.source.columns, "title", "NULL");
-        let context = optional_column_expr(&self.source.columns, "context", "NULL");
-        let updated_at = optional_column_expr(&self.source.columns, "updated_at", "NULL");
-        let metrics = optional_column_expr(&self.source.columns, "metrics", "NULL");
-        let sql = format!(
-            "select rowid, cast(conversation_id as blob), cast({title} as blob), \
-             workspace_id, cast({context} as blob), cast(created_at as blob), \
-             cast({updated_at} as blob), cast({metrics} as blob) \
-             from conversations where rowid = ?1"
-        );
-        connection
-            .query_row(&sql, [rowid], |row| {
-                Ok(ForgeCodeHydratedRow {
-                    rowid: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    title: row.get(2)?,
-                    workspace_id: row.get(3)?,
-                    context: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
-                    metrics: row.get(7)?,
-                })
-            })
-            .map_err(CaptureError::from)
-    }
-
     fn project_row(
         &mut self,
-        connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         hydrated: ForgeCodeDecodedRow,
     ) -> Result<ForgeCodePage> {
@@ -403,13 +389,13 @@ impl ForgeCodeScanner {
         let mut retained_output_bytes = 0_usize;
         if retained_core_bytes > FORGECODE_NATIVE_PAGE_CONTENT_MAX_BYTES {
             return self.rejected_row_page(
-                connection,
                 expected_frontier,
                 rowid,
                 row_line,
                 format!(
                     "ForgeCode conversation row exceeds the {FORGECODE_NATIVE_PAGE_MAX_BYTES}-byte retained-page limit"
                 ),
+                self.active_terminal,
             );
         }
         let mut next_index = start;
@@ -679,7 +665,7 @@ impl ForgeCodeScanner {
         };
         Ok(ForgeCodePage {
             expected_frontier,
-            terminal: row_complete && !self.has_row_after(connection, rowid)?,
+            terminal: row_complete && self.active_terminal,
             next_frontier,
             row: Some(row),
             events,
@@ -689,16 +675,5 @@ impl ForgeCodeScanner {
             retained_bytes,
             retained_output_bytes,
         })
-    }
-
-    fn has_row_after(&self, connection: &Connection, rowid: i64) -> Result<bool> {
-        connection
-            .query_row(
-                "select exists(select 1 from conversations where rowid > ?1)",
-                [rowid],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|exists| exists != 0)
-            .map_err(CaptureError::from)
     }
 }

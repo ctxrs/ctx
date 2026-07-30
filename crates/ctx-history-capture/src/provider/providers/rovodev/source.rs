@@ -1,13 +1,13 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
 
 use crate::common::io::{
     ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+    OpenedProviderSourceFile,
 };
 use crate::provider::normalization::provider_optional_regular_file;
 use crate::{CaptureError, Result};
@@ -19,50 +19,24 @@ const MAX_ROVODEV_DISCOVERY_ENTRIES: usize = 65_536;
 struct RovoDevFrozenFile {
     path: PathBuf,
     length: u64,
-    modified: SystemTime,
-    readonly: bool,
-    device: Option<u64>,
-    inode: Option<u64>,
+    ordinary_file_token: [u8; 32],
 }
 
 impl RovoDevFrozenFile {
-    fn from_metadata(path: PathBuf, metadata: &fs::Metadata) -> Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-
-        #[cfg(unix)]
-        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
-        #[cfg(not(unix))]
-        let (device, inode) = (None, None);
-
-        Ok(Self {
+    fn from_opened(path: PathBuf, source: &OpenedProviderSourceFile) -> Self {
+        Self {
             path,
-            length: metadata.len(),
-            modified: metadata.modified()?,
-            readonly: metadata.permissions().readonly(),
-            device,
-            inode,
-        })
+            length: source.len(),
+            ordinary_file_token: source.ordinary_file_token(),
+        }
     }
 
     fn hash_revision_authority(&self, digest: &mut Sha256) {
-        let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => (b'+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                (b'-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
         let path = format!("{:?}", self.path.as_os_str());
         digest.update((path.len() as u64).to_be_bytes());
         digest.update(path.as_bytes());
         digest.update(self.length.to_be_bytes());
-        digest.update([side]);
-        digest.update(seconds.to_be_bytes());
-        digest.update(nanos.to_be_bytes());
-        digest.update([u8::from(self.readonly)]);
-        digest.update(self.device.unwrap_or(u64::MAX).to_be_bytes());
-        digest.update(self.inode.unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(self.ordinary_file_token);
     }
 }
 
@@ -74,19 +48,18 @@ pub(super) struct RovoDevSessionObservation {
 }
 
 impl RovoDevSessionObservation {
-    pub(super) fn from_admitted(
+    pub(super) fn from_opened(
         canonical_path: PathBuf,
         context_path: PathBuf,
-        context_metadata: &fs::Metadata,
-        metadata: Option<(PathBuf, &fs::Metadata)>,
-    ) -> Result<Self> {
-        Ok(Self {
+        context_file: &OpenedProviderSourceFile,
+        metadata: Option<(PathBuf, &OpenedProviderSourceFile)>,
+    ) -> Self {
+        Self {
             canonical_path,
-            context_file: RovoDevFrozenFile::from_metadata(context_path, context_metadata)?,
+            context_file: RovoDevFrozenFile::from_opened(context_path, context_file),
             metadata_file: metadata
-                .map(|(path, metadata)| RovoDevFrozenFile::from_metadata(path, metadata))
-                .transpose()?,
-        })
+                .map(|(path, source)| RovoDevFrozenFile::from_opened(path, source)),
+        }
     }
 
     pub(super) fn context_length(&self) -> u64 {
@@ -99,7 +72,10 @@ impl RovoDevSessionObservation {
 
     pub(super) fn revision_authority(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"ctx-rovodev-frozen-source-revision-v1\0");
+        digest.update(b"ctx-rovodev-frozen-source-revision-v2\0");
+        let canonical_path = self.canonical_path.as_os_str().as_encoded_bytes();
+        digest.update((canonical_path.len() as u64).to_be_bytes());
+        digest.update(canonical_path);
         self.context_file.hash_revision_authority(&mut digest);
         match &self.metadata_file {
             Some(file) => {

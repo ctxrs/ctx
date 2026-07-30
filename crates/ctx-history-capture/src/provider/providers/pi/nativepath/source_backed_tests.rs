@@ -178,8 +178,8 @@ fn shared_family_pi_noop_replacement_lineage_and_hydration_oracle() {
     assert_eq!(pi_header_probes(), 1);
     assert_eq!(
         jsonl_family_work().provider_projections,
-        3,
-        "growth is one full replacement, never an append delta"
+        1,
+        "certified Pi growth projects only the appended record"
     );
     assert_eq!(growth.sources[0].counts().indexed_documents, 3);
 }
