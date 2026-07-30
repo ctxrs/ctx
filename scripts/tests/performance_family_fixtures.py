@@ -16,9 +16,12 @@ import unittest
 
 FAMILY_LEAF_COUNT = 48
 FAMILY_TEXT_BYTES = 384 * 1024
-DOCUMENT_LEAF_COUNT = 32
+DOCUMENT_LEAF_COUNT = 17
 CLINE_ITEM_TEXT_BYTES = 48 * 1024
-CLINE_ITEMS_PER_LEAF = 12
+CLINE_ITEMS_PER_LEAF = 24
+# Keep the queried leaf fully attributed while the remaining valid Cline tasks
+# exercise the format's supported metadata-fallback path.
+CLINE_METADATA_LEAF_COUNT = 1
 FAMILY_MIN_FIXTURE_BYTES = 16 * 1024 * 1024
 FAMILY_MAX_FIXTURE_BYTES = 32 * 1024 * 1024
 
@@ -420,14 +423,6 @@ def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
     for leaf in range(DOCUMENT_LEAF_COUNT):
         task_id = f"family-task-{leaf:03d}"
         task = root / "tasks" / task_id
-        metadata = compact_json(
-            {
-                "createdAt": "2026-07-30T12:00:00Z",
-                "task": f"source family task {leaf:03d}",
-                "taskId": task_id,
-                "workspaceDirectory": "/workspace/source-family",
-            }
-        )
         body = (
             cold_body
             if leaf == 0
@@ -437,7 +432,18 @@ def write_cline_document_tree_corpus(home: Path) -> FamilyCorpus:
             )
         )
         api = cline_api_messages(leaf, body)
-        certified_source_bytes += write_bytes(task / "task_metadata.json", metadata)
+        if leaf < CLINE_METADATA_LEAF_COUNT:
+            metadata = compact_json(
+                {
+                    "createdAt": "2026-07-30T12:00:00Z",
+                    "task": f"source family task {leaf:03d}",
+                    "taskId": task_id,
+                    "workspaceDirectory": "/workspace/source-family",
+                }
+            )
+            certified_source_bytes += write_bytes(
+                task / "task_metadata.json", metadata
+            )
         certified_source_bytes += write_bytes(
             task / "api_conversation_history.json", api
         )
