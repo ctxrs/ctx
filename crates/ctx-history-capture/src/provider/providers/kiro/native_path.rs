@@ -2,21 +2,21 @@
 
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use ctx_history_core::CaptureProvider;
-use rusqlite::Connection;
+use rusqlite::{limits::Limit, Connection};
 
 use crate::{
-    common::io::{ProviderSourceDirectory, ProviderSourceRoot},
+    common::io::ProviderSourceRoot,
     provider::sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
-    CaptureError, Result,
+    CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 #[path = "native_path_scan.rs"]
@@ -32,91 +32,57 @@ pub(crate) use source_backed::{
 
 #[derive(Debug)]
 struct KiroSqliteDatabase {
-    parent: ProviderSourceDirectory,
-    authority: SqliteSourceDirectoryAuthority,
-    database_name: OsString,
-    evidence: SqliteSourceEvidence,
+    root: ProviderSourceRoot,
+    snapshot: SqliteSourceReadSnapshot,
 }
 
 impl KiroSqliteDatabase {
-    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
-        let parent_path =
-            path.parent()
+    fn open(path: &Path) -> Result<Self> {
+        let parent_path = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let database_name =
+            path.file_name()
                 .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
                     path: path.to_path_buf(),
-                    reason: "Kiro SQLite source must have a parent directory",
+                    reason: "Kiro SQLite source must have a database leaf name",
                 })?;
-        let database_name = path
-            .file_name()
-            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Kiro SQLite source must have a database leaf name",
-            })?
-            .to_os_string();
-        let parent = ProviderSourceRoot::open(parent_path)?.directory()?;
+        let root = ProviderSourceRoot::open(parent_path)?;
+        let parent = root.directory()?;
         let authority_handle = parent.try_clone_authority_handle()?;
         let authority = retain_sqlite_source_directory_authority(&authority_handle, parent_path)
             .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        let snapshot = open_root_handle_sqlite_source_snapshot(&authority, &database_name)
+        let snapshot = open_root_handle_sqlite_source_snapshot(&authority, database_name)
             .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        let evidence = snapshot.evidence().clone();
-        let result = snapshot
+        snapshot
+            .revalidate()
+            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        parent.revalidate()?;
+        root.revalidate()?;
+        let connection = snapshot
+            .connection()
+            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+            .map_err(|_| CaptureError::SystemInvariant("Kiro SQLite value limit is invalid"))?;
+        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self { root, snapshot })
+    }
+
+    fn connection(&self, path: &Path) -> Result<&Connection> {
+        self.snapshot
             .connection()
             .map_err(|error| kiro_sqlite_source_error(path, error))
-            .and_then(query);
-        let finished = snapshot
+    }
+
+    fn finish(self, path: &Path) -> Result<SqliteSourceEvidence> {
+        let evidence = self
+            .snapshot
             .finish()
             .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        if finished != evidence {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        let database = Self {
-            parent,
-            authority,
-            database_name,
-            evidence,
-        };
-        database.revalidate()?;
-        Ok((database, result?))
-    }
-
-    fn read<T, E>(
-        &self,
-        path: &Path,
-        query: impl FnOnce(&Connection) -> std::result::Result<T, E>,
-    ) -> std::result::Result<T, E>
-    where
-        E: From<CaptureError>,
-    {
-        self.revalidate().map_err(E::from)?;
-        let snapshot =
-            open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
-                .map_err(|error| E::from(kiro_sqlite_source_error(path, error)))?;
-        let result = if snapshot.evidence() == &self.evidence {
-            snapshot
-                .connection()
-                .map_err(|error| E::from(kiro_sqlite_source_error(path, error)))
-                .and_then(query)
-        } else {
-            Err(E::from(CaptureError::SourceChangedDuringCapture))
-        };
-        let finished = snapshot
-            .finish()
-            .map_err(|error| E::from(kiro_sqlite_source_error(path, error)))?;
-        self.revalidate().map_err(E::from)?;
-        if finished != self.evidence {
-            return Err(E::from(CaptureError::SourceChangedDuringCapture));
-        }
-        result
-    }
-
-    fn revalidate(&self) -> Result<()> {
-        self.parent.revalidate()?;
-        self.parent.authority_root().revalidate()
-    }
-
-    fn evidence(&self) -> &SqliteSourceEvidence {
-        &self.evidence
+        self.root.revalidate()?;
+        Ok(evidence)
     }
 }
 
@@ -206,7 +172,7 @@ fn ensure_kiro_table_columns(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum KiroPhase {
     V2,
     Legacy,
@@ -228,51 +194,46 @@ impl KiroPhase {
     }
 }
 
-fn hex(value: &[u8]) -> String {
-    value.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[cfg(test)]
 mod stock_sqlite_snapshot_tests {
-    use std::{cell::Cell, ffi::OsString, fs, path::Path};
+    use std::{ffi::OsString, fs, path::Path};
 
     use rusqlite::{config::DbConfig, params, Connection};
 
     use super::KiroSqliteDatabase;
 
     #[test]
-    fn stock_snapshot_queries_active_wal_without_persistent_writes_and_rejects_swap() {
+    fn stock_snapshot_queries_active_wal_without_persistent_writes() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let source = temp.path().join("kiro.sqlite");
+        create_database(&source, "main");
+        persist_wal_row(&source, "from-wal");
+        let before_read = persistent_directory_snapshot(temp.path());
+
+        let database = KiroSqliteDatabase::open(&source).unwrap();
+        assert_eq!(
+            read_latest(database.connection(&source).unwrap()).unwrap(),
+            "from-wal"
+        );
+        let evidence = database.finish(&source).unwrap();
+        assert!(evidence.wal_length().is_some());
+        assert!(evidence.shared_memory_length().is_some());
+        assert_eq!(persistent_directory_snapshot(temp.path()), before_read);
+    }
+
+    #[test]
+    fn stock_snapshot_rejects_leaf_swap_before_terminal_finish() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let source = temp.path().join("kiro.sqlite");
         let attacker = temp.path().join("attacker.sqlite");
         let admitted = temp.path().join("admitted.sqlite");
         create_database(&source, "main");
         create_database(&attacker, "attacker");
-        persist_wal_row(&source, "from-wal");
-        let before_read = persistent_directory_snapshot(temp.path());
-
-        let (database, opened_value) = KiroSqliteDatabase::open(&source, read_latest).unwrap();
-        assert_eq!(opened_value, "from-wal");
-        assert!(database.evidence().wal_length().is_some());
-        assert!(database.evidence().shared_memory_length().is_some());
-        assert_eq!(
-            database
-                .read::<_, crate::CaptureError>(&source, read_latest)
-                .unwrap(),
-            "from-wal"
-        );
-        assert_eq!(persistent_directory_snapshot(temp.path()), before_read);
-
+        let database = KiroSqliteDatabase::open(&source).unwrap();
         fs::rename(&source, &admitted).unwrap();
         fs::rename(&attacker, &source).unwrap();
         let before_rejected_read = persistent_directory_snapshot(temp.path());
-        let queried = Cell::new(false);
-        let result = database.read::<_, crate::CaptureError>(&source, |_| -> crate::Result<()> {
-            queried.set(true);
-            Ok(())
-        });
-        assert!(result.is_err());
-        assert!(!queried.get());
+        assert!(database.finish(&source).is_err());
         assert_eq!(
             persistent_directory_snapshot(temp.path()),
             before_rejected_read
