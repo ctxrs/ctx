@@ -120,11 +120,18 @@ struct OpenSource {
     received_events: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ProjectionCounts {
     pub(super) sources: i64,
     pub(super) sessions: i64,
     pub(super) events: i64,
     pub(super) file_touches: i64,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SourceProjectionSnapshot {
+    pub(super) counts: ProjectionCounts,
+    session_ids: BTreeSet<String>,
 }
 
 fn insert_source(
@@ -397,19 +404,9 @@ fn validate_entity(id: StableEntityId, kind: StableEntityKind, source: &SourceKe
 pub(super) fn validate_projected_generation(
     conn: &Connection,
     manifest: &ValidatedManifest,
-) -> Result<()> {
+) -> Result<ProjectionCounts> {
     let counts = projection_counts(conn)?;
-    let projected_events = sqlite_u64(counts.events, "event_count")?;
-    if projected_events != manifest.indexed_documents {
-        return Err(RelationalProjectionError::GenerationEventCountMismatch {
-            expected: manifest.indexed_documents,
-            projected: projected_events,
-        });
-    }
-    let source_count = sqlite_u64(counts.sources, "source_count")?;
-    if source_count != manifest.sources.len() as u64 {
-        return invalid_record("projected source count does not match the manifest");
-    }
+    validate_generation_counts(counts, manifest)?;
     let dangling_relationships: i64 = conn.query_row(
         "SELECT COUNT(*) FROM source_backed_sessions child
          WHERE (child.parent_ctx_session_id IS NOT NULL
@@ -458,7 +455,7 @@ pub(super) fn validate_projected_generation(
     if dangling_event_or_file_relations != 0 {
         return invalid_record("event or file relationships have mismatched stable identities");
     }
-    Ok(())
+    Ok(counts)
 }
 
 pub(super) fn projection_counts(conn: &Connection) -> Result<ProjectionCounts> {
@@ -479,6 +476,333 @@ pub(super) fn projection_counts(conn: &Connection) -> Result<ProjectionCounts> {
         },
     )
     .map_err(RelationalProjectionError::from)
+}
+
+pub(super) fn stored_projection_counts(conn: &Connection) -> Result<ProjectionCounts> {
+    conn.query_row(
+        "SELECT source_count, session_count, event_count, file_touch_count
+         FROM source_backed_relational_state
+         WHERE singleton = 1",
+        [],
+        |row| {
+            Ok(ProjectionCounts {
+                sources: row.get(0)?,
+                sessions: row.get(1)?,
+                events: row.get(2)?,
+                file_touches: row.get(3)?,
+            })
+        },
+    )
+    .map_err(RelationalProjectionError::from)
+}
+
+pub(super) fn source_projection_snapshot(
+    conn: &Connection,
+    source_ids: &BTreeSet<String>,
+) -> Result<SourceProjectionSnapshot> {
+    let mut snapshot = SourceProjectionSnapshot::default();
+    let mut source_count = conn.prepare(
+        "SELECT COUNT(*)
+         FROM source_backed_sources
+         WHERE source_id = ?1",
+    )?;
+    let mut sessions = conn.prepare(
+        "SELECT ctx_session_id
+         FROM source_backed_sessions INDEXED BY source_backed_sessions_source
+         WHERE source_id = ?1",
+    )?;
+    let mut event_count = conn.prepare(
+        "SELECT COUNT(*)
+         FROM source_backed_events INDEXED BY source_backed_events_source
+         WHERE source_id = ?1",
+    )?;
+    let mut file_count = conn.prepare(
+        "SELECT COUNT(*)
+         FROM source_backed_files_touched INDEXED BY source_backed_files_source
+         WHERE source_id = ?1",
+    )?;
+    for source_id in source_ids {
+        let sources: i64 = source_count.query_row([source_id], |row| row.get(0))?;
+        snapshot.counts.sources =
+            checked_add_count(snapshot.counts.sources, sources, "source count")?;
+
+        let mut rows = sessions.query([source_id])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            if !snapshot.session_ids.insert(session_id) {
+                return invalid_record("a session identity belongs to multiple affected sources");
+            }
+            snapshot.counts.sessions =
+                checked_add_count(snapshot.counts.sessions, 1, "session count")?;
+        }
+
+        let events: i64 = event_count.query_row([source_id], |row| row.get(0))?;
+        snapshot.counts.events = checked_add_count(snapshot.counts.events, events, "event count")?;
+
+        let file_touches: i64 = file_count.query_row([source_id], |row| row.get(0))?;
+        snapshot.counts.file_touches = checked_add_count(
+            snapshot.counts.file_touches,
+            file_touches,
+            "file touch count",
+        )?;
+    }
+    Ok(snapshot)
+}
+
+pub(super) fn validate_no_unaffected_cascade_dependencies(
+    conn: &Connection,
+    affected_source_ids: &BTreeSet<String>,
+) -> Result<()> {
+    validate_reference_sources(
+        conn,
+        "SELECT dependent.source_id
+         FROM source_backed_sessions AS target
+              INDEXED BY source_backed_sessions_source
+         JOIN source_backed_events AS dependent
+              INDEXED BY source_backed_events_session_seq
+           ON dependent.ctx_session_id = target.ctx_session_id
+         WHERE target.source_id = ?1",
+        affected_source_ids,
+        affected_source_ids,
+        "an unaffected event references a replaced session",
+    )?;
+    validate_reference_sources(
+        conn,
+        "SELECT dependent.source_id
+         FROM source_backed_sessions AS target
+              INDEXED BY source_backed_sessions_source
+         JOIN source_backed_files_touched AS dependent
+              INDEXED BY source_backed_files_session_reference
+           ON dependent.ctx_session_id = target.ctx_session_id
+         WHERE target.source_id = ?1",
+        affected_source_ids,
+        affected_source_ids,
+        "an unaffected file touch references a replaced session",
+    )?;
+    validate_reference_sources(
+        conn,
+        "SELECT dependent.source_id
+         FROM source_backed_events AS target
+              INDEXED BY source_backed_events_source
+         JOIN source_backed_files_touched AS dependent
+              INDEXED BY source_backed_files_event_reference
+           ON dependent.ctx_event_id = target.ctx_event_id
+         WHERE target.source_id = ?1",
+        affected_source_ids,
+        affected_source_ids,
+        "an unaffected file touch references a replaced event",
+    )
+}
+
+pub(super) fn validate_incremental_projected_generation(
+    conn: &Connection,
+    manifest: &ValidatedManifest,
+    prior_counts: ProjectionCounts,
+    old: &SourceProjectionSnapshot,
+    new: &SourceProjectionSnapshot,
+    changed_source_ids: &BTreeSet<String>,
+) -> Result<ProjectionCounts> {
+    let counts = ProjectionCounts {
+        sources: replace_count(
+            prior_counts.sources,
+            old.counts.sources,
+            new.counts.sources,
+            "source count",
+        )?,
+        sessions: replace_count(
+            prior_counts.sessions,
+            old.counts.sessions,
+            new.counts.sessions,
+            "session count",
+        )?,
+        events: replace_count(
+            prior_counts.events,
+            old.counts.events,
+            new.counts.events,
+            "event count",
+        )?,
+        file_touches: replace_count(
+            prior_counts.file_touches,
+            old.counts.file_touches,
+            new.counts.file_touches,
+            "file touch count",
+        )?,
+    };
+    validate_generation_counts(counts, manifest)?;
+    validate_changed_rows(conn, changed_source_ids)?;
+
+    let affected_session_ids = old
+        .session_ids
+        .union(&new.session_ids)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    validate_session_reverse_dependencies(conn, &affected_session_ids)?;
+    Ok(counts)
+}
+
+fn validate_generation_counts(
+    counts: ProjectionCounts,
+    manifest: &ValidatedManifest,
+) -> Result<()> {
+    let projected_events = sqlite_u64(counts.events, "event_count")?;
+    if projected_events != manifest.indexed_documents {
+        return Err(RelationalProjectionError::GenerationEventCountMismatch {
+            expected: manifest.indexed_documents,
+            projected: projected_events,
+        });
+    }
+    let source_count = sqlite_u64(counts.sources, "source_count")?;
+    if source_count != manifest.sources.len() as u64 {
+        return invalid_record("projected source count does not match the manifest");
+    }
+    Ok(())
+}
+
+fn validate_changed_rows(conn: &Connection, source_ids: &BTreeSet<String>) -> Result<()> {
+    let mut sessions = conn.prepare(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM source_backed_sessions AS child
+                 INDEXED BY source_backed_sessions_source
+            WHERE child.source_id = ?1
+              AND (
+                  (child.parent_ctx_session_id IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM source_backed_sessions AS parent
+                       WHERE parent.ctx_session_id = child.parent_ctx_session_id
+                         AND parent.session_identity = child.parent_session_identity
+                   ))
+                  OR NOT EXISTS (
+                      SELECT 1 FROM source_backed_sessions AS root
+                      WHERE root.ctx_session_id = child.root_ctx_session_id
+                        AND root.session_identity = child.root_session_identity
+                  )
+              )
+        )",
+    )?;
+    let mut events = conn.prepare(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM source_backed_events AS event
+                 INDEXED BY source_backed_events_source
+            WHERE event.source_id = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_backed_sessions AS session
+                  WHERE session.ctx_session_id = event.ctx_session_id
+                    AND session.session_identity = event.session_identity
+              )
+        )",
+    )?;
+    let mut files = conn.prepare(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM source_backed_files_touched AS file
+                 INDEXED BY source_backed_files_source
+            WHERE file.source_id = ?1
+              AND (
+                  (file.ctx_event_id IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM source_backed_events AS event
+                       WHERE event.ctx_event_id = file.ctx_event_id
+                         AND event.event_identity = file.event_identity
+                   ))
+                  OR (file.ctx_session_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM source_backed_sessions AS session
+                          WHERE session.ctx_session_id = file.ctx_session_id
+                            AND session.session_identity = file.session_identity
+                      ))
+              )
+        )",
+    )?;
+    for source_id in source_ids {
+        if sessions.query_row([source_id], |row| row.get::<_, bool>(0))? {
+            return invalid_record("session relationships reference absent sessions");
+        }
+        if events.query_row([source_id], |row| row.get::<_, bool>(0))?
+            || files.query_row([source_id], |row| row.get::<_, bool>(0))?
+        {
+            return invalid_record("event or file relationships have mismatched stable identities");
+        }
+    }
+    Ok(())
+}
+
+fn validate_session_reverse_dependencies(
+    conn: &Connection,
+    affected_session_ids: &BTreeSet<String>,
+) -> Result<()> {
+    let mut parent = conn.prepare(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM source_backed_sessions AS child
+                 INDEXED BY source_backed_sessions_parent_reference
+            WHERE child.parent_ctx_session_id = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_backed_sessions AS target
+                  WHERE target.ctx_session_id = child.parent_ctx_session_id
+                    AND target.session_identity = child.parent_session_identity
+              )
+        )",
+    )?;
+    let mut root = conn.prepare(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM source_backed_sessions AS child
+                 INDEXED BY source_backed_sessions_root_reference
+            WHERE child.root_ctx_session_id = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_backed_sessions AS target
+                  WHERE target.ctx_session_id = child.root_ctx_session_id
+                    AND target.session_identity = child.root_session_identity
+              )
+        )",
+    )?;
+    for session_id in affected_session_ids {
+        if parent.query_row([session_id], |row| row.get::<_, bool>(0))?
+            || root.query_row([session_id], |row| row.get::<_, bool>(0))?
+        {
+            return invalid_record("session relationships reference absent sessions");
+        }
+    }
+    Ok(())
+}
+
+fn validate_reference_sources(
+    conn: &Connection,
+    sql: &str,
+    target_source_ids: &BTreeSet<String>,
+    affected_source_ids: &BTreeSet<String>,
+    detail: &'static str,
+) -> Result<()> {
+    let mut statement = conn.prepare(sql)?;
+    for target_source_id in target_source_ids {
+        let mut rows = statement.query([target_source_id])?;
+        while let Some(row) = rows.next()? {
+            let source_id: String = row.get(0)?;
+            if !affected_source_ids.contains(&source_id) {
+                return invalid_record(detail);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn checked_add_count(left: i64, right: i64, label: &'static str) -> Result<i64> {
+    left.checked_add(right)
+        .ok_or(RelationalProjectionError::CountOverflow(label))
+}
+
+fn replace_count(total: i64, old: i64, new: i64, label: &'static str) -> Result<i64> {
+    if total < old {
+        return invalid_record(format!(
+            "stored {label} is smaller than the affected-source count"
+        ));
+    }
+    let retained = total
+        .checked_sub(old)
+        .ok_or(RelationalProjectionError::CountOverflow(label))?;
+    checked_add_count(retained, new, label)
 }
 
 fn current_source(current: &Option<OpenSource>) -> Result<&OpenSource> {

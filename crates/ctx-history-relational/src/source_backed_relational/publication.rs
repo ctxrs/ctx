@@ -4,7 +4,11 @@ use rusqlite::{params, Connection, TransactionBehavior};
 
 use super::{
     manifest::{invalid_generation, ValidatedManifest},
-    materialization::{materialize_records, projection_counts, validate_projected_generation},
+    materialization::{
+        materialize_records, source_projection_snapshot, stored_projection_counts,
+        validate_incremental_projected_generation, validate_no_unaffected_cascade_dependencies,
+        validate_projected_generation, ProjectionCounts, SourceProjectionSnapshot,
+    },
     sqlite_u64, CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionReceipt,
     RelationalProjectionRecord, Result, SourceBackedRelationalProjection,
     GENERATION_MANIFEST_VERSION, REQUIRED_LEXICAL_SCHEMA_VERSION,
@@ -16,6 +20,16 @@ const MAX_FAILURE_DETAIL_CHARS: usize = 2_048;
 enum BuildMode {
     Rebuild,
     CatchUp,
+}
+
+enum ValidationScope {
+    Full,
+    Incremental {
+        prior_counts: ProjectionCounts,
+        changed_source_ids: BTreeSet<String>,
+        affected_source_ids: BTreeSet<String>,
+        old: SourceProjectionSnapshot,
+    },
 }
 
 impl SourceBackedRelationalProjection {
@@ -112,10 +126,10 @@ where
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let prior = stored_certificate_digests(&tx)?;
     let manifest_ids = manifest.sources.keys().cloned().collect::<BTreeSet<_>>();
-    let expected = match mode {
+    let (expected, validation_scope) = match mode {
         BuildMode::Rebuild => {
             tx.execute("DELETE FROM source_backed_sources", [])?;
-            manifest_ids.clone()
+            (manifest_ids.clone(), ValidationScope::Full)
         }
         BuildMode::CatchUp => {
             let changed = manifest
@@ -126,30 +140,60 @@ where
                 })
                 .map(|(source_id, _)| source_id.clone())
                 .collect::<BTreeSet<_>>();
-            for source_id in prior.keys().filter(|id| !manifest_ids.contains(*id)) {
+            let removed = prior
+                .keys()
+                .filter(|id| !manifest_ids.contains(*id))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for source_id in &removed {
                 if !manifest.removal_ids.contains(source_id) {
                     return invalid_generation(format!(
                         "source {source_id} is omitted without durable certified deletion evidence"
                     ));
                 }
+            }
+            let affected = changed.union(&removed).cloned().collect::<BTreeSet<_>>();
+            let prior_counts = stored_projection_counts(&tx)?;
+            let old = source_projection_snapshot(&tx, &affected)?;
+            validate_no_unaffected_cascade_dependencies(&tx, &affected)?;
+            for source_id in &affected {
                 tx.execute(
                     "DELETE FROM source_backed_sources WHERE source_id = ?1",
                     [source_id],
                 )?;
             }
-            for source_id in &changed {
-                tx.execute(
-                    "DELETE FROM source_backed_sources WHERE source_id = ?1",
-                    [source_id],
-                )?;
-            }
-            changed
+            (
+                changed.clone(),
+                ValidationScope::Incremental {
+                    prior_counts,
+                    changed_source_ids: changed,
+                    affected_source_ids: affected,
+                    old,
+                },
+            )
         }
     };
 
     materialize_records(&tx, expected, manifest, records)?;
-    validate_projected_generation(&tx, manifest)?;
-    let counts = projection_counts(&tx)?;
+    let counts = match validation_scope {
+        ValidationScope::Full => validate_projected_generation(&tx, manifest)?,
+        ValidationScope::Incremental {
+            prior_counts,
+            changed_source_ids,
+            affected_source_ids,
+            old,
+        } => {
+            let new = source_projection_snapshot(&tx, &affected_source_ids)?;
+            validate_incremental_projected_generation(
+                &tx,
+                manifest,
+                prior_counts,
+                &old,
+                &new,
+                &changed_source_ids,
+            )?
+        }
+    };
     let prior_build: i64 = tx.query_row(
         "SELECT build_generation FROM source_backed_relational_state WHERE singleton = 1",
         [],
