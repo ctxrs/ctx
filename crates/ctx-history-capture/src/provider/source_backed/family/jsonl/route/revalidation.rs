@@ -111,15 +111,18 @@ pub(super) fn inventory_observation(
     missing: bool,
     authority: Option<&ProviderSourceRoot>,
     leaves: &[JsonlFamilyLeaf],
+    rejected_leaves: &[JsonlFamilyRejectedLeaf],
 ) -> Result<SourceInventoryObservation> {
     let mut digest = Sha256::new();
     digest.update(FAMILY_INVENTORY_DOMAIN);
     digest.update([u8::from(missing)]);
     digest.update((leaves.len() as u64).to_be_bytes());
+    digest.update((rejected_leaves.len() as u64).to_be_bytes());
     if let Some(authority) = authority {
         digest.update(authority.authority_fingerprint());
     }
     for leaf in leaves {
+        digest.update([0]);
         digest.update(leaf.source.exact_descriptor_digest());
         digest.update([u8::from(leaf.whole_record)]);
         digest.update(
@@ -127,6 +130,16 @@ pub(super) fn inventory_observation(
         );
         digest.update(leaf.authority_path.as_os_str().as_encoded_bytes());
         digest.update(binding_digest(leaf)?);
+    }
+    for leaf in rejected_leaves {
+        digest.update([1]);
+        digest.update(
+            (leaf.authority_path.as_os_str().as_encoded_bytes().len() as u64).to_be_bytes(),
+        );
+        digest.update(leaf.authority_path.as_os_str().as_encoded_bytes());
+        digest.update((leaf.source_path.as_os_str().as_encoded_bytes().len() as u64).to_be_bytes());
+        digest.update(leaf.source_path.as_os_str().as_encoded_bytes());
+        digest.update(serde_json::to_vec(&leaf.proof)?);
     }
     SourceInventoryObservation::new(
         provider.as_str(),
