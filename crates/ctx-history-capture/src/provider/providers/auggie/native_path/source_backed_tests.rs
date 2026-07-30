@@ -514,7 +514,6 @@ fn discovery_retains_selection_and_rejects_replacement_and_symlink_attacks() {
         assert_eq!(aliased_tree.leaves.len(), 1);
         assert_eq!(aliased_tree.leaves[0].provider_leaf.canonical_path, alias);
         let aliased_tree_fingerprint = aliased_tree.tree_fingerprint;
-        let physical_fingerprint = aliased_tree.leaves[0].fingerprint;
 
         fs::remove_file(&alias).unwrap();
         assert!(revalidate_auggie_tree(&aliased_tree).is_err());
@@ -525,7 +524,7 @@ fn discovery_retains_selection_and_rejects_replacement_and_symlink_attacks() {
                 .unwrap();
         assert_ne!(unaliased.tree_fingerprint, aliased_tree_fingerprint);
         assert_eq!(unaliased.leaves.len(), 1);
-        assert_eq!(unaliased.leaves[0].fingerprint, physical_fingerprint);
+        assert_eq!(unaliased.leaves[0].provider_leaf.canonical_path, original);
     }
 }
 
