@@ -54,7 +54,8 @@ use capture_refresh::{
 };
 #[cfg(test)]
 use capture_refresh::{
-    execute_capture_owned_refresh_with, reject_blocking_automatic_registry_issues,
+    execute_capture_owned_refresh_with, refresh_all_provider_sources,
+    reject_blocking_automatic_registry_issues,
 };
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
@@ -100,7 +101,7 @@ impl SourceBackedRefreshMode {
         data_root: &Path,
         authority: &ExplicitSourceCatalogAuthority,
     ) -> Result<SourceBackedRefreshObservation> {
-        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority))
+        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false)
     }
 }
 
@@ -357,13 +358,14 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None)
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true)
 }
 
 fn coordinate_source_backed_refresh_with_catalog(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Off {
         if explicit_source_catalog.is_some() {
@@ -385,7 +387,7 @@ fn coordinate_source_backed_refresh_with_catalog(
 
     let config = AppConfig::load(data_root)
         .context("load daemon configuration before source-backed refresh")?;
-    if config.daemon.enabled {
+    if allow_daemon_autostart && config.daemon.enabled {
         super::daemon_autostart::autostart_daemon_and_wait(
             data_root,
             &config,
@@ -447,7 +449,13 @@ fn coordinate_source_backed_refresh_with_catalog(
         });
     }
 
-    wait_for_published_generation(data_root, request_id, mode, explicit_source_catalog)
+    wait_for_published_generation(
+        data_root,
+        request_id,
+        mode,
+        explicit_source_catalog,
+        allow_daemon_autostart,
+    )
 }
 
 fn wait_for_published_generation(
@@ -455,6 +463,7 @@ fn wait_for_published_generation(
     mut request_id: String,
     mode: SourceBackedRefreshMode,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
 ) -> Result<SourceBackedRefreshObservation> {
     loop {
         let response = match daemon_source_refresh_request(
@@ -469,12 +478,14 @@ fn wait_for_published_generation(
         ) {
             Ok(Some(response)) => response,
             Ok(None) => {
-                request_id = recover_wait_refresh_request(data_root, expected_catalog)
-                    .with_context(|| {
-                        format!(
-                            "recover daemon while waiting for source refresh request {request_id}"
-                        )
-                    })?;
+                request_id = recover_wait_refresh_request(
+                    data_root,
+                    expected_catalog,
+                    allow_daemon_autostart,
+                )
+                .with_context(|| {
+                    format!("recover daemon while waiting for source refresh request {request_id}")
+                })?;
                 continue;
             }
             Err(error)
@@ -482,8 +493,12 @@ fn wait_for_published_generation(
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                     .is_some() =>
             {
-                request_id =
-                    recover_wait_refresh_request(data_root, expected_catalog).with_context(|| {
+                request_id = recover_wait_refresh_request(
+                    data_root,
+                    expected_catalog,
+                    allow_daemon_autostart,
+                )
+                .with_context(|| {
                         format!(
                             "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
                         )
@@ -577,7 +592,14 @@ fn wait_for_published_generation(
 fn recover_wait_refresh_request(
     data_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
 ) -> Result<String> {
+    if !allow_daemon_autostart {
+        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
+            "the explicit source import disabled daemon autostart".to_owned(),
+        ))
+        .into());
+    }
     let config =
         AppConfig::load(data_root).context("load daemon configuration for refresh recovery")?;
     if !config.daemon.enabled {

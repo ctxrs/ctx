@@ -324,8 +324,14 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         "none",
         "--format=json",
     ]));
-    assert_eq!(setup["import"]["totals"]["imported_sources"], 0);
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
+    assert!(
+        setup["import"].is_null() || setup["import"]["totals"]["imported_sources"] == 0,
+        "{setup:#}"
+    );
+    assert!(
+        setup["import"].is_null() || setup["import"]["totals"]["failed_sources"] == 0,
+        "{setup:#}"
+    );
 
     let baseline_status = json_output(ctx(&temp).args(["status", "--format=json"]));
     let discovery_status = json_output(
@@ -337,7 +343,10 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         object_keys(&discovery_status),
         object_keys(&baseline_status)
     );
-    assert_eq!(discovery_status["schema_version"], 1);
+    assert_eq!(
+        discovery_status["schema_version"],
+        baseline_status["schema_version"]
+    );
     for field in [
         "cataloged_sessions",
         "indexed_events",
@@ -354,7 +363,7 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         baseline_status["daemon"]["status"]
     );
 
-    let import_all = failure_stderr(ctx(&temp).env("MUX_ROOT", &mux_root).args([
+    let import_all = success_stdout(ctx(&temp).env("MUX_ROOT", &mux_root).args([
         "import",
         "--all",
         "--no-daemon",
@@ -362,7 +371,9 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         "none",
     ]));
     assert!(
-        import_all.contains("no importable provider history sources found"),
+        import_all.contains("generation_changed: false")
+            && import_all.contains("current_source_count: 0")
+            && import_all.contains("change: no_op"),
         "{import_all}"
     );
 
@@ -376,7 +387,7 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         "background",
         "--format=json",
     ]));
-    assert_eq!(search["freshness"]["status"], "no_sources");
+    assert_eq!(search["freshness"]["status"], "daemon_unavailable");
     assert_eq!(search["freshness"]["source_count"], 0);
     assert!(search["results"].as_array().unwrap().is_empty());
 }

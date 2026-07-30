@@ -76,6 +76,18 @@ fn request_id(response: &Value) -> String {
         .to_owned()
 }
 
+fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatalogAuthority {
+    ExplicitSourceCatalogAuthority::from_json(&json!({
+        "schema_version": 1,
+        "revision": revision,
+        "integrity": {
+            "algorithm": "sha256",
+            "digest": format!("{digest_byte:02x}").repeat(32),
+        },
+    }))
+    .unwrap()
+}
+
 #[test]
 fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
     let temp = tempfile::tempdir().unwrap();
@@ -126,6 +138,76 @@ fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
 }
 
 #[test]
+fn differing_catalog_authority_queues_a_serial_successor() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = SourceBackedRefreshCoordinator::new();
+    let first_authority = test_catalog_authority(1, 0x11);
+    let second_authority = test_catalog_authority(2, 0x22);
+    let request = |authority: &ExplicitSourceCatalogAuthority| {
+        coordinator
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "schema_version": 1,
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("source refresh response")
+    };
+
+    let first = request(&first_authority);
+    let second = request(&second_authority);
+    let second_replay = request(&second_authority);
+    let first_request_id = request_id(&first);
+    let second_request_id = request_id(&second);
+    assert_ne!(first_request_id, second_request_id);
+    assert_eq!(request_id(&second_replay), second_request_id);
+    assert_eq!(second_replay["coalesced_requests"], 1);
+
+    let first_run = coordinator
+        .run_next_with(
+            |request_id, _| {
+                assert_eq!(request_id, first_request_id);
+                Ok(test_publication("catalog-generation-1"))
+            },
+            || Ok(Some("catalog-generation-1".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(!first_run.failed);
+    let queued_second = coordinator.status(&second_request_id).unwrap();
+    assert_eq!(queued_second["request_state"], "queued");
+    assert_eq!(queued_second["previous_generation"], "catalog-generation-1");
+
+    let second_run = coordinator
+        .run_next_with(
+            |request_id, _| {
+                assert_eq!(request_id, second_request_id);
+                Ok(test_publication("catalog-generation-2"))
+            },
+            || Ok(Some("catalog-generation-2".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(!second_run.failed);
+    assert!(!coordinator.has_pending_request());
+    let published_second = coordinator.status(&second_request_id).unwrap();
+    assert_eq!(published_second["request_state"], "published");
+    assert_eq!(
+        ExplicitSourceCatalogAuthority::from_json(
+            &published_second["published_explicit_source_catalog"]
+        )
+        .unwrap(),
+        second_authority
+    );
+}
+
+#[test]
 fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     let coordinator = SourceBackedRefreshCoordinator::new();
     assert_eq!(
@@ -172,6 +254,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         data_root: &data_root,
         index_root: &index_root,
         request_id: "all-provider-request",
+        explicit_source_catalog: None,
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -184,6 +267,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
          observed_discovery_duration,
          observed_data_root,
          observed_index_root,
+         observed_explicit_source_catalog,
          progress| {
             provider_wide_calls += 1;
             assert_eq!(observed_discovery.home(), discovery.home());
@@ -197,6 +281,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             assert_ne!(observed_discovery_duration, StdDuration::ZERO);
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
+            assert!(observed_explicit_source_catalog.is_none());
             progress(CaptureSourceBackedRefreshProgress {
                 phase: "discovering",
                 completed_sources: 0,
@@ -249,6 +334,71 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             ("verifying".to_owned(), 2, 2, None),
         ]
     );
+}
+
+#[test]
+fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let report = DiscoveryReport {
+        sources: vec![ProviderSource {
+            provider: CaptureProvider::Warp,
+            path: temp.path().join("missing-unsupported.sqlite"),
+            exists: false,
+            source_format: "warp_sqlite",
+            source_kind: ProviderSourceKind::DetectionOnly,
+            import_support: ProviderImportSupport::Unsupported,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Unsupported,
+            unsupported_reason: Some("fixture has no executable source-backed route"),
+        }],
+        issues: Vec::new(),
+    };
+    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+
+    let first = refresh_all_provider_sources(
+        &discovery,
+        report.clone(),
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        &mut progress,
+    )
+    .unwrap();
+    assert_eq!(first.scanned_routes, 0);
+    assert_eq!(first.unsupported_routes, 1);
+    assert_eq!(first.certified_source_count, 0);
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    assert!(verified.manifest().sources.is_empty());
+    assert!(verified.manifest().removals.is_empty());
+    drop(verified);
+
+    let replay = refresh_all_provider_sources(
+        &discovery,
+        report,
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        &mut progress,
+    )
+    .unwrap();
+    assert_eq!(replay.generation_id, first.generation_id);
+    assert_eq!(replay.scanned_routes, 0);
+    assert_eq!(replay.unsupported_routes, 1);
 }
 
 #[test]

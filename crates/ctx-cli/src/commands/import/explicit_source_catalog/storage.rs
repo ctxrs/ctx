@@ -1,4 +1,5 @@
 use super::*;
+use std::{collections::HashSet, path::Component};
 
 pub(super) fn validate_approved_path(path: &Path) -> Result<()> {
     if !path.is_absolute() {
@@ -92,6 +93,37 @@ pub(super) fn load_catalog(data_root: &Path) -> Result<ExplicitSourceCatalogSnap
     load_catalog_unlocked(&root)
 }
 
+pub(super) fn load_catalog_for_authority(
+    data_root: &Path,
+    authority: &ExplicitSourceCatalogAuthority,
+) -> Result<ExplicitSourceCatalogSnapshot> {
+    let root = catalog_root(data_root);
+    if !root
+        .try_exists()
+        .with_context(|| format!("check explicit source catalog directory {}", root.display()))?
+    {
+        let empty = ExplicitSourceCatalogSnapshot::empty()?;
+        if &empty.authority == authority {
+            return Ok(empty);
+        }
+        bail!(
+            "explicit source catalog authority revision {} is unavailable",
+            authority.revision
+        );
+    }
+    let lock = open_catalog_lock(&root, false)?;
+    FileExt::lock_shared(&lock).context("lock explicit source catalog for authority read")?;
+    let path = root.join(catalog_revision_filename(authority.revision));
+    let snapshot = load_catalog_revision(&path, authority.revision)?;
+    if &snapshot.authority != authority {
+        bail!(
+            "explicit source catalog revision {} does not match the requested integrity authority",
+            authority.revision
+        );
+    }
+    Ok(snapshot)
+}
+
 pub(super) fn load_catalog_unlocked(root: &Path) -> Result<ExplicitSourceCatalogSnapshot> {
     if !root.exists() {
         return ExplicitSourceCatalogSnapshot::empty();
@@ -119,7 +151,14 @@ pub(super) fn load_catalog_unlocked(root: &Path) -> Result<ExplicitSourceCatalog
     else {
         return ExplicitSourceCatalogSnapshot::empty();
     };
-    let metadata = fs::symlink_metadata(&path)
+    load_catalog_revision(&path, filename_revision)
+}
+
+fn load_catalog_revision(
+    path: &Path,
+    filename_revision: u64,
+) -> Result<ExplicitSourceCatalogSnapshot> {
+    let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspect explicit source catalog {}", path.display()))?;
     if !metadata.file_type().is_file() {
         bail!(

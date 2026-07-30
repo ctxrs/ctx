@@ -2,9 +2,7 @@
 mod tests {
     use std::time::Duration;
 
-    use ctx_history_capture::{
-        register_landed_source_backed_route, SourceBackedRefreshExecutor,
-    };
+    use ctx_history_capture::{register_landed_source_backed_route, SourceBackedRefreshExecutor};
     use ctx_history_index::WriterOptions;
     use serde_json::json;
     use tempfile::{tempdir, TempDir};
@@ -167,8 +165,7 @@ mod tests {
         assert_eq!(retained.generation_id(), first_generation);
         assert_eq!(retained.manifest().sources.len(), 1);
 
-        disable_explicit_source(&data_root, CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT)
-            .unwrap();
+        disable_explicit_source(&data_root, CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT).unwrap();
         refresh_catalog(&data_root, &index_root);
         let deleted = VerifiedIndex::open(&index_root).unwrap();
         assert!(deleted.manifest().sources.is_empty());
@@ -176,6 +173,19 @@ mod tests {
         assert!(deleted.manifest().removals[0]
             .deletion()
             .verifies(deleted.manifest().removals[0].inventory()));
+        let deleted_generation = deleted.generation_id().to_owned();
+        let deleted_inventory = deleted.manifest().removals[0].inventory().clone();
+        drop(deleted);
+
+        refresh_catalog(&data_root, &index_root);
+        let replayed = VerifiedIndex::open(&index_root).unwrap();
+        assert_eq!(replayed.generation_id(), deleted_generation);
+        assert!(replayed.manifest().sources.is_empty());
+        assert_eq!(replayed.manifest().removals.len(), 1);
+        assert_eq!(
+            replayed.manifest().removals[0].inventory(),
+            &deleted_inventory
+        );
     }
 
     #[test]
@@ -241,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_and_explicit_authorities_merge_or_fail_without_double_ingestion() {
+    fn exact_automatic_authority_is_shadowed_while_distinct_roots_merge() {
         let temp = tempdir().unwrap();
         let data_root = test_data_root(&temp);
         let custom = temp.path().join("custom.jsonl");
@@ -268,12 +278,8 @@ mod tests {
             issues: Vec::new(),
             discovery_duration: Duration::ZERO,
         };
-        register_explicit_source_catalog_routes(
-            &data_root,
-            &data_root.join("index"),
-            &mut build,
-        )
-        .unwrap();
+        register_explicit_source_catalog_routes(&data_root, &data_root.join("index"), &mut build)
+            .unwrap();
         assert_eq!(build.registry.executable_route_count(), 2);
 
         let native = tempdir().unwrap();
@@ -281,26 +287,88 @@ mod tests {
         let prompt = native.path().join("history.jsonl");
         fs::write(&prompt, r#"{"session_id":"one","ts":1,"text":"prompt"}"#).unwrap();
         let source = provider_source_for_path(CaptureProvider::Codex, prompt);
-        upsert_explicit_source(&native_data_root, &source).unwrap();
-        let mut duplicate_registry = SourceBackedProviderRegistry::new();
+        let explicit = upsert_explicit_source(&native_data_root, &source).unwrap();
+        let mut report = DiscoveryReport {
+            sources: vec![source.clone()],
+            issues: Vec::new(),
+        };
+        explicit
+            .authority
+            .remove_shadowed_automatic_routes(&native_data_root, &mut report)
+            .unwrap();
+        assert!(report.sources.is_empty());
+        let mut exact = empty_build();
+        explicit
+            .authority
+            .register_routes(
+                &native_data_root,
+                &native_data_root.join("index"),
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(exact.registry.executable_route_count(), 1);
+
+        let automatic_path = native.path().join("automatic-history.jsonl");
+        fs::write(
+            &automatic_path,
+            r#"{"session_id":"two","ts":2,"text":"automatic"}"#,
+        )
+        .unwrap();
+        let automatic = provider_source_for_path(CaptureProvider::Codex, automatic_path);
+        let mut distinct_registry = SourceBackedProviderRegistry::new();
         register_landed_source_backed_route(
-            &mut duplicate_registry,
-            source,
+            &mut distinct_registry,
+            automatic,
             SourceBackedRouteSelection::Automatic,
         )
         .unwrap();
-        let mut duplicate = SourceBackedAutomaticRegistryBuild {
-            registry: duplicate_registry,
+        let mut distinct = SourceBackedAutomaticRegistryBuild {
+            registry: distinct_registry,
             issues: Vec::new(),
             discovery_duration: Duration::ZERO,
         };
-        let error = register_explicit_source_catalog_routes(
-            &native_data_root,
-            &native_data_root.join("index"),
-            &mut duplicate,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("conflicts with automatic"));
-        assert_eq!(duplicate.registry.executable_route_count(), 1);
+        explicit
+            .authority
+            .register_routes(
+                &native_data_root,
+                &native_data_root.join("index"),
+                &mut distinct,
+            )
+            .unwrap();
+        assert_eq!(distinct.registry.executable_route_count(), 2);
+    }
+
+    #[test]
+    fn immutable_catalog_revision_remains_loadable_after_disable() {
+        let temp = tempdir().unwrap();
+        let data_root = test_data_root(&temp);
+        let source_path = temp.path().join("custom.jsonl");
+        write_custom_history(&source_path, "immutable catalog authority");
+        let enabled = upsert_explicit_source(&data_root, &custom_source(&source_path)).unwrap();
+        let disabled =
+            disable_explicit_source(&data_root, CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT)
+                .unwrap();
+        assert_ne!(enabled.authority, disabled);
+
+        let mut enabled_build = empty_build();
+        enabled
+            .authority
+            .register_routes(
+                &data_root,
+                &data_root.join("enabled-index"),
+                &mut enabled_build,
+            )
+            .unwrap();
+        assert_eq!(enabled_build.registry.executable_route_count(), 1);
+
+        let mut disabled_build = empty_build();
+        disabled
+            .register_routes(
+                &data_root,
+                &data_root.join("disabled-index"),
+                &mut disabled_build,
+            )
+            .unwrap();
+        assert_eq!(disabled_build.registry.executable_route_count(), 1);
     }
 }
