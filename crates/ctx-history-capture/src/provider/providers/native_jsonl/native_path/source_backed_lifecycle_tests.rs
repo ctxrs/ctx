@@ -1,31 +1,37 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    path::{Path, PathBuf},
 };
 
 use ctx_history_core::{
-    BatchHydrationRequest, CaptureProvider, CertifiedSourceDeletion, CertifiedSourceInventory,
-    ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, SourceInventoryObservation,
-    TypedKey,
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
+    HydrationFailureKind,
 };
-use ctx_history_index::{GenerationWriter, IndexError, VerifiedIndex, WriterOptions};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
-use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedCoordinatorError,
-        SourceBackedProviderRegistry, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
+        family::jsonl::{
+            jsonl_family_work, reset_jsonl_family_work, set_after_jsonl_hydration_observation_hook,
+        },
+        refresh_source_backed_generation, register_landed_source_backed_route,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceStatus,
 };
+
+const DIRECT_PROVIDERS: [CaptureProvider; 7] = [
+    CaptureProvider::Antigravity,
+    CaptureProvider::CopilotCli,
+    CaptureProvider::FactoryAiDroid,
+    CaptureProvider::Qoder,
+    CaptureProvider::QwenCode,
+    CaptureProvider::Tabnine,
+    CaptureProvider::Windsurf,
+];
 
 const QWEN_LIFECYCLE_TRANSCRIPT: &str = concat!(
     "{\"uuid\":\"qwen-event\",\"sessionId\":\"qwen-life\",",
@@ -40,84 +46,11 @@ const QWEN_LIFECYCLE_TRANSCRIPT: &str = concat!(
     "\"model\":\"qwen3-coder\"}\n"
 );
 
-fn qwen_route_fixture() -> (
-    tempfile::TempDir,
-    std::path::PathBuf,
-    std::path::PathBuf,
-    SourceBackedProviderRegistry,
-) {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let transcript = provider_root.join("workspace/chats/qwen-life.jsonl");
-    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    fs::write(&transcript, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
-    let registry = qwen_registry(&provider_root);
-    (temp, provider_root, transcript, registry)
-}
-
-fn qwen_registry(provider_root: &Path) -> SourceBackedProviderRegistry {
-    direct_jsonl_registry(
-        CaptureProvider::QwenCode,
-        provider_root,
-        "qwen_code_chat_jsonl_tree",
-    )
-}
-
-fn direct_jsonl_registry(
-    provider: CaptureProvider,
-    provider_root: &Path,
+#[derive(Debug)]
+struct DirectFixture {
+    root: PathBuf,
+    transcript: PathBuf,
     source_format: &'static str,
-) -> SourceBackedProviderRegistry {
-    let source = ProviderSource {
-        provider,
-        path: provider_root.to_path_buf(),
-        exists: true,
-        source_format,
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        status: ProviderSourceStatus::Available,
-        unsupported_reason: None,
-    };
-    let mut registry = SourceBackedProviderRegistry::new();
-    registration::register(&mut registry, source, SourceBackedRouteSelection::Automatic).unwrap();
-    registry
-}
-
-fn qwen_registry_with_test_observer(
-    provider_root: &Path,
-    observer: registration::DirectJsonlRegistrationTestObserver,
-) -> SourceBackedProviderRegistry {
-    direct_jsonl_registry_with_test_observer(qwen_source(provider_root), observer)
-}
-
-fn direct_jsonl_registry_with_test_observer(
-    source: ProviderSource,
-    observer: registration::DirectJsonlRegistrationTestObserver,
-) -> SourceBackedProviderRegistry {
-    let mut registry = SourceBackedProviderRegistry::new();
-    registration::register_with_test_observer(
-        &mut registry,
-        source,
-        SourceBackedRouteSelection::Automatic,
-        observer,
-    )
-    .unwrap();
-    registry
-}
-
-fn qwen_source(provider_root: &Path) -> ProviderSource {
-    ProviderSource {
-        provider: CaptureProvider::QwenCode,
-        path: provider_root.to_path_buf(),
-        exists: true,
-        source_format: "qwen_code_chat_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        status: ProviderSourceStatus::Available,
-        unsupported_reason: None,
-    }
 }
 
 fn writer_options() -> WriterOptions {
@@ -127,7 +60,45 @@ fn writer_options() -> WriterOptions {
     }
 }
 
-fn write_jsonl_values(path: &Path, records: &[Value]) {
+fn direct_registry(
+    provider: CaptureProvider,
+    root: &Path,
+    source_format: &'static str,
+) -> SourceBackedProviderRegistry {
+    let source = ProviderSource {
+        provider,
+        path: root.to_path_buf(),
+        exists: true,
+        source_format,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+fn qwen_fixture(parent: &Path) -> DirectFixture {
+    let root = parent.join("qwen");
+    let transcript = root.join("workspace/chats/qwen-life.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(&transcript, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
+    DirectFixture {
+        root,
+        transcript,
+        source_format: "qwen_code_chat_jsonl_tree",
+    }
+}
+
+fn write_records(path: &Path, records: &[Value]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = Vec::new();
     for record in records {
@@ -137,11 +108,7 @@ fn write_jsonl_values(path: &Path, records: &[Value]) {
     fs::write(path, bytes).unwrap();
 }
 
-fn direct_family_fixture(
-    parent: &Path,
-    provider: CaptureProvider,
-    marker: &str,
-) -> (std::path::PathBuf, &'static str) {
+fn direct_fixture(parent: &Path, provider: CaptureProvider, marker: &str) -> DirectFixture {
     let (root, transcript, source_format, records) = match provider {
         CaptureProvider::Antigravity => {
             let root = parent.join("antigravity");
@@ -311,945 +278,298 @@ fn direct_family_fixture(
         }
         _ => panic!("test fixture requested a non-direct JSONL provider"),
     };
-    write_jsonl_values(&transcript, &records);
-    (root, source_format)
+    write_records(&transcript, &records);
+    DirectFixture {
+        root,
+        transcript,
+        source_format,
+    }
 }
 
-#[test]
-fn mixed_valid_and_malformed_records_publish_with_typed_rejection_evidence() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let transcript = provider_root.join("workspace/chats/qwen-mixed.jsonl");
-    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    fs::write(
-        &transcript,
-        QWEN_LIFECYCLE_TRANSCRIPT.replacen(
-            "\n",
-            "\n{\"type\":\"message\",\"message\":{\"content\":[\n",
-            1,
-        ),
-    )
-    .unwrap();
-    let adapter = super::super::qwen_code_source_backed_adapter();
-    let inventory = adapter.discover(&provider_root).unwrap();
-    let mut reader = adapter
-        .open_leaf(
-            &inventory.leaves()[0],
-            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
-            None,
-        )
-        .unwrap();
-    let mut documents = Vec::new();
-    reader
-        .visit_documents(&mut |document| {
-            documents.push(document);
-            Ok(())
-        })
-        .unwrap();
-    let receipt = reader.finish().unwrap();
-
-    assert_eq!(documents.len(), 2);
-    assert_eq!(receipt.certificate().counts().complete_records, 3);
-    assert_eq!(receipt.certificate().counts().retained_records, 2);
-    assert_eq!(receipt.certificate().counts().rejected_records, 1);
-    assert_eq!(receipt.rejections().len(), 1);
-    assert_eq!(receipt.rejections()[0].raw_ordinal, 1);
-    assert!(receipt.rejections()[0].reason.contains("malformed JSONL"));
-
-    let base = receipt.certificate().clone();
-    let replay_inventory = adapter.discover(&provider_root).unwrap();
-    let mut replay = adapter
-        .open_leaf(
-            &replay_inventory.leaves()[0],
-            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
-            Some(&base),
-        )
-        .unwrap();
-    replay.visit_documents(&mut |_document| Ok(())).unwrap();
-    let replay = replay.finish().unwrap();
-    assert_eq!(replay.certificate(), &base);
-    assert_eq!(replay.rejections(), receipt.rejections());
-}
-
-#[test]
-fn cold_identity_rejection_isolated_from_valid_sibling_but_replacement_fails_closed() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let chats = provider_root.join("workspace/chats");
-    fs::create_dir_all(&chats).unwrap();
-    let valid = chats.join("valid.jsonl");
-    fs::write(&valid, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
-    fs::write(chats.join("malformed.jsonl"), b"{\"sessionId\":\n").unwrap();
-    let registry = qwen_registry(&provider_root);
-    let index_root = temp.path().join("index");
-
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(cold.sources.len(), 1);
-    assert_eq!(cold.sources[0].counts().indexed_documents, 2);
-    let unchanged =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(unchanged.sources, cold.sources);
-
-    fs::write(&valid, b"{\"sessionId\":\n").unwrap();
-    assert!(
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err(),
-        "a previously certified leaf becoming identity-less must fail the route"
-    );
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
-        cold.commit.generation_id
-    );
-}
-
-#[test]
-fn active_source_family_contract_direct_jsonl_rejects_late_identity_admission() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let chats = provider_root.join("workspace/chats");
-    fs::create_dir_all(&chats).unwrap();
-    fs::write(chats.join("valid.jsonl"), QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
-    let rejected = chats.join("rejected.jsonl");
-    fs::write(&rejected, b"{\"sessionId\":\n").unwrap();
-    let index_root = temp.path().join("index");
-    let promote_rejected = Arc::new(AtomicBool::new(false));
-    let promotion_armed = Arc::clone(&promote_rejected);
-    let promoted_path = rejected.clone();
-    let registry = qwen_registry_with_test_observer(
-        &provider_root,
-        Arc::new(move |event| {
-            if event == registration::DirectJsonlRegistrationTestEvent::SourceRevalidated
-                && promotion_armed.swap(false, Ordering::SeqCst)
-            {
-                fs::write(
-                    &promoted_path,
-                    QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-promoted"),
-                )
-                .unwrap();
-            }
+fn append_record(provider: CaptureProvider, transcript: &Path, marker: &str) {
+    let record = match provider {
+        CaptureProvider::Antigravity => json!({
+            "step_index": 1,
+            "source": "assistant",
+            "type": "ASSISTANT_RESPONSE",
+            "status": "ok",
+            "created_at": "2026-07-25T12:00:02Z",
+            "content": marker,
         }),
-    );
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    promote_rejected.store(true, Ordering::SeqCst);
-
-    let error =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err();
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::Index(IndexError::CompleteInventoryInvalidated { .. })
-    ));
-    assert!(!promote_rejected.load(Ordering::SeqCst));
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
-        cold.commit.generation_id
-    );
+        CaptureProvider::CopilotCli => json!({
+            "id": "copilot-appended",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "type": "assistant.message",
+            "data": {"content": marker},
+        }),
+        CaptureProvider::FactoryAiDroid => json!({
+            "type": "message",
+            "id": "droid-appended",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": marker}],
+            },
+            "model": "factory/droid",
+        }),
+        CaptureProvider::Qoder => json!({
+            "type": "assistant",
+            "sessionId": "qoder-life",
+            "uuid": "qoder-appended",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "cwd": "/workspace/qoder",
+            "message": {"role": "assistant", "content": marker},
+            "model": "qoder-agent",
+        }),
+        CaptureProvider::QwenCode => json!({
+            "uuid": "qwen-appended",
+            "sessionId": "qwen-life",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "type": "assistant",
+            "cwd": "/workspace/qwen",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": marker}],
+            },
+            "model": "qwen3-coder",
+        }),
+        CaptureProvider::Tabnine => json!({
+            "id": "tabnine-appended",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "type": "assistant",
+            "content": marker,
+            "model": "tabnine-agent",
+        }),
+        CaptureProvider::Windsurf => json!({
+            "status": "done",
+            "type": "assistant_response",
+            "timestamp": "2026-07-25T12:00:02Z",
+            "assistant_response": marker,
+        }),
+        _ => panic!("test fixture requested a non-direct JSONL provider"),
+    };
+    let mut file = OpenOptions::new().append(true).open(transcript).unwrap();
+    serde_json::to_writer(&mut file, &record).unwrap();
+    file.write_all(b"\n").unwrap();
 }
 
 #[test]
-fn malformed_sibling_does_not_invalidate_exact_deletion_proof() {
+fn seven_direct_jsonl_providers_share_cold_noop_append_rewrite_delete_and_hydration() {
+    const COLD_MARKER: &str = "cold-marker";
+    const EDIT_MARKER: &str = "edit-marker";
+    const APPEND_MARKER: &str = "append-marker";
+    assert_eq!(COLD_MARKER.len(), EDIT_MARKER.len());
+
+    for provider in DIRECT_PROVIDERS {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let fixture = direct_fixture(temp.path(), provider, COLD_MARKER);
+        let registry = direct_registry(provider, &fixture.root, fixture.source_format);
+        let index_root = temp.path().join("index");
+
+        reset_jsonl_family_work();
+        let cold =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert_eq!(cold.sources.len(), 1, "{provider} cold source count");
+        assert!(
+            cold.sources[0].counts().indexed_documents > 0,
+            "{provider} cold projection was empty"
+        );
+        assert!(
+            jsonl_family_work().provider_projections > 0,
+            "{provider} bypassed the shared family projector"
+        );
+        let source = cold.sources[0].observation().source().clone();
+        let mut cold_events = VerifiedIndex::open(&index_root)
+            .unwrap()
+            .source_event_page(&source, None, 32)
+            .unwrap()
+            .items;
+        cold_events.sort_by_key(|event| event.event_sequence);
+        let requests = cold_events
+            .iter()
+            .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+            .collect::<Vec<_>>();
+        reset_jsonl_family_work();
+        let hydrated = registry
+            .resolver_registry()
+            .hydrate_batch(&BatchHydrationRequest::new(requests.clone()).unwrap())
+            .unwrap()
+            .into_records();
+        let rewritten_request = requests[hydrated
+            .iter()
+            .position(|record| {
+                String::from_utf8_lossy(&record.provider_bytes).contains(COLD_MARKER)
+            })
+            .unwrap_or_else(|| panic!("{provider} hydration lost the provider body"))]
+        .clone();
+        assert_eq!(
+            jsonl_family_work().leaf_opens,
+            1,
+            "{provider} grouped hydration opened its leaf more than once"
+        );
+        assert_eq!(jsonl_family_work().provider_projections, 0);
+
+        reset_jsonl_family_work();
+        let unchanged =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert_eq!(
+            jsonl_family_work().provider_projections,
+            0,
+            "{provider} no-op projected provider records"
+        );
+        assert_eq!(unchanged.sources, cold.sources);
+        assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+        assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+
+        append_record(provider, &fixture.transcript, APPEND_MARKER);
+        reset_jsonl_family_work();
+        let appended =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert_eq!(
+            jsonl_family_work().provider_projections,
+            1,
+            "{provider} did not certify exactly one appended physical record"
+        );
+        assert!(appended.sources[0]
+            .observation()
+            .source()
+            .exact_descriptor_eq(&source));
+        let mut appended_events = VerifiedIndex::open(&index_root)
+            .unwrap()
+            .source_event_page(&source, None, 32)
+            .unwrap()
+            .items;
+        appended_events.sort_by_key(|event| event.event_sequence);
+        assert!(
+            appended_events.len() > cold_events.len(),
+            "{provider} append did not publish an event"
+        );
+        assert_eq!(
+            appended_events
+                .iter()
+                .take(cold_events.len())
+                .map(|event| (event.event_id, event.event_sequence, event.locator.clone()))
+                .collect::<Vec<_>>(),
+            cold_events
+                .iter()
+                .map(|event| (event.event_id, event.event_sequence, event.locator.clone()))
+                .collect::<Vec<_>>(),
+            "{provider} append changed prior identities or locators"
+        );
+
+        let bytes = fs::read(&fixture.transcript).unwrap();
+        let cold_occurrences = bytes
+            .windows(COLD_MARKER.len())
+            .filter(|window| *window == COLD_MARKER.as_bytes())
+            .count();
+        assert_eq!(cold_occurrences, 1, "{provider} fixture marker drifted");
+        let rewritten = String::from_utf8(bytes)
+            .unwrap()
+            .replacen(COLD_MARKER, EDIT_MARKER, 1);
+        fs::write(&fixture.transcript, rewritten).unwrap();
+        reset_jsonl_family_work();
+        let replaced =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert_eq!(
+            jsonl_family_work().provider_projections as u64,
+            replaced.sources[0].counts().complete_records,
+            "{provider} rewrite was not a complete replacement pass"
+        );
+        assert!(replaced.sources[0]
+            .observation()
+            .source()
+            .exact_descriptor_eq(&source));
+        assert_ne!(
+            replaced.commit.generation_id, appended.commit.generation_id,
+            "{provider} rewrite did not publish"
+        );
+        let stale = registry
+            .resolver_registry()
+            .hydrate_event(&rewritten_request)
+            .unwrap_err();
+        assert_eq!(
+            stale.kind,
+            HydrationFailureKind::StaleRecordEvidence,
+            "{provider} rewrite did not preserve stale typing"
+        );
+
+        fs::remove_file(&fixture.transcript).unwrap();
+        let deleted =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert!(
+            deleted.sources.is_empty(),
+            "{provider} deletion was not exact"
+        );
+        assert_eq!(deleted.removals.len(), 1, "{provider} deletion proof count");
+        let confirmed_deleted = direct_registry(provider, &fixture.root, fixture.source_format)
+            .resolver_registry()
+            .hydrate_event(&rewritten_request)
+            .unwrap_err();
+        assert_eq!(
+            confirmed_deleted.kind,
+            HydrationFailureKind::ConfirmedDeleted,
+            "{provider} deletion did not preserve confirmed-deleted typing"
+        );
+        let deletion_noop =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert_eq!(
+            deletion_noop.commit.generation_id,
+            deleted.commit.generation_id
+        );
+        assert_eq!(deletion_noop.commit.opstamp, deleted.commit.opstamp);
+    }
+}
+
+#[test]
+fn cold_identity_rejection_isolated_from_valid_sibling_and_deletion_remains_exact() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let chats = provider_root.join("workspace/chats");
-    fs::create_dir_all(&chats).unwrap();
-    let deleted = chats.join("deleted.jsonl");
-    fs::write(&deleted, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
+    let fixture = qwen_fixture(temp.path());
+    let chats = fixture.transcript.parent().unwrap();
+    let malformed = chats.join("malformed.jsonl");
+    fs::write(&malformed, b"{\"sessionId\":\n").unwrap();
     fs::write(
         chats.join("retained.jsonl"),
         QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-retained"),
     )
     .unwrap();
-    fs::write(chats.join("malformed.jsonl"), b"{\"sessionId\":\n").unwrap();
-    let registry = qwen_registry(&provider_root);
+    let registry = direct_registry(
+        CaptureProvider::QwenCode,
+        &fixture.root,
+        fixture.source_format,
+    );
     let index_root = temp.path().join("index");
 
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(cold.sources.len(), 2);
-
-    fs::remove_file(deleted).unwrap();
-    let deletion =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(deletion.sources.len(), 1);
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(unchanged.sources, deletion.sources);
-}
-
-#[test]
-fn active_source_family_contract_direct_jsonl_recertifies_legacy_v1_removal() {
-    let (temp, provider_root, transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let source = cold.sources[0].observation().source().clone();
-    fs::remove_file(transcript).unwrap();
-
-    let observation = SourceInventoryObservation::new(
-        CaptureProvider::QwenCode.as_str(),
-        DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE,
-        TypedKey::bytes(provider_root.as_os_str().as_encoded_bytes().to_vec()).unwrap(),
-        "direct-native-jsonl-inventory-sha256-v1",
-        vec![0],
-    )
-    .unwrap();
-    let legacy_inventory = CertifiedSourceInventory::certify(
-        observation.clone(),
-        observation,
-        DIRECT_JSONL_LEGACY_DISCOVERY_REVISION,
-        Vec::new(),
-    )
-    .unwrap();
-    let legacy_deletion =
-        CertifiedSourceDeletion::from_inventory(source.clone(), &legacy_inventory).unwrap();
-    let mut writer = GenerationWriter::open(&index_root, writer_options()).unwrap();
-    writer
-        .certify_complete_inventory(legacy_inventory.clone())
-        .unwrap();
-    writer
-        .delete_source(legacy_deletion, legacy_inventory)
-        .unwrap();
-    writer
-        .commit_with_complete_inventory_revalidation(|_| true, |_| true)
-        .unwrap();
-
-    let migrated =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(migrated.sources.is_empty());
-    assert_eq!(migrated.removals.len(), 1);
-    assert_eq!(migrated.removals[0].deletion.source(), &source);
-    assert_eq!(
-        migrated.removals[0].deletion.discovery_revision(),
-        DIRECT_JSONL_DISCOVERY_REVISION
-    );
-    assert_eq!(
-        migrated.removals[0]
-            .deletion
-            .inventory()
-            .authority_namespace(),
-        DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE
-    );
-}
-
-#[test]
-fn exact_noop_performs_zero_provider_projections_and_preserves_generation() {
-    let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-
-    super::super::reader::reset_provider_projection_count();
-    reset_inventory_traversals();
-    let unchanged =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-
-    assert_eq!(super::super::reader::provider_projection_count(), 0);
-    assert_eq!(
-        inventory_traversals(),
-        3,
-        "capture needs opening and closing traversals plus one terminal inventory traversal"
-    );
     assert_eq!(unchanged.sources, cold.sources);
-    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
-}
 
-#[test]
-fn direct_jsonl_worker_policy_honors_default_and_requested_counts() {
-    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 12, None), 8);
-    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 12, Some(4)), 4);
-    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 3, Some(4)), 3);
-    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 12, Some(0)), 1);
-    assert_eq!(
-        direct_jsonl_scanner_worker_count_policy(32, 64, Some(usize::MAX)),
-        16
-    );
-    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 0, Some(4)), 0);
-}
-
-#[test]
-fn every_direct_jsonl_provider_replacement_opens_and_projects_identity_once() {
-    let providers = [
-        CaptureProvider::Antigravity,
-        CaptureProvider::CopilotCli,
-        CaptureProvider::FactoryAiDroid,
-        CaptureProvider::Qoder,
-        CaptureProvider::QwenCode,
-        CaptureProvider::Tabnine,
-        CaptureProvider::Windsurf,
-    ];
-
-    for provider in providers {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let fixture_parent = temp.path().join(provider.as_str());
-        let (root, source_format) =
-            direct_family_fixture(&fixture_parent, provider, "opening marker");
-        let registry = direct_jsonl_registry(provider, &root, source_format);
-        let index_root = temp.path().join("index");
-        with_scanner_workers(8, || {
-            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap()
-        });
-
-        direct_family_fixture(
-            &fixture_parent,
-            provider,
-            "replacement marker with a longer payload",
-        );
-        reset_scan_work(&root);
-        with_scanner_workers(8, || {
-            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap()
-        });
-
-        assert_eq!(
-            scan_work(&root),
-            DirectJsonlScanWork {
-                leaf_opens: 1,
-                identity_projections: 1,
-            },
-            "{provider} replacement performed duplicate leaf I/O"
-        );
-    }
-}
-
-#[test]
-fn forced_parallel_scanners_match_serial_ids_for_record_and_path_identity_providers() {
-    const SOURCE_COUNT: usize = 12;
-
-    fn assert_parity(
-        index_parent: &Path,
-        registry: &SourceBackedProviderRegistry,
-        expected_sources: usize,
-    ) {
-        let serial_root = index_parent.join("serial");
-        let serial = with_scanner_workers(1, || {
-            refresh_source_backed_generation(&serial_root, registry, writer_options()).unwrap()
-        });
-        assert_eq!(
-            scanner_activity(),
-            DirectJsonlScannerActivity {
-                worker_count: 1,
-                sources_started: expected_sources,
-                sources_completed: expected_sources,
-                peak_active_scanners: 1,
-            }
-        );
-        assert_eq!(serial.sources.len(), expected_sources);
-
-        let parallel_root = index_parent.join("parallel");
-        let parallel = with_scanner_workers(8, || {
-            refresh_source_backed_generation(&parallel_root, registry, writer_options()).unwrap()
-        });
-        let activity = scanner_activity();
-        assert_eq!(activity.worker_count, 8);
-        assert_eq!(activity.sources_started, expected_sources);
-        assert_eq!(activity.sources_completed, expected_sources);
-        assert!(
-            activity.peak_active_scanners >= 4,
-            "forced shared-runner capture did not keep four provider scanners active"
-        );
-        assert!(activity.peak_active_scanners <= activity.worker_count);
-        assert_eq!(parallel.sources, serial.sources);
-        assert_eq!(parallel.commit.generation_id, serial.commit.generation_id);
-        assert_eq!(
-            parallel.commit.indexed_documents,
-            serial.commit.indexed_documents
-        );
-
-        let serial_index = VerifiedIndex::open(&serial_root).unwrap();
-        let parallel_index = VerifiedIndex::open(&parallel_root).unwrap();
-        for certificate in &serial.sources {
-            let source = certificate.observation().source();
-            assert_eq!(
-                parallel_index
-                    .source_event_page(source, None, 32)
-                    .unwrap()
-                    .items,
-                serial_index
-                    .source_event_page(source, None, 32)
-                    .unwrap()
-                    .items,
-                "parallel capture changed event/session IDs, locators, or canonical event order"
-            );
-        }
-    }
-
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let qwen_root = temp.path().join(".qwen/projects");
-    let qwen_chats = qwen_root.join("workspace/chats");
-    fs::create_dir_all(&qwen_chats).unwrap();
-    for ordinal in 0..SOURCE_COUNT {
-        fs::write(
-            qwen_chats.join(format!("session-{ordinal:02}.jsonl")),
-            QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", &format!("qwen-parallel-{ordinal:02}")),
-        )
-        .unwrap();
-    }
-    assert_parity(
-        &temp.path().join("qwen-indexes"),
-        &qwen_registry(&qwen_root),
-        SOURCE_COUNT,
-    );
-
-    let windsurf_root = temp.path().join("windsurf");
-    fs::create_dir_all(&windsurf_root).unwrap();
-    for ordinal in 0..SOURCE_COUNT {
-        fs::write(
-            windsurf_root.join(format!("windsurf-parallel-{ordinal:02}.jsonl")),
-            format!(
-                "{{\"status\":\"done\",\"type\":\"user_input\",\
-                 \"timestamp\":\"2026-07-25T12:00:{ordinal:02}Z\",\
-                 \"user_input\":{{\"user_response\":\"windsurf sentinel {ordinal:02}\"}}}}\n"
-            ),
-        )
-        .unwrap();
-    }
-    assert_parity(
-        &temp.path().join("windsurf-indexes"),
-        &direct_jsonl_registry(
-            CaptureProvider::Windsurf,
-            &windsurf_root,
-            "windsurf_cascade_hook_transcript_jsonl_tree",
-        ),
-        SOURCE_COUNT,
-    );
-}
-
-#[test]
-fn duplicate_worker_discovered_identity_fails_deterministically_without_publication() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let chats = provider_root.join("workspace/chats");
-    fs::create_dir_all(&chats).unwrap();
-    let first = chats.join("first.jsonl");
-    let second = chats.join("second.jsonl");
-    fs::write(
-        &first,
-        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-dup-a"),
-    )
-    .unwrap();
-    fs::write(
-        &second,
-        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-dup-b"),
-    )
-    .unwrap();
-    let registry = qwen_registry(&provider_root);
-    let index_root = temp.path().join("index");
-    let baseline =
+    fs::remove_file(&fixture.transcript).unwrap();
+    let deleted =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(baseline.sources.len(), 2);
-
-    fs::write(
-        &second,
-        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-dup-a"),
-    )
-    .unwrap();
-    let serial_error = with_scanner_workers(1, || {
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err()
-    });
-    let parallel_error = with_scanner_workers(8, || {
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err()
-    });
-    let duplicate_detail = |error: SourceBackedCoordinatorError| match error {
-        SourceBackedCoordinatorError::RouteScan { source, .. } => {
-            assert_eq!(source.kind, SourceBackedRouteErrorKind::InvalidSource);
-            source.detail
-        }
-        other => panic!("unexpected duplicate-identity error: {other}"),
-    };
-    assert_eq!(
-        duplicate_detail(serial_error),
-        duplicate_detail(parallel_error),
-        "worker arrival order changed the duplicate-identity failure"
-    );
-
-    let retained = VerifiedIndex::open(&index_root).unwrap();
-    assert_eq!(retained.generation_id(), baseline.commit.generation_id);
-    assert_eq!(retained.document_count(), baseline.commit.indexed_documents);
-}
-
-#[test]
-fn mutation_after_worker_identity_projection_fails_closed() {
-    let (temp, provider_root, transcript, _registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let mutate_on_begin = Arc::new(AtomicBool::new(false));
-    let armed = Arc::clone(&mutate_on_begin);
-    let transcript_to_mutate = transcript.clone();
-    let replacement =
-        QWEN_LIFECYCLE_TRANSCRIPT.replace("lifecycle sentinel", "replacement sentinel");
-    let active_mutation =
-        replacement.replace("replacement sentinel", "mutation after worker identity");
-    let registry = qwen_registry_with_test_observer(
-        &provider_root,
-        Arc::new(move |event| {
-            if event == registration::DirectJsonlRegistrationTestEvent::BeginSource
-                && armed.swap(false, Ordering::SeqCst)
-            {
-                fs::write(&transcript_to_mutate, &active_mutation).unwrap();
-            }
-        }),
-    );
-    let baseline =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-
-    fs::write(&transcript, replacement).unwrap();
-    mutate_on_begin.store(true, Ordering::SeqCst);
-    reset_scan_work(&provider_root);
-    with_scanner_workers(8, || {
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err()
-    });
-    assert!(!mutate_on_begin.load(Ordering::SeqCst));
-    assert_eq!(
-        scan_work(&provider_root),
-        DirectJsonlScanWork {
-            leaf_opens: 1,
-            identity_projections: 1,
-        }
-    );
-
-    let retained = VerifiedIndex::open(&index_root).unwrap();
-    assert_eq!(retained.generation_id(), baseline.commit.generation_id);
-    assert_eq!(retained.document_count(), baseline.commit.indexed_documents);
-}
-
-#[test]
-fn thousand_source_lifecycle_uses_linear_indexes_and_preserves_change_parity() {
-    const SOURCE_COUNT: usize = 1_001;
-
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let provider_root = temp.path().join(".qwen/projects");
-    let chats = provider_root.join("workspace/chats");
-    fs::create_dir_all(&chats).unwrap();
-    for ordinal in 0..SOURCE_COUNT {
-        fs::write(
-            chats.join(format!("session-{ordinal:04}.jsonl")),
-            QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", &format!("qwen-scale-{ordinal:04}")),
-        )
-        .unwrap();
-    }
-    let registry = qwen_registry(&provider_root);
-    let index_root = temp.path().join("index");
-    let refresh = || {
-        with_scanner_workers(8, || {
-            refresh_source_backed_generation(&index_root, &registry, writer_options())
-        })
-    };
-
-    let cold = refresh().unwrap();
-    assert_eq!(cold.sources.len(), SOURCE_COUNT);
-    let cold_source_digests = cold
-        .sources
-        .iter()
-        .map(|certificate| certificate.observation().source().exact_descriptor_digest())
-        .collect::<Vec<_>>();
-
-    reset_lifecycle_work();
-    super::super::reader::reset_provider_projection_count();
-    let unchanged = refresh().unwrap();
-    assert_eq!(
-        lifecycle_work(),
-        DirectJsonlLifecycleWork {
-            base_certificate_decodes: SOURCE_COUNT,
-            base_index_entries: SOURCE_COUNT,
-            base_index_lookups: SOURCE_COUNT,
-            current_index_entries: SOURCE_COUNT,
-            retirement_lookups: SOURCE_COUNT,
-        },
-        "base/current lifecycle membership must perform one indexed operation per source"
-    );
-    assert_eq!(super::super::reader::provider_projection_count(), 0);
-    assert_eq!(unchanged.sources, cold.sources);
-    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
-
-    let source = cold.sources[0].observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let event = index
-        .source_event_page(source, None, 1)
-        .unwrap()
-        .items
-        .pop()
-        .unwrap();
-    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
-    reset_hydration_work();
-    registry
-        .resolver_registry()
-        .hydrate_event(&request)
-        .unwrap();
-    assert_eq!(
-        hydration_work(),
-        DirectJsonlHydrationWork {
-            inventory_scans: 1,
-            leaf_index_entries: SOURCE_COUNT,
-            leaf_index_lookups: 1,
-            source_binds: 1,
-            leaf_opens: 1,
-        },
-        "hydration must build one linear leaf index and bind by one constant-time lookup"
-    );
-
-    let adapter = super::super::qwen_code_source_backed_adapter();
-    let changed_path = chats.join("session-0000.jsonl");
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&changed_path)
-        .unwrap()
-        .write_all(
-            concat!(
-                "{\"uuid\":\"qwen-event-appended\",\"sessionId\":\"qwen-scale-0000\",",
-                "\"timestamp\":\"2026-07-25T12:00:03Z\",\"type\":\"assistant\",",
-                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
-                "\"content\":[{\"type\":\"text\",\"text\":\"appended sentinel\"}]},",
-                "\"model\":\"qwen3-coder\"}\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    let appended = refresh().unwrap();
-    assert_eq!(appended.sources.len(), SOURCE_COUNT);
-    assert_eq!(
-        appended
-            .sources
-            .iter()
-            .map(|certificate| { certificate.observation().source().exact_descriptor_digest() })
-            .collect::<Vec<_>>(),
-        cold_source_digests,
-        "append must preserve exact source identities and canonical order"
-    );
-    assert_ne!(
-        appended.commit.generation_id,
-        unchanged.commit.generation_id
-    );
-
-    fs::write(
-        &changed_path,
-        QWEN_LIFECYCLE_TRANSCRIPT
-            .replace("qwen-life", "qwen-scale-0000")
-            .replace("lifecycle sentinel", "rewritten sentinel"),
-    )
-    .unwrap();
-    let changed = refresh().unwrap();
-    assert_eq!(changed.sources.len(), SOURCE_COUNT);
-    assert_eq!(
-        changed
-            .sources
-            .iter()
-            .map(|certificate| { certificate.observation().source().exact_descriptor_digest() })
-            .collect::<Vec<_>>(),
-        cold_source_digests,
-        "content rewrite must preserve exact source identities and canonical order"
-    );
-    assert_ne!(changed.sources, appended.sources);
-    assert_ne!(changed.commit.generation_id, appended.commit.generation_id);
-
-    let deleted_source = adapter.source_key("qwen-scale-0001").unwrap();
-    fs::remove_file(chats.join("session-0001.jsonl")).unwrap();
-    let deletion = refresh().unwrap();
-    assert_eq!(deletion.sources.len(), SOURCE_COUNT - 1);
-    assert!(deletion.sources.iter().all(|certificate| {
-        !certificate
-            .observation()
-            .source()
-            .exact_descriptor_eq(&deleted_source)
-    }));
-    assert_ne!(deletion.commit.generation_id, changed.commit.generation_id);
-
-    let deletion_noop = refresh().unwrap();
-    assert_eq!(deletion_noop.sources, deletion.sources);
-    assert_eq!(
-        deletion_noop.commit.generation_id,
-        deletion.commit.generation_id
-    );
-    assert_eq!(deletion_noop.commit.opstamp, deletion.commit.opstamp);
-}
-
-#[test]
-fn metadata_only_same_content_churn_is_a_logical_noop() {
-    let (temp, _provider_root, transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-
-    let mut permissions = fs::metadata(&transcript).unwrap().permissions();
-    permissions.set_mode(permissions.mode() ^ 0o100);
-    fs::set_permissions(&transcript, permissions).unwrap();
-
-    super::super::reader::reset_provider_projection_count();
-    let unchanged =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-
-    assert_eq!(super::super::reader::provider_projection_count(), 0);
-    assert_eq!(unchanged.sources, cold.sources);
-    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
-}
-
-#[test]
-fn active_source_family_contract_direct_jsonl_freezes_discovery_and_terminal_boundaries() {
-    let (temp, provider_root, transcript, _registry) = qwen_route_fixture();
-    let adapter = super::super::qwen_code_source_backed_adapter();
-    let inventory = adapter.discover(&provider_root).unwrap();
-    let leaf = inventory.leaves()[0].clone();
-    OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap()
-        .write_all(
-            concat!(
-                "{\"uuid\":\"qwen-event-3\",\"sessionId\":\"qwen-life\",",
-                "\"timestamp\":\"2026-07-25T12:00:03Z\",\"type\":\"assistant\",",
-                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
-                "\"content\":[{\"type\":\"text\",\"text\":\"active append\"}]},",
-                "\"model\":\"qwen3-coder\"}\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-
-    let mut reader = adapter
-        .open_leaf(&leaf, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH, None)
-        .unwrap();
-    let mut documents = Vec::new();
-    reader
-        .visit_documents(&mut |document| {
-            documents.push(document);
-            Ok(())
-        })
-        .unwrap();
-    let receipt = reader.finish().unwrap();
-    assert_eq!(documents.len(), 3);
-
-    let evidence = DirectJsonlTerminalEvidenceSet::default();
-    evidence.record(receipt.terminal_evidence()).unwrap();
-    OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap()
-        .write_all(
-            concat!(
-                "{\"uuid\":\"qwen-event-4\",\"sessionId\":\"qwen-life\",",
-                "\"timestamp\":\"2026-07-25T12:00:04Z\",\"type\":\"assistant\",",
-                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
-                "\"content\":[{\"type\":\"text\",\"text\":\"next refresh\"}]},",
-                "\"model\":\"qwen3-coder\"}\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    assert!(adapter
-        .revalidate_certificate(&evidence, receipt.certificate())
-        .unwrap());
-
-    let current = adapter.discover(&provider_root).unwrap();
-    assert_eq!(
-        inventory.observation, current.observation,
-        "append-log inventory identity must describe membership, not mutable length"
-    );
-
-    let route_events = Arc::new(Mutex::new(Vec::new()));
-    let observed_route_events = Arc::clone(&route_events);
-    let registry = qwen_registry_with_test_observer(
-        &provider_root,
-        Arc::new(move |event| observed_route_events.lock().unwrap().push(event)),
-    );
-    let index_root = temp.path().join("append-route-index");
-    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    route_events.lock().unwrap().clear();
-
-    OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap()
-        .write_all(
-            concat!(
-                "{\"uuid\":\"qwen-event-5\",\"sessionId\":\"qwen-life\",",
-                "\"timestamp\":\"2026-07-25T12:00:05Z\",\"type\":\"assistant\",",
-                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
-                "\"content\":[{\"type\":\"text\",\"text\":\"optimizedrouteonlymarker\"}]},",
-                "\"model\":\"qwen3-coder\"}\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-
-    assert_eq!(
-        *route_events.lock().unwrap(),
-        vec![
-            registration::DirectJsonlRegistrationTestEvent::BeginSourceAppend,
-            registration::DirectJsonlRegistrationTestEvent::SourceRevalidated,
-            registration::DirectJsonlRegistrationTestEvent::CompleteInventoryAccepted,
-        ],
-        "the direct append refresh must stage and certify against its retained base"
-    );
-    assert_eq!(
-        VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("optimizedrouteonlymarker", 8)
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn final_inventory_rejects_rewrite_after_per_source_terminal_revalidation() {
-    let (temp, provider_root, transcript, _registry) = qwen_route_fixture();
-    let index_root = temp.path().join("terminal-race-index");
-    let route_events = Arc::new(Mutex::new(Vec::new()));
-    let observed_route_events = Arc::clone(&route_events);
-    let rewrite_after_source_revalidation = Arc::new(AtomicBool::new(false));
-    let rewrite_is_armed = Arc::clone(&rewrite_after_source_revalidation);
-    let transcript_to_rewrite = transcript.clone();
-    let rewritten = QWEN_LIFECYCLE_TRANSCRIPT.replace("second sentinel", "rewritten value");
-    assert_eq!(rewritten.len(), QWEN_LIFECYCLE_TRANSCRIPT.len());
-    let registry = qwen_registry_with_test_observer(
-        &provider_root,
-        Arc::new(move |event| {
-            observed_route_events.lock().unwrap().push(event);
-            if event == registration::DirectJsonlRegistrationTestEvent::SourceRevalidated
-                && rewrite_is_armed.swap(false, Ordering::SeqCst)
-            {
-                fs::write(&transcript_to_rewrite, &rewritten).unwrap();
-            }
-        }),
-    );
-
-    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let before = VerifiedIndex::open(&index_root).unwrap();
-    let before_generation = before.generation_id().to_owned();
-    let before_documents = before.document_count();
-    drop(before);
-    route_events.lock().unwrap().clear();
-    rewrite_after_source_revalidation.store(true, Ordering::SeqCst);
-
-    let error =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err();
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::Index(IndexError::CompleteInventoryInvalidated { .. })
-    ));
-    assert_eq!(
-        *route_events.lock().unwrap(),
-        vec![
-            registration::DirectJsonlRegistrationTestEvent::BeginSourceAppend,
-            registration::DirectJsonlRegistrationTestEvent::SourceRevalidated,
-            registration::DirectJsonlRegistrationTestEvent::CompleteInventoryRejected,
-        ],
-        "the rewrite must occur after the source callback and fail the later evidence-aware inventory callback"
-    );
-    assert!(!rewrite_after_source_revalidation.load(Ordering::SeqCst));
-
-    let after = VerifiedIndex::open(&index_root).unwrap();
-    assert_eq!(after.generation_id(), before_generation);
-    assert_eq!(after.document_count(), before_documents);
-}
-
-#[test]
-fn grouped_checkpoint_hydration_binds_and_opens_once_with_exact_owner_projections() {
-    let (temp, provider_root, _transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let certificate = &cold.sources[0];
-    let source = certificate.observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let mut events = index.source_event_page(source, None, 10).unwrap().items;
-    events.sort_by_key(|event| event.event_sequence);
-    let requests = events
-        .iter()
-        .rev()
-        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
-        .collect::<Vec<_>>();
-
-    let adapter = super::super::qwen_code_source_backed_adapter();
-    reset_hydration_work();
-    let mut catalog = adapter.open_hydration_catalog(&provider_root).unwrap();
-    super::super::reader::reset_provider_projection_count();
-    let hydrated = catalog.hydrate_group(certificate, &requests).unwrap();
-
-    assert_eq!(
-        hydrated
-            .iter()
-            .map(|record| record.event_id)
-            .collect::<Vec<_>>(),
-        requests
-            .iter()
-            .map(EventHydrationRequest::event_id)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(hydrated[0].provider_bytes, b"second sentinel");
-    assert_eq!(hydrated[1].provider_bytes, b"lifecycle sentinel");
-    assert_eq!(
-        super::super::reader::provider_projection_count(),
-        2,
-        "grouped hydration must verify the provider-native session owner before and after reads"
-    );
-    assert_eq!(
-        hydration_work(),
-        DirectJsonlHydrationWork {
-            inventory_scans: 1,
-            leaf_index_entries: 1,
-            leaf_index_lookups: 1,
-            source_binds: 1,
-            leaf_opens: 1,
-        }
-    );
-}
-
-#[test]
-fn route_batch_discovers_and_binds_once_instead_of_per_event() {
-    let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let source = cold.sources[0].observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let mut events = index.source_event_page(source, None, 10).unwrap().items;
-    events.sort_by_key(|event| event.event_sequence);
-    let requests = events
-        .iter()
-        .rev()
-        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
-        .collect::<Vec<_>>();
-    let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
-
-    reset_hydration_work();
-    super::super::reader::reset_provider_projection_count();
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(&batch)
-        .unwrap()
-        .into_records();
-
-    assert_eq!(
-        hydrated
-            .iter()
-            .map(|record| record.event_id)
-            .collect::<Vec<_>>(),
-        requests
-            .iter()
-            .map(EventHydrationRequest::event_id)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(hydrated[0].provider_bytes, b"second sentinel");
-    assert_eq!(hydrated[1].provider_bytes, b"lifecycle sentinel");
-    assert_eq!(
-        hydration_work(),
-        DirectJsonlHydrationWork {
-            inventory_scans: 1,
-            leaf_index_entries: 1,
-            leaf_index_lookups: 1,
-            source_binds: 1,
-            leaf_opens: 1,
-        }
-    );
-    assert_eq!(
-        super::super::reader::provider_projection_count(),
-        2,
-        "locator-bound grouped hydration must verify the provider identity before and after reads"
-    );
+    assert_eq!(deleted.sources.len(), 1);
+    assert_eq!(deleted.removals.len(), 1);
+    assert!(malformed.exists());
 }
 
 #[test]
 fn active_source_family_contract_direct_jsonl_hydration_rejects_crossed_event_identity() {
-    let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let fixture = qwen_fixture(temp.path());
+    let registry = direct_registry(
+        CaptureProvider::QwenCode,
+        &fixture.root,
+        fixture.source_format,
+    );
     let index_root = temp.path().join("index");
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     let source = cold.sources[0].observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let mut events = index.source_event_page(source, None, 10).unwrap().items;
+    let mut events = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(source, None, 10)
+        .unwrap()
+        .items;
     events.sort_by_key(|event| event.event_sequence);
     assert_eq!(events.len(), 2);
 
@@ -1263,68 +583,19 @@ fn active_source_family_contract_direct_jsonl_hydration_rejects_crossed_event_id
 }
 
 #[test]
-fn repeated_single_hydration_reuses_one_resident_inventory_and_source_binding() {
-    let (temp, _provider_root, transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let source = cold.sources[0].observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let event = index
-        .source_event_page(source, None, 1)
-        .unwrap()
-        .items
-        .pop()
-        .unwrap();
-    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
-    let resolver = registry.resolver_registry();
-
-    reset_hydration_work();
-    super::super::reader::reset_provider_projection_count();
-    let first = resolver.hydrate_event(&request).unwrap();
-    OpenOptions::new()
-        .append(true)
-        .open(transcript)
-        .unwrap()
-        .write_all(
-            concat!(
-                "{\"uuid\":\"qwen-hydration-append\",\"sessionId\":\"qwen-life\",",
-                "\"timestamp\":\"2026-07-25T12:00:05Z\",\"type\":\"assistant\",",
-                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
-                "\"content\":[{\"type\":\"text\",\"text\":\"deferred hydration append\"}]},",
-                "\"model\":\"qwen3-coder\"}\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    let second = resolver.hydrate_event(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.provider_bytes, b"lifecycle sentinel");
-    assert_eq!(
-        hydration_work(),
-        DirectJsonlHydrationWork {
-            inventory_scans: 1,
-            leaf_index_entries: 1,
-            leaf_index_lookups: 1,
-            source_binds: 1,
-            leaf_opens: 2,
-        }
-    );
-    assert_eq!(
-        super::super::reader::provider_projection_count(),
-        4,
-        "each single hydration must verify the provider-native session owner before and after reads"
-    );
-}
-
-#[test]
 fn active_source_family_contract_direct_jsonl_hydration_rejects_identity_rewrite_with_append() {
-    let (temp, _provider_root, transcript, registry) = qwen_route_fixture();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let fixture = qwen_fixture(temp.path());
+    let registry = direct_registry(
+        CaptureProvider::QwenCode,
+        &fixture.root,
+        fixture.source_format,
+    );
     let index_root = temp.path().join("index");
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     let source = cold.sources[0].observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let event = index
+    let event = VerifiedIndex::open(&index_root)
+        .unwrap()
         .source_event_page(source, None, 10)
         .unwrap()
         .items
@@ -1332,22 +603,19 @@ fn active_source_family_contract_direct_jsonl_hydration_rejects_identity_rewrite
         .find(|event| event.event_sequence == 1)
         .unwrap();
     let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
-    let rewrite_path = transcript.clone();
-    crate::provider::source_backed::family::jsonl::set_after_jsonl_hydration_observation_hook(
-        move || {
-            let mut bytes = fs::read(&rewrite_path).unwrap();
-            let identity_offset = bytes
-                .windows(b"qwen-life".len())
-                .position(|window| window == b"qwen-life")
-                .unwrap();
-            bytes[identity_offset..identity_offset + b"qwen-life".len()]
-                .copy_from_slice(b"qwen-evil");
-            bytes.extend_from_slice(
-                b"{\"uuid\":\"late\",\"sessionId\":\"qwen-evil\",\"type\":\"assistant\"}\n",
-            );
-            fs::write(&rewrite_path, bytes).unwrap();
-        },
-    );
+    let rewrite_path = fixture.transcript.clone();
+    set_after_jsonl_hydration_observation_hook(move || {
+        let mut bytes = fs::read(&rewrite_path).unwrap();
+        let identity_offset = bytes
+            .windows(b"qwen-life".len())
+            .position(|window| window == b"qwen-life")
+            .unwrap();
+        bytes[identity_offset..identity_offset + b"qwen-life".len()].copy_from_slice(b"qwen-evil");
+        bytes.extend_from_slice(
+            b"{\"uuid\":\"late\",\"sessionId\":\"qwen-evil\",\"type\":\"assistant\"}\n",
+        );
+        fs::write(&rewrite_path, bytes).unwrap();
+    });
 
     let error = registry
         .resolver_registry()
@@ -1356,207 +624,57 @@ fn active_source_family_contract_direct_jsonl_hydration_rejects_identity_rewrite
     assert_eq!(error.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn terminal_inventory_and_deletion_proofs_each_traverse_once() {
-    let (temp, provider_root, transcript, registry) = qwen_route_fixture();
+fn direct_jsonl_inventory_and_hydration_retain_no_leaf_file_descriptors() {
+    fn provider_fds(root: &Path) -> usize {
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|target| target.starts_with(root))
+            .count()
+    }
+
+    const SOURCE_COUNT: usize = 128;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("qwen");
+    let chats = root.join("workspace/chats");
+    fs::create_dir_all(&chats).unwrap();
+    for ordinal in 0..SOURCE_COUNT {
+        fs::write(
+            chats.join(format!("session-{ordinal:03}.jsonl")),
+            QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", &format!("qwen-fd-{ordinal:03}")),
+        )
+        .unwrap();
+    }
+    let registry = direct_registry(
+        CaptureProvider::QwenCode,
+        &root,
+        "qwen_code_chat_jsonl_tree",
+    );
     let index_root = temp.path().join("index");
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let adapter = super::super::qwen_code_source_backed_adapter();
-    let sources = cold
-        .sources
-        .iter()
-        .map(|certificate| certificate.observation().source().clone())
-        .collect::<Vec<_>>();
+    assert_eq!(cold.sources.len(), SOURCE_COUNT);
+    assert!(
+        provider_fds(&root) <= 2,
+        "inventory retained per-leaf provider descriptors"
+    );
 
-    let opening = adapter.discover(&provider_root).unwrap();
-    let closing = adapter.discover(&provider_root).unwrap();
-    let inventory = opening.certify_against(&closing, sources.clone()).unwrap();
-    reset_inventory_traversals();
-    assert!(adapter
-        .revalidate_inventory(&provider_root, &inventory)
-        .unwrap());
-    assert_eq!(inventory_traversals(), 1);
-
-    fs::remove_file(transcript).unwrap();
-    let opening = adapter.discover(&provider_root).unwrap();
-    let closing = adapter.discover(&provider_root).unwrap();
-    let empty_inventory = opening.certify_against(&closing, Vec::new()).unwrap();
-    let deletion = ctx_history_core::CertifiedSourceDeletion::from_inventory(
-        sources[0].clone(),
-        &empty_inventory,
-    )
-    .unwrap();
-    reset_inventory_traversals();
-    assert!(adapter
-        .revalidate_deletion(&provider_root, &deletion)
-        .unwrap());
-    assert_eq!(inventory_traversals(), 1);
-}
-
-#[test]
-fn resident_single_hydration_preserves_stale_and_deleted_failure_kinds() {
-    let (temp, provider_root, transcript, registry) = qwen_route_fixture();
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     let source = cold.sources[0].observation().source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let event = index
+    let event = VerifiedIndex::open(&index_root)
+        .unwrap()
         .source_event_page(source, None, 1)
         .unwrap()
         .items
         .pop()
         .unwrap();
-    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
-    let resolver = registry.resolver_registry();
-    reset_hydration_work();
-    resolver.hydrate_event(&request).unwrap();
-
-    fs::write(&transcript, b"{\"sessionId\":\"rewritten\"}\n").unwrap();
-    let stale = resolver.hydrate_event(&request).unwrap_err();
-    assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
-
-    fs::write(&transcript, QWEN_LIFECYCLE_TRANSCRIPT).unwrap();
-    assert_eq!(
-        resolver.hydrate_event(&request).unwrap().provider_bytes,
-        b"lifecycle sentinel"
-    );
-    assert_eq!(
-        hydration_work(),
-        DirectJsonlHydrationWork {
-            inventory_scans: 2,
-            leaf_index_entries: 2,
-            leaf_index_lookups: 2,
-            source_binds: 2,
-            leaf_opens: 3,
-        },
-        "a stale resident catalog must be discarded so refresh retry can recatalog"
-    );
-
-    fs::remove_file(transcript).unwrap();
-    let deleted = qwen_registry(&provider_root)
+    registry
         .resolver_registry()
-        .hydrate_event(&request)
-        .unwrap_err();
-    assert_eq!(deleted.kind, HydrationFailureKind::ConfirmedDeleted);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn active_parallel_scans_bound_provider_fds_to_worker_count() {
-    const SOURCE_COUNT: usize = 128;
-    const WORKERS: usize = 8;
-
-    fn retained_provider_fds(root: &Path) -> usize {
-        fs::read_dir("/proc/self/fd")
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter_map(|entry| fs::read_link(entry.path()).ok())
-            .filter(|target| target.starts_with(root))
-            .count()
-    }
-
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("windsurf");
-    fs::create_dir_all(&root).unwrap();
-    for ordinal in 0..SOURCE_COUNT {
-        write_jsonl_values(
-            &root.join(format!("session-{ordinal:04}.jsonl")),
-            &[json!({
-                "status": "done",
-                "type": "user_input",
-                "timestamp": "2026-07-25T12:00:00Z",
-                "user_input": {"user_response": format!("fd sentinel {ordinal}")},
-            })],
-        );
-    }
-    let peak_fds = Arc::new(AtomicUsize::new(0));
-    let observed_peak = Arc::clone(&peak_fds);
-    let observed_root = root.clone();
-    let source = ProviderSource {
-        provider: CaptureProvider::Windsurf,
-        path: root.clone(),
-        exists: true,
-        source_format: "windsurf_cascade_hook_transcript_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        status: ProviderSourceStatus::Available,
-        unsupported_reason: None,
-    };
-    let registry = direct_jsonl_registry_with_test_observer(
-        source,
-        Arc::new(move |event| {
-            if event == registration::DirectJsonlRegistrationTestEvent::BeginSource {
-                observed_peak.fetch_max(retained_provider_fds(&observed_root), Ordering::SeqCst);
-            }
-        }),
-    );
-
-    reset_scan_work(&root);
-    with_scanner_workers(WORKERS, || {
-        refresh_source_backed_generation(temp.path().join("index"), &registry, writer_options())
-            .unwrap()
-    });
-    let activity = scanner_activity();
-    assert_eq!(activity.worker_count, WORKERS);
-    assert_eq!(activity.sources_started, SOURCE_COUNT);
-    assert_eq!(activity.sources_completed, SOURCE_COUNT);
-    assert!(activity.peak_active_scanners >= 4);
-    assert!(activity.peak_active_scanners <= WORKERS);
-    assert_eq!(
-        scan_work(&root),
-        DirectJsonlScanWork {
-            leaf_opens: SOURCE_COUNT,
-            identity_projections: SOURCE_COUNT,
-        }
-    );
-    assert!(
-        peak_fds.load(Ordering::SeqCst) <= WORKERS.saturating_mul(2).saturating_add(4),
-        "active scans retained more than a bounded pair of descriptors per worker"
-    );
-    assert!(
-        retained_provider_fds(&root) <= 4,
-        "completed scans retained leaf descriptors"
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn two_thousand_leaf_inventory_and_catalog_retain_constant_provider_fds() {
-    fn retained_provider_fds(root: &Path) -> usize {
-        fs::read_dir("/proc/self/fd")
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter_map(|entry| fs::read_link(entry.path()).ok())
-            .filter(|target| target.starts_with(root))
-            .count()
-    }
-
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("windsurf");
-    fs::create_dir_all(&root).unwrap();
-    for ordinal in 0..2_000 {
-        fs::write(
-            root.join(format!("session-{ordinal:04}.jsonl")),
-            b"{\"type\":\"user\"}\n",
-        )
+        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator).unwrap())
         .unwrap();
-    }
-    let adapter = super::super::windsurf_source_backed_adapter();
-
-    let inventory = adapter.discover(&root).unwrap();
-    assert_eq!(inventory.leaves().len(), 2_000);
     assert!(
-        retained_provider_fds(&root) <= 4,
-        "inventory retained one descriptor per discovered leaf"
+        provider_fds(&root) <= 2,
+        "hydration retained per-leaf provider descriptors"
     );
-    drop(inventory);
-
-    let catalog = adapter.open_hydration_catalog(&root).unwrap();
-    assert!(
-        retained_provider_fds(&root) <= 4,
-        "resident hydration catalog retained one descriptor per discovered leaf"
-    );
-    drop(catalog);
-    assert_eq!(retained_provider_fds(&root), 0);
 }
