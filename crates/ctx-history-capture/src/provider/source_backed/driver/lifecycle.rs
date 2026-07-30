@@ -10,7 +10,6 @@ pub(super) struct WriterCaptureSink<'sink, 'writer> {
     pub(super) active: Option<CapturedSourceMode>,
     pub(super) certificates: Vec<CertifiedSource>,
     pub(super) append_proofs: HashMap<[u8; 32], CertifiedSourceAppend>,
-    pub(super) inventory: Option<CertifiedSourceInventory>,
 }
 
 pub(super) enum CapturedSourcePlan {
@@ -172,22 +171,6 @@ impl ProviderCaptureSink for WriterCaptureSink<'_, '_> {
         Ok(())
     }
 
-    fn certify_complete_inventory(
-        &mut self,
-        inventory: CertifiedSourceInventory,
-    ) -> SourceBackedRouteResult<()> {
-        if self.active.is_some() {
-            return Err(captured_route_internal(
-                "provider capture certified its inventory with an active source",
-            ));
-        }
-        if self.inventory.replace(inventory).is_some() {
-            return Err(captured_route_internal(
-                "provider capture certified more than one complete inventory",
-            ));
-        }
-        Ok(())
-    }
 }
 
 pub(super) fn captured_source_plans(

@@ -7,10 +7,6 @@ pub(crate) trait ProviderCaptureSink {
     fn document(&mut self, document: LexicalDocument) -> SourceBackedRouteResult<()>;
     fn certify(&mut self, certificate: CertifiedSource) -> SourceBackedRouteResult<()>;
     fn certify_append(&mut self, append: CertifiedSourceAppend) -> SourceBackedRouteResult<()>;
-    fn certify_complete_inventory(
-        &mut self,
-        inventory: CertifiedSourceInventory,
-    ) -> SourceBackedRouteResult<()>;
 }
 
 struct EvidenceCaptureSink {
@@ -18,7 +14,6 @@ struct EvidenceCaptureSink {
     active: Option<SourceKey>,
     certificates: Vec<CertifiedSource>,
     append_proofs: HashMap<[u8; 32], CertifiedSourceAppend>,
-    inventory: Option<CertifiedSourceInventory>,
 }
 
 impl EvidenceCaptureSink {
@@ -36,7 +31,6 @@ impl EvidenceCaptureSink {
             active: None,
             certificates: Vec::new(),
             append_proofs: HashMap::new(),
-            inventory: None,
         }
     }
 }
@@ -119,22 +113,6 @@ impl ProviderCaptureSink for EvidenceCaptureSink {
         Ok(())
     }
 
-    fn certify_complete_inventory(
-        &mut self,
-        inventory: CertifiedSourceInventory,
-    ) -> SourceBackedRouteResult<()> {
-        if self.active.is_some() {
-            return Err(captured_route_internal(
-                "provider capture certified its inventory with an active source",
-            ));
-        }
-        if self.inventory.replace(inventory).is_some() {
-            return Err(captured_route_internal(
-                "provider capture certified more than one complete inventory",
-            ));
-        }
-        Ok(())
-    }
 }
 
 pub(super) type ProviderCaptureCallback =
@@ -184,7 +162,7 @@ pub(super) fn capture_route_evidence(
     finish_captured_route_evidence(
         evidence.certificates,
         evidence.append_proofs,
-        evidence.inventory,
+        None,
         authority,
     )
 }

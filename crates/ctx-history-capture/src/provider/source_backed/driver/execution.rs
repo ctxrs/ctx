@@ -97,7 +97,6 @@ pub(crate) fn captured_route_driver(
                 active: None,
                 certificates: Vec::new(),
                 append_proofs: HashMap::new(),
-                inventory: None,
             };
             scan_capture(&mut bridge)?;
             if bridge.active.is_some() {
@@ -108,7 +107,7 @@ pub(crate) fn captured_route_driver(
             let current = finish_captured_route_evidence(
                 bridge.certificates,
                 bridge.append_proofs,
-                bridge.inventory,
+                None,
                 &scan_authority,
             )?;
             if current.certificates != staged.certificates
