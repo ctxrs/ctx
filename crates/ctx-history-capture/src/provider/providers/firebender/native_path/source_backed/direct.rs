@@ -2,11 +2,10 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
 };
 
 use ctx_history_core::{
-    CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
+    BatchHydrationRequest, BatchHydrationResult, CertifiedSource, HydrationFailure,
     ScannedSourceCounts, SourceKey,
 };
 use ctx_history_index::LexicalDocument;
@@ -21,12 +20,14 @@ use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     provider::{
         source_backed::{
-            certify_captured_route_inventory, executable_route, provider_format_scope,
-            route_coordinator_error, route_error, SourceBackedCoordinatorResult,
-            SourceBackedGenerationSink, SourceBackedProviderRegistry,
-            SourceBackedRevalidationTarget, SourceBackedRouteDriver, SourceBackedRouteError,
-            SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedRouteSelection,
-            SourceBackedSelectorAuthority,
+            family::document::{
+                register_replacement_document_tree_route, ChangedDocumentSink,
+                CompleteDocumentTree, DocumentLeafFingerprint, DocumentSourceTerminal,
+                ObservedDocumentLeaf, ReplacementDocumentTree,
+            },
+            route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+            SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+            SourceBackedRouteSelection,
         },
         sqlite::{sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard},
     },
@@ -34,7 +35,7 @@ use crate::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteLogicalSnapshot, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
-    CaptureError, ProviderSource, FIREBENDER_SQLITE_SOURCE_FORMAT,
+    CaptureError, ProviderSource,
 };
 
 use super::super::{
@@ -47,26 +48,6 @@ const DIRECT_PAGE_DOCUMENTS: usize = 64;
 const CONTENT_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-logical-content-v2\0";
 const OVERSIZE_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-oversize-row-v1\0";
 const DIRECT_PARSER_REVISION: &str = "firebender-source-backed-v2";
-
-#[derive(Clone, Debug)]
-enum TerminalFence {
-    Present(SqliteSourceEvidence),
-    Missing(Arc<MissingLeafFence>),
-}
-
-#[derive(Debug)]
-struct TerminalEvidence {
-    certificate: Option<CertifiedSource>,
-    deletion: Option<CertifiedSourceDeletion>,
-    inventory: CertifiedSourceInventory,
-    fence: TerminalFence,
-}
-
-#[derive(Debug, Default)]
-struct TerminalState {
-    evidence: Option<TerminalEvidence>,
-    fence_result: Option<bool>,
-}
 
 #[derive(Debug)]
 pub(crate) struct FirebenderDirectScan {
@@ -95,12 +76,122 @@ impl FirebenderDirectScan {
     }
 }
 
-enum FirebenderScanOutcome {
-    Missing {
-        source: Box<SourceKey>,
-        terminal_fence: Arc<MissingLeafFence>,
-    },
-    Present(Box<FirebenderDirectScan>),
+#[derive(Debug)]
+enum FirebenderTreeAuthority {
+    Present(SqliteSourceEvidence),
+    Missing(MissingLeafFence),
+}
+
+#[derive(Debug)]
+struct FirebenderDocumentTreeAdapter {
+    path: PathBuf,
+}
+
+impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
+    type Leaf = SourceKey;
+    type TreeAuthority = FirebenderTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        DIRECT_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        firebender_database_path_and_source(&self.path)
+            .is_ok_and(|(_, owned)| owned.exact_descriptor_eq(source))
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let (database_path, source) =
+            firebender_database_path_and_source(&self.path).map_err(route_error)?;
+        match open_database_leaf(&database_path).map_err(route_error)? {
+            OpenDatabaseLeaf::Present(snapshot) => {
+                let evidence = snapshot.finish().map_err(route_error)?;
+                let fingerprint = *evidence.revision();
+                Ok(CompleteDocumentTree::new(
+                    fingerprint,
+                    vec![ObservedDocumentLeaf::with_durable_replay(
+                        DocumentLeafFingerprint::new(fingerprint),
+                        source,
+                        false,
+                    )],
+                    FirebenderTreeAuthority::Present(evidence),
+                ))
+            }
+            OpenDatabaseLeaf::Missing(fence) => {
+                let fingerprint = fence.fingerprint();
+                Ok(CompleteDocumentTree::new(
+                    fingerprint,
+                    Vec::new(),
+                    FirebenderTreeAuthority::Missing(fence),
+                ))
+            }
+        }
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let FirebenderTreeAuthority::Present(expected_physical) = authority else {
+            return Err(internal_error(
+                "Firebender missing inventory unexpectedly contained a document leaf",
+            ));
+        };
+        sink.begin_source(leaf.clone())?;
+        let scan = scan_source(&self.path, &mut |page| {
+            page.into_iter()
+                .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
+        })
+        .map_err(firebender_scan_error)?
+        .ok_or_else(|| {
+            source_changed("Firebender SQLite leaf disappeared during logical projection")
+        })?;
+        validate_scan_receipt(&scan)?;
+        if !scan.source.exact_descriptor_eq(leaf) || &scan.terminal_fence != expected_physical {
+            return Err(source_changed(
+                "Firebender SQLite physical inventory changed during logical projection",
+            ));
+        }
+        Ok(document_terminal(scan))
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        match &tree.authority {
+            FirebenderTreeAuthority::Present(expected) => {
+                let (database_path, _) =
+                    firebender_database_path_and_source(&self.path).map_err(route_error)?;
+                let current = open_snapshot(&database_path)
+                    .and_then(OpenedSnapshot::finish)
+                    .map_err(route_error)?;
+                if &current != expected {
+                    return Err(source_changed(
+                        "Firebender SQLite physical inventory changed before commit",
+                    ));
+                }
+            }
+            FirebenderTreeAuthority::Missing(fence) if !fence.revalidate() => {
+                return Err(source_changed(
+                    "Firebender SQLite absence changed before commit",
+                ));
+            }
+            FirebenderTreeAuthority::Missing(_) => {}
+        }
+        Ok(tree.tree_fingerprint)
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        FirebenderExactResolver::new(self.path.clone()).hydrate_batch(request)
+    }
 }
 
 pub(crate) fn register_source_backed_route(
@@ -108,143 +199,22 @@ pub(crate) fn register_source_backed_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let driver = source_backed_route_driver(&source);
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
-fn source_backed_route_driver(route: &ProviderSource) -> SourceBackedRouteDriver {
-    let path = route.path.clone();
-    let scan_path = path.clone();
-    let source_revalidation_path = path.clone();
-    let inventory_revalidation_path = path.clone();
-    let hydration_path = path.clone();
-    let batch_hydration_path = path;
-    let inventory_route = route.clone();
-    let terminal = Arc::new(Mutex::new(TerminalState::default()));
-    let scan_terminal = Arc::clone(&terminal);
-    let source_terminal = Arc::clone(&terminal);
-    let inventory_terminal = terminal;
-
-    SourceBackedRouteDriver::new(
-        move |sink| {
-            reset_terminal(&scan_terminal)?;
-            scan_replacement(&scan_path, &inventory_route, sink, &scan_terminal)
-        },
-        provider_format_scope(CaptureProvider::Firebender, FIREBENDER_SQLITE_SOURCE_FORMAT),
-        move |target| revalidate_target(&source_revalidation_path, target, &source_terminal),
-        move |request| FirebenderExactResolver::new(hydration_path.clone()).hydrate_event(request),
-    )
-    .with_complete_inventory_revalidation(move |expected| {
-        revalidate_inventory(&inventory_revalidation_path, expected, &inventory_terminal)
-    })
-    .with_batch_hydration(move |request| {
-        FirebenderExactResolver::new(batch_hydration_path.clone()).hydrate_batch(request)
-    })
-}
-
-fn scan_replacement(
-    path: &Path,
-    route: &ProviderSource,
-    sink: &mut SourceBackedGenerationSink<'_>,
-    terminal: &Mutex<TerminalState>,
-) -> SourceBackedRouteResult<()> {
-    let mut began = false;
-    let mut sink_failure = None;
-    let outcome = scan_source(path, &mut |page| {
-        stream_page(sink, page, &mut began, &mut sink_failure)
-    })
-    .map_err(route_error)?;
-    if let Some(error) = sink_failure {
-        return Err(error);
-    }
-
-    let evidence = match outcome {
-        FirebenderScanOutcome::Present(scan) => {
-            let scan = *scan;
-            validate_scan_receipt(&scan)?;
-            if !began {
-                sink.begin_source(scan.source.clone())
-                    .map_err(route_coordinator_error)?;
-            }
-            sink.certify_source(scan.certificate.clone())
-                .map_err(route_coordinator_error)?;
-            let inventory =
-                certify_captured_route_inventory(route, std::slice::from_ref(&scan.certificate))?;
-            sink.certify_complete_inventory(inventory.clone())
-                .map_err(route_coordinator_error)?;
-            TerminalEvidence {
-                certificate: Some(scan.certificate),
-                deletion: None,
-                inventory,
-                fence: TerminalFence::Present(scan.terminal_fence),
-            }
-        }
-        FirebenderScanOutcome::Missing {
-            source,
-            terminal_fence,
-        } => {
-            let source = *source;
-            let inventory = certify_captured_route_inventory(route, &[])?;
-            let deletion = sink
-                .base_source(&source)
-                .map(|_| CertifiedSourceDeletion::from_inventory(source.clone(), &inventory));
-            let deletion = deletion.transpose().map_err(route_error)?;
-            if let Some(deletion) = deletion.clone() {
-                sink.delete_source(deletion, inventory.clone())
-                    .map_err(route_coordinator_error)?;
-            }
-            sink.certify_complete_inventory(inventory.clone())
-                .map_err(route_coordinator_error)?;
-            TerminalEvidence {
-                certificate: None,
-                deletion,
-                inventory,
-                fence: TerminalFence::Missing(terminal_fence),
-            }
-        }
+    let adapter = FirebenderDocumentTreeAdapter {
+        path: source.path.clone(),
     };
-    let mut terminal = terminal.lock().map_err(|_| terminal_lock_error())?;
-    terminal.evidence = Some(evidence);
-    terminal.fence_result = None;
-    Ok(())
+    register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 
-fn stream_page(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    page: Vec<LexicalDocument>,
-    began: &mut bool,
-    sink_failure: &mut Option<SourceBackedRouteError>,
-) -> FirebenderSourceBackedResult<()> {
-    for document in page {
-        if !*began {
-            if let Err(error) = sink.begin_source(document.source.clone()) {
-                return bridge_sink_error(error, sink_failure);
-            }
-            *began = true;
-        }
-        if let Err(error) = sink.add_document(document) {
-            return bridge_sink_error(error, sink_failure);
-        }
+fn document_terminal(scan: FirebenderDirectScan) -> DocumentSourceTerminal {
+    let observation = scan.certificate.observation().clone();
+    DocumentSourceTerminal {
+        source: scan.source,
+        opening: observation.clone(),
+        closing: observation,
+        parser_revision: DIRECT_PARSER_REVISION,
+        content_digest: *scan.certificate.content_digest(),
+        counts: scan.certificate.counts(),
     }
-    Ok(())
-}
-
-fn bridge_sink_error(
-    error: crate::provider::source_backed::SourceBackedCoordinatorError,
-    sink_failure: &mut Option<SourceBackedRouteError>,
-) -> FirebenderSourceBackedResult<()> {
-    let route_error = route_coordinator_error(error);
-    let detail = route_error.to_string();
-    *sink_failure = Some(route_error);
-    Err(FirebenderSourceBackedError::Capture(
-        CaptureError::InvalidPayload(detail),
-    ))
 }
 
 fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult<()> {
@@ -264,98 +234,16 @@ fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult
     Ok(())
 }
 
-fn reset_terminal(terminal: &Mutex<TerminalState>) -> SourceBackedRouteResult<()> {
-    *terminal.lock().map_err(|_| terminal_lock_error())? = TerminalState::default();
-    Ok(())
-}
-
-fn terminal_lock_error() -> SourceBackedRouteError {
-    SourceBackedRouteError::new(
-        SourceBackedRouteErrorKind::Internal,
-        "Firebender terminal evidence lock was poisoned",
-    )
-}
-
-fn revalidate_target(
-    path: &Path,
-    target: SourceBackedRevalidationTarget<'_>,
-    terminal: &Mutex<TerminalState>,
-) -> bool {
-    revalidate_terminal(path, terminal, |evidence| match target {
-        SourceBackedRevalidationTarget::Source(expected) => {
-            evidence.certificate.as_ref() == Some(expected)
-        }
-        SourceBackedRevalidationTarget::Deletion(expected) => {
-            evidence.deletion.as_ref() == Some(expected)
-        }
-    })
-}
-
-fn revalidate_inventory(
-    path: &Path,
-    expected: &CertifiedSourceInventory,
-    terminal: &Mutex<TerminalState>,
-) -> bool {
-    revalidate_terminal(path, terminal, |evidence| evidence.inventory == *expected)
-}
-
-fn revalidate_terminal(
-    path: &Path,
-    terminal: &Mutex<TerminalState>,
-    expected_matches: impl FnOnce(&TerminalEvidence) -> bool,
-) -> bool {
-    let Ok(mut terminal) = terminal.lock() else {
-        return false;
-    };
-    let Some(evidence) = terminal.evidence.as_ref() else {
-        return false;
-    };
-    if !expected_matches(evidence) {
-        return false;
-    }
-    let fence = evidence.fence.clone();
-    cache_terminal_fence_result(&mut terminal.fence_result, || terminal_fence(path, &fence))
-}
-
-pub(crate) fn cache_terminal_fence_result(
-    cached: &mut Option<bool>,
-    evaluate: impl FnOnce() -> bool,
-) -> bool {
-    if let Some(result) = *cached {
-        return result;
-    }
-    let result = evaluate();
-    *cached = Some(result);
-    result
-}
-
-fn terminal_fence(path: &Path, expected: &TerminalFence) -> bool {
-    let Ok((database_path, _)) = firebender_database_path_and_source(path) else {
-        return false;
-    };
-    match expected {
-        TerminalFence::Present(expected) => open_snapshot(&database_path)
-            .and_then(OpenedSnapshot::finish)
-            .is_ok_and(|current| &current == expected),
-        TerminalFence::Missing(fence) => fence.revalidate(),
-    }
-}
-
 fn scan_source(
     explicit_path: &Path,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
-) -> FirebenderSourceBackedResult<FirebenderScanOutcome> {
+) -> FirebenderSourceBackedResult<Option<FirebenderDirectScan>> {
     let identity = firebender_path_identity(explicit_path)?;
     let source = firebender_source_key(&identity.route_identity)?;
     let database_path = identity.canonical_database_path;
     let snapshot = match open_database_leaf(&database_path)? {
         OpenDatabaseLeaf::Present(snapshot) => snapshot,
-        OpenDatabaseLeaf::Missing(terminal_fence) => {
-            return Ok(FirebenderScanOutcome::Missing {
-                source: Box::new(source),
-                terminal_fence: Arc::new(terminal_fence),
-            });
-        }
+        OpenDatabaseLeaf::Missing(_) => return Ok(None),
     };
     let scan = {
         let connection = snapshot.connection()?;
@@ -380,17 +268,15 @@ fn scan_source(
         scan.counts,
     );
     let certificate = logical.certify(source.clone())?;
-    Ok(FirebenderScanOutcome::Present(Box::new(
-        FirebenderDirectScan {
-            source,
-            certificate,
-            terminal_fence,
-            emitted_pages: scan.emitted_pages,
-            row_decode_passes: 1,
-            decoded_rows: scan.decoded_rows,
-            peak_buffered_documents: scan.peak_buffered_documents,
-        },
-    )))
+    Ok(Some(FirebenderDirectScan {
+        source,
+        certificate,
+        terminal_fence,
+        emitted_pages: scan.emitted_pages,
+        row_decode_passes: 1,
+        decoded_rows: scan.decoded_rows,
+        peak_buffered_documents: scan.peak_buffered_documents,
+    }))
 }
 
 #[derive(Debug)]
@@ -401,6 +287,10 @@ pub(super) struct MissingLeafFence {
 }
 
 impl MissingLeafFence {
+    fn fingerprint(&self) -> [u8; 32] {
+        self.root.authority_fingerprint()
+    }
+
     pub(super) fn revalidate(&self) -> bool {
         if self.root.revalidate().is_err() || self.directory.revalidate().is_err() {
             return false;
@@ -803,17 +693,31 @@ pub(super) fn firebender_database_path_and_source(
     Ok((identity.canonical_database_path, source))
 }
 
+fn firebender_scan_error(error: FirebenderSourceBackedError) -> SourceBackedRouteError {
+    match error {
+        FirebenderSourceBackedError::Route(error) => error,
+        error => route_error(error),
+    }
+}
+
+fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
+}
+
+fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
+}
+
 #[cfg(test)]
 pub(crate) fn scan_for_test(
     explicit_path: &Path,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<FirebenderDirectScan> {
-    match scan_source(explicit_path, emit)? {
-        FirebenderScanOutcome::Present(scan) => Ok(*scan),
-        FirebenderScanOutcome::Missing { .. } => Err(FirebenderSourceBackedError::Capture(
-            CaptureError::InvalidPayload("expected present Firebender test source".to_owned()),
-        )),
-    }
+    scan_source(explicit_path, emit)?.ok_or_else(|| {
+        FirebenderSourceBackedError::Capture(CaptureError::InvalidPayload(
+            "expected present Firebender test source".to_owned(),
+        ))
+    })
 }
 
 #[cfg(test)]

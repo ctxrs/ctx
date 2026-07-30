@@ -38,6 +38,7 @@ impl FirebenderExactResolver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn hydrate_event(
         &self,
         request: &EventHydrationRequest,

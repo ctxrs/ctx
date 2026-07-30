@@ -1,40 +1,144 @@
 use std::{
-    path::Path,
-    sync::{Arc, Mutex},
+    ffi::{OsStr, OsString},
+    io,
+    path::{Path, PathBuf},
 };
-
-use ctx_history_core::{
-    CaptureProvider, CertifiedSource, CertifiedSourceInventory, ContentSourceResolver,
-};
-use ctx_history_index::LexicalDocument;
 
 use super::{
-    hydration::hydration_failure_from_error, scan_kiro_source_backed, terminal_fence_matches,
-    KiroLocatorResolverV0, KiroSourceBackedErrorV0, KiroSourceBackedResultV0, KiroSourceBackedScan,
-    KiroSourceTerminalFence, SOURCE_BACKED_PAGE_ROWS,
+    hydration::hydration_failure_from_error, kiro_source_key, scan_kiro_source_backed,
+    KiroLocatorResolverV0, KiroSourceBackedErrorV0, KiroSourceBackedScan,
+    KIRO_SOURCE_BACKED_PARSER_REVISION, SOURCE_BACKED_PAGE_ROWS,
 };
 use crate::{
+    common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     provider::source_backed::{
-        certify_captured_route_inventory, executable_route, provider_format_scope,
-        route_coordinator_error, route_error, SourceBackedCoordinatorResult,
-        SourceBackedGenerationSink, SourceBackedProviderRegistry, SourceBackedRevalidationTarget,
-        SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
-        SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+        family::document::{
+            register_replacement_document_tree_route, ChangedDocumentSink, CompleteDocumentTree,
+            DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
+            ReplacementDocumentTree,
+        },
+        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        SourceBackedRouteSelection,
     },
+    provider_sources::SqliteSourceEvidence,
     CaptureError, ProviderSource, KIRO_SQLITE_SOURCE_FORMAT,
 };
+use ctx_history_core::{
+    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, HydrationFailure, SourceKey,
+};
+
+use super::super::{absolute_kiro_path, KiroSqliteDatabase};
 
 #[derive(Debug)]
-struct TerminalEvidence {
-    certificate: CertifiedSource,
-    inventory: CertifiedSourceInventory,
-    fence: KiroSourceTerminalFence,
+enum KiroTreeAuthority {
+    Present(SqliteSourceEvidence),
+    Missing(KiroMissingLeafFence),
 }
 
-#[derive(Debug, Default)]
-struct TerminalState {
-    evidence: Option<TerminalEvidence>,
-    fence_result: Option<bool>,
+#[derive(Debug)]
+struct KiroDocumentTreeAdapter {
+    path: PathBuf,
+}
+
+impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
+    type Leaf = SourceKey;
+    type TreeAuthority = KiroTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        KIRO_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        kiro_source_key().is_ok_and(|owned| owned.exact_descriptor_eq(source))
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let source = kiro_source_key().map_err(route_error)?;
+        match observe_kiro_inventory(&self.path).map_err(route_error)? {
+            KiroPhysicalInventory::Present(evidence) => {
+                let fingerprint = *evidence.revision();
+                Ok(CompleteDocumentTree::new(
+                    fingerprint,
+                    vec![ObservedDocumentLeaf::with_durable_replay(
+                        DocumentLeafFingerprint::new(fingerprint),
+                        source,
+                        false,
+                    )],
+                    KiroTreeAuthority::Present(evidence),
+                ))
+            }
+            KiroPhysicalInventory::Missing(fence) => {
+                let fingerprint = fence.fingerprint();
+                Ok(CompleteDocumentTree::new(
+                    fingerprint,
+                    Vec::new(),
+                    KiroTreeAuthority::Missing(fence),
+                ))
+            }
+        }
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let KiroTreeAuthority::Present(expected_physical) = authority else {
+            return Err(internal_error(
+                "Kiro missing inventory unexpectedly contained a document leaf",
+            ));
+        };
+        sink.begin_source(leaf.clone())?;
+        let scan = scan_kiro_source_backed(&self.path, KIRO_SQLITE_SOURCE_FORMAT, &mut |page| {
+            page.into_iter()
+                .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
+        })
+        .map_err(kiro_scan_error)?;
+        validate_scan_receipt(&scan)?;
+        if !scan.source.exact_descriptor_eq(leaf) || &scan.terminal_fence != expected_physical {
+            return Err(source_changed(
+                "Kiro SQLite physical inventory changed during logical projection",
+            ));
+        }
+        Ok(document_terminal(scan))
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        match &tree.authority {
+            KiroTreeAuthority::Present(expected) => {
+                let path = absolute_kiro_path(&self.path).map_err(route_error)?;
+                let current = KiroSqliteDatabase::open(&path)
+                    .and_then(|database| database.finish(&path))
+                    .map_err(route_error)?;
+                if &current != expected {
+                    return Err(source_changed(
+                        "Kiro SQLite physical inventory changed before commit",
+                    ));
+                }
+            }
+            KiroTreeAuthority::Missing(fence) if !fence.revalidate() => {
+                return Err(source_changed("Kiro SQLite absence changed before commit"));
+            }
+            KiroTreeAuthority::Missing(_) => {}
+        }
+        Ok(tree.tree_fingerprint)
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        KiroLocatorResolverV0::discover(&self.path, KIRO_SQLITE_SOURCE_FORMAT)
+            .map_err(hydration_failure_from_error)?
+            .hydrate_batch(request)
+    }
 }
 
 pub(crate) fn register(
@@ -42,247 +146,143 @@ pub(crate) fn register(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let driver = source_backed_route_driver(&source);
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    let adapter = KiroDocumentTreeAdapter {
+        path: source.path.clone(),
+    };
+    register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 
-fn source_backed_route_driver(route: &ProviderSource) -> SourceBackedRouteDriver {
-    let path = route.path.clone();
-    let scan_path = path.clone();
-    let revalidation_path = path.clone();
-    let inventory_revalidation_path = path.clone();
-    let hydration_path = path.clone();
-    let batch_hydration_path = path;
-    let inventory_route = route.clone();
-    let terminal = Arc::new(Mutex::new(TerminalState::default()));
-    let scan_terminal = Arc::clone(&terminal);
-    let revalidation_terminal = Arc::clone(&terminal);
-    let inventory_terminal = terminal;
-
-    SourceBackedRouteDriver::new(
-        move |sink| {
-            reset_terminal(&scan_terminal)?;
-            scan_replacement(&scan_path, &inventory_route, sink, &scan_terminal)
-        },
-        provider_format_scope(CaptureProvider::KiroCli, KIRO_SQLITE_SOURCE_FORMAT),
-        move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected) => {
-                revalidate_source(&revalidation_path, expected, &revalidation_terminal)
-            }
-            SourceBackedRevalidationTarget::Deletion(expected) => {
-                revalidate_deletion(&revalidation_path, expected, &revalidation_terminal)
-            }
-        },
-        move |request| {
-            KiroLocatorResolverV0::discover(hydration_path.clone(), KIRO_SQLITE_SOURCE_FORMAT)
-                .map_err(hydration_failure_from_error)?
-                .hydrate_event(request)
-        },
-    )
-    .with_complete_inventory_revalidation(move |expected| {
-        revalidate_inventory(&inventory_revalidation_path, expected, &inventory_terminal)
-    })
-    .with_batch_hydration(move |request| {
-        KiroLocatorResolverV0::discover(batch_hydration_path.clone(), KIRO_SQLITE_SOURCE_FORMAT)
-            .map_err(hydration_failure_from_error)?
-            .hydrate_batch(request)
-    })
-}
-
-fn scan_replacement(
-    path: &Path,
-    route: &ProviderSource,
-    sink: &mut SourceBackedGenerationSink<'_>,
-    terminal: &Mutex<TerminalState>,
-) -> SourceBackedRouteResult<()> {
-    let mut began = false;
-    let mut sink_failure = None;
-    let scan = scan_kiro_source_backed(path, KIRO_SQLITE_SOURCE_FORMAT, &mut |page| {
-        stream_page(sink, page, &mut began, &mut sink_failure)
-    });
-    if let Some(error) = sink_failure {
-        return Err(error);
+fn document_terminal(scan: KiroSourceBackedScan) -> DocumentSourceTerminal {
+    let observation = scan.certificate.observation().clone();
+    DocumentSourceTerminal {
+        source: scan.source,
+        opening: observation.clone(),
+        closing: observation,
+        parser_revision: KIRO_SOURCE_BACKED_PARSER_REVISION,
+        content_digest: *scan.certificate.content_digest(),
+        counts: scan.certificate.counts(),
     }
-    let scan = scan.map_err(route_error)?;
-    validate_scan_receipt(&scan)?;
-    if !began {
-        sink.begin_source(scan.source.clone())
-            .map_err(route_coordinator_error)?;
-    }
-    sink.certify_source(scan.certificate.clone())
-        .map_err(route_coordinator_error)?;
-    let inventory =
-        certify_captured_route_inventory(route, std::slice::from_ref(&scan.certificate))?;
-    sink.certify_complete_inventory(inventory.clone())
-        .map_err(route_coordinator_error)?;
-    let mut terminal = terminal.lock().map_err(|_| terminal_lock_error())?;
-    terminal.evidence = Some(TerminalEvidence {
-        certificate: scan.certificate,
-        inventory,
-        fence: scan.terminal_fence,
-    });
-    terminal.fence_result = None;
-    Ok(())
 }
 
 fn validate_scan_receipt(scan: &KiroSourceBackedScan) -> SourceBackedRouteResult<()> {
     let indexed = scan.certificate.counts().indexed_documents;
     let page_rows = SOURCE_BACKED_PAGE_ROWS as u64;
     let expected_pages = indexed / page_rows + u64::from(!indexed.is_multiple_of(page_rows));
-    let expected_peak = indexed.min(page_rows);
     let complete = scan.certificate.counts().complete_records;
     if scan.row_decode_passes != 1
         || scan.decoded_rows > complete
         || (scan.decoded_rows == 0) != (complete == 0)
         || scan.emitted_pages != expected_pages
-        || scan.peak_buffered_rows != expected_peak
+        || scan.peak_buffered_rows != indexed.min(page_rows)
     {
-        return Err(SourceBackedRouteError::new(
-            SourceBackedRouteErrorKind::Internal,
+        return Err(internal_error(
             "Kiro scan receipt violated the one-pass bounded-stream contract",
         ));
     }
     Ok(())
 }
 
-fn stream_page(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    page: Vec<LexicalDocument>,
-    began: &mut bool,
-    sink_failure: &mut Option<SourceBackedRouteError>,
-) -> KiroSourceBackedResultV0<()> {
-    for document in page {
-        if !*began {
-            if let Err(error) = sink.begin_source(document.source.clone()) {
-                return bridge_sink_error(error, sink_failure);
+enum KiroPhysicalInventory {
+    Present(SqliteSourceEvidence),
+    Missing(KiroMissingLeafFence),
+}
+
+fn observe_kiro_inventory(path: &Path) -> super::KiroSourceBackedResultV0<KiroPhysicalInventory> {
+    let path = absolute_kiro_path(path)?;
+    let parent = database_parent(&path)?;
+    let leaf = database_leaf(&path)?;
+    let root = ProviderSourceRoot::open(parent)?;
+    let directory = root.directory()?;
+    root.revalidate()?;
+    directory.revalidate()?;
+    match directory.open_child(leaf) {
+        Ok(OpenedProviderSourcePath::File(file)) => {
+            file.revalidate()?;
+            directory.revalidate()?;
+            root.revalidate()?;
+            drop(file);
+            let database = KiroSqliteDatabase::open(&path)?;
+            let evidence = database.finish(&path)?;
+            Ok(KiroPhysicalInventory::Present(evidence))
+        }
+        Ok(OpenedProviderSourcePath::Directory(_)) => Err(invalid_database_leaf(&path).into()),
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            directory.revalidate()?;
+            root.revalidate()?;
+            Ok(KiroPhysicalInventory::Missing(KiroMissingLeafFence {
+                root,
+                directory,
+                leaf: leaf.to_os_string(),
+            }))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[derive(Debug)]
+struct KiroMissingLeafFence {
+    root: ProviderSourceRoot,
+    directory: ProviderSourceDirectory,
+    leaf: OsString,
+}
+
+impl KiroMissingLeafFence {
+    fn fingerprint(&self) -> [u8; 32] {
+        self.root.authority_fingerprint()
+    }
+
+    fn revalidate(&self) -> bool {
+        if self.root.revalidate().is_err() || self.directory.revalidate().is_err() {
+            return false;
+        }
+        let missing = matches!(
+            self.directory.open_child(&self.leaf),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        );
+        missing && self.directory.revalidate().is_ok() && self.root.revalidate().is_ok()
+    }
+}
+
+fn database_parent(path: &Path) -> super::KiroSourceBackedResultV0<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "Kiro SQLite source must have a parent directory",
             }
-            *began = true;
+            .into()
+        })
+}
+
+fn database_leaf(path: &Path) -> super::KiroSourceBackedResultV0<&OsStr> {
+    path.file_name().ok_or_else(|| {
+        CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Kiro SQLite source must have a database leaf name",
         }
-        if let Err(error) = sink.add_document(document) {
-            return bridge_sink_error(error, sink_failure);
-        }
-    }
-    Ok(())
-}
-
-fn bridge_sink_error(
-    error: crate::provider::source_backed::SourceBackedCoordinatorError,
-    sink_failure: &mut Option<SourceBackedRouteError>,
-) -> KiroSourceBackedResultV0<()> {
-    let route_error = route_coordinator_error(error);
-    let detail = route_error.to_string();
-    *sink_failure = Some(route_error);
-    Err(KiroSourceBackedErrorV0::Capture(
-        CaptureError::InvalidPayload(detail),
-    ))
-}
-
-fn reset_terminal(terminal: &Mutex<TerminalState>) -> SourceBackedRouteResult<()> {
-    *terminal.lock().map_err(|_| terminal_lock_error())? = TerminalState::default();
-    Ok(())
-}
-
-fn revalidate_source(
-    path: &Path,
-    expected: &CertifiedSource,
-    terminal: &Mutex<TerminalState>,
-) -> bool {
-    revalidate_terminal(path, terminal, |evidence| evidence.certificate == *expected)
-}
-
-fn revalidate_deletion(
-    path: &Path,
-    expected: &ctx_history_core::CertifiedSourceDeletion,
-    terminal: &Mutex<TerminalState>,
-) -> bool {
-    revalidate_terminal(path, terminal, |evidence| {
-        expected.verifies(&evidence.inventory)
+        .into()
     })
 }
 
-fn revalidate_inventory(
-    path: &Path,
-    expected: &CertifiedSourceInventory,
-    terminal: &Mutex<TerminalState>,
-) -> bool {
-    revalidate_terminal(path, terminal, |evidence| evidence.inventory == *expected)
+fn invalid_database_leaf(path: &Path) -> CaptureError {
+    CaptureError::InvalidProviderTranscriptPath {
+        path: path.to_path_buf(),
+        reason: "Kiro SQLite source must be a regular non-symlink file",
+    }
 }
 
-fn revalidate_terminal(
-    path: &Path,
-    terminal: &Mutex<TerminalState>,
-    expected_matches: impl FnOnce(&TerminalEvidence) -> bool,
-) -> bool {
-    let Ok(mut terminal) = terminal.lock() else {
-        return false;
-    };
-    let Some(evidence) = terminal.evidence.as_ref() else {
-        return false;
-    };
-    if !expected_matches(evidence) {
-        return false;
+fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
+    match error {
+        KiroSourceBackedErrorV0::Route(error) => error,
+        error => route_error(error),
     }
-    let fence = evidence.fence.clone();
-    cache_terminal_fence_result(&mut terminal.fence_result, || {
-        terminal_fence_matches(path, &fence).unwrap_or(false)
-    })
 }
 
-fn cache_terminal_fence_result(cached: &mut Option<bool>, evaluate: impl FnOnce() -> bool) -> bool {
-    if let Some(result) = *cached {
-        return result;
-    }
-    let result = evaluate();
-    *cached = Some(result);
-    result
+fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
 }
 
-fn terminal_lock_error() -> SourceBackedRouteError {
-    SourceBackedRouteError::new(
-        SourceBackedRouteErrorKind::Internal,
-        "Kiro terminal evidence lock was poisoned",
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use super::cache_terminal_fence_result;
-
-    #[test]
-    fn terminal_fence_result_is_cached_for_all_revalidation_consumers() {
-        let evaluations = Cell::new(0);
-        let mut cached = None;
-        assert!(cache_terminal_fence_result(&mut cached, || {
-            evaluations.set(evaluations.get() + 1);
-            true
-        }));
-        assert!(cache_terminal_fence_result(&mut cached, || {
-            evaluations.set(evaluations.get() + 1);
-            false
-        }));
-        assert_eq!(evaluations.get(), 1);
-    }
-
-    #[test]
-    fn failed_terminal_fence_is_cached_fail_closed() {
-        let evaluations = Cell::new(0);
-        let mut cached = None;
-        assert!(!cache_terminal_fence_result(&mut cached, || {
-            evaluations.set(evaluations.get() + 1);
-            false
-        }));
-        assert!(!cache_terminal_fence_result(&mut cached, || {
-            evaluations.set(evaluations.get() + 1);
-            true
-        }));
-        assert_eq!(evaluations.get(), 1);
-    }
+fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
 }

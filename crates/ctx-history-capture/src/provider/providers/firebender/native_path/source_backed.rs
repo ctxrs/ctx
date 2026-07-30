@@ -30,9 +30,7 @@ mod hydration;
 
 pub(crate) use direct::register_source_backed_route;
 #[cfg(test)]
-pub(crate) use direct::{
-    cache_terminal_fence_result, revalidate_missing_after_for_test, scan_for_test,
-};
+pub(crate) use direct::{revalidate_missing_after_for_test, scan_for_test};
 #[cfg(test)]
 pub(crate) use hydration::resolver_for_test;
 
@@ -53,6 +51,8 @@ pub(crate) enum FirebenderSourceBackedError {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     Resolver(#[from] SourceResolverContractError),
+    #[error(transparent)]
+    Route(#[from] crate::provider::source_backed::SourceBackedRouteError),
     #[error("Firebender source-backed scan accounting overflowed")]
     CountOverflow,
     #[error("Firebender source-backed locator is malformed")]

@@ -1,11 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Barrier, Mutex,
-    },
-    thread,
 };
 
 use ctx_history_core::{
@@ -702,47 +697,4 @@ fn exact_hydration_confirms_only_a_missing_leaf_under_a_live_parent() {
         unavailable.kind,
         HydrationFailureKind::TemporarilyUnavailable
     );
-}
-
-#[test]
-fn terminal_fence_is_evaluated_once_and_false_is_cached() {
-    for verdict in [true, false] {
-        let cached = Arc::new(Mutex::new(None));
-        let calls = Arc::new(AtomicU64::new(0));
-        let barrier = Arc::new(Barrier::new(8));
-        let threads = (0..8)
-            .map(|_| {
-                let cached = Arc::clone(&cached);
-                let calls = Arc::clone(&calls);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    let mut cached = cached.lock().unwrap();
-                    source_backed::cache_terminal_fence_result(&mut cached, || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        verdict
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        let results = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(results, vec![verdict; 8]);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-}
-
-#[test]
-fn provider_local_route_is_direct_replacement_only_and_batch_hydrated() {
-    let route = include_str!("source_backed/direct.rs");
-    assert!(route.contains("SourceBackedRouteDriver::new("));
-    assert!(route.contains(".with_batch_hydration("));
-    assert!(route.contains("certify_complete_inventory("));
-    assert!(route.contains("DIRECT_PAGE_DOCUMENTS: usize = 64"));
-    assert!(!route.contains(concat!("captured_route_", "driver")));
-    assert!(!route.contains(concat!("begin_source_", "append")));
-    assert!(!route.contains(concat!("certify_source_", "append")));
 }
