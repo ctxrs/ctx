@@ -7,15 +7,51 @@ use std::{
 
 use support::*;
 
+fn command_env_value(command: &Command, name: &str) -> Option<String> {
+    command
+        .get_envs()
+        .find(|(candidate, _)| *candidate == name)
+        .and_then(|(_, value)| value)
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+#[test]
+fn bound_test_ctx_binary_preserves_ordinary_command_policy() {
+    let temp = tempdir();
+    let ordinary = ctx(&temp);
+    let binary = bind_test_ctx_binary(&temp);
+    let bound = ctx(&temp);
+
+    assert_eq!(Path::new(bound.get_program()), binary);
+    assert_ne!(ordinary.get_program(), bound.get_program());
+    for name in [
+        "CTX_ANALYTICS_ENABLED",
+        "CTX_LOCAL_USAGE_ENABLED",
+        "CTX_DAEMON_AUTOSTART_OFF",
+        "CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS",
+    ] {
+        assert_eq!(
+            command_env_value(&ordinary, name),
+            command_env_value(&bound, name),
+            "{name} changed while binding the copied test binary"
+        );
+    }
+}
+
 struct SourceRefreshDaemon {
     child: Option<Child>,
 }
 
 impl Drop for SourceRefreshDaemon {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Err(error) =
+            terminate_and_reap_test_child(&mut self.child, "import-change source-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("import-change daemon teardown also failed: {error}");
+            } else {
+                panic!("import-change daemon teardown failed: {error}");
+            }
         }
     }
 }
@@ -59,6 +95,7 @@ fn isolated_ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
 }
 
 fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    bind_test_ctx_binary(temp);
     prepare_test_roots(temp);
     fs::write(
         data_root(temp).join("config.toml"),

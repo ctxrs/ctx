@@ -13,14 +13,20 @@ struct SourceRefreshDaemon {
 
 impl Drop for SourceRefreshDaemon {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Err(error) =
+            terminate_and_reap_test_child(&mut self.child, "native-provider source-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("native-provider daemon teardown also failed: {error}");
+            } else {
+                panic!("native-provider daemon teardown failed: {error}");
+            }
         }
     }
 }
 
 fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    bind_test_ctx_binary(temp);
     fs::write(
         temp.path().join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
@@ -118,7 +124,7 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
 
 #[test]
 fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
-    let temp = tempdir();
+    let temp = finite_daemon_test_root();
     let query = "codebuddy-cli-real-shape-oracle";
     let path = write_native_codebuddy_cli_jsonl_fixture(&temp, query);
 
@@ -130,15 +136,16 @@ fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
         &path,
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "codebuddy");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "codebuddy_history_json"
+    let source =
+        assert_explicit_source_publication(&imported, "codebuddy", "codebuddy_history_json");
+    assert_eq!(source["current_source_count"], 1, "{imported:#}");
+    assert_eq!(source["current_rejected_records"], 0, "{imported:#}");
+    assert!(
+        source["current_indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{imported:#}"
     );
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -154,7 +161,7 @@ fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
 
 #[test]
 fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
-    let temp = tempdir();
+    let temp = finite_daemon_test_root();
     let query = "nanoclaw-real-text-timestamp-oracle";
     let path = write_native_nanoclaw_fixture(&temp, query);
 
@@ -215,23 +222,13 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2, "{imported:#}");
-    assert_eq!(
-        imported["sources"][0]["status"], "published",
-        "{imported:#}"
-    );
-    assert_eq!(
-        imported["sources"][0]["provider"], "nanoclaw",
-        "{imported:#}"
-    );
-    assert_eq!(
-        imported["sources"][0]["source_format"], "nanoclaw_project",
-        "{imported:#}"
-    );
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_events"], 0);
+    let source = assert_explicit_source_publication(&imported, "nanoclaw", "nanoclaw_project");
+    assert_eq!(source["current_source_count"], 1, "{imported:#}");
+    assert_eq!(source["current_rejected_records"], 0, "{imported:#}");
     assert!(
-        imported["sources"][0]["published_generation"].is_string(),
+        source["current_indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
         "{imported:#}"
     );
 
