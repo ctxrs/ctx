@@ -10,7 +10,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use fs2::FileExt as _;
 use memmap2::{Mmap, MmapOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -400,14 +399,13 @@ struct FileLock {
 impl FileLock {
     fn shared(path: &Path) -> FlatResult<Self> {
         let file = open_lock(path, false)?;
-        file.lock_shared()
-            .map_err(|source| io_error("lock shared", path, source))?;
+        fs2::FileExt::lock_shared(&file).map_err(|source| io_error("lock shared", path, source))?;
         Ok(Self { file })
     }
 
     fn exclusive(path: &Path) -> FlatResult<Self> {
         let file = open_lock(path, true)?;
-        file.lock_exclusive()
+        fs2::FileExt::lock_exclusive(&file)
             .map_err(|source| io_error("lock exclusive", path, source))?;
         Ok(Self { file })
     }

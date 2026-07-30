@@ -82,7 +82,10 @@ CTX_CLI_COMPILE_DATA = [
     "//:ctx_embedded_docs",
 ]
 
-CTX_CLI_TEST_COMPILE_DATA = CTX_CLI_COMPILE_DATA + glob(["testdata/**"]) + [
+CTX_CLI_TEST_COMPILE_DATA = CTX_CLI_COMPILE_DATA + glob([
+    "src/commands/source_index/render/goldens/**",
+    "testdata/**",
+]) + [
     "//:release_contracts",
     "//:telemetry_contract_fixtures",
 ]

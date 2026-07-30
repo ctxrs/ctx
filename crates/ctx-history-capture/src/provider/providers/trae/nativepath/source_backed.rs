@@ -118,8 +118,8 @@ pub(super) fn scan_trae_authority(
     authority: &TraeSourceAuthority,
     emit: &mut dyn FnMut(TraeSourceBackedPageV0) -> TraeSourceBackedResultV0<()>,
 ) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
-    let source = source_key(&authority)?;
-    let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
+    let source = source_key(authority)?;
+    let mut scanner = TraeScanner::new(authority, TraeFrontier::default());
     let mut counts = ScannedSourceCounts::default();
     let mut emitted_pages = 0_u64;
     let mut peak_buffered_documents = 0_u64;

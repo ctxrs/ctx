@@ -256,7 +256,7 @@ fn relational_record_stream_holds_only_bounded_event_pages() {
     let mut events = 0;
     let mut sessions = 0;
 
-    while let Some(record) = records.next() {
+    for record in records.by_ref() {
         match record.unwrap() {
             RelationalProjectionRecord::Event(_) => events += 1,
             RelationalProjectionRecord::Session(_) => sessions += 1,
@@ -284,7 +284,7 @@ fn relational_record_stream_closes_an_empty_certified_source_once() {
     let mut begins = 0;
     let mut ends = 0;
 
-    while let Some(record) = records.next() {
+    for record in records.by_ref() {
         match record.unwrap() {
             RelationalProjectionRecord::BeginSource(_) => begins += 1,
             RelationalProjectionRecord::EndSource { .. } => ends += 1,
