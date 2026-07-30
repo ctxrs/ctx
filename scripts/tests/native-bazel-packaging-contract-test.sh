@@ -8,6 +8,7 @@ else
 fi
 
 wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
+dogfood_wrapper="${source_root}/scripts/release/build-linux-x64-bazel-dogfood.sh"
 recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
 matrix="${source_root}/contracts/release-targets-v1.json"
@@ -41,6 +42,19 @@ if grep -Eq 'cargo (build|zigbuild)|qemu-' "${wrapper}"; then
   echo "native Linux Bazel wrapper contains Cargo construction or emulation" >&2
   exit 1
 fi
+
+for required in \
+  'bazel_binary_arch=x86_64' \
+  'bazel_binary_sha256=c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b' \
+  '--build-arg "BAZEL_ARCH=${bazel_binary_arch}"' \
+  '--build-arg "BAZEL_SHA256=${bazel_binary_sha256}"' \
+  '--build-arg "RELEASE_ARCH=x86_64"'; do
+  grep -Fq -- "${required}" "${dogfood_wrapper}" || {
+    printf 'Linux x64 dogfood wrapper missing architecture pin: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
 
 for required in \
   'ARG BAZEL_ARCH' \
