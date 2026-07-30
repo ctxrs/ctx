@@ -1,12 +1,10 @@
 use std::{
-    fs::{self, Metadata},
+    fs::Metadata,
     io::{self, Write},
-    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::common::io::ensure_regular_provider_transcript_file;
-use crate::{CaptureError, Result};
+use crate::Result;
 
 use super::CODEBUDDY_CAPTURE_REVISION;
 
@@ -20,11 +18,6 @@ pub(super) struct CodeBuddyFrozenFile {
 }
 
 impl CodeBuddyFrozenFile {
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        Self::from_metadata(&fs::symlink_metadata(path)?)
-    }
-
     pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -76,13 +69,8 @@ impl CodeBuddyFrozenFile {
         }
     }
 
-    pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
-        match Self::read(path) {
-            Ok(current) => Ok(current == *self),
-            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
+    pub(super) fn modified(&self) -> SystemTime {
+        self.modified
     }
 }
 

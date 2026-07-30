@@ -1,5 +1,88 @@
 use super::*;
 
+pub(super) fn scan_time(value: Option<&str>, field: &str) -> Result<Option<DateTime<Utc>>> {
+    value
+        .map(|value| {
+            value.parse::<DateTime<Utc>>().map_err(|_| {
+                CaptureError::InvalidPayload(format!(
+                    "CodeBuddy NativePath state has an invalid {field}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+pub(super) fn initial_state(
+    source: &CodeBuddySource,
+    _context: &ProviderAdapterContext,
+) -> Result<CodeBuddyScanState> {
+    let session = match source.shape {
+        CodeBuddySourceShape::Cli => CodeBuddySessionState {
+            native_session_id: source
+                .canonical_path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("unknown-session")
+                .to_owned(),
+            project_hash: cli_project_hash(&source.canonical_path),
+            ..CodeBuddySessionState::default()
+        },
+        CodeBuddySourceShape::Extension => {
+            let metadata = source
+                .capability
+                .as_ref()
+                .and_then(|capability| capability.extension.as_ref())
+                .map(|extension| &extension.metadata)
+                .ok_or(CaptureError::SystemInvariant(
+                    "CodeBuddy extension source lost its admitted metadata",
+                ))?;
+            CodeBuddySessionState {
+                native_session_id: metadata.native_session_id.clone(),
+                project_hash: metadata.project_hash.clone(),
+                cwd: None,
+                started_at: metadata
+                    .conversation
+                    .as_ref()
+                    .and_then(|value| {
+                        task_json_time_field(value, &["createdAt", "created_at", "timestamp"])
+                    })
+                    .map(|value| value.to_rfc3339()),
+                ended_at: metadata
+                    .conversation
+                    .as_ref()
+                    .and_then(|value| {
+                        task_json_time_field(
+                            value,
+                            &["lastMessageAt", "updatedAt", "completedAt", "last_modified"],
+                        )
+                    })
+                    .map(|value| value.to_rfc3339()),
+                generated_title: None,
+                row_count: 0,
+            }
+        }
+    };
+    Ok(CodeBuddyScanState {
+        shape: source.shape,
+        source_revision: source.source_revision.clone(),
+        next_native_offset: 0,
+        next_native_ordinal: 0,
+        certified_prefix_sha256: sha256_hex(&[]),
+        file_identity: source
+            .frozen
+            .as_ref()
+            .map(CodeBuddyFrozenFile::identity_token),
+        terminal: false,
+        accepted_events: 0,
+        skipped_metadata: 0,
+        rejected_records: 0,
+        failures: Vec::new(),
+        incomplete_tail: None,
+        session,
+    })
+}
+
 pub(super) fn next_source_page(
     source: &CodeBuddySource,
     state: &CodeBuddyScanState,
@@ -27,14 +110,15 @@ pub(super) fn next_cli_page(
             "CodeBuddy CLI state exceeds its source".to_owned(),
         ));
     }
-    let file = match source
+    let file = source
         .capability
         .as_ref()
         .and_then(|capability| capability.primary.as_ref())
-    {
-        Some(file) => file.file().try_clone()?,
-        None => File::open(&source.path)?,
-    };
+        .ok_or(CaptureError::SystemInvariant(
+            "CodeBuddy CLI source lost its admitted file",
+        ))?
+        .file()
+        .try_clone()?;
     if CodeBuddyFrozenFile::from_metadata(&file.metadata()?)? != *frozen {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -179,9 +263,6 @@ pub(super) fn next_cli_page(
             &mut session_title,
             ordinal,
             physical_line,
-            start,
-            offset,
-            &record_bytes,
             value,
         )?;
         match &classification {
@@ -284,132 +365,19 @@ pub(super) fn codebuddy_session_title(
     session: &CodeBuddySessionState,
 ) -> Result<Option<String>> {
     if source.shape == CodeBuddySourceShape::Extension {
-        let admitted = source
+        let metadata = source
             .capability
             .as_ref()
-            .and_then(|capability| capability.extension.as_ref());
-        let owned;
-        let metadata = if let Some(admitted) = admitted {
-            &admitted.metadata
-        } else {
-            owned = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-            &owned
-        };
+            .and_then(|capability| capability.extension.as_ref())
+            .map(|extension| &extension.metadata)
+            .ok_or(CaptureError::SystemInvariant(
+                "CodeBuddy extension source lost its admitted metadata",
+            ))?;
         if let Some(title) = codebuddy_extension_metadata_text(metadata, &["name", "title"]) {
             return Ok(Some(title));
         }
     }
-    let Some(anchor) = session.generated_title_anchor.as_ref() else {
-        return Ok(None);
-    };
-    let title = match (source.shape, anchor) {
-        (
-            CodeBuddySourceShape::Cli,
-            CodeBuddyGeneratedTitleAnchor::Cli {
-                native_ordinal: _,
-                byte_start,
-                byte_end_exclusive,
-                payload_sha256,
-            },
-        ) => {
-            let length =
-                byte_end_exclusive
-                    .checked_sub(*byte_start)
-                    .ok_or(CaptureError::InvalidPayload(
-                        "CodeBuddy CLI title anchor has an invalid byte range".to_owned(),
-                    ))?;
-            if length > CODEBUDDY_NATIVE_RECORD_MAX_BYTES as u64 {
-                return Err(CaptureError::InvalidPayload(
-                    "CodeBuddy CLI title anchor exceeds its record bound".to_owned(),
-                ));
-            }
-            let mut file = match source
-                .capability
-                .as_ref()
-                .and_then(|capability| capability.primary.as_ref())
-            {
-                Some(file) => file.file().try_clone()?,
-                None => File::open(&source.path)?,
-            };
-            file.seek(SeekFrom::Start(*byte_start))?;
-            let mut record = vec![
-                0_u8;
-                usize::try_from(length).map_err(|_| {
-                    CaptureError::InvalidPayload(
-                        "CodeBuddy CLI title anchor exceeds platform limits".to_owned(),
-                    )
-                })?
-            ];
-            file.read_exact(&mut record)?;
-            if record.last() == Some(&b'\n') {
-                record.pop();
-                if record.last() == Some(&b'\r') {
-                    record.pop();
-                }
-            }
-            if sha256_hex(&record) != *payload_sha256 {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            let value: Value = serde_json::from_slice(&record)?;
-            if provider_role(value.get("role").and_then(Value::as_str)) != EventRole::User {
-                return Err(CaptureError::InvalidPayload(
-                    "CodeBuddy CLI title anchor no longer identifies a user message".to_owned(),
-                ));
-            }
-            codebuddy_title_from_text(&cli_message_text(&value))
-        }
-        (
-            CodeBuddySourceShape::Extension,
-            CodeBuddyGeneratedTitleAnchor::Extension { message_index },
-        ) => {
-            let message_index = usize::try_from(*message_index).map_err(|_| {
-                CaptureError::InvalidPayload(
-                    "CodeBuddy extension title anchor exceeds platform limits".to_owned(),
-                )
-            })?;
-            let metadata = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-            let message_ref = metadata
-                .messages()
-                .get(message_index)
-                .ok_or(CaptureError::SourceChangedDuringCapture)?;
-            let (message_path, frozen) =
-                codebuddy_extension_message_file(&metadata.session_dir, message_ref).map_err(
-                    |error| match error {
-                        CodeBuddyExtensionMessageError::Rejected(error) => {
-                            CaptureError::InvalidPayload(error)
-                        }
-                        CodeBuddyExtensionMessageError::Source(error) => error,
-                    },
-                )?;
-            let record = fs::read(&message_path)?;
-            if !frozen.revalidate(&message_path)? {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            let raw_message: Value = serde_json::from_slice(&record)?;
-            let role = message_ref
-                .get("role")
-                .and_then(Value::as_str)
-                .or_else(|| raw_message.get("role").and_then(Value::as_str));
-            if provider_role(role) != EventRole::User {
-                return Err(CaptureError::InvalidPayload(
-                    "CodeBuddy extension title anchor no longer identifies a user message"
-                        .to_owned(),
-                ));
-            }
-            let decoded = codebuddy_decoded_message(&raw_message);
-            codebuddy_title_from_text(&codebuddy_message_text(&decoded, &raw_message))
-        }
-        _ => {
-            return Err(CaptureError::InvalidPayload(
-                "CodeBuddy title anchor does not match its source shape".to_owned(),
-            ));
-        }
-    };
-    title.map(Some).ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "CodeBuddy title anchor no longer resolves to non-empty text".to_owned(),
-        )
-    })
+    Ok(session.generated_title.clone())
 }
 
 pub(super) fn next_extension_page(
@@ -420,19 +388,11 @@ pub(super) fn next_extension_page(
     let admitted = source
         .capability
         .as_ref()
-        .and_then(|capability| capability.extension.as_ref());
-    let owned_metadata;
-    let metadata_summary;
-    let metadata = if let Some(admitted) = admitted {
-        metadata_summary = Vec::<CodeBuddyExtensionRejection>::new();
-        &admitted.metadata
-    } else {
-        owned_metadata = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-        let (_, rejections) =
-            CodeBuddyExtensionObservation::read(&owned_metadata, source.session_ordinal)?;
-        metadata_summary = rejections;
-        &owned_metadata
-    };
+        .and_then(|capability| capability.extension.as_ref())
+        .ok_or(CaptureError::SystemInvariant(
+            "CodeBuddy extension source lost its admitted metadata",
+        ))?;
+    let metadata = &admitted.metadata;
     let mut next = state.clone();
     next.source_revision.clone_from(&source.source_revision);
     next.terminal = false;
@@ -442,43 +402,27 @@ pub(super) fn next_extension_page(
     let mut reached_end = true;
     let mut session_title = codebuddy_session_title(source, &next.session)?;
 
-    if state.next_native_ordinal == 0 {
-        for failure in metadata_summary {
-            record_scan_rejection(&mut next, failure.line, failure.error)?;
-        }
-    }
-
     for (message_index, message_ref) in metadata.messages().iter().enumerate() {
-        let admitted_message = message_ref
+        let Some(message_id) = message_ref
             .get("id")
             .and_then(Value::as_str)
-            .and_then(|message_id| admitted.and_then(|admitted| admitted.messages.get(message_id)));
-        let (message_path, frozen) = match admitted_message {
-            Some(file) => (
-                metadata.session_dir.join("messages").join(format!(
-                    "{}.json",
-                    message_ref
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                )),
-                CodeBuddyFrozenFile::from_metadata(file.metadata())?,
-            ),
-            None => match codebuddy_extension_message_file(&metadata.session_dir, message_ref) {
-                Ok(value) => value,
-                Err(error) => {
-                    let error = error.rejected()?;
-                    if state.next_native_ordinal == 0 {
-                        record_scan_rejection(
-                            &mut next,
-                            codebuddy_extension_line_number(source.session_ordinal, message_index),
-                            error,
-                        )?;
-                    }
-                    continue;
-                }
-            },
+            .filter(|id| provider_safe_path_segment(id))
+        else {
+            if state.next_native_ordinal == 0 {
+                record_scan_rejection(
+                    &mut next,
+                    codebuddy_extension_line_number(source.session_ordinal, message_index),
+                    "CodeBuddy message ref has an invalid id".to_owned(),
+                )?;
+            }
+            continue;
         };
+        let admitted_message = admitted
+            .messages
+            .get(message_id)
+            .ok_or(CaptureError::SourceChangedDuringCapture)?;
+        let message_path = &admitted_message.display_path;
+        let frozen = &admitted_message.frozen;
         let ordinal = valid_ordinal;
         valid_ordinal = valid_ordinal
             .checked_add(1)
@@ -535,16 +479,17 @@ pub(super) fn next_extension_page(
             retained_bytes = retained_bytes.saturating_add(256);
             continue;
         }
-        let record_bytes = match admitted_message {
-            Some(file) => file.read_all_bounded(CODEBUDDY_NATIVE_RECORD_MAX_BYTES)?,
-            None => {
-                let bytes = fs::read(&message_path)?;
-                if !frozen.revalidate(&message_path)? {
-                    return Err(CaptureError::SourceChangedDuringCapture);
-                }
-                bytes
-            }
-        };
+        let capability = source
+            .capability
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "CodeBuddy extension source lost its authority",
+            ))?;
+        let record_bytes = read_observed_file(
+            &capability.authority,
+            admitted_message,
+            CODEBUDDY_NATIVE_RECORD_MAX_BYTES,
+        )?;
         let raw_message = match serde_json::from_slice::<Value>(&record_bytes) {
             Ok(value) => value,
             Err(error) => {
@@ -571,10 +516,8 @@ pub(super) fn next_extension_page(
             &mut next.session,
             &mut session_title,
             ordinal,
-            message_index,
             message_ref,
-            &message_path,
-            &record_bytes,
+            Some(frozen.modified()),
             raw_message,
         )?;
         match &classification {
@@ -618,4 +561,41 @@ pub(super) fn next_extension_page(
         records,
         next_state: next,
     })
+}
+
+fn source_prefix_sha256(source: &CodeBuddySource, length: u64) -> Result<String> {
+    let opened = source
+        .capability
+        .as_ref()
+        .and_then(|capability| capability.primary.as_ref())
+        .ok_or(CaptureError::SystemInvariant(
+            "CodeBuddy CLI source lost its admitted file",
+        ))?;
+    let mut file = opened.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut remaining = length;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    while remaining != 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+            CaptureError::SystemInvariant("CodeBuddy prefix length exceeds platform limits")
+        })?;
+        let read = file.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        digest.update(&buffer[..read]);
+        remaining = remaining.saturating_sub(read as u64);
+    }
+    Ok(hex(&digest.finalize()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    hex(&digest.finalize())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
