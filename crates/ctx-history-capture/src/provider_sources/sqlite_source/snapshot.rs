@@ -83,6 +83,13 @@ pub(crate) fn open_root_handle_sqlite_source_snapshot(
     open_root_handle_sqlite_source_snapshot_inner(authority, database_name, || {}, || {})
 }
 
+pub(crate) fn open_root_handle_sqlite_source_physical_revision(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+) -> SqliteSourceAccessResult<SqliteSourcePhysicalRevision> {
+    SqliteSourcePhysicalRevision::open(authority, database_name)
+}
+
 fn open_root_handle_sqlite_source_snapshot_inner(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
@@ -90,7 +97,10 @@ fn open_root_handle_sqlite_source_snapshot_inner(
     before_source_revalidation: impl FnOnce(),
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
     let family = SqliteSourceFamily::open(authority, database_name, after_parent_certification)?;
-    let native_evidence = family.capture_evidence()?;
+    let (native_evidence, database_bytes_read, wal_bytes_read) = family.capture_evidence()?;
+    authority
+        .snapshot_context
+        .record_physical_revision_capture(database_bytes_read, wal_bytes_read)?;
 
     let acquired = acquire_sqlite_connection(
         authority.data_root(),

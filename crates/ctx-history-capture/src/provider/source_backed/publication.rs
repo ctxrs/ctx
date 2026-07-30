@@ -236,6 +236,15 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 .is_some_and(|revalidate| revalidate(inventory))
         },
     )?;
+    for route in &registry.routes {
+        if let Some(after_publication) = route
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.after_successful_publication.as_ref())
+        {
+            after_publication();
+        }
+    }
     let commit_duration = commit_started.elapsed();
     let _ = report_progress(SourceBackedRefreshProgress {
         phase: "committed",

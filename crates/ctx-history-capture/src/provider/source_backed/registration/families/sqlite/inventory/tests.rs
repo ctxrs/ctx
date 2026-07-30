@@ -55,6 +55,7 @@ struct TestProvider {
     catalog: Arc<Mutex<Vec<TestLeaf>>>,
     state: Arc<Mutex<TestState>>,
     test_leaf_workers: Option<usize>,
+    parser_revision: &'static str,
 }
 
 impl TestProvider {
@@ -78,6 +79,16 @@ impl TestProvider {
             catalog,
             state: Arc::default(),
             test_leaf_workers: Some(test_leaf_workers),
+            parser_revision: TEST_PARSER_REVISION,
+        }
+    }
+
+    fn with_parser_revision(&self, parser_revision: &'static str) -> Self {
+        Self {
+            catalog: Arc::clone(&self.catalog),
+            state: Arc::clone(&self.state),
+            test_leaf_workers: self.test_leaf_workers,
+            parser_revision,
         }
     }
 
@@ -150,7 +161,7 @@ impl SqliteInventoryProvider for TestProvider {
     type Leaf = TestLeaf;
 
     fn parser_revision(&self) -> &'static str {
-        TEST_PARSER_REVISION
+        self.parser_revision
     }
 
     fn logical_tables(&self) -> &'static [&'static str] {
@@ -237,7 +248,7 @@ impl SqliteInventoryProvider for TestProvider {
         CertifiedSource::certify(
             observation.clone(),
             observation,
-            TEST_PARSER_REVISION,
+            self.parser_revision(),
             content_digest,
             ScannedSourceCounts {
                 complete_records: count,
@@ -485,7 +496,7 @@ fn one_snapshot_cold_replay_replacement_and_wal_transition() {
     let cold = publish(&index_root, &registry);
     assert_eq!(directory_file_bytes(&provider_dir), before);
     assert_eq!(provider.state.lock().unwrap().projections, 1);
-    assert_one_copied_snapshot(provider.state.lock().unwrap().counters[0]);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[0], 1);
 
     let before = directory_file_bytes(&provider_dir);
     let restarted_registry = test_registry(&data_root, &database, provider.clone());
@@ -493,7 +504,7 @@ fn one_snapshot_cold_replay_replacement_and_wal_transition() {
     assert_eq!(directory_file_bytes(&provider_dir), before);
     assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
     assert_eq!(provider.state.lock().unwrap().projections, 1);
-    assert_one_copied_snapshot(provider.state.lock().unwrap().counters[1]);
+    assert_physical_replay(provider.state.lock().unwrap().counters[1]);
 
     writer
         .execute(
@@ -506,7 +517,7 @@ fn one_snapshot_cold_replay_replacement_and_wal_transition() {
     assert_eq!(directory_file_bytes(&provider_dir), before);
     assert_ne!(replacement.commit.generation_id, cold.commit.generation_id);
     assert_eq!(provider.state.lock().unwrap().projections, 2);
-    assert_one_copied_snapshot(provider.state.lock().unwrap().counters[2]);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[2], 2);
 
     writer
         .execute_batch("pragma wal_checkpoint(truncate)")
@@ -521,19 +532,259 @@ fn one_snapshot_cold_replay_replacement_and_wal_transition() {
     );
     assert_eq!(provider.state.lock().unwrap().projections, 2);
     let counters = provider.state.lock().unwrap().counters[3];
+    assert_snapshot_fallback(counters, 2);
     #[cfg(target_os = "linux")]
     {
         assert_eq!(counters.immutable_snapshot_opens, 1);
         assert_eq!(counters.copied_snapshot_opens, 0);
         assert_eq!(counters.source_bytes_copied, 0);
     }
-    #[cfg(not(target_os = "linux"))]
-    assert_one_copied_snapshot(counters);
-    assert_eq!(counters.terminal_fences, 1);
-    assert!(counters.terminal_revalidations >= 2);
-    assert_eq!(counters.active_snapshots, 0);
-    assert_eq!(counters.max_active_snapshots, 1);
+
+    let replay_after_checkpoint = publish(&index_root, &registry);
+    assert_eq!(
+        replay_after_checkpoint.commit.generation_id,
+        checkpoint_only.commit.generation_id
+    );
+    assert_eq!(provider.state.lock().unwrap().projections, 2);
+    assert_physical_replay(provider.state.lock().unwrap().counters[4]);
     assert_no_snapshot_temp_leak(&data_root);
+}
+
+#[test]
+fn missing_corrupt_and_parser_mismatched_hints_fall_back_then_recover() {
+    const NEXT_PARSER_REVISION: &str = "sqlite-inventory-family-test-v2";
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider_dir).unwrap();
+    let database = provider_dir.join("history.sqlite");
+    let _writer = active_wal_database(&database, "stable body");
+    let provider = test_provider(database.clone());
+    let registry = test_registry(&data_root, &database, provider.clone());
+
+    let cold = publish(&index_root, &registry);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[0], 1);
+    let hint = only_replay_hint(&data_root);
+
+    let restarted = test_registry(&data_root, &database, provider.clone());
+    let exact = publish(&index_root, &restarted);
+    assert_eq!(exact.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
+    assert_physical_replay(provider.state.lock().unwrap().counters[1]);
+
+    fs::remove_file(&hint).unwrap();
+    let missing = publish(&index_root, &restarted);
+    assert_eq!(missing.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[2], 1);
+    assert!(hint.is_file(), "successful fallback must restore the hint");
+
+    fs::write(&hint, b"{corrupt").unwrap();
+    let corrupt = publish(&index_root, &restarted);
+    assert_eq!(corrupt.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[3], 1);
+
+    let next_provider = provider.with_parser_revision(NEXT_PARSER_REVISION);
+    let next_registry = test_registry(&data_root, &database, next_provider.clone());
+    let parser_mismatch = publish(&index_root, &next_registry);
+    assert_ne!(
+        parser_mismatch.commit.generation_id,
+        cold.commit.generation_id
+    );
+    assert_eq!(
+        parser_mismatch.sources[0].parser_revision(),
+        NEXT_PARSER_REVISION
+    );
+    assert_eq!(provider.state.lock().unwrap().projections, 2);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[4], 1);
+
+    let next_exact = publish(&index_root, &next_registry);
+    assert_eq!(
+        next_exact.commit.generation_id,
+        parser_mismatch.commit.generation_id
+    );
+    assert_eq!(provider.state.lock().unwrap().projections, 2);
+    assert_physical_replay(provider.state.lock().unwrap().counters[5]);
+    assert_no_snapshot_temp_leak(&data_root);
+}
+
+#[test]
+fn failed_publication_does_not_activate_a_replay_hint() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider_dir).unwrap();
+    let database = provider_dir.join("history.sqlite");
+    let _writer = active_wal_database(&database, "before failure");
+    let provider = test_provider(database.clone());
+    let registry = test_registry(&data_root, &database, provider.clone());
+
+    provider.state.lock().unwrap().mutate_after_seal = true;
+    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    assert!(
+        replay_hints(&data_root).is_empty(),
+        "a failed generation must not activate its staged replay hint"
+    );
+
+    let settled = publish(&index_root, &registry);
+    let hint = only_replay_hint(&data_root);
+    assert!(hint.is_file());
+    let exact = publish(&index_root, &registry);
+    assert_eq!(exact.commit.generation_id, settled.commit.generation_id);
+    assert_physical_replay(provider.state.lock().unwrap().counters[1]);
+    assert_no_snapshot_temp_leak(&data_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn wal_create_checkpoint_reset_and_delete_fall_back_then_replay_exactly() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider_dir).unwrap();
+    let database = provider_dir.join("history.sqlite");
+    let initial = Connection::open(&database).unwrap();
+    initial
+        .execute_batch("create table messages (id integer primary key, body text not null)")
+        .unwrap();
+    initial
+        .execute(
+            "insert into messages (id, body) values (1, 'before WAL')",
+            [],
+        )
+        .unwrap();
+    drop(initial);
+    let provider = test_provider(database.clone());
+    let registry = test_registry(&data_root, &database, provider.clone());
+
+    let cold = publish(&index_root, &registry);
+    assert_snapshot_fallback(provider.state.lock().unwrap().counters[0], 1);
+    let exact_without_wal = publish(&index_root, &registry);
+    assert_eq!(
+        exact_without_wal.commit.generation_id,
+        cold.commit.generation_id
+    );
+    assert_physical_replay(provider.state.lock().unwrap().counters[1]);
+
+    let writer = Connection::open(&database).unwrap();
+    let mode: String = writer
+        .query_row("pragma journal_mode = WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    writer
+        .execute(
+            "insert into messages (id, body) values (2, 'created WAL')",
+            [],
+        )
+        .unwrap();
+    let wal_created = publish(&index_root, &registry);
+    assert_ne!(wal_created.commit.generation_id, cold.commit.generation_id);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[2], 2);
+    let exact_with_wal = publish(&index_root, &registry);
+    assert_eq!(
+        exact_with_wal.commit.generation_id,
+        wal_created.commit.generation_id
+    );
+    assert_physical_replay(provider.state.lock().unwrap().counters[3]);
+
+    writer
+        .execute_batch("pragma wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let reset = publish(&index_root, &registry);
+    assert_eq!(reset.commit.generation_id, wal_created.commit.generation_id);
+    assert_snapshot_fallback(provider.state.lock().unwrap().counters[4], 2);
+    let exact_after_reset = publish(&index_root, &registry);
+    assert_eq!(
+        exact_after_reset.commit.generation_id,
+        wal_created.commit.generation_id
+    );
+    assert_physical_replay(provider.state.lock().unwrap().counters[5]);
+
+    drop(writer);
+    for path in [
+        database.with_file_name("history.sqlite-wal"),
+        database.with_file_name("history.sqlite-shm"),
+    ] {
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    let deleted = publish(&index_root, &registry);
+    assert_eq!(
+        deleted.commit.generation_id,
+        wal_created.commit.generation_id
+    );
+    assert_snapshot_fallback(provider.state.lock().unwrap().counters[6], 2);
+    let exact_after_delete = publish(&index_root, &registry);
+    assert_eq!(
+        exact_after_delete.commit.generation_id,
+        wal_created.commit.generation_id
+    );
+    assert_physical_replay(provider.state.lock().unwrap().counters[7]);
+    assert_eq!(provider.state.lock().unwrap().projections, 2);
+    assert_no_snapshot_temp_leak(&data_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn active_wal_inventory_replay_works_from_a_read_only_provider_tree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider_dir).unwrap();
+    let database = provider_dir.join("history.sqlite");
+    let writer = active_wal_database(&database, "read only");
+    let wal = database.with_file_name("history.sqlite-wal");
+    let shared_memory = database.with_file_name("history.sqlite-shm");
+    assert!(wal.is_file(), "active-WAL fixture must retain its WAL");
+    assert!(
+        fs::metadata(&wal).unwrap().len() > 0,
+        "active-WAL fixture must retain WAL payload"
+    );
+    assert!(
+        shared_memory.is_file(),
+        "active-WAL fixture must retain shared memory"
+    );
+    for path in [&database, &wal, &shared_memory] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    fs::set_permissions(&provider_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let before = directory_file_bytes(&provider_dir);
+    let provider = test_provider(database.clone());
+    let registry = test_registry(&data_root, &database, provider.clone());
+
+    let cold = publish(&index_root, &registry);
+    assert_eq!(directory_file_bytes(&provider_dir), before);
+    assert_copied_snapshot(provider.state.lock().unwrap().counters[0], 1);
+    let restarted = test_registry(&data_root, &database, provider.clone());
+    let exact = publish(&index_root, &restarted);
+    assert_eq!(exact.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(directory_file_bytes(&provider_dir), before);
+    assert_physical_replay(provider.state.lock().unwrap().counters[1]);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
+
+    fs::set_permissions(&provider_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    for path in [&database, &wal, &shared_memory] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    assert_no_snapshot_temp_leak(&data_root);
+    drop(writer);
 }
 
 #[test]
@@ -579,6 +830,7 @@ fn test_provider(database: PathBuf) -> TestProvider {
         }])),
         state: Arc::new(Mutex::new(TestState::default())),
         test_leaf_workers: None,
+        parser_revision: TEST_PARSER_REVISION,
     }
 }
 
@@ -731,6 +983,23 @@ fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
         .collect()
 }
 
+fn only_replay_hint(data_root: &Path) -> PathBuf {
+    let hints = replay_hints(data_root);
+    assert_eq!(hints.len(), 1, "expected exactly one SQLite replay hint");
+    hints.into_iter().next().unwrap()
+}
+
+fn replay_hints(data_root: &Path) -> Vec<PathBuf> {
+    let directory = data_root.join("cache/provider-sqlite-replay-v1");
+    if !directory.exists() {
+        return Vec::new();
+    }
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
 fn assert_inventory_work(
     provider: &TestProvider,
     projections: usize,
@@ -748,19 +1017,89 @@ fn assert_inventory_work(
     assert!(state.active_scans_by_path.is_empty());
     assert_eq!(state.max_active_scans_per_path, usize::from(peak_scans > 0));
     assert_eq!(state.counters.len(), snapshot_observations);
+    assert_eq!(
+        state
+            .counters
+            .iter()
+            .filter(|counters| counters.copied_snapshot_opens == 1)
+            .count(),
+        projections
+    );
     for counters in &state.counters {
-        assert_one_copied_snapshot(*counters);
+        if counters.copied_snapshot_opens == 1 {
+            assert!((1..=2).contains(&counters.physical_revision_captures));
+            assert_copied_snapshot(*counters, counters.physical_revision_captures);
+        } else {
+            assert_physical_replay(*counters);
+        }
     }
 }
 
-fn assert_one_copied_snapshot(counters: SqliteInventorySnapshotCounters) {
+fn assert_copied_snapshot(
+    counters: SqliteInventorySnapshotCounters,
+    expected_physical_captures: u64,
+) {
     assert_eq!(counters.immutable_snapshot_opens, 0);
     assert_eq!(counters.copied_snapshot_opens, 1);
     assert!(counters.source_bytes_copied > 0);
+    assert_eq!(
+        counters.physical_revision_captures,
+        expected_physical_captures
+    );
+    assert_eq!(counters.physical_replay_hits, 0);
+    assert!(
+        counters.physical_database_bytes_read <= expected_physical_captures.saturating_mul(128)
+    );
+    assert!(counters.physical_wal_bytes_read <= expected_physical_captures.saturating_mul(128));
+    assert!(counters.logical_rows_scanned > 0);
     assert_eq!(counters.terminal_fences, 1);
     assert!(counters.terminal_revalidations >= 2);
     assert_eq!(counters.active_snapshots, 0);
     assert_eq!(counters.max_active_snapshots, 1);
+}
+
+fn assert_snapshot_fallback(
+    counters: SqliteInventorySnapshotCounters,
+    expected_physical_captures: u64,
+) {
+    assert_eq!(
+        counters.immutable_snapshot_opens + counters.copied_snapshot_opens,
+        1
+    );
+    if counters.copied_snapshot_opens == 0 {
+        assert_eq!(counters.source_bytes_copied, 0);
+    } else {
+        assert!(counters.source_bytes_copied > 0);
+    }
+    assert_eq!(
+        counters.physical_revision_captures,
+        expected_physical_captures
+    );
+    assert_eq!(counters.physical_replay_hits, 0);
+    assert!(
+        counters.physical_database_bytes_read <= expected_physical_captures.saturating_mul(128)
+    );
+    assert!(counters.physical_wal_bytes_read <= expected_physical_captures.saturating_mul(128));
+    assert!(counters.logical_rows_scanned > 0);
+    assert_eq!(counters.terminal_fences, 1);
+    assert!(counters.terminal_revalidations >= 2);
+    assert_eq!(counters.active_snapshots, 0);
+    assert_eq!(counters.max_active_snapshots, 1);
+}
+
+fn assert_physical_replay(counters: SqliteInventorySnapshotCounters) {
+    assert_eq!(counters.immutable_snapshot_opens, 0);
+    assert_eq!(counters.copied_snapshot_opens, 0);
+    assert_eq!(counters.source_bytes_copied, 0);
+    assert_eq!(counters.physical_revision_captures, 1);
+    assert_eq!(counters.physical_replay_hits, 1);
+    assert!(counters.physical_database_bytes_read <= 128);
+    assert!(counters.physical_wal_bytes_read <= 128);
+    assert_eq!(counters.logical_rows_scanned, 0);
+    assert_eq!(counters.terminal_fences, 1);
+    assert!(counters.terminal_revalidations >= 1);
+    assert_eq!(counters.active_snapshots, 0);
+    assert_eq!(counters.max_active_snapshots, 0);
 }
 
 fn assert_no_snapshot_temp_leak(data_root: &Path) {
