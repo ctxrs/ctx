@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
-    object_dir, CaptureProvider, Confidence, ContextCitationType, Fidelity, HistoryRecord, Session,
-    SyncMetadata, SyncOutboxItem, SyncState, Visibility,
+    managed_data_root, object_dir, CaptureProvider, Confidence, ContextCitationType, Fidelity,
+    HistoryRecord, Session, SyncMetadata, SyncOutboxItem, SyncState, Visibility,
 };
 
 #[test]
@@ -157,6 +157,8 @@ fn ctx_data_root_env_is_the_ctx_root_itself() {
 
     let default_root = default_data_root().unwrap();
     assert!(default_root.ends_with(".ctx"));
+    let managed_root = managed_data_root().unwrap();
+    assert_eq!(managed_root, default_root);
 
     env::set_var("CTX_DATA_ROOT", "/tmp/custom-ctx-root");
 
@@ -168,6 +170,7 @@ fn ctx_data_root_env_is_the_ctx_root_itself() {
         database_path(default_data_root().unwrap()),
         PathBuf::from("/tmp/custom-ctx-root/work.sqlite")
     );
+    assert_eq!(managed_data_root().unwrap(), managed_root);
 
     if let Some(previous) = previous {
         env::set_var("CTX_DATA_ROOT", previous);

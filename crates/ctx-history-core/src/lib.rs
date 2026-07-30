@@ -141,7 +141,7 @@ pub use history_jsonl::{
 };
 pub use paths::{
     blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
-    object_dir,
+    managed_data_root, object_dir,
 };
 pub use projection::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,

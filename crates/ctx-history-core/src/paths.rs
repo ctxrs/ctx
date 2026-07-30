@@ -9,6 +9,13 @@ pub fn default_data_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(value));
     }
 
+    managed_data_root()
+}
+
+/// Returns the environment-independent data root owned by the installed ctx
+/// lifecycle. Custom command roots must never acquire the singleton native
+/// daemon supervisor merely by changing `CTX_DATA_ROOT`.
+pub fn managed_data_root() -> Result<PathBuf> {
     let base = BaseDirs::new().ok_or(CoreError::MissingHome)?;
     Ok(base.home_dir().join(".ctx"))
 }

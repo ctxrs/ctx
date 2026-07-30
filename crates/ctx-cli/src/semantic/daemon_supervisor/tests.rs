@@ -1,7 +1,10 @@
 use super::*;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Barrier, Mutex,
+use std::{
+    env,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Barrier, Mutex,
+    },
 };
 
 #[derive(Default)]
@@ -404,4 +407,23 @@ fn fallback_disable_status_is_retry_safe_without_claiming_registration() {
     assert_eq!(status["live_owner_verified"], false);
     assert_eq!(status["autostart_supported"], false);
     assert_eq!(status["restart_supported"], false);
+}
+
+#[test]
+fn canonical_supervisor_root_is_independent_of_ctx_data_root_override() {
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap();
+    let previous = env::var_os("CTX_DATA_ROOT");
+    let canonical = ctx_history_core::managed_data_root().unwrap();
+    let custom = canonical.with_file_name("ctx-custom-supervisor-test");
+    env::set_var("CTX_DATA_ROOT", &custom);
+
+    assert!(is_canonical_managed_data_root(&canonical).unwrap());
+    assert!(!is_canonical_managed_data_root(&custom).unwrap());
+
+    if let Some(previous) = previous {
+        env::set_var("CTX_DATA_ROOT", previous);
+    } else {
+        env::remove_var("CTX_DATA_ROOT");
+    }
 }
