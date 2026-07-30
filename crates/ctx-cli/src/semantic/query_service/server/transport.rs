@@ -1,6 +1,8 @@
 use std::{path::Path, sync::Arc, time::Duration as StdDuration};
 
 #[cfg(unix)]
+use std::os::fd::AsRawFd as _;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
@@ -188,6 +190,8 @@ fn start_daemon_service_with_request_timeout(
 ) -> Result<DaemonQueryService> {
     let root = daemon_root_path(data_root);
     create_private_dir_all(&root)?;
+    let (shutdown_reader, shutdown_stream) =
+        UnixStream::pair().context("create daemon query shutdown channel")?;
     let (listener, path, socket_runtime_dir) = bind_daemon_service_listener(data_root, service)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set daemon query socket permissions {}", path.display()))?;
@@ -216,6 +220,10 @@ fn start_daemon_service_with_request_timeout(
         .name("ctx-daemon-query".to_owned())
         .spawn(move || {
             while !thread_activity.stopping() {
+                match wait_for_unix_listener_or_shutdown(&listener, &shutdown_reader) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => break,
+                }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         // Accepted Unix sockets inherit nonblocking mode on
@@ -278,7 +286,46 @@ fn start_daemon_service_with_request_timeout(
             DaemonQueryEndpoint::Unix { path, .. } => path,
         },
         socket_runtime_dir,
+        shutdown_stream,
     })
+}
+
+#[cfg(unix)]
+fn wait_for_unix_listener_or_shutdown(
+    listener: &UnixListener,
+    shutdown: &UnixStream,
+) -> std::io::Result<bool> {
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: shutdown.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        let result =
+            unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, -1) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if poll_fds[1].revents != 0 {
+            return Ok(false);
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+            != 0
+        {
+            return Ok(true);
+        }
+    }
 }
 
 #[cfg(unix)]
