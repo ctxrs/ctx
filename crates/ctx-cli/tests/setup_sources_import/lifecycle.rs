@@ -1131,7 +1131,7 @@ fn human_wait_setup_starts_daemon_after_foreground_import() {
     let output = ctx_from_binary(&temp, &binary)
         .args(["setup", "--wait", "--progress", "none"])
         .env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2")
-        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
+        .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "60")
         .env("CTX_UPGRADE_AUTO", "off")
         .env_remove("CI")
         .env_remove("CTX_DAEMON_AUTOSTART_OFF")
