@@ -429,7 +429,7 @@ fn source_backed_cold_append_and_replay_keep_cumulative_counts() {
 }
 
 #[test]
-fn source_backed_rewrite_with_failed_append_proof_replaces_the_source() {
+fn active_source_family_contract_codex_rewrite_with_failed_append_proof_replaces_the_source() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -488,7 +488,7 @@ fn source_backed_rewrite_with_failed_append_proof_replaces_the_source() {
 }
 
 #[test]
-fn source_backed_truncation_replaces_the_source_without_stale_documents() {
+fn active_source_family_contract_codex_truncation_replaces_the_source_without_stale_documents() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::Write,
     sync::{
@@ -26,6 +27,65 @@ fn identity(path: &std::path::Path) -> JsonlSourceIdentity {
 
 type DrainedRecords = Vec<(u64, u64, Vec<u8>)>;
 type DrainOutcome = (JsonlSourceChange, DrainedRecords, JsonlCheckpoint);
+
+#[test]
+fn active_source_family_contract_documented_storage_families_cover_routed_provider_formats() {
+    let policy = include_str!("../../../../../../docs/provider-import-policy.md");
+    let storage_families = policy
+        .split_once("## Storage Families")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("## Active-Writer Lifecycle Contract")
+                .map(|(section, _)| section)
+        })
+        .expect("provider policy contains the storage-family table");
+    let mut documented_formats = Vec::new();
+    let mut mimocode_family = None;
+    for row in storage_families.lines().filter(|line| {
+        line.starts_with("| ") && !line.starts_with("| Provider ") && !line.starts_with("| ---")
+    }) {
+        let columns = row.split('|').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 6, "malformed storage-family row: {row}");
+        let formats = columns[2]
+            .split('`')
+            .enumerate()
+            .filter_map(|(index, value)| (index % 2 == 1).then_some(value.to_owned()))
+            .collect::<Vec<_>>();
+        assert!(
+            !formats.is_empty(),
+            "storage-family row has no format: {row}"
+        );
+        if formats.iter().any(|format| format == "mimocode_sqlite") {
+            mimocode_family = Some(columns[3].trim().to_owned());
+        }
+        documented_formats.extend(formats);
+    }
+
+    let documented = documented_formats.iter().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        documented.len(),
+        documented_formats.len(),
+        "the storage-family table repeats a source format"
+    );
+
+    let routes = crate::provider::source_backed::source_backed_route_inventory();
+    let routed = routes
+        .iter()
+        .filter(|route| route.provider != ctx_history_core::CaptureProvider::Custom)
+        .filter(|route| {
+            route.automatic
+                || !routes
+                    .iter()
+                    .any(|candidate| candidate.provider == route.provider && candidate.automatic)
+        })
+        .map(|route| route.source_format.to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        documented, routed,
+        "the policy taxonomy must describe every routed provider format exactly once"
+    );
+    assert_eq!(mimocode_family.as_deref(), Some("SQLite message store"));
+}
 
 fn drain(path: &std::path::Path, previous: Option<&JsonlCheckpoint>) -> DrainOutcome {
     let source = opened(path);

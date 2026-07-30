@@ -582,7 +582,8 @@ fn logical_snapshot_leaf_scans_once_and_discards_identical_staging() {
 }
 
 #[test]
-fn replacement_tree_rejects_races_duplicates_and_replaces_on_parser_change() {
+fn active_source_family_contract_document_replacement_tree_rejects_races_duplicates_and_replaces_on_parser_change(
+) {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_root = temp.path().join("index");
     let adapter = SyntheticAdapter::new(vec![SyntheticLeaf {

@@ -185,6 +185,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Claude | `claude_projects_jsonl_tree` | JSONL transcript stream/tree | Project tree of JSONL transcripts. |
 | OpenCode | `opencode_sqlite` | SQLite message store | Current schemas may split messages and parts. |
 | Kilo Code | `kilo_sqlite` | SQLite message store | Current schemas may split messages and parts. |
+| MiMo Code | `mimocode_sqlite` | SQLite message store | OpenCode-family sessions with messages and parts. |
 | Kiro CLI | `kiro_cli_sqlite` | SQLite message store | SQLite conversation key/value rows containing message JSON. |
 | Crush | `crush_sqlite` | SQLite message store | SQLite sessions with message parts and tool metadata. |
 | Goose | `goose_sessions_sqlite` | SQLite message store | SQLite sessions/messages with structured content JSON. |

@@ -59,6 +59,7 @@ ctx_rust_test(
     crate_name = "ctx_history_capture",
     crate_root = "src/lib.rs",
     compile_data = [
+        "//:provider_import_policy",
         "//:provider_support_matrix",
         "//:public_test_fixtures",
     ],
