@@ -21,7 +21,7 @@ use super::super::{
     },
 };
 use super::{
-    dedupe_report, issue, path_presence, push_source_candidate, source_from_parts,
+    dedupe_report, issue, path_presence, push_source_candidate, source_from_parts_with_data_root,
     unsupported_source, PathPresence,
 };
 
@@ -118,7 +118,7 @@ fn resolve_kiro(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
     if let Some(path) = legacy {
         push_source_candidate(
             &mut report.sources,
-            safe_native_source(spec, path, KIRO_FORMAT),
+            safe_native_source(context.data_root(), spec, path, KIRO_FORMAT),
         );
     }
     report
@@ -156,6 +156,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
             );
             add_warp_channel(
                 &mut sources,
+                context.data_root(),
                 spec,
                 platform,
                 WarpReleaseChannel::Stable,
@@ -163,6 +164,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
             )?;
             add_warp_channel(
                 &mut sources,
+                context.data_root(),
                 spec,
                 platform,
                 WarpReleaseChannel::Preview,
@@ -186,6 +188,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
             if let Some(root) = stable {
                 add_warp_channel(
                     &mut sources,
+                    context.data_root(),
                     spec,
                     platform,
                     WarpReleaseChannel::Stable,
@@ -200,6 +203,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
             if let Some(root) = preview {
                 add_warp_channel(
                     &mut sources,
+                    context.data_root(),
                     spec,
                     platform,
                     WarpReleaseChannel::Preview,
@@ -216,6 +220,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
             let warp = local_data.join("warp");
             add_warp_channel(
                 &mut sources,
+                context.data_root(),
                 spec,
                 platform,
                 WarpReleaseChannel::Stable,
@@ -223,6 +228,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
             )?;
             add_warp_channel(
                 &mut sources,
+                context.data_root(),
                 spec,
                 platform,
                 WarpReleaseChannel::Preview,
@@ -235,6 +241,7 @@ pub(in crate::provider_sources) fn resolve_warp_with_authority(
 
 fn add_warp_channel(
     sources: &mut Vec<DiscoveredWarpSource>,
+    data_root: Option<&Path>,
     spec: &ProviderSourceSpec,
     platform: WarpInstalledPlatform,
     channel: WarpReleaseChannel,
@@ -249,6 +256,7 @@ fn add_warp_channel(
     }
     push_warp_source(
         sources,
+        data_root,
         spec,
         gui,
         WarpInstalledSurfaceKey::new(platform, channel, WarpTerminalSurface::Gui),
@@ -257,6 +265,7 @@ fn add_warp_channel(
     if path_presence(&tui).suppresses_fallback() {
         push_warp_source(
             sources,
+            data_root,
             spec,
             tui,
             WarpInstalledSurfaceKey::new(platform, channel, WarpTerminalSurface::Tui),
@@ -267,6 +276,7 @@ fn add_warp_channel(
 
 fn push_warp_source(
     sources: &mut Vec<DiscoveredWarpSource>,
+    data_root: Option<&Path>,
     spec: &ProviderSourceSpec,
     path: PathBuf,
     surface_key: WarpInstalledSurfaceKey,
@@ -275,7 +285,7 @@ fn push_warp_source(
         return Err(WarpDiscoveryUnavailable::SourceCandidateRejected { surface_key });
     }
     sources.push(DiscoveredWarpSource::new(
-        safe_native_source(spec, path, WARP_FORMAT),
+        safe_native_source(data_root, spec, path, WARP_FORMAT),
         surface_key,
     ));
     Ok(())
@@ -308,7 +318,7 @@ fn resolve_codebuddy(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> D
     };
     push_source_candidate(
         &mut report.sources,
-        safe_native_source(spec, cli_root, CODEBUDDY_FORMAT),
+        safe_native_source(context.data_root(), spec, cli_root, CODEBUDDY_FORMAT),
     );
 
     let ide = match context.platform() {
@@ -322,7 +332,7 @@ fn resolve_codebuddy(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> D
     if path_presence(&ide).suppresses_fallback() {
         push_source_candidate(
             &mut report.sources,
-            safe_native_source(spec, ide, CODEBUDDY_FORMAT),
+            safe_native_source(context.data_root(), spec, ide, CODEBUDDY_FORMAT),
         );
     }
     report
@@ -386,7 +396,7 @@ fn resolve_zed(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discove
         let path = root.join("threads").join("threads.db");
         push_source_candidate(
             &mut report.sources,
-            safe_native_source(spec, path, ZED_FORMAT),
+            safe_native_source(context.data_root(), spec, path, ZED_FORMAT),
         );
     }
     report
@@ -409,7 +419,12 @@ fn resolve_copilot(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Dis
     };
     let path = root.join("session-state");
     DiscoveryReport {
-        sources: vec![safe_native_source(spec, path, COPILOT_FORMAT)],
+        sources: vec![safe_native_source(
+            context.data_root(),
+            spec,
+            path,
+            COPILOT_FORMAT,
+        )],
         issues: Vec::new(),
     }
 }
@@ -543,13 +558,20 @@ fn exact_tree_has_history(root: &Path, tree: ExactTree) -> Result<bool, Selector
 }
 
 fn safe_native_source(
+    data_root: Option<&Path>,
     spec: &ProviderSourceSpec,
     path: PathBuf,
     format: &'static str,
 ) -> ProviderSource {
     match path_presence(&path) {
         PathPresence::Missing | PathPresence::Present => {
-            return source_from_parts(spec, path, format, ProviderSourceKind::NativeHistory);
+            return source_from_parts_with_data_root(
+                data_root,
+                spec,
+                path,
+                format,
+                ProviderSourceKind::NativeHistory,
+            );
         }
         PathPresence::Unsupported => {
             return ProviderSource {
