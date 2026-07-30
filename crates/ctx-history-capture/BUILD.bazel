@@ -107,6 +107,19 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
+sh_test(
+    name = "active_source_family_contract_tests",
+    srcs = ["tests/run-active-source-family-contracts.sh"],
+    args = ["$(rootpath :unit_tests)"],
+    data = [":unit_tests"],
+    size = "small",
+    tags = [
+        "safe-presubmit",
+        "source-backed",
+        "source-family-contract",
+    ],
+)
+
 test_suite(
     name = "complete_content_tests",
     tests = [

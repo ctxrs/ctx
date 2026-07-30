@@ -19,7 +19,9 @@ use super::{
     DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION, DIRECT_JSONL_SOURCE_FRONTIER_KIND,
 };
 use crate::{
-    provider::source_backed::family::jsonl::{JsonlFileObservation, JsonlReader},
+    provider::source_backed::family::jsonl::{
+        revalidate_frozen_prefix, JsonlFileObservation, JsonlReader,
+    },
     CaptureError,
 };
 
@@ -42,8 +44,14 @@ impl DirectJsonlSourceAdapter {
         {
             return Ok(false);
         }
-        let source_file = evidence.leaf.open_verified()?;
-        source_file.revalidate()?;
+        let (_, source_file) = evidence.leaf.open_for_scan()?;
+        revalidate_frozen_prefix(
+            &evidence.leaf.path,
+            source_file.as_ref(),
+            checkpoint.physical.source_observation(),
+            checkpoint.physical.complete_prefix_end(),
+            *checkpoint.physical.complete_prefix_sha256(),
+        )?;
         Ok(true)
     }
 

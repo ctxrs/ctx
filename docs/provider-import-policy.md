@@ -221,6 +221,38 @@ Secondary traits are noted only to guide tests and hardening work.
 | Cline | `cline_task_directory_json` | JSON session/task document | Task directory JSON. |
 | Roo Code | `roo_task_directory_json` | JSON session/task document | Task directory JSON. |
 
+## Active-Writer Lifecycle Contract
+
+Provider discovery and ingestion must remain read-only and must not lock,
+truncate, rename, or copy an agent's live history merely to create a scan
+boundary. Each scan records its read bound in ctx memory and applies the
+contract for that source family:
+
+- Append-log JSONL freezes each admitted file's EOF. A same-object,
+  nonshrinking file may grow while ctx scans; ctx verifies the exact frozen
+  prefix, publishes only complete records ending at or before that EOF, and
+  reads the suffix on the next refresh. A partial final record is deferred
+  until a later refresh completes it. Rewrite, truncation, path replacement,
+  or a failed prefix proof invalidates the candidate generation.
+- SQLite is observed as one short read-only logical snapshot. WAL size,
+  checkpointing, and physical database-file size are not ingestion states.
+  Concurrent committed rows belong to a subsequent certified snapshot unless
+  they are visible inside the admitted transaction.
+- JSON documents and document trees use unchanged-or-replace semantics. A
+  mutation during a scan invalidates that candidate; the retry reads one
+  complete replacement.
+- Event-file trees treat admitted event files as immutable leaves. New leaves
+  are discovered by the next inventory, while a changed or replaced admitted
+  leaf invalidates its old evidence.
+
+Tests are layered by responsibility: each provider owns parsing, identity, and
+exact hydration fixtures; the shared source-family suite owns active append,
+partial-tail, rewrite, truncation, replacement, logical-snapshot, and
+inventory-race behavior. Platform suites separately prove retained-handle,
+symlink/reparse, read-only SQLite, watcher, and daemon behavior. This avoids a
+provider-by-behavior-by-platform Cartesian test matrix while ensuring an active
+agent is covered regardless of which supported provider it uses.
+
 ## Family-Specific Fixture Expectations
 
 JSONL transcript stream/tree adapters should test malformed lines, oversized

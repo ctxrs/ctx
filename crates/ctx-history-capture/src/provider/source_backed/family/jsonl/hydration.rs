@@ -49,7 +49,7 @@ pub(crate) fn visit_verified_ranges<T, E>(
 where
     E: From<CaptureError>,
 {
-    source_file.revalidate().map_err(E::from)?;
+    source_file.revalidate_same_object().map_err(E::from)?;
     let observation = observe_metadata(source_path, source_file.file(), source_file.metadata())
         .map_err(E::from)?;
     let mut values = Vec::with_capacity(ranges.len());
@@ -76,7 +76,7 @@ where
         }
         values.push(visit(index, &bytes)?);
     }
-    if observe_metadata(
+    let closing = observe_metadata(
         source_path,
         source_file.file(),
         &source_file
@@ -85,12 +85,11 @@ where
             .map_err(CaptureError::from)
             .map_err(E::from)?,
     )
-    .map_err(E::from)?
-        != observation
-    {
+    .map_err(E::from)?;
+    if !observation.admits_frozen_prefix_in(&closing) {
         return Err(E::from(CaptureError::SourceChangedDuringCapture));
     }
-    source_file.revalidate().map_err(E::from)?;
+    source_file.revalidate_same_object().map_err(E::from)?;
     Ok(values)
 }
 

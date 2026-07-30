@@ -11,8 +11,9 @@ mod source_backed;
 pub(crate) use checkpoint::CodexNativeCheckpoint;
 pub(crate) use prompt_history::{
     observe_codex_prompt_history_source_backed_explicit_v0,
-    scan_codex_prompt_history_source_backed_v0, CodexPromptHistorySourceBackedDispositionV0,
-    CodexPromptHistorySourceBackedInputV0, CodexPromptHistorySourceBackedResolverV0,
+    revalidate_codex_prompt_history_source_backed_v0, scan_codex_prompt_history_source_backed_v0,
+    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
+    CodexPromptHistorySourceBackedResolverV0,
 };
 pub(crate) use reader::{
     open_codex_source_capability, opened_codex_file_observation,

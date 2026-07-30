@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn append_friendly_range_permits_same_object_growth_but_rejects_replacement() {
+    fn active_source_family_contract_retained_handle_allows_growth_and_rejects_replacement() {
         use std::io::Write;
 
         let temp = crate::test_support_paths::tempdir().unwrap();

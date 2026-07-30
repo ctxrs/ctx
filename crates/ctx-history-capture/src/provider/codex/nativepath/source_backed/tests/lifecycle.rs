@@ -707,7 +707,7 @@ fn source_backed_final_inventory_revalidation_blocks_partial_publication() {
 }
 
 #[test]
-fn source_backed_commit_accepts_a_post_scan_append_as_next_generation_work() {
+fn active_source_family_contract_codex_append_publishes_then_catches_up() {
     fn append_after_scan(session_root: &Path) {
         let path = fs::read_dir(session_root)
             .unwrap()

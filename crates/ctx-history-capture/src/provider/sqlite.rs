@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_sqlite_opener_reads_active_wal_without_provider_writes() {
+    fn active_source_family_contract_sqlite_reads_active_wal_without_provider_writes() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = temp.path().join("provider.sqlite");
         let wal = temp.path().join("provider.sqlite-wal");

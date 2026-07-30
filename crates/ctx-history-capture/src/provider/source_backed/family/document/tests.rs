@@ -431,7 +431,7 @@ fn publish(
 }
 
 #[test]
-fn replacement_tree_cold_noop_changes_delete_and_unavailable_are_exact() {
+fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_root = temp.path().join("index");
     let adapter = SyntheticAdapter::new(vec![

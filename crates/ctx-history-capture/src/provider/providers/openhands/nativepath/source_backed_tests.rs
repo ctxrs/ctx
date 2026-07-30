@@ -478,7 +478,7 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
 }
 
 #[test]
-fn new_sibling_preserves_ids_and_old_leaf_hydration_while_rewrite_stales_locator() {
+fn active_source_family_contract_event_files_add_siblings_and_stale_rewrites() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("profile");
     let first_path = write_event(

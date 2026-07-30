@@ -92,8 +92,8 @@ fn hydrate_group(
                     "exact JSONL source is absent from the resident inventory",
                 )
             })?;
-        let opened = leaf
-            .open_verified()
+        let (opened, opening_observation) = leaf
+            .open_for_hydration()
             .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
         let mut hydrator = adapter.hydrator(leaf, Arc::clone(&opened))?;
         let mut records = Vec::with_capacity(requests.len());
@@ -108,9 +108,9 @@ fn hydrate_group(
             records.push(record);
         }
         hydrator.finish()?;
-        if observe_opened_file(leaf.source_path(), opened.as_ref())
-            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?
-            != *leaf.observation()
+        let closing_observation = observe_opened_file(leaf.source_path(), opened.as_ref())
+            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
+        if !leaf.accepts_hydration_closing(&opening_observation, &closing_observation)
             || inventory.revalidate_root().is_err()
         {
             return Err(hydration_error(

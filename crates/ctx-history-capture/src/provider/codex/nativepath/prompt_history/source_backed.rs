@@ -34,11 +34,14 @@ use crate::{
     CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
+mod path;
+use path::absolute_lexical_path;
+
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
 const SOURCE_REVISION_KIND: &str = "codex-prompt-history-ordinary-file-v1";
-const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v2";
+const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v3";
 const FRONTIER_KIND: &str = "codex-prompt-history-jsonl-frontier-v1";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
@@ -299,16 +302,11 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         }
     }
 
-    let opening_metadata = source.opened.metadata().clone();
-    let analysis = walk_complete_records(&source.opened, |_| Ok(()))?;
-    source.opened.revalidate()?;
-    let closing_metadata = source.opened.file().metadata()?;
-    if opening_metadata.len() != closing_metadata.len()
-        || opening_metadata.modified().ok() != closing_metadata.modified().ok()
-        || opening_metadata.permissions().readonly() != closing_metadata.permissions().readonly()
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-    }
+    source.opened.revalidate_same_object()?;
+    let opening_metadata = source.opened.file().metadata()?;
+    let frozen_len = opening_metadata.len();
+    let analysis = walk_complete_records(&source.opened, frozen_len, |_| Ok(()))?;
+    verify_frozen_prefix(&source.opened, frozen_len, analysis.whole_source_digest)?;
 
     let observation_wire = observation_wire(&opening_metadata, analysis.whole_source_digest)?;
     let observation = SourceObservation::new(
@@ -345,7 +343,7 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         0
     } else {
         let mut pages = PageEmitter::new(&source, emit);
-        let projection_analysis = walk_complete_records(&source.opened, |record| {
+        let projection_analysis = walk_complete_records(&source.opened, frozen_len, |record| {
             if record.byte_offset >= emit_from_byte {
                 pages.push(lexical_document(&source, record)?)
             } else {
@@ -357,7 +355,7 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         }
         pages.finish()?
     };
-    source.opened.revalidate()?;
+    verify_frozen_prefix(&source.opened, frozen_len, analysis.whole_source_digest)?;
 
     Ok(CodexPromptHistorySourceBackedScanV0 {
         source,
@@ -412,9 +410,10 @@ fn classify_disposition(
 
 fn walk_complete_records(
     source: &OpenedProviderSourceFile,
+    frozen_len: u64,
     mut retained: impl FnMut(&RetainedPromptRecord) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<ScanAnalysis> {
-    let mut reader = BufReader::new(opened_file_from_start(source)?);
+    let mut reader = BufReader::new(opened_file_from_start(source)?.take(frozen_len));
     let mut whole = Sha256::new();
     let mut complete = Sha256::new();
     let mut offset = 0_u64;
@@ -525,10 +524,10 @@ fn walk_complete_records(
         certified_bytes = offset;
     }
 
-    if offset != source.len() {
+    if offset != frozen_len {
         return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
     }
-    source.revalidate()?;
+    source.revalidate_same_object()?;
     let counts = ScannedSourceCounts {
         complete_records: ordinal,
         retained_records,
@@ -563,7 +562,7 @@ fn hash_opened_prefix(
     source: &OpenedProviderSourceFile,
     target: u64,
 ) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
-    if target > source.len() {
+    if target > source.file().metadata()?.len() {
         return Ok(None);
     }
     let mut file = opened_file_from_start(source)?;
@@ -584,8 +583,22 @@ fn hash_opened_prefix(
                 .map_err(|_| CodexPromptHistorySourceBackedErrorV0::CountMismatch)?,
         );
     }
-    source.revalidate()?;
+    source.revalidate_same_object()?;
     Ok(Some(digest.finalize().into()))
+}
+
+fn verify_frozen_prefix(
+    source: &OpenedProviderSourceFile,
+    frozen_len: u64,
+    expected_digest: [u8; 32],
+) -> CodexPromptHistorySourceBackedResultV0<()> {
+    source.revalidate_same_object()?;
+    let actual = hash_opened_prefix(source, frozen_len)?
+        .ok_or(CodexPromptHistorySourceBackedErrorV0::SourceChanged)?;
+    if actual != expected_digest {
+        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
+    }
+    Ok(())
 }
 
 fn observation_wire(
@@ -604,6 +617,34 @@ fn observation_wire(
         readonly: metadata.permissions().readonly(),
         whole_source_digest,
     })
+}
+
+/// Revalidates one previously staged prompt-history snapshot while allowing
+/// the provider to append bytes beyond its frozen observation boundary.
+pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
+    source: &CodexPromptHistorySourceBackedSourceV0,
+    expected: &CertifiedSource,
+) -> CodexPromptHistorySourceBackedResultV0<()> {
+    expected.validate_contract()?;
+    if expected.parser_revision() != PARSER_REVISION
+        || !source
+            .source
+            .exact_descriptor_eq(expected.observation().source())
+        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
+    {
+        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
+    }
+    let observation: ObservationWireV0 = serde_json::from_slice(expected.observation().revision())
+        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)?;
+    let checkpoint = decode_checkpoint(expected)?;
+    if checkpoint.certified_prefix_bytes > observation.length {
+        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
+    }
+    verify_frozen_prefix(
+        &source.opened,
+        observation.length,
+        observation.whole_source_digest,
+    )
 }
 
 fn lexical_document(
@@ -724,25 +765,6 @@ fn bounded_metadata(value: &str) -> Option<String> {
     (!value.is_empty() && value.len() <= DOCUMENT_METADATA_MAX_BYTES).then(|| value.to_owned())
 }
 
-fn absolute_lexical_path(path: &Path) -> CodexPromptHistorySourceBackedResultV0<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    Ok(normalized)
-}
-
 /// Invocation-local resolver for exact prompt-history JSONL ranges.
 #[derive(Debug)]
 pub(crate) struct CodexPromptHistorySourceBackedResolverV0 {
@@ -847,20 +869,21 @@ fn hydrate_from_source(
     let range_end = byte_offset
         .checked_add(byte_length)
         .ok_or(CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
-    if range_end > source.opened.len() {
+    if range_end > source.opened.file().metadata()?.len() {
         return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRangeMissing);
     }
     if byte_offset != 0 {
-        let boundary = source
-            .opened
-            .read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
+        let boundary =
+            source
+                .opened
+                .read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
         if boundary != *b"\n" {
             return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
         }
     }
     let length = usize::try_from(byte_length)
         .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let provider_bytes = source.opened.read_exact_range(
+    let provider_bytes = source.opened.read_exact_range_allow_append(
         byte_offset,
         length,
         usize::try_from(MAX_HYDRATED_RECORD_BYTES)
