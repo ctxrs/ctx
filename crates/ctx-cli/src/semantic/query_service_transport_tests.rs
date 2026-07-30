@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(unix)]
+use std::io::Read as _;
+
 #[cfg(any(unix, windows))]
 const TEST_QUERY_REQUEST_READ_TIMEOUT: StdDuration = StdDuration::from_millis(100);
 
@@ -92,6 +95,130 @@ fn configured_unix_query_stream_drains_response_larger_than_socket_buffer() -> R
     client.read_to_end(&mut received)?;
     writer.join().expect("query response writer panicked")?;
     assert_eq!(received.len(), expected);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_unix_roundtrips_wait_for_readiness_and_collect_partial_responses() -> Result<()> {
+    const CLIENTS: usize = 24;
+
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    let server = std::thread::spawn(move || -> Result<()> {
+        let mut handlers = Vec::with_capacity(CLIENTS);
+        for _ in 0..CLIENTS {
+            let (mut stream, _) = listener.accept()?;
+            handlers.push(std::thread::spawn(move || -> Result<()> {
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request)?;
+                assert_eq!(request, b"{\"op\":\"ping\"}\n");
+                std::thread::sleep(StdDuration::from_millis(25));
+                stream.write_all(b"{\"ok\":")?;
+                std::thread::sleep(StdDuration::from_millis(5));
+                stream.write_all(b"true}\n")?;
+                stream.shutdown(Shutdown::Write)?;
+                Ok(())
+            }));
+        }
+        for handler in handlers {
+            handler.join().expect("response handler panicked")?;
+        }
+        Ok(())
+    });
+
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path: socket_path,
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    let barrier = Arc::new(std::sync::Barrier::new(CLIENTS + 1));
+    let mut clients = Vec::with_capacity(CLIENTS);
+    for _ in 0..CLIENTS {
+        let endpoint = endpoint.clone();
+        let barrier = barrier.clone();
+        clients.push(std::thread::spawn(move || -> Result<()> {
+            barrier.wait();
+            let response = daemon_query_roundtrip(
+                &endpoint,
+                b"{\"op\":\"ping\"}\n",
+                StdDuration::from_secs(2),
+                1024,
+            )?;
+            assert_eq!(response, "{\"ok\":true}\n");
+            Ok(())
+        }));
+    }
+    barrier.wait();
+    for client in clients {
+        client.join().expect("query client panicked")?;
+    }
+    server.join().expect("query server panicked")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_unix_response_obeys_one_aggregate_read_deadline() -> Result<()> {
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    let server = std::thread::spawn(move || -> Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request)?;
+        for _ in 0..20 {
+            std::thread::sleep(StdDuration::from_millis(10));
+            if stream.write_all(b"x").is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path: socket_path,
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+
+    let started = Instant::now();
+    let error = daemon_query_roundtrip(
+        &endpoint,
+        b"{\"op\":\"ping\"}\n",
+        StdDuration::from_millis(60),
+        1024,
+    )
+    .expect_err("dribbling response must time out");
+
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::TimedOut),
+        "{error:#}"
+    );
+    assert!(started.elapsed() < StdDuration::from_millis(300));
+    server.join().expect("query server panicked")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_unix_response_preserves_one_aggregate_byte_limit() -> Result<()> {
+    let (mut server, mut client) = UnixStream::pair()?;
+    let writer = std::thread::spawn(move || -> Result<()> {
+        std::thread::sleep(StdDuration::from_millis(10));
+        server.write_all(b"1234")?;
+        std::thread::sleep(StdDuration::from_millis(10));
+        server.write_all(b"56789")?;
+        server.shutdown(Shutdown::Write)?;
+        Ok(())
+    });
+
+    let error = read_daemon_query_response_unix(&mut client, 8, StdDuration::from_secs(1))
+        .expect_err("split response above the aggregate limit must fail");
+
+    assert!(error
+        .downcast_ref::<DaemonQueryResponseTooLarge>()
+        .is_some());
+    writer.join().expect("query response writer panicked")?;
     Ok(())
 }
 
