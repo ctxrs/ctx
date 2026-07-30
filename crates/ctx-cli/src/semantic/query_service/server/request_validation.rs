@@ -61,13 +61,5 @@ pub(super) fn source_hydration_protocol_failure(
 }
 
 pub(super) fn hydration_failure_kind_name(kind: HydrationFailureKind) -> &'static str {
-    match kind {
-        HydrationFailureKind::TemporarilyUnavailable => "temporarily_unavailable",
-        HydrationFailureKind::ConfirmedDeleted => "confirmed_deleted",
-        HydrationFailureKind::StaleSourceEvidence => "stale_source_evidence",
-        HydrationFailureKind::StaleRecordEvidence => "stale_record_evidence",
-        HydrationFailureKind::MissingRecord => "missing_record",
-        HydrationFailureKind::UnsupportedParserRevision => "unsupported_parser_revision",
-        HydrationFailureKind::InvalidLocator => "invalid_locator",
-    }
+    kind.as_str()
 }

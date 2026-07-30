@@ -271,6 +271,7 @@ impl EventFileInventory {
         &self.selected_path
     }
 
+    #[cfg(test)]
     pub(crate) fn selected_file(&self) -> bool {
         self.selected_file
     }

@@ -53,42 +53,52 @@ pub(crate) fn source_hydration_error_contract(
 }
 
 fn public_hydration_class(kind: HydrationFailureKind) -> PublicHydrationClass {
-    match kind {
-        HydrationFailureKind::TemporarilyUnavailable => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::SourceUnreadable,
-            failure_kind: "temporarily_unavailable",
-            safe_detail: "source hydration is temporarily unavailable",
-        },
-        HydrationFailureKind::ConfirmedDeleted => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::SourceMissing,
-            failure_kind: "confirmed_deleted",
-            safe_detail: "the indexed source is no longer available",
-        },
-        HydrationFailureKind::StaleSourceEvidence => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::SourceChanged,
-            failure_kind: "stale_source_evidence",
-            safe_detail: "the source identity changed after indexing",
-        },
-        HydrationFailureKind::StaleRecordEvidence => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::ContentVerificationFailed,
-            failure_kind: "stale_record_evidence",
-            safe_detail: "the source record changed after indexing",
-        },
-        HydrationFailureKind::MissingRecord => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::SourceRecordMissing,
-            failure_kind: "missing_record",
-            safe_detail: "the indexed source record is no longer available",
-        },
-        HydrationFailureKind::UnsupportedParserRevision => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::HydrationUnsupported,
-            failure_kind: "unsupported_parser_revision",
-            safe_detail: "the source parser revision does not support hydration",
-        },
-        HydrationFailureKind::InvalidLocator => PublicHydrationClass {
-            error_kind: CompleteContentErrorKind::ContentVerificationFailed,
-            failure_kind: "invalid_locator",
-            safe_detail: "the indexed source locator could not be verified",
-        },
+    let (error_kind, safe_detail) = match kind {
+        HydrationFailureKind::TemporarilyUnavailable => (
+            CompleteContentErrorKind::SourceUnreadable,
+            "source hydration is temporarily unavailable",
+        ),
+        HydrationFailureKind::ConfirmedDeleted => (
+            CompleteContentErrorKind::SourceMissing,
+            "the indexed source is no longer available",
+        ),
+        HydrationFailureKind::StaleSourceEvidence => (
+            CompleteContentErrorKind::SourceChanged,
+            "the source identity changed after indexing",
+        ),
+        HydrationFailureKind::StaleRecordEvidence => (
+            CompleteContentErrorKind::ContentVerificationFailed,
+            "the source record changed after indexing",
+        ),
+        HydrationFailureKind::MissingRecord => (
+            CompleteContentErrorKind::SourceRecordMissing,
+            "the indexed source record is no longer available",
+        ),
+        HydrationFailureKind::MalformedSource => (
+            CompleteContentErrorKind::ContentVerificationFailed,
+            "the provider source could not be decoded safely",
+        ),
+        HydrationFailureKind::UnsupportedParserRevision => (
+            CompleteContentErrorKind::HydrationUnsupported,
+            "the source parser revision does not support hydration",
+        ),
+        HydrationFailureKind::InvalidLocator => (
+            CompleteContentErrorKind::ContentVerificationFailed,
+            "the indexed source locator could not be verified",
+        ),
+        HydrationFailureKind::InvalidRequest => (
+            CompleteContentErrorKind::ContentVerificationFailed,
+            "the source hydration request is invalid",
+        ),
+        HydrationFailureKind::Internal => (
+            CompleteContentErrorKind::ContentVerificationFailed,
+            "source hydration failed an internal consistency check",
+        ),
+    };
+    PublicHydrationClass {
+        error_kind,
+        failure_kind: kind.as_str(),
+        safe_detail,
     }
 }
 
@@ -99,7 +109,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seven_internal_failures_map_to_exactly_six_safe_public_states() {
+    fn precise_internal_failures_map_to_safe_public_states() {
         let cases = [
             (
                 HydrationFailureKind::TemporarilyUnavailable,
@@ -132,6 +142,12 @@ mod tests {
                 true,
             ),
             (
+                HydrationFailureKind::MalformedSource,
+                "content_verification_failed",
+                "malformed_source",
+                false,
+            ),
+            (
                 HydrationFailureKind::UnsupportedParserRevision,
                 "hydration_unsupported",
                 "unsupported_parser_revision",
@@ -141,6 +157,18 @@ mod tests {
                 HydrationFailureKind::InvalidLocator,
                 "content_verification_failed",
                 "invalid_locator",
+                false,
+            ),
+            (
+                HydrationFailureKind::InvalidRequest,
+                "content_verification_failed",
+                "invalid_request",
+                false,
+            ),
+            (
+                HydrationFailureKind::Internal,
+                "content_verification_failed",
+                "internal",
                 false,
             ),
         ];
