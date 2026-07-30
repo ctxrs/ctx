@@ -103,11 +103,23 @@ for required in \
   'CTX_OSV_DATABASE_DIR=/release-advisory/database' \
   'CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json' \
   'test -f "$rustc_runfile" -a -x "$rustc_runfile"' \
-  'install -m 0755 "$rustc_runfile" /build/release-input/bazel-rustc' \
+  'rustc_real="$(readlink -f "$rustc_runfile")"' \
+  'ldd "$rustc_real"' \
+  'rustc_lib_dir="$(dirname "$rustc_driver")"' \
+  '-name "*.so*"' \
+  '-name "libLLVM.so*"' \
+  '/build/release-input/bazel-rustc.bin' \
+  '/build/release-input/bazel-rustc.lib' \
+  'LD_LIBRARY_PATH=${tool_root}/bazel-rustc.lib' \
   '/build/release-input/bazel-rustc --version' \
   '/release-output/bazel-rustc' \
+  '/release-output/bazel-rustc.bin' \
+  '/release-output/bazel-rustc.lib' \
   'stat -c '\''%a'\'' "${output_dir}/bazel-rustc"' \
-  'packaged dogfood Bazel rustc must have mode 0755'; do
+  'packaged dogfood Bazel rustc must have mode 0755' \
+  'packaged dogfood Bazel rustc must have exactly one driver library' \
+  'packaged dogfood Bazel rustc must have its LLVM runtime' \
+  'packaged dogfood Bazel rustc no longer reports the declared version'; do
   grep -Fq -- "${required}" "${dogfood_wrapper}" || {
     printf 'Linux x64 dogfood wrapper missing release contract: %s\n' \
       "${required}" >&2
