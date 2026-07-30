@@ -30,13 +30,11 @@ use crate::{
 
 use super::{
     bound_stream, open_verified, resolver::mux_exact_logical_content, MuxBinding, MuxStreamKind,
-    LOGICAL_EVENT_KIND, PARSER_REVISION,
+    LOGICAL_EVENT_KIND, MAX_EVENT_SEQUENCE_ORDINAL, PARSER_REVISION, PARTIAL_EVENT_SEQUENCE_BASE,
 };
 
 const NATIVE_ITEM_NAMESPACE: &str = "mux.record";
 const PROVIDER_NATIVE_LOCATOR_NAMESPACE: &str = "mux.logical-record.v2";
-const PARTIAL_NATIVE_ORDINAL: u64 = 1_u64 << 63;
-const MAX_ORDINAL: u64 = (1_u64 << 47) - 1;
 const MAX_FILE_TOUCHES: usize = 448;
 
 pub(super) struct MuxProjector {
@@ -96,13 +94,14 @@ impl MuxProjector {
         }
         let evidence = record.evidence();
         let ordinal = evidence.physical_ordinal();
-        if !stream.is_partial() && ordinal > MAX_ORDINAL {
+        if !stream.is_partial() && ordinal > MAX_EVENT_SEQUENCE_ORDINAL {
             return Err(CaptureError::InvalidPayload(
                 "Mux source ordinal exceeds event identity capacity".to_owned(),
             ));
         }
         let event_sequence = if stream.is_partial() {
-            PARTIAL_NATIVE_ORDINAL | (mux_partial_event_index(bytes) & MAX_ORDINAL)
+            PARTIAL_EVENT_SEQUENCE_BASE
+                | (mux_partial_event_index(bytes) & MAX_EVENT_SEQUENCE_ORDINAL)
         } else {
             ordinal
         };

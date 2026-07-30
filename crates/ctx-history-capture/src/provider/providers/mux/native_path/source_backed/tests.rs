@@ -302,6 +302,10 @@ fn shared_family_mux_compound_identity_and_exact_content_parity() {
         .source_path
         .as_deref()
         .is_some_and(|path| path.ends_with("/session-1/partial.json")));
+    assert!(
+        events[1].event_sequence <= i64::MAX as u64,
+        "the SQL-compatible relational projection must preserve every admitted Mux event"
+    );
     assert_eq!(
         events[0].locator.revision_policy(),
         LocatorRevisionPolicy::StableRecordEvidence

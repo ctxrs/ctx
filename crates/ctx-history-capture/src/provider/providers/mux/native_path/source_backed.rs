@@ -41,8 +41,10 @@ const NATIVE_SESSION_NAMESPACE: &str = "mux.session";
 const LOGICAL_SESSION_KIND: &str = "mux-session";
 const LOGICAL_EVENT_KIND: &str = "mux-event";
 const SOURCE_SCHEMA_VARIANT: &str = "mux-session-tree-source-backed-v2";
-const PARSER_REVISION: &str = "mux-source-backed-v3";
+const PARSER_REVISION: &str = "mux-source-backed-v4";
 const COMPOUND_REVISION_DOMAIN: &[u8] = b"ctx.mux.compound-source.v3\0";
+const PARTIAL_EVENT_SEQUENCE_BASE: u64 = 1_u64 << 62;
+const MAX_EVENT_SEQUENCE_ORDINAL: u64 = (1_u64 << 47) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

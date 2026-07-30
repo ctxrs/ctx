@@ -23,13 +23,11 @@ use crate::{
 
 use super::{
     bound_stream, open_verified, MuxBinding, MuxStreamKind, LOGICAL_EVENT_KIND,
-    SOURCE_SCHEMA_VARIANT,
+    MAX_EVENT_SEQUENCE_ORDINAL, PARTIAL_EVENT_SEQUENCE_BASE, SOURCE_SCHEMA_VARIANT,
 };
 
 const NATIVE_ITEM_NAMESPACE: &str = "mux.record";
 const PROVIDER_NATIVE_LOCATOR_NAMESPACE: &str = "mux.logical-record.v2";
-const PARTIAL_NATIVE_ORDINAL: u64 = 1_u64 << 63;
-const MAX_ORDINAL: u64 = (1_u64 << 47) - 1;
 
 pub(super) struct MuxHydrator {
     source: ctx_history_core::SourceKey,
@@ -391,7 +389,8 @@ fn validate_native_identity(
         ));
     }
     let expected_sequence = if coordinate.stream_kind.is_partial() {
-        PARTIAL_NATIVE_ORDINAL | (mux_partial_event_index(payload) & MAX_ORDINAL)
+        PARTIAL_EVENT_SEQUENCE_BASE
+            | (mux_partial_event_index(payload) & MAX_EVENT_SEQUENCE_ORDINAL)
     } else {
         coordinate.source_record_ordinal
     };
