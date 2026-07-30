@@ -28,7 +28,10 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
     );
     write_source(&source_path, "cold-conversation", messages);
 
-    let first = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
+    let first = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &source_path,
+    ));
     assert_eq!(first.documents.len(), 18);
     assert_eq!(first.page_sizes, [16, 2]);
     assert!(first
@@ -63,7 +66,10 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
     assert_eq!(first.certificate.counts().indexed_documents, 18);
     assert!(first.certificate.counts().certified_bytes > 0);
 
-    let replay = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
+    let replay = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &source_path,
+    ));
     assert_eq!(
         first
             .documents
@@ -92,7 +98,10 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
             text_message("second exact message")
         ]),
     );
-    let scanned = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
+    let scanned = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &source_path,
+    ));
     assert_eq!(scanned.documents[0].body, complete);
     assert!(scanned.documents[0]
         .body
@@ -130,7 +139,11 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
         .certified_source_revision_digest()
         .is_none());
 
-    let resolver = ForgeCodeSourceBackedResolverV0::new([scanned.source.clone()]).unwrap();
+    let resolver = ForgeCodeSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        [scanned.source.clone()],
+    )
+    .unwrap();
     let requests = scanned
         .documents
         .iter()
@@ -165,7 +178,10 @@ fn forgecode_source_backed_row_mutation_requires_snapshot_replacement() {
         "replacement-conversation",
         json!([text_message("before replacement")]),
     );
-    let before = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
+    let before = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &source_path,
+    ));
     let old_request = EventHydrationRequest::new(
         before.documents[0].event_id,
         before.documents[0].locator.clone(),
@@ -176,13 +192,19 @@ fn forgecode_source_backed_row_mutation_requires_snapshot_replacement() {
         &source_path,
         json!([text_message("after replacement with changed bytes")]),
     );
-    let stale = ForgeCodeSourceBackedResolverV0::new([before.source.clone()])
-        .unwrap()
-        .hydrate_event(&old_request)
-        .unwrap_err();
+    let stale = ForgeCodeSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        [before.source.clone()],
+    )
+    .unwrap()
+    .hydrate_event(&old_request)
+    .unwrap_err();
     assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
 
-    let after = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
+    let after = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &source_path,
+    ));
     assert!(before
         .source
         .source()
@@ -201,7 +223,11 @@ fn forgecode_source_backed_row_mutation_requires_snapshot_replacement() {
         after.documents[0].locator.record_digest()
     );
 
-    let resolver = ForgeCodeSourceBackedResolverV0::new([after.source.clone()]).unwrap();
+    let resolver = ForgeCodeSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        [after.source.clone()],
+    )
+    .unwrap();
     let request = EventHydrationRequest::new(
         after.documents[0].event_id,
         after.documents[0].locator.clone(),
@@ -231,20 +257,27 @@ fn forgecode_source_backed_selection_keeps_one_winner_and_manual_lineage() {
         json!([text_message("manual database")]),
     );
 
-    let selected = scan(ForgeCodeSourceSelectionV0::selected(&root));
+    let selected = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &root,
+    ));
     assert_eq!(selected.documents.len(), 1);
     assert_eq!(selected.documents[0].body, "selected database");
     assert_eq!(
         selected.source.canonical_path(),
         fs::canonicalize(&selected_path).unwrap()
     );
-    let selected_exact = scan(ForgeCodeSourceSelectionV0::selected(&selected_path));
+    let selected_exact = scan(ForgeCodeSourceSelectionV0::selected(
+        crate::test_provider_sqlite_data_root(),
+        &selected_path,
+    ));
     assert_eq!(
         selected.documents[0].event_id,
         selected_exact.documents[0].event_id
     );
 
     let manual = scan(ForgeCodeSourceSelectionV0::explicit(
+        crate::test_provider_sqlite_data_root(),
         &nonselected_path,
         [7; 32],
     ));

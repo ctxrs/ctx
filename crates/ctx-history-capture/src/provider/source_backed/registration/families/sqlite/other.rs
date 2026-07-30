@@ -6,9 +6,10 @@ pub fn register_warp_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
     surface_key: impl Into<String>,
 ) -> SourceBackedCoordinatorResult<()> {
-    let selected = WarpSourceSelectionV0::new(source.path.clone(), surface_key)
+    let selected = WarpSourceSelectionV0::new(data_root, source.path.clone(), surface_key)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let adapter = project_warp_source_backed_v0(selected, resolve_warp_locator_v0)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
@@ -27,11 +28,12 @@ pub fn register_goose_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
     platform_root: impl Into<std::path::PathBuf>,
     retained_routes: Vec<(std::path::PathBuf, std::path::PathBuf)>,
 ) -> SourceBackedCoordinatorResult<()> {
     let mut selected =
-        GooseSourceBackedSelectionV0::exact(source.path.clone(), platform_root.into());
+        GooseSourceBackedSelectionV0::exact(data_root, source.path.clone(), platform_root.into());
     if !retained_routes.is_empty() {
         selected = selected
             .with_explicit_retained_routes(

@@ -26,19 +26,25 @@ pub fn register_astrbot_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
     discovery: DiscoveryContext,
 ) -> SourceBackedCoordinatorResult<()> {
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route(
         registry,
         source,
         selection,
+        data_root,
         CaptureProvider::AstrBot,
         "astrbot_data_v4_sqlite",
-        AstrBotInventoryProvider { discovery },
+        AstrBotInventoryProvider {
+            data_root: data_root.to_path_buf(),
+            discovery,
+        },
     )
 }
 
 struct AstrBotInventoryProvider {
+    data_root: PathBuf,
     discovery: DiscoveryContext,
 }
 
@@ -103,7 +109,7 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
             AstrBotSourceBackedInventoryV0::discover(&self.discovery).map_err(|error| {
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?;
-        AstrBotSourceBackedResolverV0::from_inventory(&inventory)
+        AstrBotSourceBackedResolverV0::from_inventory(&self.data_root, &inventory)
             .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
             .hydrate_batch_request(request)
     }
@@ -128,10 +134,11 @@ fn astrbot_inventory_route_error(
 pub fn register_shelley_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
+    data_root: &Path,
     exact_cwd: impl Into<PathBuf>,
 ) -> SourceBackedCoordinatorResult<()> {
     let exact_cwd = exact_cwd.into();
-    let adapter = discover_shelley_source_backed_exact_cwd(&exact_cwd)
+    let adapter = discover_shelley_source_backed_exact_cwd(data_root, &exact_cwd)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?
         .ok_or_else(|| {
             invalid_route(
@@ -150,13 +157,18 @@ pub fn register_shelley_source_backed_route(
         source,
         SourceBackedRouteSelection::Automatic,
         SourceBackedSelectorAuthority::ExactCwd,
+        data_root,
         CaptureProvider::Shelley,
         "shelley_sqlite",
-        ShelleyInventoryProvider { exact_cwd },
+        ShelleyInventoryProvider {
+            data_root: data_root.to_path_buf(),
+            exact_cwd,
+        },
     )
 }
 
 struct ShelleyInventoryProvider {
+    data_root: PathBuf,
     exact_cwd: PathBuf,
 }
 
@@ -168,7 +180,7 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
     }
 
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
-        let adapter = discover_shelley_source_backed_exact_cwd(&self.exact_cwd)
+        let adapter = discover_shelley_source_backed_exact_cwd(&self.data_root, &self.exact_cwd)
             .map_err(shelley_inventory_route_error)?;
         let mut authority = sha2::Sha256::new();
         authority.update(b"ctx.shelley-exact-cwd-inventory-v1\0");
@@ -206,7 +218,7 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
         &self,
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let adapter = discover_shelley_source_backed_exact_cwd(&self.exact_cwd)
+        let adapter = discover_shelley_source_backed_exact_cwd(&self.data_root, &self.exact_cwd)
             .map_err(|error| {
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?
@@ -258,6 +270,7 @@ pub fn register_lingma_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
     authority_key: TypedKey,
     databases: Vec<(PathBuf, TypedKey)>,
 ) -> SourceBackedCoordinatorResult<()> {
@@ -272,6 +285,7 @@ pub fn register_lingma_source_backed_route(
         registry,
         source,
         selection,
+        data_root,
         Arc::new(FixedLingmaInventorySource { inventory }),
     )
 }
@@ -311,19 +325,25 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
     inventory_source: Arc<dyn LingmaInventorySource>,
 ) -> SourceBackedCoordinatorResult<()> {
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route(
         registry,
         source,
         selection,
+        data_root,
         CaptureProvider::Lingma,
         "lingma_sqlite",
-        LingmaInventoryProvider { inventory_source },
+        LingmaInventoryProvider {
+            data_root: data_root.to_path_buf(),
+            inventory_source,
+        },
     )
 }
 
 struct LingmaInventoryProvider {
+    data_root: PathBuf,
     inventory_source: Arc<dyn LingmaInventorySource>,
 }
 
@@ -388,7 +408,7 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
         let inventory = self.inventory_source.observe().map_err(|error| {
             hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
         })?;
-        LingmaSourceBackedResolverV0::new(&inventory)
+        LingmaSourceBackedResolverV0::new(&self.data_root, &inventory)
             .map_err(|error| {
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?

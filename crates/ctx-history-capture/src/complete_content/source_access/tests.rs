@@ -26,7 +26,7 @@ fn admit_jsonl(
     root: &std::path::Path,
 ) -> (Uuid, super::BrokeredSourceAccess) {
     let event_id = Uuid::new_v4();
-    let access = SourceAccessBroker::new()
+    let access = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: Uuid::new_v4(),
@@ -86,7 +86,7 @@ fn authorized_route_debug_omits_paths_roots_and_identity() {
         assert!(!debug.contains(secret), "debug output leaked {secret}");
     }
 
-    let prepared = SourceAccessBroker::new()
+    let prepared = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .prepare(route, Uuid::new_v4())
         .unwrap();
     let debug = format!("{prepared:?}");
@@ -122,7 +122,7 @@ fn sqlite_snapshot_reservation_counts_sidecars_and_rejects_a_changed_total() {
         source_identity: Some("sqlite-source".to_owned()),
         source_snapshot: SourceSnapshot::default(),
     };
-    let broker = SourceAccessBroker::new();
+    let broker = SourceAccessBroker::new(crate::test_provider_sqlite_data_root());
 
     let prepared = broker.prepare(route, event_id).unwrap();
     let reserved = prepared.reserved_snapshot_bytes();
@@ -207,7 +207,7 @@ fn windows_jsonl_read_rejects_named_replacement_after_admission() {
     fs::write(&path, &line).unwrap();
     fs::write(&replacement, br#"{"value":"changed"}"#).unwrap();
     let event_id = Uuid::new_v4();
-    let access = SourceAccessBroker::new()
+    let access = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: Uuid::new_v4(),
@@ -283,7 +283,7 @@ fn exact_jsonl_auxiliary_replace_delete_and_append_fail_closed() {
     fs::create_dir_all(&missing_session).unwrap();
     let missing_messages = missing_session.join("messages.jsonl");
     fs::write(&missing_messages, b"{}\n").unwrap();
-    let error = SourceAccessBroker::new()
+    let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: Uuid::new_v4(),
@@ -377,7 +377,7 @@ fn source_root_safety_exact_jsonl_auxiliary_symlink_is_rejected() {
     fs::write(&fresh_messages, b"{}\n").unwrap();
     fs::write(&fresh_replacement, b"{}").unwrap();
     symlink(&fresh_replacement, &fresh_metadata).unwrap();
-    let error = SourceAccessBroker::new()
+    let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: Uuid::new_v4(),
@@ -610,7 +610,7 @@ fn source_root_safety_complete_content_rejects_unc_network_routes() {
         Path::new(r"\\?\UNC\server\share\session.jsonl"),
     ] {
         let event_id = Uuid::new_v4();
-        let error = SourceAccessBroker::new()
+        let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
             .admit(
                 AuthorizedSourceRoute {
                     source_id: Uuid::new_v4(),
@@ -634,7 +634,7 @@ fn source_root_safety_complete_content_rejects_unc_network_routes() {
 #[test]
 fn source_root_safety_complete_content_unsupported_platform_is_typed() {
     let event_id = Uuid::new_v4();
-    let error = SourceAccessBroker::new()
+    let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: Uuid::new_v4(),

@@ -91,16 +91,19 @@ type NanoClawDocumentTree =
 
 #[derive(Debug, Clone)]
 pub(crate) struct NanoClawDocumentTreeAdapter {
+    data_root: PathBuf,
     path: PathBuf,
     source: SourceKey,
 }
 
 impl NanoClawDocumentTreeAdapter {
     pub(crate) fn new(
+        data_root: &Path,
         path: PathBuf,
         catalog_lineage: [u8; 32],
     ) -> NanoClawSourceBackedResult<Self> {
         Ok(Self {
+            data_root: data_root.to_path_buf(),
             path,
             source: nanoclaw_source_key(catalog_lineage)?,
         })
@@ -160,8 +163,8 @@ impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<NanoClawDocumentTree> {
-        let project =
-            NanoClawSourceBackedProject::open(&self.path).map_err(nanoclaw_route_capture_error)?;
+        let project = NanoClawSourceBackedProject::open(&self.data_root, &self.path)
+            .map_err(nanoclaw_route_capture_error)?;
         let physical_fingerprint = project.physical_fingerprint();
         let tree_fingerprint = nanoclaw_tree_fingerprint(physical_fingerprint, &self.source);
         Ok(CompleteDocumentTree::new(
@@ -225,7 +228,7 @@ impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
         &self,
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let records = hydrate_nanoclaw_group(&self.path, &self.source, request)
+        let records = hydrate_nanoclaw_group(&self.data_root, &self.path, &self.source, request)
             .map_err(nanoclaw_hydration_failure)?;
         BatchHydrationResult::new(records)
             .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))
@@ -352,6 +355,7 @@ fn scan_nanoclaw_project(
 }
 
 fn hydrate_nanoclaw_group(
+    data_root: &Path,
     path: &Path,
     source: &SourceKey,
     request: &BatchHydrationRequest,
@@ -362,7 +366,7 @@ fn hydrate_nanoclaw_group(
     }) {
         return Err(NanoClawSourceBackedError::InvalidProjectMessageLocator);
     }
-    let mut project = NanoClawSourceBackedProject::open(path)?;
+    let mut project = NanoClawSourceBackedProject::open(data_root, path)?;
     let central = project.connection()?;
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))

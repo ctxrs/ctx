@@ -43,7 +43,7 @@ fn opencode_family_projects_full_bodies_and_hydrates_typed_sqlite_rows() {
         assert!(!locator_json.contains(&body));
 
         let hydrated = registration
-            .exact_resolver(&path)
+            .exact_resolver(crate::test_provider_sqlite_data_root(), &path)
             .hydrate_event(&event_request(document))
             .unwrap();
         assert_eq!(hydrated.provider_bytes, body.as_bytes());
@@ -66,7 +66,12 @@ fn lingma_source_backed_prompt_hydrates_and_changed_row_fails_closed() {
     )
     .unwrap();
     let closing = inventory.clone();
-    let scan = lingma::scan_lingma_source_backed_v0(inventory.clone(), || Ok(closing)).unwrap();
+    let scan = lingma::scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        inventory.clone(),
+        || Ok(closing),
+    )
+    .unwrap();
     let record = scan.databases()[0]
         .records()
         .iter()
@@ -83,7 +88,11 @@ fn lingma_source_backed_prompt_hydrates_and_changed_row_fails_closed() {
         } if logical_relation == "chat_record" && digest.len() == 32
     ));
 
-    let resolver = lingma::LingmaSourceBackedResolverV0::new(&inventory).unwrap();
+    let resolver = lingma::LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &inventory,
+    )
+    .unwrap();
     assert_eq!(
         resolver.hydrate_record(record).unwrap().provider_bytes,
         body.as_bytes()
@@ -116,10 +125,14 @@ fn astrbot_source_backed_conversation_hydrates_the_original_typed_item() {
             .unwrap();
     let source = inventory.sources().first().unwrap();
     let mut documents = Vec::new();
-    astrbot::native_path::source_backed::scan_astrbot_source_backed_v0(source, &mut |document| {
-        documents.push(document);
-        Ok(())
-    })
+    astrbot::native_path::source_backed::scan_astrbot_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source,
+        &mut |document| {
+            documents.push(document);
+            Ok(())
+        },
+    )
     .unwrap();
     let document = documents
         .iter()
@@ -136,6 +149,7 @@ fn astrbot_source_backed_conversation_hydrates_the_original_typed_item() {
 
     let resolver =
         astrbot::native_path::source_backed::AstrBotSourceBackedResolverV0::from_inventory(
+            crate::test_provider_sqlite_data_root(),
             &inventory,
         )
         .unwrap();

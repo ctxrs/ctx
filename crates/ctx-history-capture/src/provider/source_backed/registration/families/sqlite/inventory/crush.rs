@@ -7,6 +7,7 @@ pub fn register_crush_source_backed_route<I>(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
     inventory_source: Arc<I>,
 ) -> SourceBackedCoordinatorResult<()>
 where
@@ -16,10 +17,17 @@ where
     let revalidation_inventory = Arc::clone(&inventory_source);
     let complete_inventory_revalidation = Arc::clone(&inventory_source);
     let hydration_inventory = inventory_source;
+    let scan_data_root = data_root.to_path_buf();
+    let revalidation_data_root = data_root.to_path_buf();
+    let complete_data_root = data_root.to_path_buf();
+    let hydration_data_root = data_root.to_path_buf();
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
-            let opening = bind_crush_inventory(scan_inventory.observe().map_err(route_error)?)
-                .map_err(route_error)?;
+            let opening = bind_crush_inventory(
+                &scan_data_root,
+                scan_inventory.observe().map_err(route_error)?,
+            )
+            .map_err(route_error)?;
             let base_sources = sink
                 .writer
                 .base_manifest()
@@ -120,7 +128,8 @@ where
                     "Crush project inventory changed during shared staging",
                 ));
             }
-            let closing = bind_crush_inventory(closing_observation).map_err(route_error)?;
+            let closing =
+                bind_crush_inventory(&scan_data_root, closing_observation).map_err(route_error)?;
             let certified_inventory = CertifiedSourceInventory::certify(
                 opening.observation.clone(),
                 closing.observation,
@@ -156,7 +165,8 @@ where
                 let Ok(observation) = revalidation_inventory.observe() else {
                     return false;
                 };
-                let Ok(inventory) = bind_crush_inventory(observation) else {
+                let Ok(inventory) = bind_crush_inventory(&revalidation_data_root, observation)
+                else {
                     return false;
                 };
                 let Some(database) = inventory.databases.iter().find(|database| {
@@ -176,7 +186,9 @@ where
                 let Ok(opening_observation) = revalidation_inventory.observe() else {
                     return false;
                 };
-                let Ok(opening) = bind_crush_inventory(opening_observation.clone()) else {
+                let Ok(opening) =
+                    bind_crush_inventory(&revalidation_data_root, opening_observation.clone())
+                else {
                     return false;
                 };
                 let Ok(closing_observation) = revalidation_inventory.observe() else {
@@ -188,7 +200,9 @@ where
                 {
                     return false;
                 }
-                let Ok(closing) = bind_crush_inventory(closing_observation) else {
+                let Ok(closing) =
+                    bind_crush_inventory(&revalidation_data_root, closing_observation)
+                else {
                     return false;
                 };
                 let source_keys = opening.source_keys();
@@ -202,11 +216,12 @@ where
             }
         },
         move |request| {
-            let hydrated = CrushLocatorResolverV0::discover(hydration_inventory.as_ref())
-                .and_then(|resolver| resolver.hydrate(request.locator()))
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
+            let hydrated = CrushLocatorResolverV0::discover(
+                &hydration_data_root,
+                hydration_inventory.as_ref(),
+            )
+            .and_then(|resolver| resolver.hydrate(request.locator()))
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
             let provider_bytes = hydrated
                 .decoded_display_text
                 .ok_or_else(|| {
@@ -226,7 +241,8 @@ where
         let Ok(opening_observation) = complete_inventory_revalidation.observe() else {
             return false;
         };
-        let Ok(opening) = bind_crush_inventory(opening_observation.clone()) else {
+        let Ok(opening) = bind_crush_inventory(&complete_data_root, opening_observation.clone())
+        else {
             return false;
         };
         let Ok(closing_observation) = complete_inventory_revalidation.observe() else {
@@ -238,7 +254,7 @@ where
         {
             return false;
         }
-        let Ok(closing) = bind_crush_inventory(closing_observation) else {
+        let Ok(closing) = bind_crush_inventory(&complete_data_root, closing_observation) else {
             return false;
         };
         let source_keys = opening.source_keys();

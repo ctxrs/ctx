@@ -290,12 +290,13 @@ impl NanoClawSqliteSnapshot {
 
 #[derive(Clone)]
 pub(super) struct NanoClawRootBoundDatabase {
+    data_root: PathBuf,
     root: ProviderSourceRoot,
     relative_path: PathBuf,
 }
 
 impl NanoClawRootBoundDatabase {
-    fn bind(root: &ProviderSourceRoot, relative_path: PathBuf) -> Result<Self> {
+    fn bind(data_root: &Path, root: &ProviderSourceRoot, relative_path: PathBuf) -> Result<Self> {
         let display_path = root.named_path().join(&relative_path);
         if relative_path.file_name().is_none() {
             return Err(CaptureError::InvalidProviderTranscriptPath {
@@ -304,6 +305,7 @@ impl NanoClawRootBoundDatabase {
             });
         }
         let route = Self {
+            data_root: data_root.to_path_buf(),
             root: root.clone(),
             relative_path,
         };
@@ -335,8 +337,12 @@ impl NanoClawRootBoundDatabase {
         let directory = self.root.open_directory(parent_path)?;
         let authority_handle = directory.try_clone_authority_handle()?;
         let approved_parent = self.root.named_path().join(parent_path);
-        let sqlite = retain_sqlite_source_directory_authority(&authority_handle, &approved_parent)
-            .map_err(|error| nanoclaw_sqlite_access_error(&display_path, error))?;
+        let sqlite = retain_sqlite_source_directory_authority(
+            &self.data_root,
+            &authority_handle,
+            &approved_parent,
+        )
+        .map_err(|error| nanoclaw_sqlite_access_error(&display_path, error))?;
         directory.revalidate()?;
         self.root.revalidate()?;
         Ok(sqlite)
@@ -437,6 +443,7 @@ impl NanoClawDatabaseRead {
 
 #[derive(Clone)]
 pub(super) struct NanoClawProjectDatabaseSnapshot {
+    data_root: PathBuf,
     source: NanoClawMessageSource,
     path: PathBuf,
     sqlite: Option<NanoClawSqliteSnapshot>,
@@ -444,10 +451,15 @@ pub(super) struct NanoClawProjectDatabaseSnapshot {
 }
 
 impl NanoClawProjectDatabaseSnapshot {
-    pub(super) fn read(session_dir: &Path, source: NanoClawMessageSource) -> Result<Self> {
+    pub(super) fn read(
+        data_root: &Path,
+        session_dir: &Path,
+        source: NanoClawMessageSource,
+    ) -> Result<Self> {
         let path = session_dir.join(source.file_name());
         let sqlite = NanoClawSqliteSnapshot::read_optional(&path)?;
         Ok(Self {
+            data_root: data_root.to_path_buf(),
             source,
             path,
             sqlite,
@@ -456,15 +468,17 @@ impl NanoClawProjectDatabaseSnapshot {
     }
 
     fn read_root_bound(
+        data_root: &Path,
         root: &ProviderSourceRoot,
         session_relative_path: &Path,
         source: NanoClawMessageSource,
     ) -> Result<Self> {
         let relative_path = session_relative_path.join(source.file_name());
-        let route = NanoClawRootBoundDatabase::bind(root, relative_path)?;
+        let route = NanoClawRootBoundDatabase::bind(data_root, root, relative_path)?;
         let path = route.display_path();
         let sqlite = route.read_optional()?;
         Ok(Self {
+            data_root: data_root.to_path_buf(),
             source,
             path,
             sqlite,
@@ -499,7 +513,7 @@ impl NanoClawProjectDatabaseSnapshot {
         };
         let Some(route) = self.root_bound.as_ref() else {
             return Ok(Some(NanoClawDatabaseRead::Pathname(
-                open_provider_sqlite_readonly(&self.path)?,
+                open_provider_sqlite_readonly(&self.data_root, &self.path)?,
             )));
         };
         let opened = NanoClawOpenedSqliteFamily::open(&route.root, &route.relative_path)?;
@@ -578,19 +592,21 @@ pub(super) struct NanoClawSourceBackedProject {
 impl NanoClawSourceBackedProject {
     /// Opens exactly the caller-selected project. No parent/default discovery
     /// and no pathname or copy fallback is available on this route.
-    pub(super) fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(data_root: &Path, path: &Path) -> Result<Self> {
         let requested_root = nanoclaw_requested_project_root(path)?;
         let root = ProviderSourceRoot::open(&requested_root)?;
         let sessions = root.open_directory(Path::new("data/v2-sessions"))?;
         sessions.revalidate()?;
 
         let central_relative = PathBuf::from("data/v2.db");
-        let central_route = NanoClawRootBoundDatabase::bind(&root, central_relative.clone())?;
+        let central_route =
+            NanoClawRootBoundDatabase::bind(data_root, &root, central_relative.clone())?;
         let central_path = central_route.display_path();
         let central_opened = NanoClawOpenedSqliteFamily::open(&root, &central_relative)?;
         let central_snapshot = central_opened.snapshot()?;
         let central_guard = central_route.open_snapshot()?;
         let inventory = nanoclaw_stream_inventory(
+            data_root,
             root.named_path(),
             central_guard
                 .connection()
@@ -781,6 +797,7 @@ impl NanoClawInventoryPacer {
 }
 
 fn nanoclaw_stream_inventory(
+    data_root: &Path,
     project_root: &Path,
     conn: &Connection,
     source_root: Option<&ProviderSourceRoot>,
@@ -824,11 +841,12 @@ fn nanoclaw_stream_inventory(
                     .join(&session_id);
                 let read_component = |source: NanoClawMessageSource| match source_root {
                     Some(root) => NanoClawProjectDatabaseSnapshot::read_root_bound(
+                        data_root,
                         root,
                         &session_relative_path,
                         source,
                     ),
-                    None => NanoClawProjectDatabaseSnapshot::read(&session_dir, source),
+                    None => NanoClawProjectDatabaseSnapshot::read(data_root, &session_dir, source),
                 };
                 let inbound = read_component(NanoClawMessageSource::Inbound)?;
                 let outbound = read_component(NanoClawMessageSource::Outbound)?;

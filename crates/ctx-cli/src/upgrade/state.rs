@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::{
     platform_security::{
-        create_private_directory_all, restrict_private_file_handle, verify_private_directory,
+        establish_private_data_root, restrict_private_file_handle, verify_private_directory,
         verify_private_file_handle,
     },
     utc_now,
@@ -728,8 +728,8 @@ pub(super) fn now_unix_s() -> u64 {
 }
 
 pub(super) fn set_auto_mode(data_root: &Path, mode: &str) -> Result<()> {
-    create_private_directory_all(data_root)
-        .with_context(|| format!("create private upgrade data root {}", data_root.display()))?;
+    establish_private_data_root(data_root)
+        .with_context(|| format!("protect private upgrade data root {}", data_root.display()))?;
     verify_private_directory(data_root)
         .with_context(|| format!("verify private upgrade data root {}", data_root.display()))?;
     let config_path = data_root.join(crate::config::CONFIG_FILE);

@@ -1,9 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-
-use ctx_history_capture::CaptureError;
 
 use crate::analytics::{ImportTelemetry, ProviderRefreshTrigger};
 use crate::progress::ProgressArg;
@@ -27,7 +25,7 @@ use explicit::{run_explicit_source_catalog_import, ExplicitSourceCatalogImportCo
 pub(crate) use explicit_source_catalog::{
     explicit_source_for_import, load_explicit_source_catalog_authority,
     register_explicit_source_catalog_routes, upsert_explicit_source,
-    ExplicitSourceCatalogAuthority,
+    validate_explicit_source_catalog_roots, ExplicitSourceCatalogAuthority,
 };
 use history_source_plugin::{run_history_source_plugin_import, HistorySourcePluginImportContext};
 pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
@@ -79,10 +77,6 @@ pub(crate) fn run_import_internal(
     options: ImportRunOptions,
 ) -> Result<ImportReport> {
     validate_import_args(args)?;
-    fs::create_dir_all(&data_root).map_err(|source| CaptureError::SystemIo {
-        operation: "initialize ctx data root",
-        source,
-    })?;
     if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
         return run_history_source_plugin_import(HistorySourcePluginImportContext {
             args,

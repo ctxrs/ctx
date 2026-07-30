@@ -37,6 +37,7 @@ pub(super) const HYDRATION_NATIVE_KEY_BATCH: usize = 256;
 /// Exact-row resolver bound to one already-discovered provider database.
 #[derive(Debug)]
 pub(crate) struct OpenCodeSourceBackedExactResolver {
+    data_root: PathBuf,
     registration: OpenCodeSourceBackedRegistration,
     path: PathBuf,
     #[cfg(test)]
@@ -48,9 +49,11 @@ pub(crate) struct OpenCodeSourceBackedExactResolver {
 impl OpenCodeSourceBackedExactResolver {
     pub(super) fn new(
         registration: OpenCodeSourceBackedRegistration,
+        data_root: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
     ) -> Self {
         Self {
+            data_root: data_root.into(),
             registration,
             path: path.into(),
             #[cfg(test)]
@@ -142,7 +145,8 @@ impl OpenCodeSourceBackedExactResolver {
                 )
             })?;
         let (source_root, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
+            open_root_authorized_snapshot(&self.data_root, &self.path)
+                .map_err(temporary_hydration_failure)?;
         #[cfg(test)]
         self.snapshot_opens
             .set(self.snapshot_opens.get().saturating_add(1));

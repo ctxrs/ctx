@@ -15,6 +15,7 @@ const INDEXED_LIMIT: usize = 16_000;
 #[test]
 fn native_sqlite_target_recovers_exact_firebender_message() {
     let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
     let database = temp.path().join("chat_history.db");
     let body = format!(
         "Unicode 🦀 café 東京\nEscaped: \"quote\" \\ slash\n{}",
@@ -51,7 +52,7 @@ fn native_sqlite_target_recovers_exact_firebender_message() {
         LogicalValue::Text("{}"),
     ]);
     let event_id = Uuid::new_v4();
-    let source_access = SourceAccessBroker::new()
+    let source_access = SourceAccessBroker::new(data.path())
         .admit(
             AuthorizedSourceRoute {
                 source_id: Uuid::new_v4(),

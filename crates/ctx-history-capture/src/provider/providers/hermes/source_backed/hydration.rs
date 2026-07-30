@@ -13,13 +13,19 @@ pub(crate) struct HermesHydratedMessage {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HermesLocatorResolver {
+    data_root: PathBuf,
     path: PathBuf,
     source: SourceKey,
 }
 
 impl HermesLocatorResolver {
-    pub(crate) fn new(path: impl Into<PathBuf>, source: SourceKey) -> Self {
+    pub(crate) fn new(
+        data_root: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        source: SourceKey,
+    ) -> Self {
         Self {
+            data_root: data_root.into(),
             path: path.into(),
             source,
         }
@@ -50,7 +56,8 @@ impl HermesLocatorResolver {
             }
             coordinates.push(decode_message_coordinate(locator)?);
         }
-        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&self.path)?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.data_root, &self.path)?;
         let opening_evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
         let operation = (|| {
@@ -103,10 +110,11 @@ impl HermesLocatorResolver {
 
 #[cfg(test)]
 pub(crate) fn hydrate_hermes_source_backed_message(
+    data_root: &Path,
     path: &Path,
     locator: &SourceRecordLocator,
 ) -> HermesSourceBackedResult<HermesHydratedMessage> {
-    HermesLocatorResolver::new(path, locator.source().clone()).hydrate(locator)
+    HermesLocatorResolver::new(data_root, path, locator.source().clone()).hydrate(locator)
 }
 
 fn find_message_rowid(

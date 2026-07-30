@@ -38,6 +38,7 @@ enum KiroTreeAuthority {
 
 #[derive(Debug)]
 struct KiroDocumentTreeAdapter {
+    data_root: PathBuf,
     path: PathBuf,
 }
 
@@ -57,7 +58,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let source = kiro_source_key().map_err(route_error)?;
-        match observe_kiro_inventory(&self.path).map_err(route_error)? {
+        match observe_kiro_inventory(&self.data_root, &self.path).map_err(route_error)? {
             KiroPhysicalInventory::Present(evidence) => {
                 let fingerprint = *evidence.revision();
                 Ok(CompleteDocumentTree::new(
@@ -93,10 +94,15 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
             ));
         };
         sink.begin_source(leaf.clone())?;
-        let scan = scan_kiro_source_backed(&self.path, KIRO_SQLITE_SOURCE_FORMAT, &mut |page| {
-            page.into_iter()
-                .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
-        })
+        let scan = scan_kiro_source_backed(
+            &self.data_root,
+            &self.path,
+            KIRO_SQLITE_SOURCE_FORMAT,
+            &mut |page| {
+                page.into_iter()
+                    .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
+            },
+        )
         .map_err(kiro_scan_error)?;
         validate_scan_receipt(&scan)?;
         if !scan.source.exact_descriptor_eq(leaf) || &scan.terminal_fence != expected_physical {
@@ -114,7 +120,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         match &tree.authority {
             KiroTreeAuthority::Present(expected) => {
                 let path = absolute_kiro_path(&self.path).map_err(route_error)?;
-                let current = KiroSqliteDatabase::open(&path)
+                let current = KiroSqliteDatabase::open(&self.data_root, &path)
                     .and_then(|database| database.finish(&path))
                     .map_err(route_error)?;
                 if &current != expected {
@@ -135,7 +141,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         &self,
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
-        KiroLocatorResolverV0::discover(&self.path, KIRO_SQLITE_SOURCE_FORMAT)
+        KiroLocatorResolverV0::discover(&self.data_root, &self.path, KIRO_SQLITE_SOURCE_FORMAT)
             .map_err(hydration_failure_from_error)?
             .hydrate_batch(request)
     }
@@ -145,8 +151,10 @@ pub(crate) fn register(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     let adapter = KiroDocumentTreeAdapter {
+        data_root: data_root.to_path_buf(),
         path: source.path.clone(),
     };
     register_replacement_document_tree_route(registry, source, selection, adapter)
@@ -187,7 +195,10 @@ enum KiroPhysicalInventory {
     Missing(KiroMissingLeafFence),
 }
 
-fn observe_kiro_inventory(path: &Path) -> super::KiroSourceBackedResultV0<KiroPhysicalInventory> {
+fn observe_kiro_inventory(
+    data_root: &Path,
+    path: &Path,
+) -> super::KiroSourceBackedResultV0<KiroPhysicalInventory> {
     let path = absolute_kiro_path(path)?;
     let parent = database_parent(&path)?;
     let leaf = database_leaf(&path)?;
@@ -201,7 +212,7 @@ fn observe_kiro_inventory(path: &Path) -> super::KiroSourceBackedResultV0<KiroPh
             directory.revalidate()?;
             root.revalidate()?;
             drop(file);
-            let database = KiroSqliteDatabase::open(&path)?;
+            let database = KiroSqliteDatabase::open(data_root, &path)?;
             let evidence = database.finish(&path)?;
             Ok(KiroPhysicalInventory::Present(evidence))
         }

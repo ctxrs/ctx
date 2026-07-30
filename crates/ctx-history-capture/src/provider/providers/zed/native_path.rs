@@ -97,6 +97,7 @@ impl ZedImmutableSqliteSnapshot {
 
 #[derive(Debug)]
 struct ZedAdmittedSqliteFamily {
+    data_root: PathBuf,
     root: ProviderSourceRoot,
     directory: ProviderSourceDirectory,
     database_name: OsString,
@@ -363,7 +364,7 @@ pub(super) fn into_capture_error(error: ZedNativePathError) -> CaptureError {
 }
 
 impl ZedAdmittedSqliteFamily {
-    fn open(path: &Path) -> ZedNativeResult<Self> {
+    fn open(data_root: &Path, path: &Path) -> ZedNativeResult<Self> {
         let parent = path
             .parent()
             .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
@@ -403,6 +404,7 @@ impl ZedAdmittedSqliteFamily {
             false,
         )?;
         let family = Self {
+            data_root: data_root.to_path_buf(),
             root,
             directory,
             database_name: filename.to_os_string(),
@@ -429,8 +431,11 @@ impl ZedAdmittedSqliteFamily {
 
     fn connection(&self) -> ZedNativeResult<SqliteSourceReadSnapshot> {
         let directory = self.directory.try_clone_authority_handle()?;
-        let authority =
-            retain_sqlite_source_directory_authority(&directory, self.root.named_path())?;
+        let authority = retain_sqlite_source_directory_authority(
+            &self.data_root,
+            &directory,
+            self.root.named_path(),
+        )?;
         match open_root_handle_sqlite_source_snapshot(&authority, &self.database_name) {
             Ok(snapshot) => Ok(snapshot),
             Err(
@@ -534,11 +539,14 @@ fn zed_absolute_authority_path(path: &Path) -> ZedNativeResult<PathBuf> {
     }
 }
 
-pub(super) fn acquire_immutable_snapshot(path: &Path) -> ZedNativeResult<ZedSnapshotAcquisition> {
+pub(super) fn acquire_immutable_snapshot(
+    data_root: &Path,
+    path: &Path,
+) -> ZedNativeResult<ZedSnapshotAcquisition> {
     let authority_path = zed_absolute_authority_path(path)?;
     let fallback_locator = authority_path.display().to_string();
     for _ in 0..ZED_SNAPSHOT_ACQUISITION_ATTEMPTS {
-        let observed = match ZedAdmittedSqliteFamily::open(&authority_path) {
+        let observed = match ZedAdmittedSqliteFamily::open(data_root, &authority_path) {
             Ok(observed) => observed,
             Err(ZedNativePathError::Capture(CaptureError::SourceChangedDuringCapture)) => continue,
             Err(error) => return Err(error),

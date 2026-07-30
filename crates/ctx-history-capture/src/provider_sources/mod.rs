@@ -21,7 +21,8 @@ pub use discovery::{
     discover_provider_sources_for_provider_with_context,
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_projects,
-    provider_source_for_path,
+    provider_source_for_path, validate_provider_source_roots_outside_data_root,
+    ProviderSourceRootBoundaryError,
 };
 #[cfg(test)]
 pub(crate) use event_files::count_event_file_io;

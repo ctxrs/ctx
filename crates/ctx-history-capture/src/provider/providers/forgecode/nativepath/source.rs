@@ -93,6 +93,7 @@ pub(in crate::provider::providers::forgecode) enum ForgeCodeDiscovery {
 }
 
 pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
+    data_root: &Path,
     path: &Path,
 ) -> Result<ForgeCodeDiscovery> {
     let candidate = match fs::symlink_metadata(path) {
@@ -130,7 +131,7 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
     }
     let canonical_path = absolute_path(&candidate)?;
     let (database, (columns, schema_fingerprint, user_version)) =
-        ForgeCodeSqliteDatabase::open(&canonical_path, |conn| {
+        ForgeCodeSqliteDatabase::open(data_root, &canonical_path, |conn| {
             let columns = sqlite_table_columns(conn, "conversations")?;
             ensure_sqlite_table_columns(
                 &columns,
@@ -183,6 +184,7 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeSqliteDatabase {
 
 impl ForgeCodeSqliteDatabase {
     pub(super) fn open<T>(
+        data_root: &Path,
         path: &Path,
         query: impl FnOnce(&Connection) -> Result<T>,
     ) -> Result<(Self, T)> {
@@ -201,8 +203,9 @@ impl ForgeCodeSqliteDatabase {
             .to_os_string();
         let parent = ProviderSourceRoot::open(parent_path)?.directory()?;
         let authority_handle = parent.try_clone_authority_handle()?;
-        let authority = retain_sqlite_source_directory_authority(&authority_handle, parent_path)
-            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
+        let authority =
+            retain_sqlite_source_directory_authority(data_root, &authority_handle, parent_path)
+                .map_err(|error| forgecode_sqlite_source_error(path, error))?;
         let snapshot = open_root_handle_sqlite_source_snapshot(&authority, &database_name)
             .map_err(|error| forgecode_sqlite_source_error(path, error))?;
         let evidence = snapshot.evidence().clone();
@@ -621,7 +624,12 @@ mod stock_sqlite_snapshot_tests {
         persist_wal_row(&source, "from-wal");
         let before_read = persistent_directory_snapshot(temp.path());
 
-        let (database, opened_value) = ForgeCodeSqliteDatabase::open(&source, read_latest).unwrap();
+        let (database, opened_value) = ForgeCodeSqliteDatabase::open(
+            crate::test_provider_sqlite_data_root(),
+            &source,
+            read_latest,
+        )
+        .unwrap();
         assert_eq!(opened_value, "from-wal");
         assert!(database.evidence().wal_length().is_some());
         assert!(database.evidence().shared_memory_length().is_some());

@@ -240,7 +240,7 @@ fn has_supported_explicit_history(provider: CaptureProvider, path: &Path) -> boo
         source_kind: ProviderSourceKind::NativeHistory,
     };
     matches!(
-        default_location_import_probe(provider, &location, path),
+        default_location_import_probe(None, provider, &location, path),
         BoundedProbe::Found
     )
 }

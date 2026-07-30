@@ -5,10 +5,54 @@ use std::{io, path::Path};
 #[cfg(unix)]
 use std::fs;
 
+mod path_overlap;
 #[cfg(unix)]
 mod unix_private_directory;
 #[cfg(windows)]
 mod windows_acl;
+
+/// Rejects equal, ancestor, descendant, symlink/reparse, and native-identity
+/// aliases between one provider source root and the selected ctx data root.
+///
+/// This inspection is read-only and does not create either path.
+pub fn validate_provider_source_outside_data_root(
+    data_root: &Path,
+    source_root: &Path,
+) -> io::Result<()> {
+    path_overlap::validate_provider_source_outside_data_root(data_root, source_root)
+}
+
+/// Establishes the selected ctx data root as an owner-private directory before
+/// the first persistent write.
+///
+/// Missing components are private at creation. An existing final directory is
+/// repaired through a no-follow handle, while unsafe ownership, symlinks, and
+/// Windows reparse points fail closed.
+pub fn establish_private_data_root(path: &Path) -> io::Result<()> {
+    let path = path_overlap::absolute_data_root_path(path)?;
+    #[cfg(unix)]
+    {
+        unix_private_directory::establish_private_data_root(&path)
+    }
+    #[cfg(windows)]
+    {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => windows_acl::restrict_private_directory(&path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                windows_acl::create_private_directory_all(&path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private data-root establishment is unavailable on this platform",
+        ))
+    }
+}
 
 /// Creates missing pathname components with an owner-only directory policy,
 /// then verifies the final directory without repairing pre-existing objects.
@@ -316,6 +360,28 @@ mod windows_tests {
 
         assert!(create_private_directory_all(&target).is_err());
         assert!(verify_private_directory(&target).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn data_root_establishment_replaces_inherited_acl_before_first_write(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let status = Command::new("icacls.exe")
+            .arg(parent.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        if !status.success() {
+            return Err("failed to make inherited ACL fixture permissive".into());
+        }
+        let target = parent.path().join("data");
+        fs::create_dir(&target)?;
+        assert!(verify_private_directory(&target).is_err());
+
+        establish_private_data_root(&target)?;
+
+        verify_private_directory(&target)?;
+        fs::write(target.join("first-write"), b"private")?;
         Ok(())
     }
 

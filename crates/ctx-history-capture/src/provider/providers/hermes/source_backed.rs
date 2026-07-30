@@ -99,7 +99,8 @@ pub(crate) fn scan_hermes_source_backed(
         .to_str()
         .ok_or_else(|| HermesSourceBackedError::InvalidProfilePath(candidate.path.clone()))?
         .to_owned();
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&candidate.path)?;
+    let (source_root, sqlite_snapshot) =
+        open_root_authorized_snapshot(&candidate.data_root, &candidate.path)?;
     let opening_evidence = sqlite_snapshot.evidence().clone();
     let conn = sqlite_snapshot.connection()?;
     let sqlite_user_version = conn
@@ -253,12 +254,14 @@ fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {
 }
 
 fn open_root_authorized_snapshot(
+    data_root: &Path,
     path: &Path,
 ) -> HermesSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(path, || {})
+    open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
 fn open_root_authorized_snapshot_with_hook(
+    data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
 ) -> HermesSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
@@ -277,7 +280,8 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = admission_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
     admission_directory.revalidate()?;
     admission_root.revalidate()?;
     let sqlite_snapshot =
@@ -310,10 +314,11 @@ fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) ->
 }
 
 pub(crate) fn terminal_fence_matches(
+    data_root: &Path,
     path: &Path,
     expected: &HermesSourceTerminalFence,
 ) -> HermesSourceBackedResult<bool> {
-    let (source_root, snapshot) = open_root_authorized_snapshot(path)?;
+    let (source_root, snapshot) = open_root_authorized_snapshot(data_root, path)?;
     let current = snapshot.finish()?;
     source_root.revalidate()?;
     Ok(current == expected.evidence)

@@ -424,7 +424,7 @@ fn structured_broker_reservation_and_admission_typed_fail_without_io() {
         source_identity: None,
         source_snapshot: SourceSnapshot::default(),
     };
-    let broker = SourceAccessBroker::new();
+    let broker = SourceAccessBroker::new(crate::test_provider_sqlite_data_root());
     assert_eq!(
         broker.prepare(route.clone(), event_id).unwrap_err().kind,
         CompleteContentErrorKind::HydrationUnsupported

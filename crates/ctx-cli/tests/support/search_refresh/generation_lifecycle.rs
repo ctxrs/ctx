@@ -694,6 +694,8 @@ fn search_refresh_wait_reports_typed_failure_for_empty_source_inventory() {
         "{status:#}"
     );
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
-    assert!(!temp.path().join("search/lexical/meta.json").exists());
+    assert!(!search_refresh_data_root(&temp)
+        .join("search/lexical/meta.json")
+        .exists());
     assert!(generation_manifest_paths(&temp).is_empty());
 }

@@ -13,12 +13,16 @@ pub(crate) struct TraeHydratedRecordV0 {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraeLocatorResolverV0 {
+    data_root: PathBuf,
     path: PathBuf,
 }
 
 impl TraeLocatorResolverV0 {
-    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    pub(crate) fn new(data_root: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: data_root.into(),
+            path: path.into(),
+        }
     }
 
     #[cfg(test)]
@@ -50,7 +54,7 @@ impl TraeLocatorResolverV0 {
             }
             coordinates.push(decode_locator(locator)?);
         }
-        let (_, values) = TraeSqliteDatabase::open(&canonical_path, |conn| {
+        let (_, values) = TraeSqliteDatabase::open(&self.data_root, &canonical_path, |conn| {
             validate_schema(conn, &canonical_path)?;
             let mut values = BTreeMap::new();
             let mut keys = coordinates
@@ -110,7 +114,7 @@ pub(crate) fn hydrate_trae_source_backed_locator_v0(
     path: &Path,
     locator: &SourceRecordLocator,
 ) -> TraeSourceBackedResultV0<TraeHydratedRecordV0> {
-    TraeLocatorResolverV0::new(path).hydrate(locator)
+    TraeLocatorResolverV0::new(crate::test_provider_sqlite_data_root(), path).hydrate(locator)
 }
 
 struct DecodedLocator {

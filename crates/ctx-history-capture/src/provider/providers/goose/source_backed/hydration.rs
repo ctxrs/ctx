@@ -74,7 +74,10 @@ impl GooseSourceBackedResolverV0 {
             if bodies.iter().all(Option::is_some) {
                 break;
             }
-            let retained = match RetainedGooseDirectory::open(route.selected_database()) {
+            let retained = match RetainedGooseDirectory::open(
+                &self.selection.data_root,
+                route.selected_database(),
+            ) {
                 Ok(retained) => retained,
                 Err(_) => continue,
             };

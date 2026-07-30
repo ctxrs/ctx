@@ -330,7 +330,13 @@ fn automatic_builder_executes_typed_warp_crush_and_lingma_authorities() {
         missing_mux,
     ];
 
-    let build = build_automatic_source_backed_registry_from_report(&context, sources, Vec::new());
+    let data_root = temp.path().join("ctx-data");
+    let build = build_automatic_source_backed_registry_from_parts(
+        &context,
+        &data_root,
+        sources,
+        Vec::new(),
+    );
     assert_eq!(build.executable_route_count(), 7);
     assert_eq!(build.unsupported_route_count(), 1);
     assert_eq!(build.issues.len(), 2);
@@ -393,8 +399,13 @@ fn automatic_registry_keeps_present_empty_roots_executable_and_other_statuses_ty
     empty.status = ProviderSourceStatus::Empty;
     empty.unsupported_reason = Some("path exists but has no sessions");
 
-    let empty_build =
-        build_automatic_source_backed_registry_from_report(&context, vec![empty], Vec::new());
+    let data_root = temp.path().join("ctx-data");
+    let empty_build = build_automatic_source_backed_registry_from_parts(
+        &context,
+        &data_root,
+        vec![empty],
+        Vec::new(),
+    );
     assert_eq!(empty_build.executable_route_count(), 1);
     assert_eq!(empty_build.unsupported_route_count(), 0);
     assert!(empty_build.issues.is_empty());
@@ -430,8 +441,9 @@ fn automatic_registry_keeps_present_empty_roots_executable_and_other_statuses_ty
         "unknown_detected_format",
         ProviderImportSupport::Unsupported,
     );
-    let unavailable_build = build_automatic_source_backed_registry_from_report(
+    let unavailable_build = build_automatic_source_backed_registry_from_parts(
         &context,
+        &data_root,
         vec![missing, unknown, unsupported],
         Vec::new(),
     );

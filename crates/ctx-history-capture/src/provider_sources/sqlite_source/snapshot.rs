@@ -68,10 +68,11 @@ pub(crate) fn open_ctx_owned_sqlite_read_snapshot(
 /// Retains an approved parent-directory handle together with the pathname that
 /// stock SQLite is allowed to open beneath it.
 pub(crate) fn retain_sqlite_source_directory_authority(
+    data_root: &Path,
     authorized_parent: &File,
     approved_parent_path: &Path,
 ) -> SqliteSourceAccessResult<SqliteSourceDirectoryAuthority> {
-    SqliteSourceDirectoryAuthority::retain(authorized_parent, approved_parent_path)
+    SqliteSourceDirectoryAuthority::retain(data_root, authorized_parent, approved_parent_path)
 }
 
 /// Opens one approved SQLite leaf through stock rusqlite/SQLite behavior.
@@ -91,7 +92,7 @@ fn open_root_handle_sqlite_source_snapshot_inner(
     let family = SqliteSourceFamily::open(authority, database_name, after_parent_certification)?;
     let native_evidence = family.capture_evidence()?;
 
-    let acquired = acquire_sqlite_connection(&family, &native_evidence)?;
+    let acquired = acquire_sqlite_connection(authority.data_root(), &family, &native_evidence)?;
     verify_connection_read_only(&acquired.connection)?;
     configure_and_pin_snapshot(&acquired.connection)?;
     before_source_revalidation();
@@ -123,6 +124,7 @@ struct AcquiredSqliteConnection {
 }
 
 fn acquire_sqlite_connection(
+    data_root: &Path,
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
 ) -> SqliteSourceAccessResult<AcquiredSqliteConnection> {
@@ -140,7 +142,7 @@ fn acquire_sqlite_connection(
 
     enforce_snapshot_copy_bounds(family, evidence)?;
     let (snapshot_directory, snapshot_path, copied_bytes) =
-        copy_sqlite_family_to_ctx(family, evidence)?;
+        copy_sqlite_family_to_ctx(data_root, family, evidence)?;
     let connection = Connection::open_with_flags(
         &snapshot_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -221,24 +223,22 @@ fn bounded_snapshot_component(path: &Path, length: u64) -> SqliteSourceAccessRes
 }
 
 fn copy_sqlite_family_to_ctx(
+    data_root: &Path,
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
 ) -> SqliteSourceAccessResult<(TempDir, PathBuf, u64)> {
-    let data_root =
-        default_data_root().map_err(|source| SqliteSourceAccessError::SnapshotUnavailable {
-            reason: format!("the ctx data root is unavailable: {source}"),
-        })?;
-    fs::create_dir_all(&data_root).map_err(|source| SqliteSourceAccessError::Io {
-        operation: "creating the ctx data root for a provider SQLite snapshot",
-        path: data_root.clone(),
+    let staging_root = data_root.join("tmp").join("provider-sqlite");
+    create_private_directory_all(&staging_root).map_err(|source| SqliteSourceAccessError::Io {
+        operation: "creating the private provider SQLite staging root",
+        path: staging_root.clone(),
         source,
     })?;
     let directory = tempfile::Builder::new()
         .prefix("provider-sqlite-snapshot-")
-        .tempdir_in(&data_root)
+        .tempdir_in(&staging_root)
         .map_err(|source| SqliteSourceAccessError::Io {
             operation: "creating a private provider SQLite snapshot",
-            path: data_root,
+            path: staging_root,
             source,
         })?;
     let snapshot_path = directory.path().join("source.sqlite");

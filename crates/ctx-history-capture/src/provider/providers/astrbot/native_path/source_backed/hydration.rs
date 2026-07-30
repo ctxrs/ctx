@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use ctx_history_core::{
     derive_event_id, BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver,
@@ -31,11 +31,13 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct AstrBotSourceBackedResolverV0 {
+    data_root: PathBuf,
     pub(super) sources: BTreeMap<[u8; 32], AstrBotSourceBackedSourceV0>,
 }
 
 impl AstrBotSourceBackedResolverV0 {
     pub(crate) fn from_inventory(
+        data_root: impl Into<PathBuf>,
         inventory: &AstrBotSourceBackedInventoryV0,
     ) -> AstrBotSourceBackedResultV0<Self> {
         let sources = inventory
@@ -44,7 +46,18 @@ impl AstrBotSourceBackedResolverV0 {
             .cloned()
             .map(|source| (source.source_key.identity().digest(), source))
             .collect();
-        Ok(Self { sources })
+        Ok(Self {
+            data_root: data_root.into(),
+            sources,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_source(source: AstrBotSourceBackedSourceV0) -> Self {
+        Self {
+            data_root: crate::test_provider_sqlite_data_root().to_path_buf(),
+            sources: BTreeMap::from([(source.source_key.identity().digest(), source)]),
+        }
     }
 
     pub(crate) fn hydrate_requests(
@@ -85,7 +98,8 @@ impl AstrBotSourceBackedResolverV0 {
         }
 
         let (source_root, sqlite_snapshot) =
-            open_root_authorized_snapshot(&source.path).map_err(map_source_hydration)?;
+            open_root_authorized_snapshot(&self.data_root, &source.path)
+                .map_err(map_source_hydration)?;
         let hydration = (|| {
             let conn = sqlite_snapshot.connection().map_err(map_sqlite_hydration)?;
             let sql = AstrBotSql::new(conn).map_err(map_parser_hydration)?;

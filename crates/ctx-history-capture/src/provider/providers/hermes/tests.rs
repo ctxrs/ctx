@@ -103,7 +103,11 @@ fn minimum_sqlite_rowid_is_distinct_from_the_initial_frontier() {
         )
         .unwrap();
 
-    let conn = crate::provider::sqlite::open_provider_sqlite_readonly(&path).unwrap();
+    let conn = crate::provider::sqlite::open_provider_sqlite_readonly(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    )
+    .unwrap();
     let schema = HermesSchema::detect(&conn).unwrap();
     let mut reader = HermesRowReader::new(&conn, &schema).unwrap();
     let mut frontier = HermesFrontier::initial();
@@ -155,7 +159,11 @@ fn row_reader_scans_sessions_then_messages_and_rejects_before_hydration() {
         )
         .unwrap();
 
-    let conn = crate::provider::sqlite::open_provider_sqlite_readonly(&path).unwrap();
+    let conn = crate::provider::sqlite::open_provider_sqlite_readonly(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    )
+    .unwrap();
     let schema = HermesSchema::detect(&conn).unwrap();
     let mut reader = HermesRowReader::new(&conn, &schema).unwrap();
     let mut frontier = HermesFrontier::initial();

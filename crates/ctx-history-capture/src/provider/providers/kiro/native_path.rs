@@ -37,7 +37,7 @@ struct KiroSqliteDatabase {
 }
 
 impl KiroSqliteDatabase {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(data_root: &Path, path: &Path) -> Result<Self> {
         let parent_path = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -51,8 +51,9 @@ impl KiroSqliteDatabase {
         let root = ProviderSourceRoot::open(parent_path)?;
         let parent = root.directory()?;
         let authority_handle = parent.try_clone_authority_handle()?;
-        let authority = retain_sqlite_source_directory_authority(&authority_handle, parent_path)
-            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        let authority =
+            retain_sqlite_source_directory_authority(data_root, &authority_handle, parent_path)
+                .map_err(|error| kiro_sqlite_source_error(path, error))?;
         let snapshot = open_root_handle_sqlite_source_snapshot(&authority, database_name)
             .map_err(|error| kiro_sqlite_source_error(path, error))?;
         snapshot
@@ -210,7 +211,8 @@ mod stock_sqlite_snapshot_tests {
         persist_wal_row(&source, "from-wal");
         let before_read = persistent_directory_snapshot(temp.path());
 
-        let database = KiroSqliteDatabase::open(&source).unwrap();
+        let database =
+            KiroSqliteDatabase::open(crate::test_provider_sqlite_data_root(), &source).unwrap();
         assert_eq!(
             read_latest(database.connection(&source).unwrap()).unwrap(),
             "from-wal"
@@ -229,7 +231,8 @@ mod stock_sqlite_snapshot_tests {
         let admitted = temp.path().join("admitted.sqlite");
         create_database(&source, "main");
         create_database(&attacker, "attacker");
-        let database = KiroSqliteDatabase::open(&source).unwrap();
+        let database =
+            KiroSqliteDatabase::open(crate::test_provider_sqlite_data_root(), &source).unwrap();
         fs::rename(&source, &admitted).unwrap();
         fs::rename(&attacker, &source).unwrap();
         let before_rejected_read = persistent_directory_snapshot(temp.path());

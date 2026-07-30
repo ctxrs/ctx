@@ -55,6 +55,7 @@ pub(super) trait SqliteInventoryProvider: Send + Sync + 'static {
 }
 
 pub(super) struct SqliteInventoryDocumentAdapter<A> {
+    data_root: PathBuf,
     provider: CaptureProvider,
     source_format: &'static str,
     provider_adapter: A,
@@ -64,8 +65,14 @@ impl<A> SqliteInventoryDocumentAdapter<A>
 where
     A: SqliteInventoryProvider,
 {
-    fn new(provider: CaptureProvider, source_format: &'static str, provider_adapter: A) -> Self {
+    fn new(
+        data_root: &Path,
+        provider: CaptureProvider,
+        source_format: &'static str,
+        provider_adapter: A,
+    ) -> Self {
         Self {
+            data_root: data_root.to_path_buf(),
             provider,
             source_format,
             provider_adapter,
@@ -76,6 +83,7 @@ where
         registry: &mut SourceBackedProviderRegistry,
         source: ProviderSource,
         selection: SourceBackedRouteSelection,
+        data_root: &Path,
         provider: CaptureProvider,
         source_format: &'static str,
         provider_adapter: A,
@@ -84,7 +92,7 @@ where
             registry,
             source,
             selection,
-            Self::new(provider, source_format, provider_adapter),
+            Self::new(data_root, provider, source_format, provider_adapter),
         )
     }
 
@@ -93,6 +101,7 @@ where
         source: ProviderSource,
         selection: SourceBackedRouteSelection,
         authority: SourceBackedSelectorAuthority,
+        data_root: &Path,
         provider: CaptureProvider,
         source_format: &'static str,
         provider_adapter: A,
@@ -102,7 +111,7 @@ where
             source,
             selection,
             authority,
-            Self::new(provider, source_format, provider_adapter),
+            Self::new(data_root, provider, source_format, provider_adapter),
         )
     }
 }
@@ -122,7 +131,10 @@ struct RetainedSqliteInventoryLeaf {
 }
 
 impl RetainedSqliteInventoryLeaf {
-    fn observe(path: &Path) -> SourceBackedRouteResult<(Self, SqliteSourceEvidence)> {
+    fn observe(
+        data_root: &Path,
+        path: &Path,
+    ) -> SourceBackedRouteResult<(Self, SqliteSourceEvidence)> {
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -138,8 +150,9 @@ impl RetainedSqliteInventoryLeaf {
         let authority_handle = directory
             .try_clone_authority_handle()
             .map_err(route_error)?;
-        let authority = retain_sqlite_source_directory_authority(&authority_handle, parent)
-            .map_err(route_error)?;
+        let authority =
+            retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)
+                .map_err(route_error)?;
         let retained = Self {
             authority,
             database_name,
@@ -196,7 +209,8 @@ where
         let mut observed = Vec::with_capacity(catalog.leaves.len());
         for (index, leaf) in catalog.leaves.into_iter().enumerate() {
             let catalog_leaf = sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path);
-            let (authority, evidence) = RetainedSqliteInventoryLeaf::observe(&leaf.path)?;
+            let (authority, evidence) =
+                RetainedSqliteInventoryLeaf::observe(&self.data_root, &leaf.path)?;
             let fingerprint = sqlite_physical_leaf_fingerprint(catalog_leaf, &evidence);
             retained.push(authority);
             catalog_leaves.push(catalog_leaf);

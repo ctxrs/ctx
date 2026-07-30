@@ -116,7 +116,7 @@ fn context(path: &Path) -> ProviderAdapterContext {
 }
 
 fn live_source(path: &Path) -> super::nativepath::source::ForgeCodeSourceObservation {
-    match discover_forgecode_source(path).unwrap() {
+    match discover_forgecode_source(crate::test_provider_sqlite_data_root(), path).unwrap() {
         ForgeCodeDiscovery::Live(source) => source,
         ForgeCodeDiscovery::Missing => panic!("fixture source is missing"),
     }

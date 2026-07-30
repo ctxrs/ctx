@@ -452,7 +452,7 @@ fn trae_workspace_storage_compatibility_paths_are_not_automatic() {
         write_trae_discovery_db(&root.join("workspace-hash/state.vscdb"));
     }
     assert_eq!(
-        has_trae_state_vscdb_chat_history(&standard_mac_root, 10_000),
+        has_trae_state_vscdb_chat_history(None, &standard_mac_root, 10_000),
         BoundedProbe::Found
     );
 
@@ -461,7 +461,7 @@ fn trae_workspace_storage_compatibility_paths_are_not_automatic() {
         .join("Library/Application Support/Trae/User/workspaceStorage-empty");
     write_trae_non_chat_state_db(&empty_root.join("workspace-hash/state.vscdb"));
     assert_eq!(
-        has_trae_state_vscdb_chat_history(&empty_root, 10_000),
+        has_trae_state_vscdb_chat_history(None, &empty_root, 10_000),
         BoundedProbe::NotFound
     );
 

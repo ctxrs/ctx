@@ -12,8 +12,8 @@ use super::{
         selectors::{direct_entries, encoded_path_within_limit, source_path_kind, SourcePathKind},
         types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
     },
-    issue, path_presence, push_source_candidate, select_current_or_legacy, source_from_parts,
-    unsupported_source, PathPresence,
+    issue, path_presence, push_source_candidate, select_current_or_legacy,
+    source_from_parts_with_data_root, unsupported_source, PathPresence,
 };
 
 const MANUAL_PATH_REASON: &str =
@@ -381,7 +381,12 @@ fn resolve_forgecode(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> D
         let Some(base) = resolve_from_cwd(context, PathBuf::from(value)) else {
             return manual_report(spec, None, MANUAL_PATH_REASON);
         };
-        return one_source(spec, base.join(".forge.db"), "forgecode_sqlite");
+        return one_source_with_data_root(
+            context,
+            spec,
+            base.join(".forge.db"),
+            "forgecode_sqlite",
+        );
     }
 
     if let Err(report) = supported_default(context, spec) {
@@ -392,7 +397,7 @@ fn resolve_forgecode(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> D
         PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => legacy,
         PathPresence::Missing => context.home().join(".forge"),
     };
-    one_source(spec, base.join(".forge.db"), "forgecode_sqlite")
+    one_source_with_data_root(context, spec, base.join(".forge.db"), "forgecode_sqlite")
 }
 
 fn kilo_data_root(
@@ -499,8 +504,39 @@ fn one_source(
     report
 }
 
+fn one_source_with_data_root(
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    source_format: &'static str,
+) -> DiscoveryReport {
+    let mut report = DiscoveryReport::default();
+    add_source_with_data_root(&mut report, context, spec, path, source_format);
+    report
+}
+
 fn add_source(
     report: &mut DiscoveryReport,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    source_format: &'static str,
+) {
+    add_source_inner(report, None, spec, path, source_format);
+}
+
+fn add_source_with_data_root(
+    report: &mut DiscoveryReport,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    source_format: &'static str,
+) {
+    add_source_inner(report, context.data_root(), spec, path, source_format);
+}
+
+fn add_source_inner(
+    report: &mut DiscoveryReport,
+    data_root: Option<&Path>,
     spec: &ProviderSourceSpec,
     path: PathBuf,
     source_format: &'static str,
@@ -538,7 +574,13 @@ fn add_source(
         }
         PathPresence::Missing | PathPresence::Present => {}
     }
-    let source = source_from_parts(spec, path, source_format, ProviderSourceKind::NativeHistory);
+    let source = source_from_parts_with_data_root(
+        data_root,
+        spec,
+        path,
+        source_format,
+        ProviderSourceKind::NativeHistory,
+    );
     if !push_source_candidate(&mut report.sources, source) {
         push_issue_once(
             report,

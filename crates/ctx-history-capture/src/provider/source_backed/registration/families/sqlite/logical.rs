@@ -8,7 +8,8 @@ pub(super) fn register_forgecode_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
-    make_selection: impl Fn(std::path::PathBuf) -> ForgeCodeSourceSelectionV0
+    data_root: &Path,
+    make_selection: impl Fn(std::path::PathBuf, &Path) -> ForgeCodeSourceSelectionV0
         + Send
         + Sync
         + Clone
@@ -19,7 +20,7 @@ pub(super) fn register_forgecode_route(
     } else {
         SourceBackedSelectorAuthority::ExplicitPath
     };
-    let adapter = make_selection(source.path.clone());
+    let adapter = make_selection(source.path.clone(), data_root);
     register_replacement_document_tree_route_with_authority(
         registry, source, selection, authority, adapter,
     )
@@ -28,8 +29,9 @@ pub(super) fn register_deepagents_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = DeepAgentsDatabaseSelectionV0::explicit(source.path.clone());
+    let adapter = DeepAgentsDatabaseSelectionV0::explicit(data_root, source.path.clone());
     register_replacement_document_tree_route_with_authority(
         registry,
         source,
@@ -42,9 +44,10 @@ pub(super) fn register_opencode_family_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     crate::provider::providers::opencode::native_path::source_backed::register_source_backed_route(
-        registry, source, selection,
+        registry, source, selection, data_root,
     )
 }
 
@@ -52,6 +55,7 @@ pub(super) fn register_hermes_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     if selection != SourceBackedRouteSelection::Automatic {
         return Err(invalid_route(
@@ -59,7 +63,7 @@ pub(super) fn register_hermes_route(
             "manual Hermes registration requires a persistent explicit SourceAnchor",
         ));
     }
-    let candidate = HermesSourceCandidate::automatic(source.clone())
+    let candidate = HermesSourceCandidate::automatic(data_root, source.clone())
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     register_hermes_candidate(
         registry,
@@ -85,8 +89,9 @@ pub(super) fn register_trae_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = TraeReplacementTree::new(source.path.clone());
+    let adapter = TraeReplacementTree::new(data_root, source.path.clone());
     register_replacement_document_tree_route_with_authority(
         registry,
         source,
@@ -100,15 +105,20 @@ pub(super) fn register_zed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     let path = source.path.clone();
     let capture_path = path.clone();
     let revalidation_path = path.clone();
     let hydration_path = path;
+    let capture_data_root = data_root.to_path_buf();
+    let revalidation_data_root = data_root.to_path_buf();
+    let hydration_data_root = data_root.to_path_buf();
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
             let source_key = zed_source_key().map_err(route_error)?;
-            let mut snapshot = acquire_zed_snapshot(&capture_path).map_err(route_error)?;
+            let mut snapshot =
+                acquire_zed_snapshot(&capture_data_root, &capture_path).map_err(route_error)?;
             let snapshot_revision = snapshot.snapshot_revision.clone();
             let physical_locator = snapshot.physical_locator.clone();
             let revision_digest = zed_snapshot_revision_digest(&snapshot_revision);
@@ -179,7 +189,9 @@ pub(super) fn register_zed_route(
                 let Ok(source_key) = zed_source_key() else {
                     return false;
                 };
-                let Ok(mut snapshot) = acquire_zed_snapshot(&revalidation_path) else {
+                let Ok(mut snapshot) =
+                    acquire_zed_snapshot(&revalidation_data_root, &revalidation_path)
+                else {
                     return false;
                 };
                 let observation = zed_source_observation(&source_key, &snapshot.snapshot_revision);
@@ -189,7 +201,7 @@ pub(super) fn register_zed_route(
             SourceBackedRevalidationTarget::Deletion(_) => false,
         },
         move |request| {
-            ZedLocatorResolverV0::new(&hydration_path)
+            ZedLocatorResolverV0::new(&hydration_data_root, &hydration_path)
                 .map_err(|error| {
                     hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
                 })?
@@ -208,6 +220,7 @@ pub(super) fn register_forgecode_selected_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     if selection != SourceBackedRouteSelection::Automatic {
         return Err(invalid_route(
@@ -215,23 +228,24 @@ pub(super) fn register_forgecode_selected_route(
             "manual ForgeCode registration requires explicit catalog lineage",
         ));
     }
-    register_forgecode_route(
-        registry,
-        source,
-        selection,
-        ForgeCodeSourceSelectionV0::selected,
-    )
+    register_forgecode_route(registry, source, selection, data_root, |path, data_root| {
+        ForgeCodeSourceSelectionV0::selected(data_root, path)
+    })
 }
 
 pub fn register_forgecode_explicit_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
+    data_root: &Path,
     catalog_lineage: [u8; 32],
 ) -> SourceBackedCoordinatorResult<()> {
     register_forgecode_route(
         registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
-        move |path| ForgeCodeSourceSelectionV0::explicit(path, catalog_lineage),
+        data_root,
+        move |path, data_root| {
+            ForgeCodeSourceSelectionV0::explicit(data_root, path, catalog_lineage)
+        },
     )
 }

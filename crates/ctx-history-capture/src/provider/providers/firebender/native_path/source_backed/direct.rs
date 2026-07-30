@@ -84,6 +84,7 @@ enum FirebenderTreeAuthority {
 
 #[derive(Debug)]
 struct FirebenderDocumentTreeAdapter {
+    data_root: PathBuf,
     path: PathBuf,
 }
 
@@ -105,7 +106,7 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let (database_path, source) =
             firebender_database_path_and_source(&self.path).map_err(route_error)?;
-        match open_database_leaf(&database_path).map_err(route_error)? {
+        match open_database_leaf(&self.data_root, &database_path).map_err(route_error)? {
             OpenDatabaseLeaf::Present(snapshot) => {
                 let evidence = snapshot.finish().map_err(route_error)?;
                 let fingerprint = *evidence.revision();
@@ -142,7 +143,7 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
             ));
         };
         sink.begin_source(leaf.clone())?;
-        let scan = scan_source(&self.path, &mut |page| {
+        let scan = scan_source(&self.data_root, &self.path, &mut |page| {
             page.into_iter()
                 .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
         })
@@ -167,7 +168,7 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
             FirebenderTreeAuthority::Present(expected) => {
                 let (database_path, _) =
                     firebender_database_path_and_source(&self.path).map_err(route_error)?;
-                let current = open_snapshot(&database_path)
+                let current = open_snapshot(&self.data_root, &database_path)
                     .and_then(OpenedSnapshot::finish)
                     .map_err(route_error)?;
                 if &current != expected {
@@ -190,7 +191,8 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
         &self,
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
-        FirebenderExactResolver::new(self.path.clone()).hydrate_batch(request)
+        FirebenderExactResolver::new(self.data_root.clone(), self.path.clone())
+            .hydrate_batch(request)
     }
 }
 
@@ -198,8 +200,10 @@ pub(crate) fn register_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     let adapter = FirebenderDocumentTreeAdapter {
+        data_root: data_root.to_path_buf(),
         path: source.path.clone(),
     };
     register_replacement_document_tree_route(registry, source, selection, adapter)
@@ -235,13 +239,14 @@ fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult
 }
 
 fn scan_source(
+    data_root: &Path,
     explicit_path: &Path,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<Option<FirebenderDirectScan>> {
     let identity = firebender_path_identity(explicit_path)?;
     let source = firebender_source_key(&identity.route_identity)?;
     let database_path = identity.canonical_database_path;
-    let snapshot = match open_database_leaf(&database_path)? {
+    let snapshot = match open_database_leaf(data_root, &database_path)? {
         OpenDatabaseLeaf::Present(snapshot) => snapshot,
         OpenDatabaseLeaf::Missing(_) => return Ok(None),
     };
@@ -308,7 +313,10 @@ pub(super) enum OpenDatabaseLeaf {
     Missing(MissingLeafFence),
 }
 
-pub(super) fn open_database_leaf(path: &Path) -> FirebenderSourceBackedResult<OpenDatabaseLeaf> {
+pub(super) fn open_database_leaf(
+    data_root: &Path,
+    path: &Path,
+) -> FirebenderSourceBackedResult<OpenDatabaseLeaf> {
     let parent = database_parent(path)?;
     let leaf = database_leaf(path)?;
     let root = ProviderSourceRoot::open(parent)?;
@@ -320,7 +328,7 @@ pub(super) fn open_database_leaf(path: &Path) -> FirebenderSourceBackedResult<Op
             file.revalidate()?;
             directory.revalidate()?;
             root.revalidate()?;
-            open_snapshot_from_authority(parent, leaf, root, directory)
+            open_snapshot_from_authority(data_root, parent, leaf, root, directory)
                 .map(Box::new)
                 .map(OpenDatabaseLeaf::Present)
         }
@@ -369,8 +377,11 @@ impl OpenedSnapshot {
     }
 }
 
-pub(super) fn open_snapshot(path: &Path) -> FirebenderSourceBackedResult<OpenedSnapshot> {
-    match open_database_leaf(path)? {
+pub(super) fn open_snapshot(
+    data_root: &Path,
+    path: &Path,
+) -> FirebenderSourceBackedResult<OpenedSnapshot> {
+    match open_database_leaf(data_root, path)? {
         OpenDatabaseLeaf::Present(snapshot) => Ok(*snapshot),
         OpenDatabaseLeaf::Missing(_) => Err(CaptureError::Io(io::Error::new(
             io::ErrorKind::NotFound,
@@ -381,6 +392,7 @@ pub(super) fn open_snapshot(path: &Path) -> FirebenderSourceBackedResult<OpenedS
 }
 
 fn open_snapshot_from_authority(
+    data_root: &Path,
     parent: &Path,
     leaf: &OsStr,
     root: ProviderSourceRoot,
@@ -389,7 +401,7 @@ fn open_snapshot_from_authority(
     let handle = directory
         .try_clone_authority_handle()
         .map_err(CaptureError::Io)?;
-    let authority = retain_sqlite_source_directory_authority(&handle, parent)
+    let authority = retain_sqlite_source_directory_authority(data_root, &handle, parent)
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
     let snapshot = open_root_handle_sqlite_source_snapshot(&authority, leaf)
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
@@ -713,7 +725,7 @@ pub(crate) fn scan_for_test(
     explicit_path: &Path,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<FirebenderDirectScan> {
-    scan_source(explicit_path, emit)?.ok_or_else(|| {
+    scan_source(crate::test_provider_sqlite_data_root(), explicit_path, emit)?.ok_or_else(|| {
         FirebenderSourceBackedError::Capture(CaptureError::InvalidPayload(
             "expected present Firebender test source".to_owned(),
         ))
@@ -726,7 +738,9 @@ pub(crate) fn revalidate_missing_after_for_test(
     mutate: impl FnOnce(),
 ) -> FirebenderSourceBackedResult<bool> {
     let (database_path, _) = firebender_database_path_and_source(explicit_path)?;
-    let OpenDatabaseLeaf::Missing(fence) = open_database_leaf(&database_path)? else {
+    let OpenDatabaseLeaf::Missing(fence) =
+        open_database_leaf(crate::test_provider_sqlite_data_root(), &database_path)?
+    else {
         return Err(CaptureError::InvalidPayload(
             "expected missing Firebender test source".to_owned(),
         )

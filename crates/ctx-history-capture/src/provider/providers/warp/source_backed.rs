@@ -92,12 +92,14 @@ pub(crate) type WarpSourceBackedResultV0<T> = Result<T, WarpSourceBackedErrorV0>
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WarpSourceSelectionV0 {
+    data_root: PathBuf,
     path: PathBuf,
     surface_key: String,
 }
 
 impl WarpSourceSelectionV0 {
     pub(crate) fn new(
+        data_root: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
         surface_key: impl Into<String>,
     ) -> WarpSourceBackedResultV0<Self> {
@@ -106,6 +108,7 @@ impl WarpSourceSelectionV0 {
             return Err(WarpSourceBackedErrorV0::EmptySurfaceKey);
         }
         Ok(Self {
+            data_root: data_root.into(),
             path: path.into(),
             surface_key,
         })
@@ -186,7 +189,9 @@ impl ReplacementDocumentTree for WarpReplacementTreeAdapter {
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
-        let retained = RetainedWarpDirectory::open(self.selection.path()).map_err(route_error)?;
+        let retained =
+            RetainedWarpDirectory::open(&self.selection.data_root, self.selection.path())
+                .map_err(route_error)?;
         let Some(snapshot) = retained.open_snapshot()? else {
             let fingerprint = missing_tree_fingerprint(&self.source);
             return Ok(CompleteDocumentTree::new(
@@ -321,7 +326,7 @@ pub(crate) struct RetainedWarpDirectory {
 }
 
 impl RetainedWarpDirectory {
-    fn open(path: &Path) -> WarpSourceBackedResultV0<Self> {
+    fn open(data_root: &Path, path: &Path) -> WarpSourceBackedResultV0<Self> {
         let parent = path.parent().ok_or_else(|| {
             CaptureError::InvalidPayload("Warp SQLite source has no parent directory".to_owned())
         })?;
@@ -331,7 +336,7 @@ impl RetainedWarpDirectory {
         let root = ProviderSourceRoot::open(parent)?;
         let directory = root.directory()?;
         let authority_handle = directory.try_clone_authority_handle()?;
-        let sqlite = retain_sqlite_source_directory_authority(&authority_handle, parent)
+        let sqlite = retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)
             .map_err(sqlite_access_error)?;
         let retained = Self {
             root,
@@ -621,7 +626,8 @@ fn hydrate_warp_group(
         })
         .collect::<WarpSourceBackedResultV0<Vec<_>>>()
         .map_err(warp_hydration_error)?;
-    let retained = RetainedWarpDirectory::open(selection.path()).map_err(warp_hydration_error)?;
+    let retained = RetainedWarpDirectory::open(&selection.data_root, selection.path())
+        .map_err(warp_hydration_error)?;
     let snapshot = retained
         .open_snapshot()
         .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))?

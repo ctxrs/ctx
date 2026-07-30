@@ -80,10 +80,14 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
     create_state_db(&path, "expected", "expected");
     create_state_db(&attacker, "attacker", "attacker");
 
-    let result = open_root_authorized_snapshot_with_hook(&path, || {
-        fs::rename(&path, &original).unwrap();
-        fs::rename(&attacker, &path).unwrap();
-    });
+    let result = open_root_authorized_snapshot_with_hook(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        },
+    );
     assert!(
         matches!(
             result,
@@ -116,6 +120,7 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         .unwrap();
     let before = sqlite_persistent_bytes(&path);
     let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
         &path,
         SourceAnchor::provider_native(
             HERMES_SOURCE_ANCHOR_NAMESPACE,
@@ -146,6 +151,7 @@ fn idle_wal_writer_first_scan_succeeds_and_append_changes_revision() {
         "the idle writer must not have materialized a WAL pathname"
     );
     let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
         &path,
         SourceAnchor::provider_native(
             HERMES_SOURCE_ANCHOR_NAMESPACE,
@@ -205,6 +211,7 @@ fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     let text = format!("hermes-head-{}-hermes-tail", "x".repeat(3_000));
     create_state_db(&path, "full", &text);
     let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
         &path,
         SourceAnchor::provider_native(
             HERMES_SOURCE_ANCHOR_NAMESPACE,
@@ -218,8 +225,12 @@ fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     assert_eq!(document.body, text);
     assert!(document.body.ends_with("hermes-tail"));
 
-    let hydrated =
-        hydrate_hermes_source_backed_message(candidate.path(), &document.locator).unwrap();
+    let hydrated = hydrate_hermes_source_backed_message(
+        crate::test_provider_sqlite_data_root(),
+        candidate.path(),
+        &document.locator,
+    )
+    .unwrap();
     assert_eq!(hydrated.text, text);
     assert_eq!(hydrated.provider_bytes, text.as_bytes());
 }
@@ -333,7 +344,8 @@ fn hermes_source_backed_gateway_inventory_scans_multiple_profiles_and_hydrates_e
         crate::provider_sources::DiscoveryPlatform::Linux,
         crate::provider_sources::DiscoveryPlatformDirs::default(),
     );
-    let inventory = discover_hermes_source_backed(&context).unwrap();
+    let inventory =
+        discover_hermes_source_backed(crate::test_provider_sqlite_data_root(), &context).unwrap();
     assert!(inventory.issues.is_empty());
     assert_eq!(
         inventory
@@ -381,8 +393,12 @@ fn hermes_source_backed_gateway_inventory_scans_multiple_profiles_and_hydrates_e
         assert_eq!(event.agent_type, "subagent");
         assert!(!event.is_primary);
         assert!(event.workspace.as_deref().unwrap().starts_with("/repo/"));
-        let hydrated =
-            hydrate_hermes_source_backed_message(candidate.path(), &event.locator).unwrap();
+        let hydrated = hydrate_hermes_source_backed_message(
+            crate::test_provider_sqlite_data_root(),
+            candidate.path(),
+            &event.locator,
+        )
+        .unwrap();
         assert_eq!(
             hydrated.provider_session_id,
             event.provider_session_id.as_deref().unwrap()
@@ -419,7 +435,8 @@ fn hermes_source_backed_inactive_profiles_remain_explicit_only() {
         crate::provider_sources::DiscoveryPlatform::Linux,
         crate::provider_sources::DiscoveryPlatformDirs::default(),
     );
-    let inventory = discover_hermes_source_backed(&context).unwrap();
+    let inventory =
+        discover_hermes_source_backed(crate::test_provider_sqlite_data_root(), &context).unwrap();
     assert_eq!(inventory.sources.len(), 1);
     assert_eq!(
         inventory.sources[0].selection(),
@@ -431,6 +448,7 @@ fn hermes_source_backed_inactive_profiles_remain_explicit_only() {
     );
 
     let explicit = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
         &inactive_path,
         SourceAnchor::provider_native(
             HERMES_SOURCE_ANCHOR_NAMESPACE,
@@ -444,9 +462,13 @@ fn hermes_source_backed_inactive_profiles_remain_explicit_only() {
     let event = event(&records);
     assert_eq!(event.body, "inactive explicit sentinel");
     assert_eq!(
-        hydrate_hermes_source_backed_message(explicit.path(), &event.locator)
-            .unwrap()
-            .text,
+        hydrate_hermes_source_backed_message(
+            crate::test_provider_sqlite_data_root(),
+            explicit.path(),
+            &event.locator
+        )
+        .unwrap()
+        .text,
         "inactive explicit sentinel"
     );
 }
@@ -457,6 +479,7 @@ fn hermes_source_backed_replacement_preserves_ids_and_rejects_stale_exact_coordi
     let path = temp.path().join("state.db");
     create_state_db(&path, "replacement", "before replacement sentinel");
     let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
         &path,
         SourceAnchor::provider_native(
             HERMES_SOURCE_ANCHOR_NAMESPACE,
@@ -469,9 +492,13 @@ fn hermes_source_backed_replacement_preserves_ids_and_rejects_stale_exact_coordi
     let before_event = event(&before_records).clone();
     let before_child = child_session(&before_records).clone();
     assert_eq!(
-        hydrate_hermes_source_backed_message(&path, &before_event.locator)
-            .unwrap()
-            .text,
+        hydrate_hermes_source_backed_message(
+            crate::test_provider_sqlite_data_root(),
+            &path,
+            &before_event.locator
+        )
+        .unwrap()
+        .text,
         "before replacement sentinel"
     );
 
@@ -493,13 +520,22 @@ fn hermes_source_backed_replacement_preserves_ids_and_rejects_stale_exact_coordi
             || before_certificate.content_digest() != after_certificate.content_digest()
     );
     assert!(matches!(
-        hydrate_hermes_source_backed_message(&path, &before_event.locator).unwrap_err(),
+        hydrate_hermes_source_backed_message(
+            crate::test_provider_sqlite_data_root(),
+            &path,
+            &before_event.locator
+        )
+        .unwrap_err(),
         HermesSourceBackedError::StaleSourceEvidence | HermesSourceBackedError::StaleRecordEvidence
     ));
     assert_eq!(
-        hydrate_hermes_source_backed_message(&path, &after_event.locator)
-            .unwrap()
-            .text,
+        hydrate_hermes_source_backed_message(
+            crate::test_provider_sqlite_data_root(),
+            &path,
+            &after_event.locator
+        )
+        .unwrap()
+        .text,
         "after replacement exact sentinel"
     );
 

@@ -49,10 +49,14 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
         .unwrap();
     drop(attacker_database);
 
-    let result = open_root_authorized_snapshot_with_hook(&path, || {
-        fs::rename(&path, &original).unwrap();
-        fs::rename(&attacker, &path).unwrap();
-    });
+    let result = open_root_authorized_snapshot_with_hook(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        },
+    );
     assert!(matches!(
         result,
         Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
@@ -85,7 +89,10 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         )]),
     );
     let before = sqlite_persistent_bytes(&path);
-    let (documents, _, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
+    let (documents, _, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    ));
     assert!(documents
         .iter()
         .any(|document| document.body.contains("DeepAgents active WAL sentinel")));
@@ -200,23 +207,35 @@ fn current_database_wins_and_legacy_is_only_a_missing_current_fallback() {
     fs::write(&current, b"current").unwrap();
     fs::write(&legacy, b"legacy").unwrap();
 
-    let selected = DeepAgentsDatabaseSelectionV0::from_home(temp.path());
+    let selected = DeepAgentsDatabaseSelectionV0::from_home(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    );
     assert_eq!(selected.path(), current);
     assert_eq!(selected.route(), DeepAgentsDatabaseRouteV0::Current);
     assert_eq!(
-        DeepAgentsLocatorResolverV0::from_home(temp.path())
-            .selection
-            .path(),
+        DeepAgentsLocatorResolverV0::from_home(
+            crate::test_provider_sqlite_data_root(),
+            temp.path()
+        )
+        .selection
+        .path(),
         current
     );
 
     fs::remove_file(&current).unwrap();
-    let selected = DeepAgentsDatabaseSelectionV0::from_home(temp.path());
+    let selected = DeepAgentsDatabaseSelectionV0::from_home(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    );
     assert_eq!(selected.path(), legacy);
     assert_eq!(selected.route(), DeepAgentsDatabaseRouteV0::Legacy);
 
     fs::remove_file(&legacy).unwrap();
-    let selected = DeepAgentsDatabaseSelectionV0::from_home(temp.path());
+    let selected = DeepAgentsDatabaseSelectionV0::from_home(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    );
     assert_eq!(selected.path(), current);
     assert_eq!(selected.route(), DeepAgentsDatabaseRouteV0::Current);
 }
@@ -246,7 +265,8 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     );
     drop(conn);
 
-    let selection = DeepAgentsDatabaseSelectionV0::explicit(&path);
+    let selection =
+        DeepAgentsDatabaseSelectionV0::explicit(crate::test_provider_sqlite_data_root(), &path);
     let mut scanner =
         DeepAgentsSourceBackedScannerV0::open(selection.clone(), DateTime::<Utc>::UNIX_EPOCH)
             .unwrap();
@@ -318,9 +338,10 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
         ))
     );
 
-    let hydrated = DeepAgentsLocatorResolverV0::explicit(&path)
-        .hydrate(&documents[0].locator)
-        .unwrap();
+    let hydrated =
+        DeepAgentsLocatorResolverV0::explicit(crate::test_provider_sqlite_data_root(), &path)
+            .hydrate(&documents[0].locator)
+            .unwrap();
     assert_eq!(hydrated.text, long_message);
     assert_eq!(
         &hydrated.record_digest,
@@ -359,7 +380,10 @@ fn checkpoint_state_and_non_message_writes_never_become_chat() {
     );
     drop(conn);
 
-    let (documents, result, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
+    let (documents, result, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    ));
     assert_eq!(documents.len(), 1);
     assert_eq!(documents[0].body, "visible chat message");
     assert_eq!(result.certificate.counts().complete_records, 2);
@@ -388,7 +412,10 @@ fn replacement_preserves_ids_and_invalidates_old_snapshot_evidence() {
     );
     drop(conn);
 
-    let (before, before_scan, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
+    let (before, before_scan, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    ));
     assert_eq!(before.len(), 1);
     let before_event_id = before[0].event_id;
     let before_session_id = before[0].session_id;
@@ -403,11 +430,15 @@ fn replacement_preserves_ids_and_invalidates_old_snapshot_evidence() {
     drop(conn);
 
     assert!(matches!(
-        DeepAgentsLocatorResolverV0::explicit(&path).hydrate(&before_locator),
+        DeepAgentsLocatorResolverV0::explicit(crate::test_provider_sqlite_data_root(), &path)
+            .hydrate(&before_locator),
         Err(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)
     ));
 
-    let (after, after_scan, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
+    let (after, after_scan, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    ));
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].event_id, before_event_id);
     assert_eq!(after[0].session_id, before_session_id);
@@ -420,8 +451,9 @@ fn replacement_preserves_ids_and_invalidates_old_snapshot_evidence() {
         after[0].locator.certified_source_revision_digest(),
         before_locator.certified_source_revision_digest()
     );
-    let hydrated = DeepAgentsLocatorResolverV0::explicit(&path)
-        .hydrate(&after[0].locator)
-        .unwrap();
+    let hydrated =
+        DeepAgentsLocatorResolverV0::explicit(crate::test_provider_sqlite_data_root(), &path)
+            .hydrate(&after[0].locator)
+            .unwrap();
     assert_eq!(hydrated.text, "after replacement");
 }

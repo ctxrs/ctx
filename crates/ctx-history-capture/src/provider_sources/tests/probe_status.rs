@@ -36,7 +36,7 @@ fn default_location_probe_does_not_fallback_to_path_existence_for_unhandled_prov
     };
 
     assert_eq!(
-        default_location_import_probe(CaptureProvider::Shell, &location, &existing),
+        default_location_import_probe(None, CaptureProvider::Shell, &location, &existing),
         BoundedProbe::NotFound
     );
 }

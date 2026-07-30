@@ -376,17 +376,24 @@ fn map_lingma_source_hydration(error: LingmaSourceBackedErrorV0) -> HydrationFai
 
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceBackedResolverV0 {
+    data_root: PathBuf,
     pub(super) sources: BTreeMap<[u8; 32], (SourceKey, PathBuf)>,
 }
 
 impl LingmaSourceBackedResolverV0 {
-    pub(crate) fn new(inventory: &LingmaSourceInventoryV0) -> LingmaSourceBackedResultV0<Self> {
+    pub(crate) fn new(
+        data_root: impl Into<PathBuf>,
+        inventory: &LingmaSourceInventoryV0,
+    ) -> LingmaSourceBackedResultV0<Self> {
         let mut sources = BTreeMap::new();
         for database in &inventory.databases {
             let source = database.source_key()?;
             sources.insert(source.identity().digest(), (source, database.path.clone()));
         }
-        Ok(Self { sources })
+        Ok(Self {
+            data_root: data_root.into(),
+            sources,
+        })
     }
 
     #[cfg(test)]
@@ -437,8 +444,8 @@ impl LingmaSourceBackedResolverV0 {
             ));
         }
 
-        let root_authority =
-            LingmaRootAuthorizedSource::retain(path).map_err(map_lingma_source_hydration)?;
+        let root_authority = LingmaRootAuthorizedSource::retain(&self.data_root, path)
+            .map_err(map_lingma_source_hydration)?;
         let sqlite_snapshot = root_authority
             .open_snapshot()
             .map_err(map_lingma_source_hydration)?;

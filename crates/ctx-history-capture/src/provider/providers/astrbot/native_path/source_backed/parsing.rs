@@ -164,10 +164,11 @@ where
 
 #[cfg(test)]
 pub(crate) fn scan_astrbot_source_backed_v0(
+    data_root: &std::path::Path,
     source: &AstrBotSourceBackedSourceV0,
     sink: &mut impl AstrBotSourceBackedSinkV0,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&source.path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, &source.path)?;
     let certificate = scan_astrbot_snapshot_v0(source, sqlite_snapshot, sink)?;
     source_root.revalidate()?;
     Ok(certificate)

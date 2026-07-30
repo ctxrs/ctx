@@ -1,4 +1,7 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use ctx_history_core::{
     BatchHydrationRequest, BatchHydrationResult, CaptureProvider, ContentSourceResolver,
@@ -29,6 +32,7 @@ use crate::{
 
 #[derive(Debug)]
 struct OpenCodeDocumentTreeAdapter {
+    data_root: PathBuf,
     registration: OpenCodeSourceBackedRegistration,
     path: PathBuf,
 }
@@ -58,7 +62,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<OpenCodeDocumentTree> {
-        discover_document_tree(&self.path).map_err(route_error)
+        discover_document_tree(&self.data_root, &self.path).map_err(route_error)
     }
 
     fn scan_changed(
@@ -74,6 +78,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             ));
         };
         let scan = scan_source(
+            &self.data_root,
             &self.path,
             self.registration.dialect,
             Some(physical_evidence),
@@ -102,7 +107,8 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
     ) -> SourceBackedRouteResult<[u8; 32]> {
         match &tree.authority {
             OpenCodeTreeAuthority::Present(expected) => {
-                let current = observe_present_document_tree(&self.path).map_err(route_error)?;
+                let current = observe_present_document_tree(&self.data_root, &self.path)
+                    .map_err(route_error)?;
                 let OpenCodeTreeAuthority::Present(current_evidence) = current.authority else {
                     return Err(source_changed(
                         "OpenCode-family SQLite database disappeared before publication",
@@ -131,7 +137,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
         request: &BatchHydrationRequest,
     ) -> Result<BatchHydrationResult, HydrationFailure> {
         self.registration
-            .exact_resolver(self.path.clone())
+            .exact_resolver(self.data_root.clone(), self.path.clone())
             .hydrate_batch(request)
     }
 }
@@ -140,6 +146,7 @@ pub(crate) fn register(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
     let registration = registration_for_provider(source.provider).ok_or_else(|| {
         invalid_route(
@@ -148,6 +155,7 @@ pub(crate) fn register(
         )
     })?;
     let adapter = OpenCodeDocumentTreeAdapter {
+        data_root: data_root.to_path_buf(),
         registration,
         path: source.path.clone(),
     };
@@ -163,9 +171,10 @@ fn registration_for_provider(
 }
 
 fn discover_document_tree(
+    data_root: &Path,
     path: &std::path::Path,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    match observe_present_document_tree(path) {
+    match observe_present_document_tree(data_root, path) {
         Ok(tree) => Ok(tree),
         Err(error) if source_missing(&error) => observe_missing_document_tree(path),
         Err(error) => Err(error),
@@ -173,9 +182,10 @@ fn discover_document_tree(
 }
 
 fn observe_present_document_tree(
+    data_root: &Path,
     path: &std::path::Path,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, path)?;
     let opening = sqlite_snapshot.evidence().clone();
     let closing = sqlite_snapshot.finish()?;
     source_root.revalidate()?;

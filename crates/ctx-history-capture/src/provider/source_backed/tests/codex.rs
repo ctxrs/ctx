@@ -72,7 +72,13 @@ fn codex_history_and_sessions_publish_one_fresh_generation_and_hydrate_exactly()
             &history,
         ),
     ];
-    let build = build_automatic_source_backed_registry_from_report(&context, sources, Vec::new());
+    let data_root = temp.path().join("ctx-data");
+    let build = build_automatic_source_backed_registry_from_parts(
+        &context,
+        &data_root,
+        sources,
+        Vec::new(),
+    );
     assert_eq!(build.executable_route_count(), 2);
     assert_eq!(build.unsupported_route_count(), 0);
     assert!(build.issues.is_empty());
@@ -213,8 +219,9 @@ fn codex_history_and_sessions_publish_one_fresh_generation_and_hydrate_exactly()
     appended_line.push(b'\n');
     prompt_bytes.extend(appended_line);
     fs::write(&history, &prompt_bytes).unwrap();
-    let appended_build = build_automatic_source_backed_registry_from_report(
+    let appended_build = build_automatic_source_backed_registry_from_parts(
         &context,
+        &data_root,
         vec![
             fixture_provider_source_at(
                 CaptureProvider::Codex,

@@ -14,7 +14,7 @@ use std::{
 #[cfg(not(target_os = "windows"))]
 use std::fs::File;
 
-use ctx_history_core::{default_data_root, CaptureProvider};
+use ctx_history_core::{platform_security::create_private_directory_all, CaptureProvider};
 use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -93,10 +93,12 @@ impl fmt::Debug for AuthorizedSourceRoute {
     }
 }
 
-/// Stateless admission service. Future Store route revisions can be consumed
+/// Root-bound admission service. Future Store route revisions can be consumed
 /// here without exposing their path representation to provider resolvers.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SourceAccessBroker;
+#[derive(Debug, Clone)]
+pub struct SourceAccessBroker {
+    data_root: Arc<PathBuf>,
+}
 
 /// Opaque result of bounded route inspection. It owns the exact route that was
 /// measured, so admission cannot substitute a caller-supplied byte count or a
@@ -125,8 +127,10 @@ impl fmt::Debug for PreparedSourceAdmission {
 }
 
 impl SourceAccessBroker {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: Arc::new(data_root.into()),
+        }
     }
 
     pub fn admit(
@@ -152,7 +156,7 @@ impl SourceAccessBroker {
                 event_id,
             ));
         }
-        admit_platform(route, locators, None, event_id)
+        admit_platform(&self.data_root, route, locators, None, event_id)
     }
 
     /// Returns the bytes that must be reserved before admitting this source.
@@ -189,6 +193,7 @@ impl SourceAccessBroker {
         locators: &[CompleteContentSourceLocator],
     ) -> Result<BrokeredSourceAccess, CompleteContentError> {
         admit_platform(
+            &self.data_root,
             prepared.route,
             locators,
             Some(prepared.reserved_snapshot_bytes),
@@ -453,6 +458,7 @@ enum BrokeredSource {
 
 enum BrokeredSqliteSource {
     Provider {
+        data_root: Arc<PathBuf>,
         path: PathBuf,
         evidence: SqliteSourceEvidence,
     },
@@ -473,8 +479,12 @@ pub(crate) enum BrokeredSqliteReadSnapshot {
 impl BrokeredSqliteSource {
     fn open(&self, event_id: Uuid) -> Result<BrokeredSqliteReadSnapshot, CompleteContentError> {
         match self {
-            Self::Provider { path, evidence } => {
-                let connection = open_provider_sqlite_readonly(path)
+            Self::Provider {
+                data_root,
+                path,
+                evidence,
+            } => {
+                let connection = open_provider_sqlite_readonly(data_root, path)
                     .map_err(|cause| map_capture_error(event_id, cause))?;
                 if connection
                     .evidence()
@@ -552,6 +562,7 @@ impl BrokeredNanoClawSource {
 
 #[cfg(any(unix, target_os = "windows"))]
 fn admit_platform(
+    data_root: &Path,
     route: AuthorizedSourceRoute,
     locators: &[CompleteContentSourceLocator],
     reserved_snapshot_bytes: Option<u64>,
@@ -574,9 +585,12 @@ fn admit_platform(
                     nanoclaw_snapshot::SNAPSHOT_MAX_TOTAL_BYTES,
                     event_id,
                 )?;
-                BrokeredSource::NanoClaw(admit_nanoclaw(&route, &selected, locators, event_id)?)
+                BrokeredSource::NanoClaw(admit_nanoclaw(
+                    data_root, &route, &selected, locators, event_id,
+                )?)
             } else {
                 BrokeredSource::Sqlite(admit_sqlite(
+                    data_root,
                     &route,
                     &selected,
                     reserved_snapshot_bytes,
@@ -603,28 +617,37 @@ fn admit_platform(
 }
 
 fn admit_nanoclaw(
+    data_root: &Path,
     route: &AuthorizedSourceRoute,
     selected_path: &Path,
     locators: &[CompleteContentSourceLocator],
     event_id: Uuid,
 ) -> Result<BrokeredNanoClawSource, CompleteContentError> {
-    nanoclaw_snapshot::BrokeredNanoClawSnapshot::admit(route, selected_path, locators, event_id)
-        .map(BrokeredNanoClawSource)
+    nanoclaw_snapshot::BrokeredNanoClawSnapshot::admit(
+        data_root,
+        route,
+        selected_path,
+        locators,
+        event_id,
+    )
+    .map(BrokeredNanoClawSource)
 }
 
-fn ctx_sqlite_snapshot_tempdir(event_id: Uuid) -> Result<TempDir, CompleteContentError> {
-    let data_root = default_data_root().map_err(|_| {
-        CompleteContentError::new(CompleteContentErrorKind::SourceUnreadable, event_id)
-    })?;
-    fs::create_dir_all(&data_root).map_err(|cause| map_io_error(event_id, cause))?;
+fn ctx_sqlite_snapshot_tempdir(
+    data_root: &Path,
+    event_id: Uuid,
+) -> Result<TempDir, CompleteContentError> {
+    let staging_root = data_root.join("tmp").join("provider-sqlite");
+    create_private_directory_all(&staging_root).map_err(|cause| map_io_error(event_id, cause))?;
     tempfile::Builder::new()
         .prefix("complete-content-sqlite-")
-        .tempdir_in(&data_root)
+        .tempdir_in(&staging_root)
         .map_err(|cause| map_io_error(event_id, cause))
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
 fn admit_platform(
+    _data_root: &Path,
     _route: AuthorizedSourceRoute,
     _locators: &[CompleteContentSourceLocator],
     _reserved_snapshot_bytes: Option<u64>,

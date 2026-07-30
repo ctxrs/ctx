@@ -28,6 +28,7 @@ fn sqlite_component_bytes(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
 #[test]
 fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
     let temp = tempdir();
+    let data = tempdir();
     let path = temp.path().join("forge.db");
     let writer = Connection::open(&path).unwrap();
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
@@ -42,10 +43,13 @@ fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
     }));
 
     assert_eq!(
-        has_forgecode_conversations_table(&path),
+        has_forgecode_conversations_table(Some(data.path()), &path),
         BoundedProbe::Found
     );
     assert_eq!(sqlite_component_bytes(&path), before);
+    let staging = data.path().join("tmp/provider-sqlite");
+    assert!(staging.is_dir());
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
     drop(writer);
 }
 
@@ -55,7 +59,7 @@ fn sqlite_probe_fails_closed_for_corruption_and_oversized_sources() {
     let corrupt = temp.path().join("corrupt.db");
     fs::write(&corrupt, b"not a sqlite database").unwrap();
     assert_eq!(
-        has_forgecode_conversations_table(&corrupt),
+        has_forgecode_conversations_table(None, &corrupt),
         BoundedProbe::IoError
     );
 
@@ -65,7 +69,7 @@ fn sqlite_probe_fails_closed_for_corruption_and_oversized_sources() {
         .set_len(SQLITE_PROBE_MAX_TOTAL_BYTES + 1)
         .unwrap();
     assert_eq!(
-        has_forgecode_conversations_table(&oversized),
+        has_forgecode_conversations_table(None, &oversized),
         BoundedProbe::BudgetExhausted
     );
 }
@@ -84,7 +88,7 @@ fn sqlite_probe_deadline_interrupts_expensive_queries() {
         ..SqliteProbeLimits::default()
     };
 
-    let outcome = sqlite_structural_probe(&path, limits, |connection| {
+    let outcome = sqlite_structural_probe(None, &path, limits, |connection| {
         connection.query_row(
             "with recursive counter(value) as (\
                  values(0) union all select value + 1 from counter where value < 10000000\
@@ -105,15 +109,38 @@ fn sqlite_probe_connections_are_query_only() {
         .execute_batch("create table conversations (id text);")
         .unwrap();
 
-    let outcome = sqlite_structural_probe(&path, SqliteProbeLimits::default(), |connection| {
-        let query_only =
-            connection.pragma_query_value(None, "query_only", |row| row.get::<_, bool>(0))?;
-        Ok(query_only
-            && connection
-                .execute("create table denied (id integer)", [])
-                .is_err())
-    });
+    let outcome =
+        sqlite_structural_probe(None, &path, SqliteProbeLimits::default(), |connection| {
+            let query_only =
+                connection.pragma_query_value(None, "query_only", |row| row.get::<_, bool>(0))?;
+            Ok(query_only
+                && connection
+                    .execute("create table denied (id integer)", [])
+                    .is_err())
+        });
     assert_eq!(outcome, BoundedProbe::Found);
+}
+
+#[test]
+fn sqlite_probe_rejects_source_mutation_during_structural_query() {
+    let temp = tempdir();
+    let path = temp.path().join("mutation.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("create table conversations (id text);")
+        .unwrap();
+
+    let outcome =
+        sqlite_structural_probe(None, &path, SqliteProbeLimits::default(), |connection| {
+            let present = connection.query_row(
+                "select exists(select 1 from sqlite_schema where name = 'conversations')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            Connection::open(&path)?.pragma_update(None, "user_version", 7)?;
+            Ok(present)
+        });
+    assert_eq!(outcome, BoundedProbe::IoError);
 }
 
 #[test]

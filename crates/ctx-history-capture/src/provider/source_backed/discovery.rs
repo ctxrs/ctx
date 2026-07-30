@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceBackedAutomaticUnavailableReason {
     SourceStatus(ProviderSourceStatus),
+    UnsafeRootOverlap { detail: String },
     UnsupportedFormat { detail: &'static str },
     SelectorAuthorityUnavailable { detail: &'static str },
     RegistrationRejected { detail: String },
@@ -69,20 +70,38 @@ impl SourceBackedAutomaticRegistryBuild {
 /// silently claim it.
 pub fn build_automatic_source_backed_registry(
     discovery: &DiscoveryContext,
+    data_root: &Path,
 ) -> SourceBackedAutomaticRegistryBuild {
     let discovery_started = Instant::now();
-    let report = discover_provider_sources_with_context(discovery);
-    let mut build = build_automatic_source_backed_registry_from_report(
-        discovery,
-        report.sources,
-        report.issues,
-    );
+    let discovery = discovery.clone().with_data_root(data_root);
+    let report = discover_provider_sources_with_context(&discovery);
+    let mut build =
+        build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
     build.discovery_duration = discovery_started.elapsed();
     build
 }
 
-pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry_from_report(
+/// Registers automatic routes from one already-completed discovery report.
+///
+/// Callers that must validate source roots before their first persistent write
+/// can pass the same report through registration instead of traversing every
+/// provider tree a second time.
+pub fn build_automatic_source_backed_registry_from_report(
     discovery: &DiscoveryContext,
+    data_root: &Path,
+    report: DiscoveryReport,
+) -> SourceBackedAutomaticRegistryBuild {
+    build_automatic_source_backed_registry_from_parts(
+        discovery,
+        data_root,
+        report.sources,
+        report.issues,
+    )
+}
+
+pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry_from_parts(
+    discovery: &DiscoveryContext,
+    data_root: &Path,
     sources: Vec<ProviderSource>,
     discovery_issues: Vec<DiscoveryIssue>,
 ) -> SourceBackedAutomaticRegistryBuild {
@@ -94,6 +113,19 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
     let mut compound_provider_registered = HashSet::new();
 
     for source in sources {
+        if let Err(error) =
+            validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))
+        {
+            let reason = SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap {
+                detail: error.to_string(),
+            };
+            registry.register(SourceBackedRoute::unsupported(
+                source.clone(),
+                automatic_unavailable_detail(&reason),
+            ));
+            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
+            continue;
+        }
         if source.import_support == ProviderImportSupport::Explicit {
             continue;
         }
@@ -161,6 +193,7 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
         match register_discovered_automatic_route(
             &mut registry,
             discovery,
+            data_root,
             format_route.constructor,
             source.clone(),
         ) {
@@ -207,17 +240,19 @@ fn automatic_unavailable_detail(reason: &SourceBackedAutomaticUnavailableReason)
         SourceBackedAutomaticUnavailableReason::SourceStatus(status) => {
             format!("provider source status is {}", status.as_str())
         }
+        SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { detail }
+        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
         SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail }
         | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { detail } => {
             (*detail).to_owned()
         }
-        SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
     }
 }
 
 fn register_discovered_automatic_route(
     registry: &mut SourceBackedProviderRegistry,
     discovery: &DiscoveryContext,
+    data_root: &Path,
     constructor: SourceBackedRouteConstructor,
     source: ProviderSource,
 ) -> Result<(), SourceBackedAutomaticUnavailableReason> {
@@ -233,6 +268,7 @@ fn register_discovered_automatic_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::Automatic,
+                data_root,
                 selected.surface_key().as_str(),
             )
         }
@@ -246,6 +282,7 @@ fn register_discovered_automatic_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::Automatic,
+                data_root,
                 platform_root,
                 Vec::new(),
             )
@@ -256,6 +293,7 @@ fn register_discovered_automatic_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::Automatic,
+                data_root,
                 inventory_source,
             )
         }
@@ -265,6 +303,7 @@ fn register_discovered_automatic_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::Automatic,
+                data_root,
                 inventory_source,
             )
         }
@@ -273,6 +312,7 @@ fn register_discovered_automatic_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::Automatic,
+                data_root,
                 discovery.clone(),
             )
         }
@@ -282,13 +322,16 @@ fn register_discovered_automatic_route(
                     detail: "Shelley automatic registration requires the exact discovery CWD",
                 },
             )?;
-            register_shelley_source_backed_route(registry, source, exact_cwd)
+            register_shelley_source_backed_route(registry, source, data_root, exact_cwd)
         }
-        (SourceBackedRouteConstructor::ProviderSource, _) => register_landed_source_backed_route(
-            registry,
-            source,
-            SourceBackedRouteSelection::Automatic,
-        ),
+        (SourceBackedRouteConstructor::ProviderSource, _) => {
+            register_landed_source_backed_route_with_data_root(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                data_root,
+            )
+        }
         _ => Err(invalid_route(
             source.provider,
             "the landed route constructor does not match its provider registration callback",

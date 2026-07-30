@@ -15,7 +15,7 @@ use rusqlite::{config::DbConfig, params, Connection};
 use sha2::{Digest, Sha256};
 
 use super::{
-    default_data_root, open_root_handle_sqlite_source_snapshot,
+    open_root_handle_sqlite_source_snapshot,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
     SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceComponent,
@@ -53,7 +53,8 @@ fn create_persistent_wal(path: &Path) -> Connection {
 
 fn retain_parent(path: &Path) -> SqliteSourceDirectoryAuthority {
     let parent = File::open(path).unwrap();
-    retain_sqlite_source_directory_authority(&parent, path).unwrap()
+    retain_sqlite_source_directory_authority(crate::test_provider_sqlite_data_root(), &parent, path)
+        .unwrap()
 }
 
 fn read_values(snapshot: &SqliteSourceReadSnapshot) -> Vec<String> {
@@ -162,10 +163,11 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
         snapshot.copied_bytes(),
         u64::try_from(before_database.len() + before_wal.len()).unwrap()
     );
-    assert!(snapshot
-        .snapshot_directory()
-        .unwrap()
-        .starts_with(default_data_root().unwrap()));
+    assert!(snapshot.snapshot_directory().unwrap().starts_with(
+        crate::test_provider_sqlite_data_root()
+            .join("tmp")
+            .join("provider-sqlite")
+    ));
     let snapshot_directory = snapshot.snapshot_directory().unwrap().to_path_buf();
     assert_eq!(
         snapshot

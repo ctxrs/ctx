@@ -31,10 +31,14 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
     create_fixture(&path, "expected", 1);
     create_fixture(&attacker, "attacker", 1);
 
-    let result = open_root_authorized_snapshot_with_hook(&path, || {
-        fs::rename(&path, &original).unwrap();
-        fs::rename(&attacker, &path).unwrap();
-    });
+    let result = open_root_authorized_snapshot_with_hook(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        },
+    );
     assert!(matches!(
         result,
         Err(OpenCodeSourceBackedError::SqliteSource(
@@ -121,7 +125,7 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         let request =
             EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone())
                 .unwrap();
-        let resolver = registration.exact_resolver(&path);
+        let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
         let hydrated = resolver.hydrate_event(&request).unwrap();
         assert_eq!(hydrated.provider_bytes, documents[0].body.as_bytes());
         let session_requests = documents
@@ -147,7 +151,8 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
             })
             .collect();
         let batch_request = BatchHydrationRequest::new(batch_events).unwrap();
-        let batch_resolver = registration.exact_resolver(&path);
+        let batch_resolver =
+            registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
         let hydrated_batch = batch_resolver.hydrate_batch(&batch_request).unwrap();
         assert_eq!(batch_resolver.hydration_counters(), (1, 1));
         for (hydrated, document) in hydrated_batch.records().iter().zip(documents.iter().rev()) {
@@ -216,7 +221,7 @@ fn exact_hydration_does_not_scan_unrelated_provider_rows() {
         drop(connection);
 
         let hydrated = registration
-            .exact_resolver(&path)
+            .exact_resolver(crate::test_provider_sqlite_data_root(), &path)
             .hydrate_event(&request)
             .unwrap();
         assert_eq!(hydrated.provider_bytes, documents[0].body.as_bytes());
@@ -240,7 +245,7 @@ fn grouped_batch_hydration_uses_one_snapshot_and_bounded_native_key_queries() {
             .collect(),
     )
     .unwrap();
-    let resolver = registration.exact_resolver(&path);
+    let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
 
     let hydrated = resolver.hydrate_batch(&request).unwrap();
 
@@ -319,7 +324,7 @@ fn checkpoint_sidecar_removal_and_vacuum_preserve_all_family_logical_snapshots()
             baseline_documents[0].locator.clone(),
         )
         .unwrap();
-        let resolver = registration.exact_resolver(&path);
+        let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
         assert_eq!(
             resolver.hydrate_event(&request).unwrap().provider_bytes,
             baseline_documents[0].body.as_bytes()
@@ -381,7 +386,7 @@ fn schema_policy_and_projection_classification_changes_replace() {
             baseline_documents[0].locator.clone(),
         )
         .unwrap();
-        let resolver = registration.exact_resolver(&path);
+        let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
 
         let connection = Connection::open(&path).unwrap();
         connection.pragma_update(None, "user_version", 7).unwrap();
@@ -454,7 +459,7 @@ fn one_decode_pass_streams_logical_rows_directly_without_a_page_bridge() {
         let request =
             EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone())
                 .unwrap();
-        let resolver = registration.exact_resolver(&path);
+        let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch("vacuum").unwrap();
         drop(connection);
@@ -538,6 +543,7 @@ fn logical_same_route_replacement_preserves_the_certificate_without_append() {
             &mut registry,
             source,
             SourceBackedRouteSelection::ExplicitManual,
+            crate::test_provider_sqlite_data_root(),
         )
         .unwrap();
         let options = WriterOptions {
@@ -577,6 +583,7 @@ fn route_deletes_a_missing_database_and_preserves_on_acquisition_unavailable() {
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
     )
     .unwrap();
     let options = WriterOptions {

@@ -115,17 +115,24 @@ impl OpenCodeSourceBackedRegistration {
         path: &Path,
         emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
     ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-        scan_source(path, self.dialect, None, &mut |output| match output {
-            OpenCodeScanOutput::Begin(_) => Ok(()),
-            OpenCodeScanOutput::Document(document) => emit(vec![document]),
-        })
+        scan_source(
+            crate::test_provider_sqlite_data_root(),
+            path,
+            self.dialect,
+            None,
+            &mut |output| match output {
+                OpenCodeScanOutput::Begin(_) => Ok(()),
+                OpenCodeScanOutput::Document(document) => emit(vec![document]),
+            },
+        )
     }
 
     pub(crate) fn exact_resolver(
         self,
+        data_root: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
     ) -> OpenCodeSourceBackedExactResolver {
-        OpenCodeSourceBackedExactResolver::new(self, path)
+        OpenCodeSourceBackedExactResolver::new(self, data_root, path)
     }
 
     fn owns_source(self, source: &SourceKey) -> bool {
@@ -264,12 +271,13 @@ impl SqliteSourceValue {
 }
 
 fn scan_source(
+    data_root: &Path,
     path: &Path,
     dialect: &'static OpenCodeSqliteDialect,
     expected_physical: Option<&SqliteSourceEvidence>,
     emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, path)?;
     if expected_physical.is_some_and(|expected| sqlite_snapshot.evidence() != expected) {
         return Err(CaptureError::SourceChangedDuringCapture.into());
     }
@@ -507,12 +515,14 @@ fn schema_family_for_source(
 }
 
 fn open_root_authorized_snapshot(
+    data_root: &Path,
     path: &Path,
 ) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(path, || {})
+    open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
 fn open_root_authorized_snapshot_with_hook(
+    data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
 ) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
@@ -531,7 +541,8 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();

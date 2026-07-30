@@ -35,7 +35,11 @@ fn source_backed_multi_db_root_guards_and_exact_hydration() {
             database("project-b", &second),
         ],
     ));
-    let frozen = bind_inventory(inventory.observe().unwrap()).unwrap();
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory.observe().unwrap(),
+    )
+    .unwrap();
     assert_eq!(frozen.databases.len(), 2);
 
     let first_path = std::fs::canonicalize(&first).unwrap();
@@ -79,10 +83,11 @@ fn source_backed_multi_db_root_guards_and_exact_hydration() {
     assert!(finish_opened_source(second_source).unwrap());
 
     let locator = alpha_event.locator.clone();
-    let hydrated = CrushLocatorResolverV0::discover(&inventory)
-        .unwrap()
-        .hydrate(&locator)
-        .unwrap();
+    let hydrated =
+        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
+            .unwrap()
+            .hydrate(&locator)
+            .unwrap();
     assert_eq!(hydrated.provider_session_id, "session-a");
     assert_eq!(hydrated.native_record_id, "message-a");
     assert_eq!(
@@ -100,7 +105,11 @@ fn source_backed_replacement_keeps_ids_and_rejects_stale_locator() {
         b"inventory-stable",
         vec![database("project", &path)],
     ));
-    let opening = bind_inventory(inventory.observe().unwrap()).unwrap();
+    let opening = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory.observe().unwrap(),
+    )
+    .unwrap();
     let source = open_source(opening.databases.into_iter().next().unwrap()).unwrap();
     let before = document_for_only_message(&source);
     assert!(finish_opened_source(source).unwrap());
@@ -110,20 +119,24 @@ fn source_backed_replacement_keeps_ids_and_rejects_stale_locator() {
     std::fs::remove_file(&path).unwrap();
     std::fs::rename(&replacement, &path).unwrap();
 
-    let replacement = bind_inventory(inventory.observe().unwrap()).unwrap();
+    let replacement = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory.observe().unwrap(),
+    )
+    .unwrap();
     let source = open_source(replacement.databases.into_iter().next().unwrap()).unwrap();
     let after = document_for_only_message(&source);
     assert!(finish_opened_source(source).unwrap());
     assert_eq!(after.event_id, before.event_id);
     assert_ne!(after.locator, before.locator);
     assert!(matches!(
-        CrushLocatorResolverV0::discover(&inventory)
+        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
             .unwrap()
             .hydrate(&before.locator),
         Err(CrushSourceBackedErrorV0::StaleSourceEvidence)
     ));
     assert_eq!(
-        CrushLocatorResolverV0::discover(&inventory)
+        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
             .unwrap()
             .hydrate(&after.locator)
             .unwrap()
@@ -191,17 +204,22 @@ fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
         b"full-body-inventory",
         vec![database("full-body-project", &path)],
     ));
-    let frozen = bind_inventory(inventory.observe().unwrap()).unwrap();
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory.observe().unwrap(),
+    )
+    .unwrap();
     let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
     let document = document_for_only_message(&source);
     assert_eq!(document.body, text);
     assert!(document.body.ends_with("crush-tail"));
     assert!(finish_opened_source(source).unwrap());
 
-    let hydrated = CrushLocatorResolverV0::discover(&inventory)
-        .unwrap()
-        .hydrate(&document.locator)
-        .unwrap();
+    let hydrated =
+        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
+            .unwrap()
+            .hydrate(&document.locator)
+            .unwrap();
     assert_eq!(
         hydrated.decoded_display_text.as_deref(),
         Some(text.as_str())
@@ -235,10 +253,10 @@ fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
     assert!(path.with_file_name("wal-project.db-wal").exists());
     assert!(path.with_file_name("wal-project.db-shm").exists());
 
-    let frozen = bind_inventory(inventory(
-        b"wal-inventory",
-        vec![database("wal-project", &path)],
-    ))
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory(b"wal-inventory", vec![database("wal-project", &path)]),
+    )
     .unwrap();
     let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
     let document = document_for_only_message(&source);
@@ -259,8 +277,11 @@ fn stock_sqlite_snapshot_finish_precedes_publication_revalidation() {
         "message",
         "replacement after finish",
     );
-    let frozen =
-        bind_inventory(inventory(b"finish-order", vec![database("project", &path)])).unwrap();
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory(b"finish-order", vec![database("project", &path)]),
+    )
+    .unwrap();
     let opened = open_source(frozen.databases[0].clone()).unwrap();
     let replaced_path = path.clone();
     set_before_source_publication_revalidation(Some(Box::new(move || {

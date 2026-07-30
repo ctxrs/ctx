@@ -14,7 +14,7 @@ fn provider_native_batch_hydration_preserves_requested_order_and_full_bodies() {
     let requests = vec![event_request(&documents[1]), event_request(&documents[0])];
     let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
     let hydrated = registration
-        .exact_resolver(&path)
+        .exact_resolver(crate::test_provider_sqlite_data_root(), &path)
         .hydrate_batch(&batch)
         .unwrap();
 

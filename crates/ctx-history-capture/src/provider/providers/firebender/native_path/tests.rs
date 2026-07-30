@@ -330,6 +330,7 @@ fn direct_route_logical_noop_survives_wal_only_physical_churn() {
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
     )
     .unwrap();
     let options = WriterOptions {
@@ -371,6 +372,7 @@ fn direct_route_certifies_authoritative_deletion_and_rejects_unavailable_shape()
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
     )
     .unwrap();
     let options = WriterOptions {
@@ -404,6 +406,7 @@ fn direct_route_never_deletes_when_the_provider_parent_is_missing() {
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
     )
     .unwrap();
     let options = WriterOptions {
@@ -467,6 +470,7 @@ fn direct_route_never_deletes_for_an_unsafe_leaf() {
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
     )
     .unwrap();
     let options = WriterOptions {
@@ -535,6 +539,7 @@ fn direct_route_never_deletes_for_a_permission_denied_leaf() {
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
     )
     .unwrap();
     let options = WriterOptions {

@@ -109,12 +109,14 @@ struct NanoClawSnapshotManifest {
 /// directory; the only IDs retained are immutable locator/component manifest
 /// entries. No provider path survives this boundary.
 pub(super) struct BrokeredNanoClawSnapshot {
+    data_root: PathBuf,
     _snapshot: tempfile::TempDir,
     manifest: NanoClawSnapshotManifest,
 }
 
 impl BrokeredNanoClawSnapshot {
     pub(super) fn admit(
+        data_root: &Path,
         route: &AuthorizedSourceRoute,
         selected_path: &Path,
         source_locators: &[CompleteContentSourceLocator],
@@ -161,7 +163,10 @@ impl BrokeredNanoClawSnapshot {
             }
         }
         let root = admit_root(&project_root, route.source_root.as_deref(), event_id)?;
-        let snapshot = create_snapshot_tempdir(&std::env::temp_dir(), event_id)?;
+        let staging_root = data_root.join("tmp").join("provider-sqlite");
+        ctx_history_core::platform_security::create_private_directory_all(&staging_root)
+            .map_err(|cause| map_io_error(event_id, cause))?;
+        let snapshot = create_snapshot_tempdir(&staging_root, event_id)?;
         fs::create_dir_all(snapshot.path().join("data").join("v2-sessions"))
             .map_err(|cause| map_io_error(event_id, cause))?;
 
@@ -178,9 +183,9 @@ impl BrokeredNanoClawSnapshot {
         )?
         .ok_or_else(|| content_error(event_id, CompleteContentErrorKind::SourceMissing))?;
         budget.admit_database(&central.database, event_id)?;
-        validate_snapshot_schema(&central_destination, &mut budget, event_id)?;
+        validate_snapshot_schema(data_root, &central_destination, &mut budget, event_id)?;
 
-        let central_connection = open_provider_sqlite_readonly(&central_destination)
+        let central_connection = open_provider_sqlite_readonly(data_root, &central_destination)
             .map_err(|cause| map_capture_error(event_id, cause))?;
         configure_complete_content_sqlite_connection(
             &central_connection,
@@ -242,7 +247,7 @@ impl BrokeredNanoClawSnapshot {
                     ));
                 }
                 database_identities.push(observed.database.frozen.clone());
-                validate_snapshot_schema(&destination, &mut budget, event_id)?;
+                validate_snapshot_schema(data_root, &destination, &mut budget, event_id)?;
                 observations.push(observed);
             }
             component_ids.insert((
@@ -264,6 +269,7 @@ impl BrokeredNanoClawSnapshot {
         budget.check(event_id)?;
 
         let project = nanoclaw::NanoClawCompleteProject::open(
+            data_root,
             snapshot.path(),
             &locators,
             CompleteContentSqliteQueryBudget::new(),
@@ -281,6 +287,7 @@ impl BrokeredNanoClawSnapshot {
         drop(project);
 
         Ok(Self {
+            data_root: data_root.to_path_buf(),
             _snapshot: snapshot,
             manifest: NanoClawSnapshotManifest {
                 locators: locators.iter().map(ManifestLocator::from_native).collect(),
@@ -309,8 +316,13 @@ impl BrokeredNanoClawSnapshot {
             ));
         }
         let _ = &self.manifest.component_ids;
-        nanoclaw::NanoClawCompleteProject::open(self._snapshot.path(), locators, query_budget)
-            .map_err(|cause| map_bounded_sqlite_error_for_event(event_id, cause))
+        nanoclaw::NanoClawCompleteProject::open(
+            &self.data_root,
+            self._snapshot.path(),
+            locators,
+            query_budget,
+        )
+        .map_err(|cause| map_bounded_sqlite_error_for_event(event_id, cause))
     }
 }
 
@@ -451,13 +463,14 @@ fn snapshot_sqlite_set(
 }
 
 fn validate_snapshot_schema(
+    data_root: &Path,
     path: &Path,
     budget: &mut SnapshotBudget,
     event_id: Uuid,
 ) -> Result<(), CompleteContentError> {
     budget.check(event_id)?;
-    let conn =
-        open_provider_sqlite_readonly(path).map_err(|cause| map_capture_error(event_id, cause))?;
+    let conn = open_provider_sqlite_readonly(data_root, path)
+        .map_err(|cause| map_capture_error(event_id, cause))?;
     configure_complete_content_sqlite_connection(&conn, CompleteContentSqliteQueryBudget::new())
         .map_err(|cause| map_bounded_sqlite_error_for_event(event_id, cause))?;
     budget.check(event_id)

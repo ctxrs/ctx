@@ -41,6 +41,7 @@ pub(crate) enum HermesSourceSelection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceCandidate {
+    pub(super) data_root: PathBuf,
     pub(super) path: PathBuf,
     pub(super) source: SourceKey,
     // Selection and status remain discovery provenance for release reporting.
@@ -70,7 +71,10 @@ impl HermesSourceCandidate {
         self.status
     }
 
-    pub(crate) fn automatic(source: ProviderSource) -> HermesSourceBackedResult<Self> {
+    pub(crate) fn automatic(
+        data_root: impl Into<PathBuf>,
+        source: ProviderSource,
+    ) -> HermesSourceBackedResult<Self> {
         let selection = automatic_selection(&source.path)?;
         let profile = match &selection {
             HermesSourceSelection::DefaultProfile => "default",
@@ -84,6 +88,7 @@ impl HermesSourceCandidate {
             TypedKey::utf8(profile)?,
         )?;
         Ok(Self {
+            data_root: data_root.into(),
             path: source.path,
             source: hermes_source_key(anchor)?,
             selection,
@@ -105,6 +110,7 @@ pub(crate) struct HermesSourceInventory {
 /// multiplex set admitted by the existing Hermes discovery resolver.
 #[allow(dead_code)]
 pub(crate) fn discover_hermes_source_backed(
+    data_root: &Path,
     context: &DiscoveryContext,
 ) -> HermesSourceBackedResult<HermesSourceInventory> {
     let report =
@@ -112,7 +118,7 @@ pub(crate) fn discover_hermes_source_backed(
     let mut sources = Vec::with_capacity(report.sources.len());
     for source in report.sources {
         if source.source_format == HERMES_SQLITE_SOURCE_FORMAT {
-            sources.push(HermesSourceCandidate::automatic(source)?);
+            sources.push(HermesSourceCandidate::automatic(data_root, source)?);
         }
     }
     Ok(HermesSourceInventory {
@@ -124,6 +130,7 @@ pub(crate) fn discover_hermes_source_backed(
 /// Admits an explicitly selected Hermes database with caller-owned persistent
 /// lineage. This is the only provider-local entry point for inactive profiles.
 pub(crate) fn hermes_source_backed_explicit(
+    data_root: impl Into<PathBuf>,
     path: impl Into<PathBuf>,
     anchor: SourceAnchor,
 ) -> HermesSourceBackedResult<HermesSourceCandidate> {
@@ -137,6 +144,7 @@ pub(crate) fn hermes_source_backed_explicit(
         Err(_) => ProviderSourceStatus::Unknown,
     };
     Ok(HermesSourceCandidate {
+        data_root: data_root.into(),
         path,
         source: hermes_source_key(anchor)?,
         selection: HermesSourceSelection::Explicit,

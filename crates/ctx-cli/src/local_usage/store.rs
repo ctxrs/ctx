@@ -9,7 +9,7 @@ use std::{
 
 use chrono::{DateTime, Days, Utc};
 use ctx_history_core::platform_security::{
-    create_private_directory_all, restrict_private_file_handle, verify_private_file,
+    establish_private_data_root, restrict_private_file_handle, verify_private_file,
 };
 #[cfg(test)]
 use rusqlite::params;
@@ -169,7 +169,7 @@ fn create_v1_fixture_for_test(
     daily_schema: &str,
     empty_blame_outcome: &str,
 ) -> Result<(), UsageStoreError> {
-    create_private_directory_all(data_root)?;
+    establish_private_data_root(data_root)?;
     verify_private_directory_and_owner(data_root)?;
     let path = usage_path(data_root);
     if path.exists() {
@@ -508,7 +508,7 @@ fn prepare_file(path: &Path, create: bool) -> Result<PreparedFile, UsageStoreErr
     match parent.symlink_metadata() {
         Ok(_) => verify_private_directory_and_owner(parent)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-            create_private_directory_all(parent)?;
+            establish_private_data_root(parent)?;
             verify_private_directory_and_owner(parent)?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {

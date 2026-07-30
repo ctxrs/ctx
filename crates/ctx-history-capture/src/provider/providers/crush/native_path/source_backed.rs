@@ -1,9 +1,8 @@
 //! Source-backed lexical projection for Crush's finite project-database inventory.
 //!
 //! The selector owner supplies a re-observable inventory. This adapter owns
-//! only Crush discovery binding, native SQLite parsing, stable provider
-//! coordinates, and bounded lexical projection. Source lifecycle,
-//! certification, and atomic publication remain in the shared contracts.
+//! Crush discovery binding, native SQLite parsing, stable provider coordinates,
+//! and bounded lexical projection. Source lifecycle,
 
 use std::{
     collections::HashSet,
@@ -241,6 +240,7 @@ pub(crate) struct BoundDatabase {
 
 #[derive(Debug)]
 pub(crate) struct FrozenInventory {
+    data_root: PathBuf,
     pub(crate) observation: SourceInventoryObservation,
     pub(crate) databases: Vec<BoundDatabase>,
 }
@@ -263,7 +263,7 @@ impl FrozenInventory {
         &self,
         observation: CrushProjectInventoryObservationV0,
     ) -> CrushSourceBackedResultV0<bool> {
-        let candidate = bind_inventory(observation)?;
+        let candidate = bind_inventory(&self.data_root, observation)?;
         Ok(self.observation == candidate.observation
             && self.databases.len() == candidate.databases.len()
             && self
@@ -347,10 +347,11 @@ pub struct CrushLocatorResolverV0 {
 
 impl CrushLocatorResolverV0 {
     pub fn discover(
+        data_root: &Path,
         inventory_source: &dyn CrushProjectInventorySourceV0,
     ) -> CrushSourceBackedResultV0<Self> {
         Ok(Self {
-            inventory: bind_inventory(inventory_source.observe()?)?,
+            inventory: bind_inventory(data_root, inventory_source.observe()?)?,
         })
     }
 
@@ -446,6 +447,7 @@ impl CrushLocatorResolverV0 {
 }
 
 pub(crate) fn bind_inventory(
+    data_root: &Path,
     observation: CrushProjectInventoryObservationV0,
 ) -> CrushSourceBackedResultV0<FrozenInventory> {
     if observation.databases.len() > MAX_CRUSH_PROJECT_DATABASES {
@@ -466,7 +468,7 @@ pub(crate) fn bind_inventory(
         }
         let canonical_path = std::fs::canonicalize(&database.path)?;
         let (source_root, sqlite_authority, database_name) =
-            retain_crush_sqlite_authority(&canonical_path)?;
+            retain_crush_sqlite_authority(data_root, &canonical_path)?;
         let source_key = crush_source_key(database.project_key)?;
         if !source_ids.insert(source_key.identity().digest()) {
             return Err(CrushSourceBackedErrorV0::DuplicateProjectKey);
@@ -484,6 +486,7 @@ pub(crate) fn bind_inventory(
     }
     databases.sort_by_key(|database| database.source_key.identity().digest());
     Ok(FrozenInventory {
+        data_root: data_root.to_path_buf(),
         observation: core_observation,
         databases,
     })
@@ -569,6 +572,7 @@ fn source_revalidation_is_current(evidence: &SourceRevalidation) -> bool {
 }
 
 fn retain_crush_sqlite_authority(
+    data_root: &Path,
     canonical_path: &Path,
 ) -> CrushSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceDirectoryAuthority, OsString)> {
     let parent = canonical_path.parent().ok_or_else(|| {
@@ -583,7 +587,8 @@ fn retain_crush_sqlite_authority(
     let source_root = ProviderSourceRoot::open(parent)?;
     let directory = source_root.directory()?;
     let authority_handle = directory.try_clone_authority_handle()?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle, parent)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)?;
     source_root.revalidate()?;
     Ok((source_root, sqlite_authority, database_name))
 }

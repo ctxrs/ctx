@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use ctx_history_capture::ProviderImportWorkResult;
+use ctx_history_capture::{
+    discover_provider_sources, validate_provider_source_roots_outside_data_root,
+    ProviderImportWorkResult,
+};
+use ctx_history_core::platform_security::establish_private_data_root;
 use serde_json::json;
 
 use crate::{
@@ -43,6 +47,15 @@ pub(super) fn run_automatic_source_refresh_import(
         "refreshing",
         "Refreshing the provider-authoritative source index through the ctx daemon.",
     );
+    let home = crate::identity::home_dir()
+        .context("resolve user home for provider-root safety preflight")?;
+    let sources = discover_provider_sources(&home);
+    validate_provider_source_roots_outside_data_root(&context.data_root, sources.iter())
+        .context("validate provider roots before initializing ctx state")?;
+    super::validate_explicit_source_catalog_roots(&context.data_root)
+        .context("validate explicit provider roots before initializing ctx state")?;
+    establish_private_data_root(&context.data_root)
+        .context("protect ctx data root before provider refresh")?;
     if !context.args.no_daemon {
         autostart_daemon_and_wait(
             &context.data_root,

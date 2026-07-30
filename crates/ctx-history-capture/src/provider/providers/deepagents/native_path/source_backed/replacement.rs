@@ -116,7 +116,7 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
             .map_err(|_| deepagents_internal("Deep Agents fence lock was poisoned"))?
             .clone()
             .ok_or_else(|| deepagents_changed("Deep Agents scan has no terminal fence"))?;
-        if terminal_fence_matches(self.path(), &fence).map_err(route_error)? {
+        if terminal_fence_matches(&self.data_root, self.path(), &fence).map_err(route_error)? {
             Ok(tree.tree_fingerprint)
         } else {
             Err(deepagents_changed(
@@ -134,7 +134,7 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
             .iter()
             .map(|event| event.locator())
             .collect::<Vec<_>>();
-        let hydrated = DeepAgentsLocatorResolverV0::explicit(self.path.clone())
+        let hydrated = DeepAgentsLocatorResolverV0::explicit(&self.data_root, self.path.clone())
             .hydrate_locators(&locators)
             .map_err(deepagents_hydration_failure)?;
         let records = request
@@ -154,10 +154,11 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
 }
 
 fn terminal_fence_matches(
+    data_root: &Path,
     path: &Path,
     expected: &DeepAgentsSourceTerminalFence,
 ) -> DeepAgentsSourceBackedResultV0<bool> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, path)?;
     let current = sqlite_snapshot.finish()?;
     source_root.revalidate()?;
     Ok(current == expected.evidence)

@@ -13,6 +13,7 @@ use super::{
 
 #[cfg(unix)]
 pub(super) fn admit(
+    data_root: &Path,
     route: &AuthorizedSourceRoute,
     selected_path: &Path,
     reserved_snapshot_bytes: Option<u64>,
@@ -88,7 +89,7 @@ pub(super) fn admit(
                 Err(cause) => return Err(map_io_error(event_id, cause)),
             }
         }
-        let evidence = super::open_provider_sqlite_readonly(selected_path)
+        let evidence = super::open_provider_sqlite_readonly(data_root, selected_path)
             .and_then(ReadOnlySqliteConnection::finish)
             .map_err(|cause| map_capture_error(event_id, cause))?;
         if !revalidate_opened_file(selected_path, &main, &main_frozen) {
@@ -110,11 +111,12 @@ pub(super) fn admit(
             }
         }
         return Ok(BrokeredSqliteSource::Provider {
+            data_root: std::sync::Arc::new(data_root.to_path_buf()),
             path: selected_path.to_path_buf(),
             evidence,
         });
     }
-    let dir = ctx_sqlite_snapshot_tempdir(event_id)?;
+    let dir = ctx_sqlite_snapshot_tempdir(data_root, event_id)?;
     let path = dir.path().join("source.sqlite");
     copy_bounded_handle(&main, &path, main_frozen.length, event_id)?;
     for (suffix, _, file, frozen) in &sidecars {
@@ -177,6 +179,7 @@ pub(super) fn admit(
 
 #[cfg(target_os = "windows")]
 pub(super) fn admit(
+    data_root: &Path,
     route: &AuthorizedSourceRoute,
     selected_path: &Path,
     reserved_snapshot_bytes: Option<u64>,
@@ -228,7 +231,7 @@ pub(super) fn admit(
                 event_id,
             )?;
         }
-        let evidence = super::open_provider_sqlite_readonly(selected_path)
+        let evidence = super::open_provider_sqlite_readonly(data_root, selected_path)
             .and_then(ReadOnlySqliteConnection::finish)
             .map_err(|cause| map_capture_error(event_id, cause))?;
         super::windows::verify_named_file_still_matches(
@@ -246,12 +249,13 @@ pub(super) fn admit(
             )?;
         }
         return Ok(BrokeredSqliteSource::Provider {
+            data_root: std::sync::Arc::new(data_root.to_path_buf()),
             path: selected_path.to_path_buf(),
             evidence,
         });
     }
 
-    let dir = ctx_sqlite_snapshot_tempdir(event_id)?;
+    let dir = ctx_sqlite_snapshot_tempdir(data_root, event_id)?;
     let path = dir.path().join("source.sqlite");
     super::windows::copy_bounded_handle(&database, &path, database.metadata.len(), event_id)?;
     for ((suffix, admitted), _source_path) in ["-wal", "-shm", "-journal"]

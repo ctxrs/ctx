@@ -105,7 +105,11 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
     emit: &mut dyn FnMut(TraeSourceBackedPageV0) -> TraeSourceBackedResultV0<()>,
 ) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
     let canonical_path = explicit_trae_leaf(path)?;
-    let authority = acquire_source(&canonical_path, DateTime::<Utc>::UNIX_EPOCH)?;
+    let authority = acquire_source(
+        crate::test_provider_sqlite_data_root(),
+        &canonical_path,
+        DateTime::<Utc>::UNIX_EPOCH,
+    )?;
     scan_trae_authority(&canonical_path, &authority, emit)
 }
 

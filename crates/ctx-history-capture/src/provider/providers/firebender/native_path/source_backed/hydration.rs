@@ -20,6 +20,7 @@ use crate::provider::providers::firebender::native_path::{
 
 #[derive(Debug)]
 pub(crate) struct FirebenderExactResolver {
+    data_root: PathBuf,
     explicit_path: PathBuf,
     #[cfg(test)]
     snapshot_opens: Cell<u64>,
@@ -28,8 +29,9 @@ pub(crate) struct FirebenderExactResolver {
 }
 
 impl FirebenderExactResolver {
-    pub(super) fn new(explicit_path: impl Into<PathBuf>) -> Self {
+    pub(super) fn new(data_root: impl Into<PathBuf>, explicit_path: impl Into<PathBuf>) -> Self {
         Self {
+            data_root: data_root.into(),
             explicit_path: explicit_path.into(),
             #[cfg(test)]
             snapshot_opens: Cell::new(0),
@@ -107,7 +109,7 @@ impl ContentSourceResolver for FirebenderExactResolver {
             ));
         }
 
-        let snapshot = match open_database_leaf(&database_path) {
+        let snapshot = match open_database_leaf(&self.data_root, &database_path) {
             Ok(OpenDatabaseLeaf::Present(snapshot)) => *snapshot,
             Ok(OpenDatabaseLeaf::Missing(fence)) if fence.revalidate() => {
                 return Err(hydration_failure(
@@ -226,5 +228,5 @@ fn hydration_failure(kind: HydrationFailureKind, detail: impl Into<String>) -> H
 
 #[cfg(test)]
 pub(crate) fn resolver_for_test(path: impl Into<PathBuf>) -> FirebenderExactResolver {
-    FirebenderExactResolver::new(path)
+    FirebenderExactResolver::new(crate::test_provider_sqlite_data_root(), path)
 }
