@@ -4,7 +4,7 @@ use anyhow::Result;
 use ctx_pro_host_protocol::BlameResult;
 use serde_json::Value;
 
-use crate::ui::{Document, RenderContext, Ui};
+use crate::ui::{canonical_human_output_bytes, Document, RenderContext, Ui};
 
 mod commit;
 mod evidence;
@@ -35,7 +35,8 @@ pub(crate) fn print_blame_result(
     }
 
     let document = render_blame_document(result, ui.stdout_context());
-    let plain_bytes = document.render_plain().len();
+    let plain_bytes =
+        canonical_human_output_bytes(|context| render_blame_document(result, context));
     ui.write_stdout(&document)?;
     Ok(plain_bytes)
 }

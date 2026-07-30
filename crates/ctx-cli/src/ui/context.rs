@@ -46,6 +46,20 @@ pub(crate) struct RenderContext {
 }
 
 impl RenderContext {
+    /// Stable, unbounded plain-text context used only for local accounting and
+    /// output-limit decisions. Terminal capabilities must not change the bytes
+    /// attributed to the same logical result.
+    pub(crate) const fn canonical_human_measurement() -> Self {
+        Self {
+            stream: StreamKind::Stdout,
+            color_mode: ColorMode::Never,
+            is_terminal: false,
+            color_enabled: false,
+            terminal_width: None,
+            unicode: true,
+        }
+    }
+
     pub(crate) fn for_test(test: TestContext) -> Self {
         let auto_color_enabled = test
             .auto_color_enabled

@@ -19,15 +19,12 @@ use crate::{
     provider_args::ProviderArg,
     semantic::PinnedSourceBackedGeneration,
     transcript::TranscriptMode,
-    ui::Ui,
+    ui::{canonical_human_output_bytes, Ui},
     ShowArgs, ShowTarget,
 };
 
 use super::{
-    render::{
-        canonical_human_output_bytes, enforce_json_output_limit, render_show_document,
-        timestamp_json, write_show_value,
-    },
+    render::{enforce_json_output_limit, render_show_document, timestamp_json, write_show_value},
     shared::{
         event_source_json, open_index, resolve_event, resolve_session, session_source_json,
         source_path_exists, validate_ctx_id, validate_session_selector,
@@ -129,7 +126,7 @@ pub(crate) fn run_show(
 
 fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {
     let document = render_show_document(value, ui.stdout_context());
-    let output_bytes = canonical_human_output_bytes(&document);
+    let output_bytes = canonical_show_output_bytes(value);
     enforce_complete_content_output_limit(
         ContentPolicy::Complete,
         output_bytes,
@@ -138,6 +135,10 @@ fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usi
     )?;
     ui.write_stdout(&document)?;
     Ok(output_bytes)
+}
+
+pub(super) fn canonical_show_output_bytes(value: &Value) -> usize {
+    canonical_human_output_bytes(|context| render_show_document(value, context))
 }
 
 pub(super) fn validate_show_target(target: &ShowTarget) -> Result<()> {

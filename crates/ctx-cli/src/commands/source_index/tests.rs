@@ -35,14 +35,15 @@ mod tests {
     use super::*;
     use super::{
         locate::{locate_event_value, locate_session_value, validate_locate_target},
-        render::search_json,
+        render::{render_show_document, search_json},
         search::{
             search_context_observation_with_hydrator, NormalizedSearchQuery, SearchCollection,
             SearchHit, SearchResultWindow,
         },
         shared::session_source_json,
         show::{
-            event_window_value, render_event_value, session_transcript_value, validate_show_target,
+            canonical_show_output_bytes, event_window_value, render_event_value,
+            session_transcript_value, validate_show_target,
         },
     };
 
@@ -1352,5 +1353,54 @@ mod tests {
         );
         assert_eq!(stdout_body_bytes("body"), 5);
         assert_eq!(stdout_body_bytes("body\n"), 5);
+    }
+
+    #[test]
+    fn show_human_output_limit_uses_one_unbounded_canonical_measurement() {
+        let value = json!({
+            "target": "event",
+            "content_policy": "complete",
+            "events": [{
+                "ctx_event_id": "01900001-0000-7000-8000-000000000002",
+                "role": "assistant",
+                "event_type": "message",
+                "text": "a sentence that wraps differently on a narrow terminal but has one canonical bound"
+            }]
+        });
+        let expected = render_show_document(
+            &value,
+            &crate::ui::RenderContext::canonical_human_measurement(),
+        )
+        .render_plain()
+        .len();
+        let narrow = render_show_document(
+            &value,
+            &crate::ui::RenderContext::for_test(crate::ui::TestContext::tty(
+                crate::ui::StreamKind::Stdout,
+                32,
+            )),
+        )
+        .render_plain()
+        .len();
+        assert!(narrow > expected, "fixture must add narrow-terminal wrapping");
+        assert_eq!(canonical_show_output_bytes(&value), expected);
+        let event_id = uuid::Uuid::parse_str("01900001-0000-7000-8000-000000000002").unwrap();
+        crate::complete_content::enforce_complete_content_output_limit(
+            ContentPolicy::Complete,
+            canonical_show_output_bytes(&value),
+            expected,
+            event_id,
+        )
+        .unwrap();
+        assert!(
+            crate::complete_content::enforce_complete_content_output_limit(
+                ContentPolicy::Complete,
+                narrow,
+                expected,
+                event_id,
+            )
+            .is_err(),
+            "a live-width count would incorrectly reject the same logical output"
+        );
     }
 }

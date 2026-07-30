@@ -17,8 +17,8 @@ use crate::local_usage::{CliUsage, ResultObservationAction};
 use crate::output::{compact_json, print_json, SqlFormat};
 use crate::source_sql::SqlCompatibility;
 use crate::ui::{
-    diagnostic, empty_state, outcome, section, table, Diagnostic, DiagnosticLevel, Document,
-    EmptyState, Field, Outcome, OutcomeState, RenderContext, Table, Ui,
+    canonical_human_output_bytes, diagnostic, empty_state, outcome, section, table, Diagnostic,
+    DiagnosticLevel, Document, EmptyState, Field, Outcome, OutcomeState, RenderContext, Table, Ui,
 };
 use crate::SqlArgs;
 
@@ -146,7 +146,7 @@ pub(crate) fn read_sql_limited(
 
 pub(crate) fn print_sql_table(result: &RawSqlResult, ui: &mut Ui) -> Result<usize> {
     let document = render_sql_table(ui.stdout_context(), result);
-    let output_bytes = document.render_plain().len();
+    let output_bytes = canonical_human_output_bytes(|context| render_sql_table(context, result));
     ui.write_stdout(&document)?;
     if let Some(warning) = render_sql_truncation(ui.stderr_context(), result) {
         ui.write_stderr(&warning)?;

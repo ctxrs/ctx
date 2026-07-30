@@ -23,13 +23,11 @@ use crate::{
         PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
         SourceBackedSemanticNotReady,
     },
-    ui::Ui,
+    ui::{canonical_human_output_bytes, Ui},
     RefreshArg, SearchArgs, SearchBackendArg,
 };
 
-use super::render::{
-    canonical_human_output_bytes, pretty_json_stdout_bytes, render_search_document, search_json,
-};
+use super::render::{pretty_json_stdout_bytes, render_search_document, search_json};
 
 pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{index_search_filters, NormalizedSearchQuery};
@@ -156,7 +154,9 @@ pub(crate) fn run_search(
         output_bytes
     } else {
         let document = render_search_document(&value, args.verbose, ui.stdout_context());
-        let output_bytes = canonical_human_output_bytes(&document);
+        let output_bytes = canonical_human_output_bytes(|context| {
+            render_search_document(&value, args.verbose, context)
+        });
         ui.write_stdout(&document)?;
         output_bytes
     };

@@ -24,5 +24,17 @@ pub(crate) use document::{Document, Line, Span};
 pub(crate) use style::{Token, CLAP_STYLES};
 pub(crate) use writer::Ui;
 
+/// Measures one logical human result in a fixed, unbounded plain context.
+///
+/// Visible output is rendered separately with the live terminal context. This
+/// count stays independent of wrapping, color, and terminal capability.
+pub(crate) fn canonical_human_output_bytes(
+    render: impl FnOnce(&RenderContext) -> Document,
+) -> usize {
+    render(&RenderContext::canonical_human_measurement())
+        .render_plain()
+        .len()
+}
+
 #[cfg(test)]
 mod tests;
