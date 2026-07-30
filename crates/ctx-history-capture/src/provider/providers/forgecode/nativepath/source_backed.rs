@@ -8,22 +8,32 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
+    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    provider::source_backed::{
+        family::document::{
+            ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
+            DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+        },
+        route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    },
+    provider_sources::{SqliteLogicalSnapshot, SqliteSourceEvidence},
     CaptureError, ProviderAdapterContext, ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
@@ -32,21 +42,24 @@ use super::super::complete_content::{
 };
 use super::source::{
     discover_forgecode_source, ForgeCodeConversationRow, ForgeCodeDiscovery, ForgeCodeFrontier,
-    ForgeCodePage, ForgeCodeScanner, ForgeCodeSourceObservation, FORGECODE_NATIVE_PAGE_MAX_BYTES,
-    FORGECODE_NATIVE_PARSER_REVISION, FORGECODE_NATIVE_POLICY_REVISION,
+    ForgeCodePage, ForgeCodeScanner, ForgeCodeSourceObservation, ForgeCodeSqliteDatabase,
+    FORGECODE_NATIVE_PAGE_MAX_BYTES, FORGECODE_NATIVE_PARSER_REVISION,
+    FORGECODE_NATIVE_POLICY_REVISION,
 };
 
 const FORGECODE_PROVIDER_ID: &str = "forgecode";
 const FORGECODE_SOURCE_SCHEMA_VARIANT: &str = "conversations-messages-v1";
 const FORGECODE_SELECTED_SOURCE_NAMESPACE: &str = "forgecode-selected-database-v1";
 const FORGECODE_SELECTED_SOURCE_KEY: &str = "selected";
-const FORGECODE_SOURCE_REVISION_KIND: &str = "forgecode-sqlite-snapshot-v1";
 const FORGECODE_LOGICAL_SESSION_KIND: &str = "forgecode-conversation";
 const FORGECODE_NATIVE_SESSION_NAMESPACE: &str = "forgecode-conversation-id-v1";
 const FORGECODE_LOGICAL_EVENT_KIND: &str = "forgecode-message";
 const FORGECODE_NATIVE_EVENT_POSITION_KIND: &str = "forgecode-message-index-v1";
 const FORGECODE_LOCATOR_RELATION: &str = "conversations.messages";
 const FORGECODE_RECORD_DIGEST_DOMAIN: &[u8] = b"ctx.forgecode.source-backed-scan-v0\0";
+const FORGECODE_HYDRATION_NATIVE_KEY_BATCH: usize = 256;
+const FORGECODE_SOURCE_BACKED_PARSER_REVISION: &str =
+    "forgecode-nativepath-source-backed-v0:parser=1;policy=6";
 
 #[derive(Debug, Error)]
 pub(crate) enum ForgeCodeSourceBackedErrorV0 {
@@ -165,7 +178,7 @@ pub(crate) struct ForgeCodeSourceBackedPageV0 {
 
 pub(crate) struct ForgeCodeSourceBackedScanV0 {
     source: ForgeCodeSourceBackedSourceV0,
-    opening: SourceObservation,
+    schema_evidence: Vec<u8>,
     scanner: ForgeCodeScanner,
     content_digest: Sha256,
     counts: ScannedSourceCounts,
@@ -178,14 +191,14 @@ pub(crate) fn open_forgecode_source_backed_v0(
 ) -> ForgeCodeSourceBackedResultV0<ForgeCodeSourceBackedDiscoveryV0> {
     let source = selection.source_key()?;
     let native_source = match discover_forgecode_source(&selection.path)? {
-        ForgeCodeDiscovery::Missing(missing) => {
+        ForgeCodeDiscovery::Missing => {
             return Ok(ForgeCodeSourceBackedDiscoveryV0::Missing {
-                preferred_path: missing.preferred_path,
+                preferred_path: selection.path,
             });
         }
         ForgeCodeDiscovery::Live(source) => source,
     };
-    let opening = source_observation(&source, &native_source)?;
+    let schema_evidence = forgecode_schema_evidence(&native_source);
     let canonical_path = native_source.canonical_path.clone();
     let context = ProviderAdapterContext {
         machine_id: "source-backed".to_owned(),
@@ -207,7 +220,7 @@ pub(crate) fn open_forgecode_source_backed_v0(
                 source,
                 canonical_path,
             },
-            opening,
+            schema_evidence,
             scanner,
             content_digest,
             counts: ScannedSourceCounts::default(),
@@ -222,133 +235,143 @@ impl ForgeCodeSourceBackedScanV0 {
         &self.source
     }
 
+    #[cfg(test)]
     pub(crate) fn next_page(
         &mut self,
     ) -> ForgeCodeSourceBackedResultV0<Option<ForgeCodeSourceBackedPageV0>> {
         let Some(page) = self.scanner.next_page()? else {
             return Ok(None);
         };
-        self.observe_source_record(&page)?;
-        let terminal = page.terminal;
-        let retained_bytes = page.retained_bytes;
-        if retained_bytes > FORGECODE_NATIVE_PAGE_MAX_BYTES {
-            return Err(CaptureError::InvalidPayload(
-                "ForgeCode source-backed page exceeds its retained byte bound".to_owned(),
-            )
-            .into());
-        }
-        let ignored_records = ignored_output_records(&page)?;
-        let direct_touches = direct_touches(&page);
-        let row = page.row.as_ref();
-        let mut documents = Vec::with_capacity(page.events.len());
-        let mut failures = page.rejections;
-        let provider_rejections = u64::try_from(failures.len())
-            .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
-        let mut projection_rejections = 0_u64;
-        for retained in page.events {
-            let Some(row) = row else {
-                return Err(ForgeCodeSourceBackedErrorV0::MissingConversationRow);
-            };
-            match lexical_document(&self.source, &self.opening, row, retained, &direct_touches) {
-                Ok(document) => documents.push(document),
-                Err(error) => {
-                    projection_rejections = checked_add(projection_rejections, 1)?;
-                    failures.push(ProviderImportFailure {
-                        line: usize::try_from(row.rowid.max(0)).unwrap_or(usize::MAX),
-                        error: format!(
-                            "ForgeCode source-backed projection rejected event: {error}"
-                        ),
-                    });
-                }
-            }
-        }
-        let retained_records = u64::try_from(documents.len())
-            .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
-        let rejected_records = checked_add(provider_rejections, projection_rejections)?;
-        let complete_records = checked_add(
-            checked_add(retained_records, rejected_records)?,
-            ignored_records,
-        )?;
-        self.counts.complete_records = checked_add(self.counts.complete_records, complete_records)?;
-        self.counts.retained_records = checked_add(self.counts.retained_records, retained_records)?;
-        self.counts.rejected_records = checked_add(self.counts.rejected_records, rejected_records)?;
-        self.counts.ignored_records = checked_add(self.counts.ignored_records, ignored_records)?;
-        self.counts.indexed_documents =
-            checked_add(self.counts.indexed_documents, retained_records)?;
-        self.terminal = terminal;
-        Ok(Some(ForgeCodeSourceBackedPageV0 {
-            documents,
-            failures,
-            retained_bytes,
-            ignored_records,
-            terminal,
-        }))
+        project_source_backed_page(
+            &self.source,
+            &mut self.content_digest,
+            &mut self.counts,
+            &mut self.last_observed_rowid,
+            &mut self.terminal,
+            page,
+        )
+        .map(Some)
     }
 
+    #[cfg(test)]
     pub(crate) fn finish(self) -> ForgeCodeSourceBackedResultV0<CertifiedSource> {
         if !self.terminal {
             return Err(ForgeCodeSourceBackedErrorV0::IncompleteScan);
         }
-        let closing_native = match discover_forgecode_source(&self.source.canonical_path)? {
-            ForgeCodeDiscovery::Live(source) => source,
-            ForgeCodeDiscovery::Missing(_) => {
-                return Err(CaptureError::SourceChangedDuringCapture.into());
-            }
-        };
-        let closing = source_observation(&self.source.source, &closing_native)?;
-        let parser_revision = format!(
-            "forgecode-nativepath-source-backed-v0:parser={FORGECODE_NATIVE_PARSER_REVISION};policy={FORGECODE_NATIVE_POLICY_REVISION}"
-        );
-        Ok(CertifiedSource::certify(
-            self.opening,
-            closing,
-            parser_revision,
+        self.scanner.source_database().revalidate()?;
+        Ok(SqliteLogicalSnapshot::new(
+            FORGECODE_SOURCE_BACKED_PARSER_REVISION,
+            &self.schema_evidence,
             self.content_digest.finalize().into(),
             self.counts,
-        )?)
+        )
+        .certify(self.source.source)?)
     }
+}
 
-    fn observe_source_record(&mut self, page: &ForgeCodePage) -> ForgeCodeSourceBackedResultV0<()> {
-        if let Some(row) = page.row.as_ref() {
-            if self.last_observed_rowid != Some(row.rowid) {
-                self.content_digest.update([1]);
-                self.content_digest.update(row.rowid.to_be_bytes());
-                self.content_digest.update(row.source_record_digest);
-                self.counts.certified_bytes =
-                    checked_add(self.counts.certified_bytes, row.canonical_record_bytes)?;
-                self.last_observed_rowid = Some(row.rowid);
-            }
-            return Ok(());
-        }
-        let Some(rowid) = page.next_frontier.rowid else {
-            return Ok(());
-        };
-        if self.last_observed_rowid == Some(rowid) {
-            return Ok(());
-        }
-        self.content_digest.update([2]);
-        self.content_digest.update(rowid.to_be_bytes());
-        let mut certified_bytes = 9_u64;
-        for failure in &page.rejections {
-            let error_bytes = failure.error.as_bytes();
-            self.content_digest
-                .update((error_bytes.len() as u64).to_be_bytes());
-            self.content_digest.update(error_bytes);
-            certified_bytes = checked_add(
-                certified_bytes,
-                u64::try_from(error_bytes.len())
-                    .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?,
-            )?;
-        }
-        self.counts.certified_bytes = checked_add(self.counts.certified_bytes, certified_bytes)?;
-        self.last_observed_rowid = Some(rowid);
-        Ok(())
+fn project_source_backed_page(
+    source: &ForgeCodeSourceBackedSourceV0,
+    content_digest: &mut Sha256,
+    counts: &mut ScannedSourceCounts,
+    last_observed_rowid: &mut Option<i64>,
+    terminal_scan: &mut bool,
+    page: ForgeCodePage,
+) -> ForgeCodeSourceBackedResultV0<ForgeCodeSourceBackedPageV0> {
+    observe_source_record(content_digest, counts, last_observed_rowid, &page)?;
+    let terminal = page.terminal;
+    let retained_bytes = page.retained_bytes;
+    if retained_bytes > FORGECODE_NATIVE_PAGE_MAX_BYTES {
+        return Err(CaptureError::InvalidPayload(
+            "ForgeCode source-backed page exceeds its retained byte bound".to_owned(),
+        )
+        .into());
     }
+    let ignored_records = ignored_output_records(&page)?;
+    let direct_touches = direct_touches(&page);
+    let row = page.row.as_ref();
+    let mut documents = Vec::with_capacity(page.events.len());
+    let mut failures = page.rejections;
+    let provider_rejections =
+        u64::try_from(failures.len()).map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
+    let mut projection_rejections = 0_u64;
+    for retained in page.events {
+        let Some(row) = row else {
+            return Err(ForgeCodeSourceBackedErrorV0::MissingConversationRow);
+        };
+        match lexical_document(source, row, retained, &direct_touches) {
+            Ok(document) => documents.push(document),
+            Err(error) => {
+                projection_rejections = checked_add(projection_rejections, 1)?;
+                failures.push(ProviderImportFailure {
+                    line: usize::try_from(row.rowid.max(0)).unwrap_or(usize::MAX),
+                    error: format!("ForgeCode source-backed projection rejected event: {error}"),
+                });
+            }
+        }
+    }
+    let retained_records =
+        u64::try_from(documents.len()).map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
+    let rejected_records = checked_add(provider_rejections, projection_rejections)?;
+    let complete_records = checked_add(
+        checked_add(retained_records, rejected_records)?,
+        ignored_records,
+    )?;
+    counts.complete_records = checked_add(counts.complete_records, complete_records)?;
+    counts.retained_records = checked_add(counts.retained_records, retained_records)?;
+    counts.rejected_records = checked_add(counts.rejected_records, rejected_records)?;
+    counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
+    counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
+    *terminal_scan = terminal;
+    Ok(ForgeCodeSourceBackedPageV0 {
+        documents,
+        failures,
+        retained_bytes,
+        ignored_records,
+        terminal,
+    })
+}
+
+fn observe_source_record(
+    content_digest: &mut Sha256,
+    counts: &mut ScannedSourceCounts,
+    last_observed_rowid: &mut Option<i64>,
+    page: &ForgeCodePage,
+) -> ForgeCodeSourceBackedResultV0<()> {
+    if let Some(row) = page.row.as_ref() {
+        if *last_observed_rowid != Some(row.rowid) {
+            content_digest.update([1]);
+            content_digest.update(row.source_record_digest);
+            counts.certified_bytes =
+                checked_add(counts.certified_bytes, row.canonical_record_bytes)?;
+            *last_observed_rowid = Some(row.rowid);
+        }
+        return Ok(());
+    }
+    let Some(rowid) = page.next_frontier.rowid else {
+        return Ok(());
+    };
+    if *last_observed_rowid == Some(rowid) {
+        return Ok(());
+    }
+    content_digest.update([2]);
+    let mut certified_bytes = 1_u64;
+    for failure in &page.rejections {
+        let error_bytes = failure.error.as_bytes();
+        content_digest.update((error_bytes.len() as u64).to_be_bytes());
+        content_digest.update(error_bytes);
+        certified_bytes = checked_add(
+            certified_bytes,
+            u64::try_from(error_bytes.len())
+                .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?,
+        )?;
+    }
+    counts.certified_bytes = checked_add(counts.certified_bytes, certified_bytes)?;
+    *last_observed_rowid = Some(rowid);
+    Ok(())
 }
 
 fn lexical_document(
     source: &ForgeCodeSourceBackedSourceV0,
-    opening: &SourceObservation,
     row: &ForgeCodeConversationRow,
     retained: super::source::ForgeCodeRetainedEvent,
     direct_touches: &BTreeMap<u64, Vec<String>>,
@@ -360,7 +383,6 @@ fn lexical_document(
         .ok_or(ProjectionContractError::InvalidDerivedIdentity)?;
     let event_id = forgecode_event_id(&source.source, session_id, subrecord_index)?;
     let primary_key = TypedKey::composite(vec![
-        TypedKey::I64(row.rowid),
         TypedKey::utf8(&row.conversation_id)?,
         TypedKey::U64(subrecord_index),
     ])?;
@@ -371,8 +393,8 @@ fn lexical_document(
             primary_key,
             row_version: Some(TypedKey::bytes(row.source_record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest(opening)),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         row.source_record_digest,
     )?;
     let lexical_text = retained
@@ -495,32 +517,13 @@ fn forgecode_event_id(
     })
 }
 
-fn source_observation(
-    source: &SourceKey,
-    native: &ForgeCodeSourceObservation,
-) -> Result<SourceObservation, ProjectionContractError> {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx.forgecode.sqlite-snapshot-v1\0");
-    digest.update(native.database.evidence().identity());
-    digest.update(native.database.evidence().length().to_be_bytes());
-    digest.update(native.database.evidence().revision());
-    digest.update(native.schema_fingerprint.as_bytes());
-    digest.update(native.user_version.to_be_bytes());
-    SourceObservation::new(
-        source.clone(),
-        FORGECODE_SOURCE_REVISION_KIND,
-        digest.finalize().to_vec(),
+fn forgecode_schema_evidence(native: &ForgeCodeSourceObservation) -> Vec<u8> {
+    format!(
+        "forgecode-logical-schema-v1;parser={FORGECODE_NATIVE_PARSER_REVISION};\
+         policy={FORGECODE_NATIVE_POLICY_REVISION};user_version={};schema={}",
+        native.user_version, native.schema_fingerprint
     )
-}
-
-fn source_revision_digest(observation: &SourceObservation) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx.source-revision-evidence\0");
-    digest.update((observation.revision_kind().len() as u64).to_be_bytes());
-    digest.update(observation.revision_kind().as_bytes());
-    digest.update((observation.revision().len() as u64).to_be_bytes());
-    digest.update(observation.revision());
-    digest.finalize().into()
+    .into_bytes()
 }
 
 fn checked_add(left: u64, right: u64) -> ForgeCodeSourceBackedResultV0<u64> {
@@ -552,7 +555,7 @@ impl ForgeCodeSourceBackedResolverV0 {
         })
     }
 
-    fn hydrate(
+    pub(crate) fn hydrate(
         &self,
         requests: &[EventHydrationRequest],
         expected_session_id: Option<StableEntityId>,
@@ -565,54 +568,55 @@ impl ForgeCodeSourceBackedResolverV0 {
             .iter()
             .find(|source| source.source.exact_descriptor_eq(first.locator().source()))
             .ok_or_else(|| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-        let current = match discover_forgecode_source(&route.canonical_path) {
-            Ok(ForgeCodeDiscovery::Live(source)) => source,
-            Ok(ForgeCodeDiscovery::Missing(_)) => {
-                return Err(hydration_failure(HydrationFailureKind::ConfirmedDeleted));
-            }
-            Err(_) => {
-                return Err(hydration_failure(
-                    HydrationFailureKind::TemporarilyUnavailable,
-                ));
-            }
-        };
-        let current_observation = source_observation(&route.source, &current)
-            .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-        let expected_revision = source_revision_digest(&current_observation);
         let mut coordinates = Vec::with_capacity(requests.len());
         for request in requests {
+            request
+                .locator()
+                .validate_contract()
+                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
             if !route.source.exact_descriptor_eq(request.locator().source()) {
                 return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
             }
-            if request.locator().certified_source_revision_digest() != Some(&expected_revision) {
-                return Err(hydration_failure(HydrationFailureKind::StaleSourceEvidence));
-            }
             coordinates.push(decode_locator(request.locator())?);
         }
-        let cached_rows = current
-            .database
-            .read(&route.canonical_path, |connection| {
-                let mut rows = BTreeMap::new();
-                for coordinate in &coordinates {
-                    if rows.contains_key(&coordinate.rowid) {
+        let (_, cached_rows) = ForgeCodeSqliteDatabase::open(&route.canonical_path, |connection| {
+            let mut rows = BTreeMap::new();
+            for chunk in coordinates.chunks(FORGECODE_HYDRATION_NATIVE_KEY_BATCH) {
+                for coordinate in chunk {
+                    if rows.contains_key(&coordinate.conversation_id) {
                         continue;
                     }
-                    let values = load_forgecode_conversation_values(connection, coordinate.rowid)?;
+                    let mut statement = connection.prepare(
+                        "select rowid from conversations \
+                             where cast(conversation_id as text) = ?1 collate binary limit 2",
+                    )?;
+                    let mut matches = statement.query([&coordinate.conversation_id])?;
+                    let rowid = matches
+                        .next()?
+                        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                        .get(0)?;
+                    if matches.next()?.is_some() {
+                        return Err(CaptureError::InvalidPayload(
+                            "ForgeCode conversation key is ambiguous".to_owned(),
+                        ));
+                    }
+                    let values = load_forgecode_conversation_values(connection, rowid)?;
                     let digest = forgecode_logical_record_digest(&values);
-                    rows.insert(coordinate.rowid, (values, digest));
+                    rows.insert(coordinate.conversation_id.clone(), (values, digest));
                 }
-                Ok(rows)
-            })
-            .map_err(|error| match error {
-                CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                    hydration_failure(HydrationFailureKind::MissingRecord)
-                }
-                _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
-            })?;
+            }
+            Ok(rows)
+        })
+        .map_err(|error| match error {
+            CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                hydration_failure(HydrationFailureKind::MissingRecord)
+            }
+            _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
+        })?;
         let mut hydrated = Vec::with_capacity(requests.len());
         for (request, coordinate) in requests.iter().zip(coordinates) {
             let (values, digest) = cached_rows
-                .get(&coordinate.rowid)
+                .get(&coordinate.conversation_id)
                 .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
             if digest != request.locator().record_digest() || coordinate.row_version != *digest {
                 return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
@@ -660,10 +664,22 @@ impl ContentSourceResolver for ForgeCodeSourceBackedResolverV0 {
     ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
         self.hydrate(request.events(), Some(request.session_id()))
     }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let records = self.hydrate(request.events(), None)?;
+        let result = BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
+            kind: HydrationFailureKind::InvalidLocator,
+            detail: error.to_string(),
+        })?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
 }
 
 struct ForgeCodeLocatorCoordinate {
-    rowid: i64,
     conversation_id: String,
     subrecord_index: u64,
     row_version: [u8; 32],
@@ -672,7 +688,9 @@ struct ForgeCodeLocatorCoordinate {
 fn decode_locator(
     locator: &SourceRecordLocator,
 ) -> Result<ForgeCodeLocatorCoordinate, HydrationFailure> {
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision {
+    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
+    {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     }
     let NativeRecordCoordinate::ProviderSqlite {
@@ -689,9 +707,7 @@ fn decode_locator(
     let TypedKey::Composite(parts) = primary_key else {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     };
-    let [TypedKey::I64(rowid), TypedKey::Utf8(conversation_id), TypedKey::U64(subrecord_index)] =
-        parts.as_slice()
-    else {
+    let [TypedKey::Utf8(conversation_id), TypedKey::U64(subrecord_index)] = parts.as_slice() else {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     };
     let Some(TypedKey::Bytes(row_version)) = row_version.as_ref() else {
@@ -702,7 +718,6 @@ fn decode_locator(
         .try_into()
         .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
     Ok(ForgeCodeLocatorCoordinate {
-        rowid: *rowid,
         conversation_id: conversation_id.clone(),
         subrecord_index: *subrecord_index,
         row_version,
@@ -714,6 +729,213 @@ fn hydration_failure(kind: HydrationFailureKind) -> HydrationFailure {
         kind,
         detail: "ForgeCode source-backed native hydration failed".to_owned(),
     }
+}
+
+pub(crate) struct ForgeCodeTreeAuthority {
+    native: ForgeCodeSourceObservation,
+    fence: Mutex<Option<SqliteSourceEvidence>>,
+}
+
+impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
+    type Leaf = ForgeCodeSourceBackedSourceV0;
+    type TreeAuthority = ForgeCodeTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        FORGECODE_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        source.provider() == CaptureProvider::ForgeCode.as_str()
+            && source.source_format() == FORGECODE_SQLITE_SOURCE_FORMAT
+            && source.schema_variant() == FORGECODE_SOURCE_SCHEMA_VARIANT
+            && source.provider_identity_version() == 1
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let native = match discover_forgecode_source(&self.path).map_err(route_error)? {
+            ForgeCodeDiscovery::Live(native) => native,
+            ForgeCodeDiscovery::Missing => {
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "selected ForgeCode database is missing",
+                ));
+            }
+        };
+        let fingerprint = DocumentLeafFingerprint::new(*native.database.evidence().revision());
+        let leaf = ForgeCodeSourceBackedSourceV0 {
+            source: self.source_key().map_err(route_error)?,
+            canonical_path: native.canonical_path.clone(),
+        };
+        Ok(CompleteDocumentTree::new(
+            fingerprint.as_bytes(),
+            vec![ObservedDocumentLeaf::with_durable_replay(
+                fingerprint,
+                leaf,
+                false,
+            )],
+            ForgeCodeTreeAuthority {
+                native,
+                fence: Mutex::new(None),
+            },
+        ))
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        sink.begin_source(leaf.source.clone())?;
+        let context = ProviderAdapterContext {
+            machine_id: "source-backed".to_owned(),
+            source_path: Some(leaf.canonical_path.clone()),
+            source_root: leaf.canonical_path.parent().map(Path::to_path_buf),
+            imported_at: DateTime::<Utc>::UNIX_EPOCH,
+        };
+        let mut scanner = ForgeCodeScanner::new(
+            authority.native.clone(),
+            ForgeCodeFrontier::initial(),
+            context,
+            true,
+        )
+        .map_err(route_error)?;
+        let mut content_digest = Sha256::new();
+        content_digest.update(FORGECODE_RECORD_DIGEST_DOMAIN);
+        let mut counts = ScannedSourceCounts::default();
+        let mut last_observed_rowid = None;
+        let mut terminal = false;
+        let mut emitted_pages = 0_u64;
+        let mut peak_buffered_documents = 0_u64;
+        let mut sink_error = None;
+        let streamed = scanner.stream_pages(|page| {
+            let page = project_source_backed_page(
+                leaf,
+                &mut content_digest,
+                &mut counts,
+                &mut last_observed_rowid,
+                &mut terminal,
+                page,
+            )
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            peak_buffered_documents = peak_buffered_documents.max(
+                u64::try_from(page.documents.len())
+                    .map_err(|_| CaptureError::SystemInvariant("ForgeCode page count overflow"))?,
+            );
+            if !page.documents.is_empty() {
+                emitted_pages =
+                    emitted_pages
+                        .checked_add(1)
+                        .ok_or(CaptureError::SystemInvariant(
+                            "ForgeCode emitted-page count overflow",
+                        ))?;
+            }
+            for document in page.documents {
+                if let Err(error) = sink.emit_document(document) {
+                    let detail = error.to_string();
+                    sink_error = Some(error);
+                    return Err(CaptureError::InvalidPayload(detail));
+                }
+            }
+            Ok(())
+        });
+        if let Some(error) = sink_error {
+            return Err(error);
+        }
+        streamed.map_err(route_error)?;
+        if !terminal {
+            return Err(route_error(ForgeCodeSourceBackedErrorV0::IncompleteScan));
+        }
+        let decoded_rows = scanner.decoded_rows();
+        if decoded_rows > counts.complete_records
+            || peak_buffered_documents > 64
+            || (counts.indexed_documents == 0) != (emitted_pages == 0)
+        {
+            return Err(forgecode_internal(
+                "ForgeCode scan violated its one-pass bounded-page receipt",
+            ));
+        }
+        scanner
+            .source_database()
+            .revalidate()
+            .map_err(route_error)?;
+        let logical = SqliteLogicalSnapshot::new(
+            FORGECODE_SOURCE_BACKED_PARSER_REVISION,
+            &forgecode_schema_evidence(&authority.native),
+            content_digest.finalize().into(),
+            counts,
+        );
+        let certificate = logical.certify(leaf.source.clone()).map_err(route_error)?;
+        *authority
+            .fence
+            .lock()
+            .map_err(|_| forgecode_internal("ForgeCode terminal fence lock was poisoned"))? =
+            Some(authority.native.database.evidence().clone());
+        Ok(forgecode_document_terminal(certificate))
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        let expected = tree
+            .authority
+            .fence
+            .lock()
+            .map_err(|_| forgecode_internal("ForgeCode terminal fence lock was poisoned"))?
+            .clone()
+            .ok_or_else(|| forgecode_changed("ForgeCode scan has no terminal fence"))?;
+        let (current, ()) =
+            ForgeCodeSqliteDatabase::open(&tree.authority.native.canonical_path, |_| Ok(()))
+                .map_err(route_error)?;
+        if current.evidence() == &expected {
+            Ok(tree.tree_fingerprint)
+        } else {
+            Err(forgecode_changed(
+                "ForgeCode physical source changed before commit",
+            ))
+        }
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let source = ForgeCodeSourceBackedSourceV0 {
+            source: self
+                .source_key()
+                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?,
+            canonical_path: if self.path.is_dir() {
+                self.path.join(".forge.db")
+            } else {
+                self.path.clone()
+            },
+        };
+        let resolver = ForgeCodeSourceBackedResolverV0::new([source])
+            .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
+        resolver.hydrate_batch(request)
+    }
+}
+
+fn forgecode_document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
+    DocumentSourceTerminal {
+        source: certificate.observation().source().clone(),
+        opening: certificate.observation().clone(),
+        closing: certificate.observation().clone(),
+        parser_revision: FORGECODE_SOURCE_BACKED_PARSER_REVISION,
+        content_digest: *certificate.content_digest(),
+        counts: certificate.counts(),
+    }
+}
+
+fn forgecode_changed(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
+}
+
+fn forgecode_internal(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
 }
 
 #[cfg(test)]

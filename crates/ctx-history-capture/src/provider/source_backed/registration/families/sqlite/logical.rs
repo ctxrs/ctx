@@ -1,4 +1,8 @@
 use super::*;
+use crate::provider::{
+    providers::trae::nativepath::TraeReplacementTree,
+    source_backed::family::document::register_replacement_document_tree_route_with_authority,
+};
 
 pub(super) fn register_forgecode_route(
     registry: &mut SourceBackedProviderRegistry,
@@ -10,106 +14,29 @@ pub(super) fn register_forgecode_route(
         + Clone
         + 'static,
 ) -> SourceBackedCoordinatorResult<()> {
-    let path = source.path.clone();
-    let capture_path = path.clone();
-    let hydration_path = path;
-    let capture_selection = make_selection.clone();
-    let hydration_selection = make_selection;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let ForgeCodeSourceBackedDiscoveryV0::Live(mut scan) =
-                open_forgecode_source_backed_v0(capture_selection(capture_path.clone()))
-                    .map_err(route_error)?
-            else {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    "selected ForgeCode database is missing",
-                ));
-            };
-            let route = scan.source().clone();
-            sink.begin(route.source().clone())?;
-            while let Some(page) = scan.next_page().map_err(route_error)? {
-                for document in page.documents {
-                    sink.document(document)?;
-                }
-            }
-            sink.certify(scan.finish().map_err(route_error)?)
-        },
-        provider_format_scope(CaptureProvider::ForgeCode, "forgecode_sqlite"),
-        move |request| {
-            let ForgeCodeSourceBackedDiscoveryV0::Live(scan) =
-                open_forgecode_source_backed_v0(hydration_selection(hydration_path.clone()))
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                    })?
-            else {
-                return Err(hydration_failure(
-                    HydrationFailureKind::ConfirmedDeleted,
-                    "selected ForgeCode database is missing",
-                ));
-            };
-            ForgeCodeSourceBackedResolverV0::new([scan.source().clone()])
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
-                .hydrate_event(request)
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        if selection == SourceBackedRouteSelection::Automatic {
-            SourceBackedSelectorAuthority::SelectedWithRetainedExplicit
-        } else {
-            SourceBackedSelectorAuthority::ExplicitPath
-        },
-        driver,
-    )?);
-    Ok(())
+    let authority = if selection == SourceBackedRouteSelection::Automatic {
+        SourceBackedSelectorAuthority::SelectedWithRetainedExplicit
+    } else {
+        SourceBackedSelectorAuthority::ExplicitPath
+    };
+    let adapter = make_selection(source.path.clone());
+    register_replacement_document_tree_route_with_authority(
+        registry, source, selection, authority, adapter,
+    )
 }
 pub(super) fn register_deepagents_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let database = source.path.clone();
-    let capture_database = database.clone();
-    let hydration_database = database;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let mut scanner = DeepAgentsSourceBackedScannerV0::open(
-                DeepAgentsDatabaseSelectionV0::explicit(capture_database.clone()),
-                DateTime::<Utc>::UNIX_EPOCH,
-            )
-            .map_err(route_error)?;
-            sink.begin(scanner.source().clone())?;
-            while let Some(page) = scanner.next_page().map_err(route_error)? {
-                for document in page {
-                    sink.document(document)?;
-                }
-            }
-            sink.certify(scanner.finish().map_err(route_error)?.certificate)
-        },
-        provider_format_scope(CaptureProvider::DeepAgents, "deepagents_sessions_sqlite"),
-        move |request| {
-            let hydrated = DeepAgentsLocatorResolverV0::explicit(hydration_database.clone())
-                .hydrate(request.locator())
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.text.into_bytes(),
-            })
-        },
-    );
-    registry.register(executable_route(
+    let adapter = DeepAgentsDatabaseSelectionV0::explicit(source.path.clone());
+    register_replacement_document_tree_route_with_authority(
+        registry,
         source,
         selection,
         SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+        adapter,
+    )
 }
 pub(super) fn register_opencode_family_route(
     registry: &mut SourceBackedProviderRegistry,
@@ -150,111 +77,23 @@ pub(super) fn register_hermes_candidate(
     candidate: HermesSourceCandidate,
     authority: SourceBackedSelectorAuthority,
 ) -> SourceBackedCoordinatorResult<()> {
-    let capture_candidate = candidate.clone();
-    let hydration_path = candidate.path().to_path_buf();
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            sink.begin(capture_candidate.source().clone())?;
-            let mut sink_failure = None;
-            let certificate = scan_hermes_source_backed(&capture_candidate, |page| {
-                for record in page.records {
-                    if let HermesSourceBackedRecord::Event(document) = record {
-                        if let Err(error) = sink.document(document) {
-                            let detail = error.to_string();
-                            sink_failure = Some(error);
-                            return Err(HermesSourceBackedError::Capture(
-                                CaptureError::InvalidPayload(detail),
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .map_err(route_error)?;
-            if let Some(error) = sink_failure {
-                return Err(error);
-            }
-            sink.certify(certificate)
-        },
-        provider_format_scope(CaptureProvider::Hermes, "hermes_state_sqlite"),
-        move |request| {
-            let hydrated = hydrate_hermes_source_backed_message(&hydration_path, request.locator())
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-        },
-    );
-    registry.register(executable_route(source, selection, authority, driver)?);
-    Ok(())
+    register_replacement_document_tree_route_with_authority(
+        registry, source, selection, authority, candidate,
+    )
 }
 pub(super) fn register_trae_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let path = source.path.clone();
-    let capture_path = path.clone();
-    let hydration_path = path;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let mut began = false;
-            let mut sink_failure = None;
-            let scan = scan_trae_source_backed_explicit_v0(&capture_path, &mut |page| {
-                for document in page.documents {
-                    if !began {
-                        if let Err(error) = sink.begin(document.source.clone()) {
-                            let detail = error.to_string();
-                            sink_failure = Some(error);
-                            return Err(TraeSourceBackedErrorV0::Capture(
-                                CaptureError::InvalidPayload(detail),
-                            ));
-                        }
-                        began = true;
-                    }
-                    if let Err(error) = sink.document(document) {
-                        let detail = error.to_string();
-                        sink_failure = Some(error);
-                        return Err(TraeSourceBackedErrorV0::Capture(
-                            CaptureError::InvalidPayload(detail),
-                        ));
-                    }
-                }
-                Ok(())
-            })
-            .map_err(route_error)?;
-            if let Some(error) = sink_failure {
-                return Err(error);
-            }
-            if !began {
-                sink.begin(scan.source.observation().source().clone())?;
-            }
-            sink.certify(scan.source)
-        },
-        provider_format_scope(CaptureProvider::Trae, "trae_state_vscdb"),
-        move |request| {
-            let hydrated =
-                hydrate_trae_source_backed_locator_v0(&hydration_path, request.locator()).map_err(
-                    |error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error),
-                )?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.exact_text.into_bytes(),
-            })
-        },
-    );
-    registry.register(executable_route(
+    let adapter = TraeReplacementTree::new(source.path.clone());
+    register_replacement_document_tree_route_with_authority(
+        registry,
         source,
         selection,
         SourceBackedSelectorAuthority::ExplicitPath,
-        driver,
-    )?);
-    Ok(())
+        adapter,
+    )
 }
 
 pub(super) fn register_zed_route(

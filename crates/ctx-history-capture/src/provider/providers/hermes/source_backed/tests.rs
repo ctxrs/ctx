@@ -240,7 +240,7 @@ fn scan_candidate(
     candidate: &HermesSourceCandidate,
 ) -> (CertifiedSource, Vec<HermesSourceBackedRecord>) {
     let mut records = Vec::new();
-    let certified = scan_hermes_source_backed(candidate, |page| {
+    let scan = scan_hermes_source_backed(candidate, |page| {
         assert!(!page.records.is_empty());
         assert!(page.records.len() <= NATIVE_INGESTION_PAGE_MAX_UNITS);
         assert!(page.owned_bytes <= NATIVE_INGESTION_PAGE_MAX_BYTES);
@@ -248,7 +248,7 @@ fn scan_candidate(
         Ok(())
     })
     .unwrap();
-    (certified, records)
+    (scan.certificate, records)
 }
 
 fn event(records: &[HermesSourceBackedRecord]) -> &LexicalDocument {
@@ -519,7 +519,10 @@ fn hermes_source_backed_replacement_preserves_ids_and_rejects_stale_exact_coordi
             TypedKey::I64(7),
         ])
     );
-    assert_eq!(row_version, &Some(TypedKey::I64(1)));
+    assert!(matches!(
+        row_version,
+        Some(TypedKey::Bytes(digest)) if digest.as_slice() == after_event.locator.record_digest()
+    ));
     assert_eq!(
         after_event.source.provider(),
         CaptureProvider::Hermes.as_str()

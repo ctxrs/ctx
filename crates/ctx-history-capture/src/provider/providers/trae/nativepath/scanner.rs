@@ -70,7 +70,7 @@ pub(super) struct TraeSourceAuthority {
     pub(super) raw_source_path: String,
     pub(super) workspace_id: String,
     pub(super) workspace_folder: Option<String>,
-    pub(super) source_revision: String,
+    pub(super) schema_evidence: Vec<u8>,
     observed_at: DateTime<Utc>,
 }
 
@@ -82,7 +82,10 @@ pub(super) struct TraeSqliteDatabase {
 }
 
 impl TraeSqliteDatabase {
-    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
+    pub(super) fn open<T>(
+        path: &Path,
+        query: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<(Self, T)> {
         let parent_path =
             path.parent()
                 .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
@@ -123,6 +126,7 @@ impl TraeSqliteDatabase {
         Ok((database, result?))
     }
 
+    #[cfg(test)]
     pub(super) fn read<T>(
         &self,
         path: &Path,
@@ -150,12 +154,41 @@ impl TraeSqliteDatabase {
         result
     }
 
+    pub(super) fn read_provider<T, E>(
+        &self,
+        path: &Path,
+        query: impl FnOnce(&Connection) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<CaptureError>,
+    {
+        self.revalidate().map_err(E::from)?;
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
+                .map_err(|error| E::from(trae_sqlite_source_error(path, error)))?;
+        if snapshot.evidence() != &self.evidence {
+            return Err(E::from(CaptureError::SourceChangedDuringCapture));
+        }
+        let result = snapshot
+            .connection()
+            .map_err(|error| E::from(trae_sqlite_source_error(path, error)))
+            .and_then(query);
+        let finished = snapshot
+            .finish()
+            .map_err(|error| E::from(trae_sqlite_source_error(path, error)))?;
+        self.revalidate().map_err(E::from)?;
+        if finished != self.evidence {
+            return Err(E::from(CaptureError::SourceChangedDuringCapture));
+        }
+        result
+    }
+
     pub(super) fn revalidate(&self) -> Result<()> {
         self.parent.revalidate()?;
         self.parent.authority_root().revalidate()
     }
 
-    fn evidence(&self) -> &SqliteSourceEvidence {
+    pub(super) fn evidence(&self) -> &SqliteSourceEvidence {
         &self.evidence
     }
 }
@@ -195,6 +228,7 @@ pub(super) struct TraeScanner<'a> {
     active: Option<TraeActiveKey>,
     source_content_hasher: Sha256,
     certified_source_bytes: u64,
+    decoded_rows: u64,
 }
 
 pub(super) struct TraeCoreRecord {
@@ -232,27 +266,29 @@ pub(super) fn acquire_source(
     path: &Path,
     observed_at: DateTime<Utc>,
 ) -> Result<TraeSourceAuthority> {
-    let (database, schema) = TraeSqliteDatabase::open(path, |conn| {
+    let (database, (schema, user_version)) = TraeSqliteDatabase::open(path, |conn| {
         validate_schema(conn, path)?;
-        sqlite_schema_fingerprint(conn)
+        Ok((
+            sqlite_schema_fingerprint(conn)?,
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+        ))
     })?;
-    let source_revision = format!(
-        "trae-nativepath-sqlite-v2;parser={TRAE_SOURCE_PARSER_REVISION};policy={TRAE_SOURCE_POLICY_REVISION};schema={schema};identity={};length={};revision={}",
-        hex(database.evidence().identity()),
-        database.evidence().length(),
-        hex(database.evidence().revision()),
-    );
+    let schema_evidence = format!(
+        "trae-logical-schema-v1;parser={TRAE_SOURCE_PARSER_REVISION};\
+         policy={TRAE_SOURCE_POLICY_REVISION};user_version={user_version};schema={schema}"
+    )
+    .into_bytes();
     Ok(TraeSourceAuthority {
         database,
         raw_source_path: path.display().to_string(),
         workspace_id: trae_workspace_id(path),
         workspace_folder: trae_workspace_folder(path),
-        source_revision,
+        schema_evidence,
         observed_at,
     })
 }
 
-fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
+pub(super) fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
     if !sqlite_table_exists(conn, "ItemTable")? {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
@@ -281,6 +317,7 @@ impl<'a> TraeScanner<'a> {
             active: None,
             source_content_hasher: Sha256::new(),
             certified_source_bytes: 0,
+            decoded_rows: 0,
         }
     }
 
@@ -446,6 +483,12 @@ impl<'a> TraeScanner<'a> {
         let Some((value_type, retained_bytes)) = candidate else {
             return Ok(TraeLoadedKey::Missing);
         };
+        self.decoded_rows =
+            self.decoded_rows
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Trae decoded-row counter overflow",
+                ))?;
         let retained_bytes = u64::try_from(retained_bytes).map_err(|_| {
             CaptureError::InvalidPayload("Trae ItemTable value length is negative".into())
         })?;
@@ -567,6 +610,10 @@ impl<'a> TraeScanner<'a> {
     pub(super) fn certified_source_bytes(&self) -> u64 {
         self.certified_source_bytes
     }
+
+    pub(super) fn decoded_rows(&self) -> u64 {
+        self.decoded_rows
+    }
 }
 
 fn normalize_frontier(
@@ -655,16 +702,6 @@ pub(super) fn absolute_trae_path(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 #[cfg(test)]

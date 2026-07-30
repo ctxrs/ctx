@@ -4,8 +4,9 @@
 //! lexical documents and a certified SQLite snapshot, but does not choose
 //! publication, replacement, deletion, or retry policy.
 
+mod replacement;
+
 use std::{
-    collections::VecDeque,
     fs,
     path::{Path, PathBuf},
 };
@@ -15,7 +16,7 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
     EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
@@ -41,7 +42,8 @@ use crate::{
     provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderAdapterContext, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -50,7 +52,6 @@ use crate::{
 const DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE: &str = "deepagents.sessions";
 const DEEPAGENTS_SOURCE_ANCHOR_KEY: &str = "selected-sessions-db";
 const DEEPAGENTS_SOURCE_SCHEMA_VARIANT: &str = "deepagents-sqlite-write-messages-v0";
-const DEEPAGENTS_SOURCE_REVISION_KIND: &str = "deepagents-sqlite-snapshot-v0";
 const DEEPAGENTS_SOURCE_PARSER_REVISION: &str = "deepagents-source-backed-v0";
 const DEEPAGENTS_NATIVE_SESSION_NAMESPACE: &str = "deepagents.thread";
 const DEEPAGENTS_NATIVE_MESSAGE_NAMESPACE: &str = "deepagents.message";
@@ -62,6 +63,7 @@ const DEEPAGENTS_LOGICAL_RELATION: &str = "writes.messages";
 const DEEPAGENTS_PAGE_MAX_DOCUMENTS: usize = 64;
 const DEEPAGENTS_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-deepagents-source-backed-v0\0";
 const DEEPAGENTS_REJECTED_RECORD_DOMAIN: &[u8] = b"ctx-deepagents-rejected-record-v0\0";
+const DEEPAGENTS_HYDRATION_NATIVE_KEY_BATCH: usize = 256;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Deep Agents SQLite source must have an authorized parent and database leaf";
 
@@ -189,25 +191,32 @@ struct PendingWriteV0 {
 
 #[derive(Debug)]
 pub(crate) struct DeepAgentsSourceBackedScanV0 {
-    // Terminal source/path/route provenance remains coupled to certification.
-    #[allow(dead_code)]
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) selected_path: PathBuf,
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) selected_route: DeepAgentsDatabaseRouteV0,
+    pub(crate) terminal_fence: DeepAgentsSourceTerminalFence,
+    pub(crate) row_decode_passes: u64,
+    pub(crate) decoded_rows: u64,
+    pub(crate) peak_buffered_documents: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeepAgentsSourceTerminalFence {
+    evidence: SqliteSourceEvidence,
 }
 
 /// Bounded scanner for one immutable observation of the selected sessions DB.
 pub(crate) struct DeepAgentsSourceBackedScannerV0 {
+    #[cfg(test)]
     selection: DeepAgentsDatabaseSelectionV0,
     evidence: SqliteSourceEvidence,
     source_root: Option<ProviderSourceRoot>,
     sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
     source: SourceKey,
-    observation: SourceObservation,
-    source_revision_digest: [u8; 32],
+    schema_evidence: Vec<u8>,
     context: ProviderAdapterContext,
     source_path: String,
     after_rowid: Option<i64>,
@@ -217,8 +226,8 @@ pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     counts: ScannedSourceCounts,
     content_digest: Sha256,
     exhausted: bool,
-    source_validated: bool,
-    validated_pages: VecDeque<Vec<LexicalDocument>>,
+    decoded_rows: u64,
+    peak_buffered_documents: u64,
 }
 
 impl DeepAgentsSourceBackedScannerV0 {
@@ -232,10 +241,7 @@ impl DeepAgentsSourceBackedScannerV0 {
         deepagents_validate_schema(conn, selection.path())?;
         let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
         let source = deepagents_source_key()?;
-        let revision = deepagents_snapshot_revision(&selection, &evidence, &schema_fingerprint)?;
-        let source_revision_digest = Sha256::digest(&revision).into();
-        let observation =
-            SourceObservation::new(source.clone(), DEEPAGENTS_SOURCE_REVISION_KIND, revision)?;
+        let schema_evidence = deepagents_schema_evidence(&selection, &schema_fingerprint)?;
         let mut content_digest = Sha256::new();
         content_digest.update(DEEPAGENTS_SOURCE_DIGEST_DOMAIN);
         content_digest.update(source.exact_descriptor_digest());
@@ -249,13 +255,13 @@ impl DeepAgentsSourceBackedScannerV0 {
         };
         let source_path = selection.path().display().to_string();
         Ok(Self {
+            #[cfg(test)]
             selection,
             evidence,
             source_root: Some(source_root),
             sqlite_snapshot: Some(sqlite_snapshot),
             source,
-            observation,
-            source_revision_digest,
+            schema_evidence,
             context,
             source_path,
             after_rowid: None,
@@ -265,8 +271,8 @@ impl DeepAgentsSourceBackedScannerV0 {
             counts: ScannedSourceCounts::default(),
             content_digest,
             exhausted: false,
-            source_validated: false,
-            validated_pages: VecDeque::new(),
+            decoded_rows: 0,
+            peak_buffered_documents: 0,
         })
     }
 
@@ -274,24 +280,8 @@ impl DeepAgentsSourceBackedScannerV0 {
         &self.source
     }
 
-    // Exposed for exact-locator/release evidence checks without recomputation.
-    #[allow(dead_code)]
-    pub(crate) fn source_revision_digest(&self) -> &[u8; 32] {
-        &self.source_revision_digest
-    }
-
-    /// Returns at most 64 bounded lexical records after the complete source
-    /// read has finished and passed terminal revalidation.
+    /// Returns at most 64 lexical records directly from the pinned snapshot.
     pub(crate) fn next_page(
-        &mut self,
-    ) -> DeepAgentsSourceBackedResultV0<Option<Vec<LexicalDocument>>> {
-        if !self.source_validated {
-            self.stage_and_validate_pages()?;
-        }
-        Ok(self.validated_pages.pop_front())
-    }
-
-    fn next_unvalidated_page(
         &mut self,
     ) -> DeepAgentsSourceBackedResultV0<Option<Vec<LexicalDocument>>> {
         if self.exhausted {
@@ -326,7 +316,6 @@ impl DeepAgentsSourceBackedScannerV0 {
                     .ok_or(DeepAgentsSourceBackedErrorV0::CountOverflow)?;
                 page.push(deepagents_lexical_document(
                     &self.source,
-                    self.source_revision_digest,
                     &pending.key,
                     pending.record_digest,
                     pending.session_id,
@@ -344,6 +333,9 @@ impl DeepAgentsSourceBackedScannerV0 {
                 self.pending = None;
             }
         }
+        self.peak_buffered_documents = self.peak_buffered_documents.max(
+            u64::try_from(page.len()).map_err(|_| DeepAgentsSourceBackedErrorV0::CountOverflow)?,
+        );
         if page.is_empty() && self.exhausted {
             Ok(None)
         } else {
@@ -351,34 +343,17 @@ impl DeepAgentsSourceBackedScannerV0 {
         }
     }
 
-    pub(crate) fn finish(self) -> DeepAgentsSourceBackedResultV0<DeepAgentsSourceBackedScanV0> {
-        if !self.source_validated
-            || !self.validated_pages.is_empty()
-            || !self.exhausted
-            || self.pending.is_some()
-        {
+    pub(crate) fn finish(mut self) -> DeepAgentsSourceBackedResultV0<DeepAgentsSourceBackedScanV0> {
+        if !self.exhausted || self.pending.is_some() {
             return Err(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted);
         }
         let content_digest = self.content_digest.finalize().into();
-        let certificate = CertifiedSource::certify(
-            self.observation.clone(),
-            self.observation,
+        let logical_snapshot = SqliteLogicalSnapshot::new(
             DEEPAGENTS_SOURCE_PARSER_REVISION,
+            &self.schema_evidence,
             content_digest,
             self.counts,
-        )?;
-        Ok(DeepAgentsSourceBackedScanV0 {
-            source: self.source,
-            certificate,
-            selected_path: self.selection.path,
-            selected_route: self.selection.route,
-        })
-    }
-
-    fn stage_and_validate_pages(&mut self) -> DeepAgentsSourceBackedResultV0<()> {
-        while let Some(page) = self.next_unvalidated_page()? {
-            self.validated_pages.push_back(page);
-        }
+        );
         let sqlite_snapshot = self
             .sqlite_snapshot
             .take()
@@ -391,8 +366,21 @@ impl DeepAgentsSourceBackedScannerV0 {
             .take()
             .ok_or(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted)?
             .revalidate()?;
-        self.source_validated = true;
-        Ok(())
+        let certificate = logical_snapshot.certify(self.source.clone())?;
+        Ok(DeepAgentsSourceBackedScanV0 {
+            source: self.source,
+            certificate,
+            #[cfg(test)]
+            selected_path: self.selection.path,
+            #[cfg(test)]
+            selected_route: self.selection.route,
+            terminal_fence: DeepAgentsSourceTerminalFence {
+                evidence: closing_evidence,
+            },
+            row_decode_passes: 1,
+            decoded_rows: self.decoded_rows,
+            peak_buffered_documents: self.peak_buffered_documents,
+        })
     }
 
     fn connection(&self) -> DeepAgentsSourceBackedResultV0<&rusqlite::Connection> {
@@ -431,6 +419,7 @@ impl DeepAgentsSourceBackedScannerV0 {
             };
             let (value_type, value) =
                 deepagents_hydrate_write(self.connection()?, candidate.rowid)?;
+            self.decoded_rows = checked_add(self.decoded_rows, 1)?;
             let record_digest = digest_bytes(&deepagents_write_record_digest(
                 &key,
                 value_type.as_deref(),
@@ -516,7 +505,6 @@ impl DeepAgentsSourceBackedScannerV0 {
     fn observe_rejected_candidate(&mut self, candidate: &DeepAgentsWriteCandidate) {
         self.content_digest
             .update(DEEPAGENTS_REJECTED_RECORD_DOMAIN);
-        self.content_digest.update(candidate.rowid.to_be_bytes());
         self.content_digest
             .update(candidate.retained_bytes.to_be_bytes());
         if let Some(reason) = &candidate.rejection_reason {
@@ -565,45 +553,58 @@ impl DeepAgentsLocatorResolverV0 {
         &self,
         locator: &SourceRecordLocator,
     ) -> DeepAgentsSourceBackedResultV0<DeepAgentsHydratedMessageV0> {
-        locator.validate_contract()?;
+        self.hydrate_locators(&[locator])?
+            .pop()
+            .ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)
+    }
+
+    pub(crate) fn hydrate_locators(
+        &self,
+        locators: &[&SourceRecordLocator],
+    ) -> DeepAgentsSourceBackedResultV0<Vec<DeepAgentsHydratedMessageV0>> {
         let expected_source = deepagents_source_key()?;
-        if !expected_source.exact_descriptor_eq(locator.source())
-            || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        {
-            return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-        }
-        let (address, row_version) = decode_deepagents_locator(locator)?;
-        if &row_version != locator.record_digest() {
-            return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
+        let mut addresses = Vec::with_capacity(locators.len());
+        for locator in locators {
+            locator.validate_contract()?;
+            if !expected_source.exact_descriptor_eq(locator.source())
+                || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+                || locator.certified_source_revision_digest().is_some()
+            {
+                return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
+            }
+            let (address, row_version) = decode_deepagents_locator(locator)?;
+            if &row_version != locator.record_digest() {
+                return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
+            }
+            addresses.push((address, row_version));
         }
 
         let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(self.selection.path())?;
         let evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
         validate_deepagents_content_schema(conn)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-        let revision =
-            deepagents_snapshot_revision(&self.selection, &evidence, &schema_fingerprint)?;
-        let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
-        if locator.certified_source_revision_digest() != Some(&revision_digest) {
-            return Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence);
-        }
-        let resolved = resolve_deepagents_content(conn, &address)?
-            .ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)?;
-        let record_digest = digest_bytes(&resolved.record_digest)
-            .ok_or(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)?;
-        if record_digest != row_version {
-            return Err(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence);
+        let mut hydrated = Vec::with_capacity(addresses.len());
+        for chunk in addresses.chunks(DEEPAGENTS_HYDRATION_NATIVE_KEY_BATCH) {
+            for (address, row_version) in chunk {
+                let resolved = resolve_deepagents_content(conn, address)?
+                    .ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)?;
+                let record_digest = digest_bytes(&resolved.record_digest)
+                    .ok_or(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)?;
+                if &record_digest != row_version {
+                    return Err(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence);
+                }
+                hydrated.push(DeepAgentsHydratedMessageV0 {
+                    text: resolved.text,
+                    record_digest,
+                });
+            }
         }
         let closing_evidence = sqlite_snapshot.finish()?;
         if closing_evidence != evidence {
             return Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence);
         }
         source_root.revalidate()?;
-        Ok(DeepAgentsHydratedMessageV0 {
-            text: resolved.text,
-            record_digest,
-        })
+        Ok(hydrated)
     }
 }
 
@@ -663,34 +664,14 @@ fn deepagents_source_key() -> DeepAgentsSourceBackedResultV0<SourceKey> {
     )?)
 }
 
-fn deepagents_snapshot_revision(
+fn deepagents_schema_evidence(
     selection: &DeepAgentsDatabaseSelectionV0,
-    evidence: &SqliteSourceEvidence,
     schema_fingerprint: &str,
 ) -> DeepAgentsSourceBackedResultV0<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "route": selection.route.as_str(),
-        "snapshot": sqlite_revision_component(evidence),
         "schema_fingerprint": schema_fingerprint,
     }))?)
-}
-
-fn sqlite_revision_component(evidence: &SqliteSourceEvidence) -> String {
-    format!(
-        "identity={};length={};revision={}",
-        hex_digest(evidence.identity()),
-        evidence.length(),
-        hex_digest(evidence.revision()),
-    )
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(value, "{byte:02x}");
-    }
-    value
 }
 
 fn deepagents_session_id(
@@ -711,7 +692,6 @@ fn deepagents_session_id(
 #[allow(clippy::too_many_arguments)]
 fn deepagents_lexical_document(
     source: &SourceKey,
-    source_revision_digest: [u8; 32],
     key: &DeepAgentsWriteKey,
     record_digest: [u8; 32],
     session_id: StableEntityId,
@@ -768,8 +748,8 @@ fn deepagents_lexical_document(
             primary_key,
             row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )?;
     let body = message.text.clone();

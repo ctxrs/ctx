@@ -1,8 +1,8 @@
 use std::{fs, path::Path};
 
 use ctx_history_core::{
-    EventHydrationRequest, HydrationFailureKind, NativeRecordCoordinate, SessionHydrationRequest,
-    TypedKey,
+    EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
+    SessionHydrationRequest, TypedKey,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -112,7 +112,6 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
             if matches!(
                 parts.as_slice(),
                 [
-                    TypedKey::I64(_),
                     TypedKey::Utf8(conversation),
                     TypedKey::U64(0)
                 ] if conversation == "exact-conversation"
@@ -123,11 +122,13 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
         Some(TypedKey::Bytes(digest)) if digest.len() == 32
     ));
     assert_eq!(
-        scanned.documents[0]
-            .locator
-            .certified_source_revision_digest(),
-        Some(&source_revision_digest(scanned.certificate.observation()))
+        scanned.documents[0].locator.revision_policy(),
+        LocatorRevisionPolicy::StableRecordEvidence
     );
+    assert!(scanned.documents[0]
+        .locator
+        .certified_source_revision_digest()
+        .is_none());
 
     let resolver = ForgeCodeSourceBackedResolverV0::new([scanned.source.clone()]).unwrap();
     let requests = scanned
@@ -179,7 +180,7 @@ fn forgecode_source_backed_row_mutation_requires_snapshot_replacement() {
         .unwrap()
         .hydrate_event(&old_request)
         .unwrap_err();
-    assert_eq!(stale.kind, HydrationFailureKind::StaleSourceEvidence);
+    assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
 
     let after = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
     assert!(before

@@ -14,8 +14,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
     EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    StableEntityId, TypedKey,
+    SourceAnchor, SourceKey, SourceRecordLocator, SourceResolverContractError, StableEntityId,
+    TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
@@ -32,7 +32,8 @@ use crate::{
         discover_provider_sources_for_provider_with_context,
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         DiscoveryContext, DiscoveryIssue, ProviderSource, ProviderSourceStatus,
-        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -52,7 +53,6 @@ const HERMES_MESSAGE_NAMESPACE: &str = "hermes.message";
 const HERMES_LOGICAL_SESSION_KIND: &str = "hermes-session";
 const HERMES_LOGICAL_EVENT_KIND: &str = "hermes-message";
 const HERMES_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-db-v1";
-const HERMES_SOURCE_REVISION_KIND: &str = "hermes-sqlite-snapshot-v1";
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Hermes SQLite source must have an authorized parent and database leaf";
 const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
@@ -65,15 +65,32 @@ const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v
 const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejection-v1\0";
 
 mod contracts;
+mod hydration;
+mod replacement;
 
 pub(crate) use contracts::*;
+pub(crate) use hydration::{hydrate_hermes_source_backed_message, HermesLocatorResolver};
 
-/// Streams bounded provider-local pages and returns authority only after the
-/// opening SQLite snapshot has been revalidated unchanged.
+#[derive(Debug)]
+pub(crate) struct HermesSourceBackedScan {
+    pub(crate) certificate: CertifiedSource,
+    pub(crate) terminal_fence: HermesSourceTerminalFence,
+    pub(crate) row_decode_passes: u64,
+    pub(crate) decoded_rows: u64,
+    pub(crate) emitted_pages: u64,
+    pub(crate) peak_buffered_records: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HermesSourceTerminalFence {
+    evidence: SqliteSourceEvidence,
+}
+
+/// Streams bounded provider-local pages from one pinned SQLite snapshot.
 pub(crate) fn scan_hermes_source_backed(
     candidate: &HermesSourceCandidate,
     mut emit: impl FnMut(HermesSourceBackedPage) -> HermesSourceBackedResult<()>,
-) -> HermesSourceBackedResult<CertifiedSource> {
+) -> HermesSourceBackedResult<HermesSourceBackedScan> {
     candidate.source.validate_contract()?;
     let source_path = candidate
         .path
@@ -88,121 +105,144 @@ pub(crate) fn scan_hermes_source_backed(
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
     let schema = HermesSchema::detect(conn)?;
-    let revision =
-        hermes_source_revision(&opening_evidence, sqlite_user_version, &schema_fingerprint);
-    let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
-    let opening = SourceObservation::new(
-        candidate.source.clone(),
-        HERMES_SOURCE_REVISION_KIND,
-        revision,
-    )?;
+    let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
 
     let mut reader = HermesRowReader::new(conn, &schema)?;
-    let mut pending_pages = Vec::new();
-    let operation: HermesSourceBackedResult<(ScannedSourceCounts, [u8; 32])> = (|| {
-        let mut frontier = super::sqlite::HermesFrontier::initial();
-        let mut digest = Sha256::new();
-        digest.update(HERMES_SOURCE_DIGEST_DOMAIN);
-        let mut counts = ScannedSourceCounts::default();
-        let mut page_records = Vec::new();
-        let mut page_owned_bytes = 0_usize;
-        let mut session_cache: Option<(String, HermesSessionContext)> = None;
+    let operation: HermesSourceBackedResult<(ScannedSourceCounts, [u8; 32], u64, u64, u64)> =
+        (|| {
+            let mut frontier = super::sqlite::HermesFrontier::initial();
+            let mut digest = Sha256::new();
+            digest.update(HERMES_SOURCE_DIGEST_DOMAIN);
+            let mut counts = ScannedSourceCounts::default();
+            let mut page_records = Vec::new();
+            let mut page_owned_bytes = 0_usize;
+            let mut session_cache: Option<(String, HermesSessionContext)> = None;
+            let mut decoded_rows = 0_u64;
+            let mut emitted_pages = 0_u64;
+            let mut peak_buffered_records = 0_u64;
 
-        while let Some(native) = reader.next(frontier)? {
-            frontier = native.next_frontier;
-            counts.complete_records = checked_add(counts.complete_records, 1)?;
-            let observed_bytes = u64::try_from(native.observed_bytes)
-                .map_err(|_| HermesSourceBackedError::CountOverflow)?;
-            counts.certified_bytes = checked_add(counts.certified_bytes, observed_bytes)?;
+            while let Some(native) = reader.next(frontier)? {
+                frontier = native.next_frontier;
+                decoded_rows = checked_add(decoded_rows, 1)?;
+                counts.complete_records = checked_add(counts.complete_records, 1)?;
+                let observed_bytes = u64::try_from(native.observed_bytes)
+                    .map_err(|_| HermesSourceBackedError::CountOverflow)?;
+                counts.certified_bytes = checked_add(counts.certified_bytes, observed_bytes)?;
 
-            let logical_digest = native_record_digest(&native)?;
-            digest.update([match native.locator.phase {
-                HermesPhase::Sessions => 1,
-                HermesPhase::Messages => 2,
-            }]);
-            digest.update(native.locator.rowid.to_be_bytes());
-            digest.update(native.ordinal.to_be_bytes());
-            digest.update(observed_bytes.to_be_bytes());
-            digest.update(logical_digest);
+                let logical_digest = native_record_digest(&native)?;
+                digest.update([match native.locator.phase {
+                    HermesPhase::Sessions => 1,
+                    HermesPhase::Messages => 2,
+                }]);
+                digest.update(native.ordinal.to_be_bytes());
+                digest.update(observed_bytes.to_be_bytes());
+                digest.update(logical_digest);
 
-            let phase = native.locator.phase;
-            let rowid = native.locator.rowid;
-            let ordinal = native.ordinal;
-            let record = project_native_row(
-                conn,
-                &schema,
-                &candidate.source,
-                &source_path,
-                revision_digest,
-                native,
-                logical_digest,
-                &mut session_cache,
-            )?;
-            let (record, owned_bytes) = bound_projected_record(record, phase, rowid, ordinal)?;
+                let phase = native.locator.phase;
+                let rowid = native.locator.rowid;
+                let ordinal = native.ordinal;
+                let record = project_native_row(
+                    conn,
+                    &schema,
+                    &candidate.source,
+                    &source_path,
+                    native,
+                    logical_digest,
+                    &mut session_cache,
+                )?;
+                let (record, owned_bytes) = bound_projected_record(record, phase, rowid, ordinal)?;
 
-            match &record {
-                HermesSourceBackedRecord::Session(_) => {
-                    counts.retained_records = checked_add(counts.retained_records, 1)?;
+                match &record {
+                    HermesSourceBackedRecord::Session(_) => {
+                        counts.retained_records = checked_add(counts.retained_records, 1)?;
+                    }
+                    HermesSourceBackedRecord::Event(_) => {
+                        counts.retained_records = checked_add(counts.retained_records, 1)?;
+                        counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
+                    }
+                    HermesSourceBackedRecord::Rejected(_) => {
+                        counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                    }
                 }
-                HermesSourceBackedRecord::Event(_) => {
-                    counts.retained_records = checked_add(counts.retained_records, 1)?;
-                    counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
+
+                if !page_records.is_empty()
+                    && (page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS
+                        || page_owned_bytes.saturating_add(owned_bytes)
+                            > NATIVE_INGESTION_PAGE_MAX_BYTES)
+                {
+                    let records = std::mem::take(&mut page_records);
+                    peak_buffered_records = peak_buffered_records.max(
+                        u64::try_from(records.len())
+                            .map_err(|_| HermesSourceBackedError::CountOverflow)?,
+                    );
+                    emit(HermesSourceBackedPage {
+                        records,
+                        owned_bytes: page_owned_bytes,
+                    })?;
+                    emitted_pages = checked_add(emitted_pages, 1)?;
+                    page_owned_bytes = 0;
                 }
-                HermesSourceBackedRecord::Rejected(_) => {
-                    counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                page_owned_bytes = page_owned_bytes.saturating_add(owned_bytes);
+                page_records.push(record);
+                if page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS {
+                    let records = std::mem::take(&mut page_records);
+                    peak_buffered_records = peak_buffered_records.max(
+                        u64::try_from(records.len())
+                            .map_err(|_| HermesSourceBackedError::CountOverflow)?,
+                    );
+                    emit(HermesSourceBackedPage {
+                        records,
+                        owned_bytes: page_owned_bytes,
+                    })?;
+                    emitted_pages = checked_add(emitted_pages, 1)?;
+                    page_owned_bytes = 0;
                 }
             }
-
-            if !page_records.is_empty()
-                && (page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS
-                    || page_owned_bytes.saturating_add(owned_bytes)
-                        > NATIVE_INGESTION_PAGE_MAX_BYTES)
-            {
-                pending_pages.push(HermesSourceBackedPage {
-                    records: std::mem::take(&mut page_records),
+            if !page_records.is_empty() {
+                peak_buffered_records = peak_buffered_records.max(
+                    u64::try_from(page_records.len())
+                        .map_err(|_| HermesSourceBackedError::CountOverflow)?,
+                );
+                emit(HermesSourceBackedPage {
+                    records: page_records,
                     owned_bytes: page_owned_bytes,
-                });
-                page_owned_bytes = 0;
+                })?;
+                emitted_pages = checked_add(emitted_pages, 1)?;
             }
-            page_owned_bytes = page_owned_bytes.saturating_add(owned_bytes);
-            page_records.push(record);
-            if page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS {
-                pending_pages.push(HermesSourceBackedPage {
-                    records: std::mem::take(&mut page_records),
-                    owned_bytes: page_owned_bytes,
-                });
-                page_owned_bytes = 0;
-            }
-        }
-        if !page_records.is_empty() {
-            pending_pages.push(HermesSourceBackedPage {
-                records: page_records,
-                owned_bytes: page_owned_bytes,
-            });
-        }
-        Ok((counts, digest.finalize().into()))
-    })();
+            Ok((
+                counts,
+                digest.finalize().into(),
+                decoded_rows,
+                emitted_pages,
+                peak_buffered_records,
+            ))
+        })();
     drop(reader);
 
     let finish = sqlite_snapshot.finish();
-    let (counts, content_digest) = operation?;
+    let (counts, content_digest, decoded_rows, emitted_pages, peak_buffered_records) = operation?;
     let closing_evidence = finish?;
     if closing_evidence != opening_evidence {
         return Err(HermesSourceBackedError::SourceChanged);
     }
     source_root.revalidate()?;
-    let closing = opening.clone();
-    let certificate = CertifiedSource::certify(
-        opening,
-        closing,
+    let certificate = SqliteLogicalSnapshot::new(
         HERMES_SOURCE_PARSER_REVISION,
+        &schema_evidence,
         content_digest,
         counts,
-    )?;
-    for page in pending_pages {
-        emit(page)?;
-    }
-    Ok(certificate)
+    )
+    .certify(candidate.source.clone())?;
+    Ok(HermesSourceBackedScan {
+        certificate,
+        terminal_fence: HermesSourceTerminalFence {
+            evidence: closing_evidence,
+        },
+        row_decode_passes: 1,
+        decoded_rows,
+        emitted_pages,
+        peak_buffered_records,
+    })
 }
 
 fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {
@@ -258,29 +298,23 @@ fn open_root_authorized_snapshot_with_hook(
     Ok((source_root, sqlite_snapshot))
 }
 
-fn hermes_source_revision(
-    evidence: &SqliteSourceEvidence,
-    sqlite_user_version: i64,
-    schema_fingerprint: &str,
-) -> Vec<u8> {
+fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) -> Vec<u8> {
     format!(
-        "hermes-source-backed-snapshot-v1:capture={HERMES_CAPTURE_REVISION};\
+        "hermes-logical-schema-v1:capture={HERMES_CAPTURE_REVISION};\
          policy={HERMES_POLICY_REVISION};user_version={sqlite_user_version};\
-         schema={schema_fingerprint};identity={};length={};revision={}",
-        hex_digest(evidence.identity()),
-        evidence.length(),
-        hex_digest(evidence.revision()),
+         schema={schema_fingerprint}",
     )
     .into_bytes()
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(value, "{byte:02x}");
-    }
-    value
+pub(crate) fn terminal_fence_matches(
+    path: &Path,
+    expected: &HermesSourceTerminalFence,
+) -> HermesSourceBackedResult<bool> {
+    let (source_root, snapshot) = open_root_authorized_snapshot(path)?;
+    let current = snapshot.finish()?;
+    source_root.revalidate()?;
+    Ok(current == expected.evidence)
 }
 
 #[derive(Debug, Clone)]
@@ -295,15 +329,11 @@ struct HermesSessionContext {
     cwd: Option<String>,
 }
 
-// The eight inputs are the explicit native-row identity, authority, and cache
-// state needed at this provider projection boundary.
-#[allow(clippy::too_many_arguments)]
 fn project_native_row(
     conn: &rusqlite::Connection,
     schema: &HermesSchema,
     source: &SourceKey,
     source_path: &str,
-    revision_digest: [u8; 32],
     native: HermesNativeRow,
     logical_digest: [u8; 32],
     session_cache: &mut Option<(String, HermesSessionContext)>,
@@ -328,15 +358,7 @@ fn project_native_row(
                 }
                 Err(error) => return Err(error.into()),
             };
-            match project_session(
-                source,
-                source_path,
-                revision_digest,
-                rowid,
-                row,
-                context,
-                logical_digest,
-            ) {
+            match project_session(source, source_path, row, context, logical_digest) {
                 Ok(session) => Ok(HermesSourceBackedRecord::Session(session)),
                 Err(error) => Ok(rejected(phase, rowid, ordinal, error.to_string())),
             }
@@ -379,8 +401,6 @@ fn project_native_row(
             match project_message(
                 source,
                 source_path,
-                revision_digest,
-                rowid,
                 ordinal,
                 row,
                 prepared,
@@ -412,8 +432,6 @@ fn rejected(
 fn project_session(
     source: &SourceKey,
     source_path: &str,
-    revision_digest: [u8; 32],
-    rowid: i64,
     row: HermesSessionRow,
     context: HermesSessionContext,
     record_digest: [u8; 32],
@@ -429,10 +447,10 @@ fn project_session(
         NativeRecordCoordinate::ProviderSqlite {
             logical_relation: HERMES_SESSION_RELATION.to_owned(),
             primary_key: TypedKey::utf8(&row.id)?,
-            row_version: Some(TypedKey::I64(rowid)),
+            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )?;
     Ok(HermesSourceBackedSession {
@@ -453,14 +471,9 @@ fn project_session(
     })
 }
 
-// These nine values preserve the certified message identity and source evidence
-// explicitly; a one-use argument bundle would add indirection without reuse.
-#[allow(clippy::too_many_arguments)]
 fn project_message(
     source: &SourceKey,
     source_path: &str,
-    revision_digest: [u8; 32],
-    rowid: i64,
     ordinal: u64,
     row: HermesMessageRow,
     prepared: Option<super::HermesPreparedCoreMessage>,
@@ -490,10 +503,10 @@ fn project_message(
                 TypedKey::utf8(&row.session_id)?,
                 TypedKey::I64(row.id),
             ])?,
-            row_version: Some(TypedKey::I64(rowid)),
+            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )?;
     let body = native
@@ -816,107 +829,6 @@ fn bounded_text(value: &str, limit: usize) -> String {
 
 fn bounded_optional(value: Option<&str>, limit: usize) -> Option<String> {
     value.map(|value| bounded_text(value, limit))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HermesHydratedMessage {
-    pub(crate) provider_bytes: Vec<u8>,
-    pub(crate) text: String,
-    pub(crate) provider_session_id: String,
-    pub(crate) provider_event_hash: String,
-    pub(crate) normalized_payload_hash: String,
-}
-
-/// Reopens one exact Hermes message through the existing visibility-aware
-/// SQLite parser and verifies both snapshot and logical-row evidence.
-pub(crate) fn hydrate_hermes_source_backed_message(
-    path: &Path,
-    locator: &SourceRecordLocator,
-) -> HermesSourceBackedResult<HermesHydratedMessage> {
-    locator.validate_contract()?;
-    if locator.source().provider() != CaptureProvider::Hermes.as_str()
-        || locator.source().source_format() != HERMES_SQLITE_SOURCE_FORMAT
-        || locator.source().schema_variant() != HERMES_SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != 1
-    {
-        return Err(HermesSourceBackedError::InvalidLocator);
-    }
-    let (provider_session_id, message_id, rowid) = decode_message_coordinate(locator)?;
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
-    let opening_evidence = sqlite_snapshot.evidence().clone();
-    let conn = sqlite_snapshot.connection()?;
-    let operation = (|| {
-        let sqlite_user_version = conn
-            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .map_err(CaptureError::from)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-        HermesSchema::detect(conn)?;
-        let revision =
-            hermes_source_revision(&opening_evidence, sqlite_user_version, &schema_fingerprint);
-        let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
-        if locator.certified_source_revision_digest() != Some(&revision_digest) {
-            return Err(HermesSourceBackedError::StaleSourceEvidence);
-        }
-        let values = match load_hermes_message_values(conn, rowid) {
-            Ok(values) => values,
-            Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {
-                return Err(HermesSourceBackedError::MissingRecord);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let (actual_session_id, provider_event_hash, normalized_payload_hash, text) =
-            hermes_complete_message_with_normalized_hash(conn, &values)?;
-        if actual_session_id != provider_session_id
-            || provider_event_hash != format!("message:{message_id}")
-        {
-            return Err(HermesSourceBackedError::StaleRecordEvidence);
-        }
-        let record_digest = decode_sha256(hermes_record_digest(&values).as_str())?;
-        if locator.record_digest() != &record_digest {
-            return Err(HermesSourceBackedError::StaleRecordEvidence);
-        }
-        Ok(HermesHydratedMessage {
-            provider_bytes: text.as_bytes().to_vec(),
-            text,
-            provider_session_id: actual_session_id,
-            provider_event_hash,
-            normalized_payload_hash,
-        })
-    })();
-    let finish = sqlite_snapshot.finish();
-    let hydrated = operation?;
-    let closing_evidence = finish?;
-    if closing_evidence != opening_evidence {
-        return Err(HermesSourceBackedError::StaleSourceEvidence);
-    }
-    source_root.revalidate()?;
-    Ok(hydrated)
-}
-
-fn decode_message_coordinate(
-    locator: &SourceRecordLocator,
-) -> HermesSourceBackedResult<(String, i64, i64)> {
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(HermesSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(HermesSourceBackedError::InvalidLocator);
-    };
-    let [TypedKey::Utf8(provider_session_id), TypedKey::I64(message_id)] = parts.as_slice() else {
-        return Err(HermesSourceBackedError::InvalidLocator);
-    };
-    let Some(TypedKey::I64(rowid)) = row_version else {
-        return Err(HermesSourceBackedError::InvalidLocator);
-    };
-    if logical_relation != HERMES_MESSAGE_RELATION {
-        return Err(HermesSourceBackedError::InvalidLocator);
-    }
-    Ok((provider_session_id.clone(), *message_id, *rowid))
 }
 
 #[cfg(test)]

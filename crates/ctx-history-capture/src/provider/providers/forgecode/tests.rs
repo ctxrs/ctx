@@ -118,7 +118,7 @@ fn context(path: &Path) -> ProviderAdapterContext {
 fn live_source(path: &Path) -> super::nativepath::source::ForgeCodeSourceObservation {
     match discover_forgecode_source(path).unwrap() {
         ForgeCodeDiscovery::Live(source) => source,
-        ForgeCodeDiscovery::Missing(_) => panic!("fixture source is missing"),
+        ForgeCodeDiscovery::Missing => panic!("fixture source is missing"),
     }
 }
 
