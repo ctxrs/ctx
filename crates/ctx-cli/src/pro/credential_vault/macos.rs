@@ -16,7 +16,7 @@ use security_framework_sys::base::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use super::unix_file::{BackendSelection, VaultRoot};
+use super::unix_file::{BackendSelection, VaultRoot, FILE_SELECTION};
 use super::{validate_record_id, CredentialVaultBackend, CredentialVaultError, SecretBytes};
 
 const SERVICE: &str = "com.ctx.pro.credentials.v1";
