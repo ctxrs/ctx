@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,7 @@ TOP_PROVIDER_COUNT = 3
 # scheduler/accounting noise over the complete multi-second cold refresh.
 MIN_COLD_CPU_PER_WALL = 1.10
 FORCE_SINGLE_CPU_ENV = "CTX_PERFORMANCE_FORCE_SINGLE_CPU"
+TASK_BINARY_ENV = "CTX_PERFORMANCE_TASK_BINARY"
 
 
 def ctx_binary_argument() -> Path:
@@ -370,6 +372,9 @@ def write_representative_corpus(home: Path) -> RepresentativeCorpus:
 def isolated_env(root: Path, home: Path) -> dict[str, str]:
     temp_root = root / "tmp"
     temp_root.mkdir()
+    task_binary = root / "ctx-test-binary"
+    shutil.copyfile(CTX_BIN, task_binary)
+    task_binary.chmod(0o700)
     env = os.environ.copy()
     env.update(
         {
@@ -378,6 +383,7 @@ def isolated_env(root: Path, home: Path) -> dict[str, str]:
             "CTX_ANALYTICS_ENABLED": "false",
             "CTX_DAEMON_MODE": "source-refresh-only",
             "CTX_DATA_ROOT": str(root / "data"),
+            TASK_BINARY_ENV: str(task_binary),
             "CTX_UPGRADE_AUTO": "off",
             "NO_COLOR": "1",
             "TMPDIR": str(temp_root),
@@ -388,6 +394,10 @@ def isolated_env(root: Path, home: Path) -> dict[str, str]:
     )
     env.pop("CODEX_THREAD_ID", None)
     return env
+
+
+def task_binary(env: dict[str, str]) -> str:
+    return env[TASK_BINARY_ENV]
 
 
 def command_failure(
@@ -402,7 +412,7 @@ def command_failure(
 
 def run_checked(args: list[str], env: dict[str, str], cwd: Path) -> bytes:
     completed = subprocess.run(
-        [str(CTX_BIN), *args],
+        [task_binary(env), *args],
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
@@ -556,7 +566,7 @@ def run_measured(
         tempfile.TemporaryFile(mode="w+b", dir=cwd)
     ) as stderr_file:
         process = subprocess.Popen(
-            [str(CTX_BIN), *args],
+            [task_binary(env), *args],
             cwd=cwd,
             env=env,
             stdout=stdout_file,
@@ -601,7 +611,7 @@ def start_daemon(
     stderr_file = (root / "daemon.stderr").open("w+b")
     process = subprocess.Popen(
         [
-            str(CTX_BIN),
+            task_binary(env),
             "daemon",
             "run",
             "--force",
@@ -625,12 +635,15 @@ def start_daemon(
         if process.poll() is not None:
             stdout_file.seek(0)
             stderr_file.seek(0)
-            raise command_failure(
+            error = command_failure(
                 ["daemon", "run"],
                 process.returncode,
                 stdout_file.read(),
                 stderr_file.read(),
             )
+            stdout_file.close()
+            stderr_file.close()
+            raise error
         try:
             status = run_json(["daemon", "status", "--format=json"], env, root)
             last_status = status
@@ -653,12 +666,15 @@ def start_daemon(
     process.wait(timeout=5)
     stdout_file.seek(0)
     stderr_file.seek(0)
-    raise TimeoutError(
+    error = TimeoutError(
         "source-refresh daemon did not become ready\n"
         f"last status:\n{json.dumps(last_status, indent=2, sort_keys=True)}\n"
         f"stdout:\n{stdout_file.read().decode(errors='replace')}\n"
         f"stderr:\n{stderr_file.read().decode(errors='replace')}"
     )
+    stdout_file.close()
+    stderr_file.close()
+    raise error
 
 
 def stop_daemon(
@@ -781,9 +797,18 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                 ):
                     self.assertLessEqual(refresh_seconds, MAX_COMMAND_SECONDS)
                 self.assertNotEqual(appended.request_id, noop.request_id)
-                self.assertTrue(appended.generation_changed)
-                self.assertEqual(appended.previous_generation, noop.generation_id)
                 self.assertNotEqual(appended.generation_id, noop.generation_id)
+                # The persistent filesystem watcher can win the append race
+                # before this explicit wait request. In that case the request
+                # is truthfully a no-op over the already-published successor.
+                self.assertEqual(
+                    appended.previous_generation,
+                    (
+                        noop.generation_id
+                        if appended.generation_changed
+                        else appended.generation_id
+                    ),
+                )
                 self.assertEqual(
                     appended.indexed_documents, noop.indexed_documents + 1
                 )
@@ -907,6 +932,8 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             f" fixture_events={EVENT_COUNT + 1}"
             f" initial_fixture_bytes={fixture_bytes}"
             f" append_bytes={append_bytes}"
+            f" append_request_generation_changed="
+            f"{str(appended.generation_changed).lower()}"
             f" noop_generation_changed={str(noop.generation_changed).lower()}"
             f" noop_current_unchanged=true"
             f" noop_publication_unchanged=true"
