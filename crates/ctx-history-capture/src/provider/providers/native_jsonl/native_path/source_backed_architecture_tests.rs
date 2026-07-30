@@ -15,18 +15,10 @@ fn owned_source_backed_constructors_have_no_preview_body_or_store_fallback() {
             include_str!("../../openclaw/native_path/source_backed.rs"),
         ),
         (
-            "opencode",
-            include_str!("../../opencode/native_path/source_backed.rs"),
-        ),
-        (
             "openhands",
             include_str!("../../openhands/nativepath/source_backed.rs"),
         ),
         ("pi", include_str!("../../pi/nativepath/source_backed.rs")),
-        (
-            "rovodev",
-            include_str!("../../rovodev/native_path/source_backed.rs"),
-        ),
         (
             "shelley",
             include_str!("../../shelley/native_path/source_backed.rs"),

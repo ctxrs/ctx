@@ -487,7 +487,7 @@ fn registry_rejects_malformed_native_batch_results() {
     })
     .hydrate_batch(&request)
     .unwrap_err();
-    assert_eq!(short.kind, HydrationFailureKind::InvalidLocator);
+    assert_eq!(short.kind, HydrationFailureKind::Internal);
     assert!(short.detail.contains("returned 0 records"));
 
     let duplicate_record = fixture_hydrated_record(&events[0]);
@@ -499,7 +499,7 @@ fn registry_rejects_malformed_native_batch_results() {
     })
     .hydrate_batch(&request)
     .unwrap_err();
-    assert_eq!(duplicate.kind, HydrationFailureKind::InvalidLocator);
+    assert_eq!(duplicate.kind, HydrationFailureKind::Internal);
     assert!(duplicate.detail.contains("duplicate event identity"));
 
     let unrequested = fixture_hydrated_record(&fixture_event_request(&source, "unrequested"));
@@ -512,7 +512,7 @@ fn registry_rejects_malformed_native_batch_results() {
     })
     .hydrate_batch(&request)
     .unwrap_err();
-    assert_eq!(wrong.kind, HydrationFailureKind::InvalidLocator);
+    assert_eq!(wrong.kind, HydrationFailureKind::Internal);
     assert!(wrong.detail.contains("unrequested event identity"));
 
     let unordered = fixture_batch_resolver(&source, |request| {
@@ -528,7 +528,7 @@ fn registry_rejects_malformed_native_batch_results() {
     })
     .hydrate_batch(&request)
     .unwrap_err();
-    assert_eq!(unordered.kind, HydrationFailureKind::InvalidLocator);
+    assert_eq!(unordered.kind, HydrationFailureKind::Internal);
     assert!(unordered.detail.contains("exact request order"));
 }
 

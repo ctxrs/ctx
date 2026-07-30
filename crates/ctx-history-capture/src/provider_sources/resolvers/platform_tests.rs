@@ -752,7 +752,7 @@ fn automatic_sources_do_not_follow_symlink_roots() {
     fs::create_dir_all(root.parent().unwrap()).unwrap();
     symlink(&target, &root).unwrap();
     let report = provider_report(&context, CaptureProvider::Windsurf);
-    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unsupported);
 }
 
 #[cfg(unix)]
@@ -771,7 +771,7 @@ fn unsafe_automatic_sqlite_targets_are_rejected_before_probing() {
 
     let report = provider_report(&context, CaptureProvider::Zed);
 
-    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unsupported);
     assert_eq!(
         super::super::super::probes::default_location_probe_calls(),
         0

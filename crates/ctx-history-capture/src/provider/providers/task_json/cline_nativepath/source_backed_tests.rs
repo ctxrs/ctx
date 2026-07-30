@@ -135,7 +135,7 @@ fn task_json_commit_time_inventory_race_fails_closed() {
         let api = fixture.api.clone();
         let hook_calls = Arc::clone(&calls);
         let hook = Arc::new(move || {
-            if hook_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            if hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 replace_json(&api, &messages("commit fence race"));
             }
         });
@@ -149,8 +149,8 @@ fn task_json_commit_time_inventory_race_fails_closed() {
         ));
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            2,
-            "the shared engine performs one scan fence and one cached commit fence"
+            1,
+            "the shared engine performs one terminal commit fence"
         );
     }
 }

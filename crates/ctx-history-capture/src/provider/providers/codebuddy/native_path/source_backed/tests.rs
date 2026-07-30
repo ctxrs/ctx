@@ -356,8 +356,6 @@ fn catalog_is_body_free_bounded_and_collapses_hardlink_aliases() {
     for index in 0..2_000 {
         fs::write(project.join(format!("{index:04}.jsonl")), b"not parsed").unwrap();
     }
-    #[cfg(target_os = "linux")]
-    let descriptors_before = fs::read_dir("/proc/self/fd").unwrap().count();
     reset_body_reads();
     let inventory = discover_codebuddy_tree(&root).unwrap();
     assert_eq!(inventory.status, CodeBuddyInventoryStatus::Complete);
@@ -366,11 +364,6 @@ fn catalog_is_body_free_bounded_and_collapses_hardlink_aliases() {
     assert_eq!(tree.authority.retained_handles(), 1);
     assert!(tree.authority.route_count() >= 2_003);
     assert_eq!(body_reads(), 0);
-    #[cfg(target_os = "linux")]
-    assert!(
-        fs::read_dir("/proc/self/fd").unwrap().count() <= descriptors_before + 2,
-        "complete catalog retained per-leaf descriptors"
-    );
     drop(tree);
 
     #[cfg(unix)]

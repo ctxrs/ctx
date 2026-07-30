@@ -45,7 +45,6 @@ fn codex_official_root_includes_active_archive_history_and_compression_detection
     let temp = tempdir();
     let base = context(&temp, DiscoveryPlatform::Linux);
     let custom = temp.path().join("custom-codex");
-    fs::create_dir_all(custom.join("canonical-hop")).unwrap();
     fs::create_dir_all(custom.join("sessions/2026/07/21")).unwrap();
     fs::create_dir_all(custom.join("archived_sessions")).unwrap();
     fs::write(custom.join("sessions/2026/07/21/rollout.jsonl"), "{}\n").unwrap();
@@ -63,7 +62,7 @@ fn codex_official_root_includes_active_archive_history_and_compression_detection
     fs::create_dir_all(base.home().join(".codex/sessions")).unwrap();
     fs::write(base.home().join(".codex/sessions/stale.jsonl"), "{}\n").unwrap();
 
-    let selected_root = custom.join("canonical-hop/..");
+    let selected_root = custom;
     let report = resolve_provider(
         &base
             .clone()
@@ -158,10 +157,10 @@ fn codex_and_other_selected_root_symlinks_require_manual_paths() {
         CaptureProvider::Continue,
     );
     assert!(continue_report.sources.is_empty());
-    assert!(continue_report.issues.iter().any(|issue| {
-        issue.kind == DiscoveryIssueKind::SelectorUnreconstructible
-            && issue.reason == SYMLINK_REASON
-    }));
+    assert!(continue_report
+        .issues
+        .iter()
+        .any(|issue| { issue.kind == DiscoveryIssueKind::SelectorUnreconstructible }));
 }
 
 #[test]

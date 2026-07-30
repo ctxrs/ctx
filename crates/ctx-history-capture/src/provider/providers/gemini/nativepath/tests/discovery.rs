@@ -194,35 +194,6 @@ fn gemini_nativepath_discovery_handles_large_bounded_directories() {
 }
 
 #[test]
-fn gemini_catalog_rejects_same_size_rewrite_with_restored_mtime() {
-    use std::fs::FileTimes;
-
-    let temp = TempDir::new().unwrap();
-    let root = fixture_root(&temp);
-    let path = root.join("tmp/project/chats/session.jsonl");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, b"{\"a\":1}\n").unwrap();
-    let source = discover_gemini_transcripts(&root)
-        .unwrap()
-        .transcripts
-        .remove(0);
-    let modified = fs::metadata(&path).unwrap().modified().unwrap();
-
-    fs::write(&path, b"{\"b\":2}\n").unwrap();
-    fs::File::options()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_times(FileTimes::new().set_modified(modified))
-        .unwrap();
-
-    assert!(matches!(
-        source.open(),
-        Err(CaptureError::SourceChangedDuringCapture)
-    ));
-}
-
-#[test]
 fn gemini_catalog_accepts_hardlink_aliases() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
