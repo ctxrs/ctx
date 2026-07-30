@@ -6,11 +6,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, CaptureProvider, CertifiedSource,
-    CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
-    EventHydrationRequest, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    ScannedSourceCounts, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    TypedKey,
+    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
+    CertifiedSourceInventory, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, ScannedSourceCounts, SourceFrontier, SourceInventoryObservation,
+    SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
@@ -40,6 +39,9 @@ const FAMILY_INVENTORY_AUTHORITY: &str = "borrowed-jsonl-provider-root-v1";
 const FAMILY_INVENTORY_REVISION: &str = "borrowed-jsonl-inventory-v1";
 const FAMILY_DISCOVERY_REVISION: &str = "borrowed-jsonl-discovery-v1";
 const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
+
+mod hydration;
+use hydration::{hydrate_batch, hydrate_single};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -852,129 +854,6 @@ fn revalidate_complete_inventory(
     }
     current.revalidate_root()?;
     Ok(true)
-}
-
-fn hydrate_single(
-    adapter: &dyn JsonlFamilyAdapter,
-    root: &Path,
-    resident: &Mutex<FamilyResident>,
-    request: &EventHydrationRequest,
-) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-    let mut records = hydrate_group(adapter, root, resident, std::slice::from_ref(request))?;
-    records.pop().ok_or_else(|| {
-        hydration_error(
-            HydrationFailureKind::InvalidLocator,
-            "JSONL single hydration returned no record",
-        )
-    })
-}
-
-fn hydrate_batch(
-    adapter: &dyn JsonlFamilyAdapter,
-    root: &Path,
-    resident: &Mutex<FamilyResident>,
-    request: &BatchHydrationRequest,
-) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
-    let records = hydrate_group(adapter, root, resident, request.events())?;
-    let result = BatchHydrationResult::new(records)
-        .map_err(|error| hydration_error(HydrationFailureKind::InvalidLocator, error))?;
-    result.validate_for_request(request)?;
-    Ok(result)
-}
-
-fn hydrate_group(
-    adapter: &dyn JsonlFamilyAdapter,
-    root: &Path,
-    resident: &Mutex<FamilyResident>,
-    requests: &[EventHydrationRequest],
-) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-    if requests.is_empty() {
-        return Ok(Vec::new());
-    }
-    let source = requests[0].locator().source();
-    if requests
-        .iter()
-        .any(|request| !request.locator().source().exact_descriptor_eq(source))
-    {
-        return Err(hydration_error(
-            HydrationFailureKind::InvalidLocator,
-            "JSONL hydration batch spans exact sources",
-        ));
-    }
-    let result = (|| {
-        let mut resident = resident.lock().map_err(|_| {
-            hydration_error(
-                HydrationFailureKind::TemporarilyUnavailable,
-                "JSONL resident catalog lock was poisoned",
-            )
-        })?;
-        if resident.hydration_inventory.is_none() {
-            let inventory = discover(adapter, root).map_err(|error| {
-                hydration_error(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            if inventory.root_missing() {
-                return Err(hydration_error(
-                    HydrationFailureKind::TemporarilyUnavailable,
-                    "provider JSONL root is unavailable",
-                ));
-            }
-            resident.hydration_inventory = Some(inventory);
-        }
-        let inventory = resident.hydration_inventory.as_ref().ok_or_else(|| {
-            hydration_error(
-                HydrationFailureKind::TemporarilyUnavailable,
-                "JSONL resident inventory is absent",
-            )
-        })?;
-        let leaf = inventory
-            .leaves()
-            .iter()
-            .find(|leaf| leaf.source().exact_descriptor_eq(source))
-            .ok_or_else(|| {
-                hydration_error(
-                    HydrationFailureKind::ConfirmedDeleted,
-                    "exact JSONL source is absent from the resident inventory",
-                )
-            })?;
-        let opened = leaf
-            .open_verified()
-            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
-        let mut hydrator = adapter.hydrator(leaf, Arc::clone(&opened))?;
-        let mut records = Vec::with_capacity(requests.len());
-        for request in requests {
-            let record = hydrator.hydrate(request)?;
-            if record.event_id != request.event_id() {
-                return Err(hydration_error(
-                    HydrationFailureKind::InvalidLocator,
-                    "JSONL hydrator changed the requested event identity",
-                ));
-            }
-            records.push(record);
-        }
-        hydrator.finish()?;
-        if observe_opened_file(leaf.source_path(), opened.as_ref())
-            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?
-            != *leaf.observation()
-            || inventory.revalidate_root().is_err()
-        {
-            return Err(hydration_error(
-                HydrationFailureKind::StaleRecordEvidence,
-                "JSONL source changed during grouped hydration",
-            ));
-        }
-        Ok(records)
-    })();
-    if result.as_ref().is_err_and(|failure| {
-        matches!(
-            failure.kind,
-            HydrationFailureKind::StaleRecordEvidence | HydrationFailureKind::ConfirmedDeleted
-        )
-    }) {
-        if let Ok(mut resident) = resident.lock() {
-            resident.hydration_inventory = None;
-        }
-    }
-    result
 }
 
 fn inventory_observation(
