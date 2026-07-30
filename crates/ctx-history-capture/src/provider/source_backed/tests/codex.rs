@@ -262,26 +262,25 @@ fn codex_history_and_sessions_publish_one_fresh_generation_and_hydrate_exactly()
 }
 
 #[test]
-fn codex_session_roots_recover_exact_hydration_before_a_successor_refresh() {
+fn codex_automatic_session_roots_are_one_move_stable_inventory_and_resolver() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
     let sessions = home.join(".codex/sessions");
     let archived = home.join(".codex/archived_sessions");
     fs::create_dir_all(&sessions).unwrap();
     fs::create_dir_all(&archived).unwrap();
-
-    let active_id = "019fb3ec-7ea0-7150-bba0-acde00000001";
-    let archived_id = "019fb3ec-7ea0-7150-bba0-acde00000002";
-    let active_text = "resident active Codex route sentinel";
-    let archived_text = "resident archived Codex route sentinel";
+    let live_session_id = "019fb010-0000-7000-8000-000000000001";
+    let archived_session_id = "019fb010-0000-7000-8000-000000000002";
+    let live_path = sessions.join(format!("rollout-{live_session_id}.jsonl"));
+    let archived_path = archived.join(format!("rollout-{archived_session_id}.jsonl"));
     fs::write(
-        sessions.join(format!("rollout-{active_id}.jsonl")),
-        codex_rollout_bytes(active_id, &[active_text]),
+        &live_path,
+        codex_rollout_bytes(live_session_id, &["unionliverootsentinel"]),
     )
     .unwrap();
     fs::write(
-        archived.join(format!("rollout-{archived_id}.jsonl")),
-        codex_rollout_bytes(archived_id, &[archived_text]),
+        &archived_path,
+        codex_rollout_bytes(archived_session_id, &["unionarchivedrootsentinel"]),
     )
     .unwrap();
 
@@ -291,81 +290,234 @@ fn codex_session_roots_recover_exact_hydration_before_a_successor_refresh() {
         DiscoveryPlatform::Linux,
         crate::DiscoveryPlatformDirs::default(),
     );
-    let sources = || {
+    let data_root = temp.path().join("ctx-data");
+    let build = build_automatic_source_backed_registry_from_parts(
+        &context,
+        &data_root,
         vec![
-            fixture_provider_source_at(
-                CaptureProvider::Codex,
-                "codex_session_jsonl_tree",
-                ProviderImportSupport::Native,
-                &sessions,
-            ),
             fixture_provider_source_at(
                 CaptureProvider::Codex,
                 "codex_session_jsonl_tree",
                 ProviderImportSupport::Native,
                 &archived,
             ),
-        ]
-    };
-    let data_root = temp.path().join("ctx-data");
-    let initial = build_automatic_source_backed_registry_from_parts(
-        &context,
-        &data_root,
-        sources(),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+        ],
         Vec::new(),
     );
-    assert_eq!(initial.executable_route_count(), 2);
+    assert_eq!(build.executable_route_count(), 1);
+    assert_eq!(build.unsupported_route_count(), 0);
+    assert!(build.issues.is_empty());
+    let route = build.registry.routes().next().unwrap();
+    assert_eq!(route.source.path, sessions);
+
+    let writer_options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
     let index_root = temp.path().join("index");
-    refresh_source_backed_generation(
-        &index_root,
-        &initial.registry,
-        WriterOptions {
-            indexer_threads: 1,
-            memory_bytes: 15_000_000,
-        },
+    let cold =
+        refresh_source_backed_generation(&index_root, &build.registry, writer_options.clone())
+            .unwrap();
+    assert_eq!(cold.scanned_routes, 1);
+    assert_eq!(cold.sources.len(), 2);
+    assert!(cold.removals.is_empty());
+    assert_eq!(cold.commit.indexed_documents, 2);
+    let cold_generation = cold.commit.generation_id.clone();
+    let cold_opstamp = cold.commit.opstamp;
+
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let events = verified
+        .manifest()
+        .sources
+        .iter()
+        .flat_map(|source| {
+            verified
+                .source_event_page(source.observation().source(), None, 10)
+                .unwrap()
+                .items
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    let requests = events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let batch = build
+        .registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests.clone()).unwrap())
+        .unwrap();
+    for (event, record) in events.iter().zip(batch.records()) {
+        let expected = match event.provider_session_id.as_deref() {
+            Some(id) if id == live_session_id => b"unionliverootsentinel".as_slice(),
+            Some(id) if id == archived_session_id => b"unionarchivedrootsentinel".as_slice(),
+            other => panic!("unexpected union session identity: {other:?}"),
+        };
+        assert_eq!(record.provider_bytes, expected);
+        assert_eq!(
+            build
+                .registry
+                .resolver_registry()
+                .hydrate_event(
+                    &EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap()
+                )
+                .unwrap()
+                .provider_bytes,
+            expected
+        );
+    }
+    drop(verified);
+
+    let replay =
+        refresh_source_backed_generation(&index_root, &build.registry, writer_options.clone())
+            .unwrap();
+    assert_eq!(replay.commit.generation_id, cold_generation);
+    assert_eq!(replay.commit.opstamp, cold_opstamp);
+    assert_eq!(replay.sources, cold.sources);
+    assert!(replay.removals.is_empty());
+
+    let moved_path = archived.join(format!("rollout-{live_session_id}.jsonl"));
+    fs::rename(&live_path, &moved_path).unwrap();
+    let moved =
+        refresh_source_backed_generation(&index_root, &build.registry, writer_options.clone())
+            .unwrap();
+    assert_eq!(moved.sources.len(), cold.sources.len());
+    assert!(cold.sources.iter().all(|before| {
+        moved.sources.iter().any(|after| {
+            after
+                .observation()
+                .source()
+                .exact_descriptor_eq(before.observation().source())
+                && after.content_digest() == before.content_digest()
+                && after.counts() == before.counts()
+        })
+    }));
+    assert!(moved.removals.is_empty());
+    assert!(sessions.read_dir().unwrap().next().is_none());
+    let moved_verified = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(moved_verified.document_count(), 2);
+    let moved_event_ids = moved_verified
+        .manifest()
+        .sources
+        .iter()
+        .flat_map(|source| {
+            moved_verified
+                .source_event_page(source.observation().source(), None, 10)
+                .unwrap()
+                .items
+        })
+        .map(|event| event.event_id)
+        .collect::<HashSet<_>>();
+    let cold_event_ids = events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<HashSet<_>>();
+    assert_eq!(moved_event_ids, cold_event_ids);
+    drop(moved_verified);
+    for request in &requests {
+        build
+            .registry
+            .resolver_registry()
+            .hydrate_event(request)
+            .unwrap();
+    }
+
+    fs::remove_file(&moved_path).unwrap();
+    fs::remove_file(&archived_path).unwrap();
+    let deletion =
+        refresh_source_backed_generation(&index_root, &build.registry, writer_options.clone())
+            .unwrap();
+    assert!(deletion.sources.is_empty());
+    assert_eq!(deletion.removals.len(), 2);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        0
+    );
+    let deletion_generation = deletion.commit.generation_id.clone();
+
+    let empty_replay =
+        refresh_source_backed_generation(&index_root, &build.registry, writer_options).unwrap();
+    assert_eq!(empty_replay.commit.generation_id, deletion_generation);
+    assert!(empty_replay.sources.is_empty());
+    assert_eq!(empty_replay.removals.len(), 2);
+    let unavailable = build
+        .registry
+        .resolver_registry()
+        .hydrate_event(&requests[0])
+        .unwrap_err();
+    assert_eq!(
+        unavailable.kind,
+        HydrationFailureKind::TemporarilyUnavailable
+    );
+}
+
+#[test]
+fn codex_automatic_session_union_rejects_duplicate_native_ids_before_publication() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let sessions = home.join(".codex/sessions");
+    let archived = home.join(".codex/archived_sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&archived).unwrap();
+    let duplicate_id = "019fb010-0000-7000-8000-000000000011";
+    let rollout = codex_rollout_bytes(duplicate_id, &["duplicateunionrootsentinel"]);
+    fs::write(
+        sessions.join(format!("rollout-{duplicate_id}.jsonl")),
+        &rollout,
+    )
+    .unwrap();
+    fs::write(
+        archived.join(format!("rollout-{duplicate_id}.jsonl")),
+        rollout,
     )
     .unwrap();
 
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let requests = [active_text, archived_text]
-        .into_iter()
-        .map(|text| {
-            let candidate = index
-                .search_event_candidates(text, 2)
-                .unwrap()
-                .into_iter()
-                .next()
-                .unwrap();
-            EventHydrationRequest::new(candidate.event.event_id, candidate.event.locator)
-                .unwrap()
-                .with_source_path_hint(candidate.event.source_path)
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    drop(index);
-
-    // This is the daemon-restart shape: rebuild provider routes from current
-    // provider authority and hydrate the retained generation before running a
-    // successor capture.
-    let recovered = build_automatic_source_backed_registry_from_parts(
+    let context = DiscoveryContext::new(
+        &home,
+        temp.path().join("cwd"),
+        DiscoveryPlatform::Linux,
+        crate::DiscoveryPlatformDirs::default(),
+    );
+    let build = build_automatic_source_backed_registry_from_parts(
         &context,
-        &data_root,
-        sources(),
+        &temp.path().join("ctx-data"),
+        vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &archived,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+        ],
         Vec::new(),
     );
-    let result = recovered
-        .registry
-        .resolver_registry()
-        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
-        .unwrap();
-    assert_eq!(
-        result
-            .records()
-            .iter()
-            .map(|record| record.provider_bytes.as_slice())
-            .collect::<Vec<_>>(),
-        vec![active_text.as_bytes(), archived_text.as_bytes()]
-    );
+    assert_eq!(build.executable_route_count(), 0);
+    assert_eq!(build.unsupported_route_count(), 1);
+    assert!(build.issues.iter().any(|issue| matches!(
+        issue,
+        SourceBackedAutomaticRegistryIssue::Unavailable {
+            source,
+            reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail },
+        } if source.path == sessions
+            && detail.contains(duplicate_id)
+            && detail.contains("resolves to more than one source")
+    )));
+    assert!(!temp.path().join("index").exists());
+}
+
+#[test]
 fn codex_session_tree_route_parallel_cold_scan_matches_single_worker_and_preserves_lifecycle() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -614,8 +766,10 @@ fn codex_session_tree_route_parallel_cold_scan_matches_single_worker_and_preserv
 fn codex_session_tree_parallel_route_keeps_failed_terminal_certification_atomic() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
+    let archived = temp.path().join("archived_sessions");
     let index_root = temp.path().join("index");
     fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&archived).unwrap();
     let baseline_id = "019fb000-0000-7000-8000-000000000011";
     fs::write(
         sessions.join(format!("rollout-{baseline_id}.jsonl")),
@@ -623,14 +777,22 @@ fn codex_session_tree_parallel_route_keeps_failed_terminal_certification_atomic(
     )
     .unwrap();
     let mut baseline_registry = SourceBackedProviderRegistry::new();
-    register_landed_source_backed_route(
+    register_codex_session_tree_routes(
         &mut baseline_registry,
-        fixture_provider_source_at(
-            CaptureProvider::Codex,
-            "codex_session_jsonl_tree",
-            ProviderImportSupport::Native,
-            &sessions,
-        ),
+        vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &archived,
+            ),
+        ],
         SourceBackedRouteSelection::Automatic,
     )
     .unwrap();
@@ -646,41 +808,51 @@ fn codex_session_tree_parallel_route_keeps_failed_terminal_certification_atomic(
     drop(baseline);
 
     fs::remove_file(sessions.join(format!("rollout-{baseline_id}.jsonl"))).unwrap();
-    for (native_session_id, marker) in [
+    for (root, native_session_id, marker) in [
         (
+            &sessions,
             "019fb000-0000-7000-8000-000000000012",
             "uncommittedparallelroutesentinelone",
         ),
         (
+            &archived,
             "019fb000-0000-7000-8000-000000000013",
             "uncommittedparallelroutesentineltwo",
         ),
     ] {
         fs::write(
-            sessions.join(format!("rollout-{native_session_id}.jsonl")),
+            root.join(format!("rollout-{native_session_id}.jsonl")),
             codex_rollout_bytes(native_session_id, &[marker]),
         )
         .unwrap();
     }
-    let late_sessions = sessions.clone();
+    let late_archived = archived.clone();
     let after_scan: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let late_id = "019fb000-0000-7000-8000-000000000014";
         fs::write(
-            late_sessions.join(format!("rollout-{late_id}.jsonl")),
+            late_archived.join(format!("rollout-{late_id}.jsonl")),
             codex_rollout_bytes(late_id, &["lateinventorycertificationsentinel"]),
         )
         .unwrap();
     });
     let counters = Arc::new(Mutex::new(Vec::new()));
     let mut failing_registry = SourceBackedProviderRegistry::new();
-    register_codex_session_tree_route_for_test(
+    register_codex_session_tree_routes_for_test(
         &mut failing_registry,
-        fixture_provider_source_at(
-            CaptureProvider::Codex,
-            "codex_session_jsonl_tree",
-            ProviderImportSupport::Native,
-            &sessions,
-        ),
+        vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &archived,
+            ),
+        ],
         SourceBackedRouteSelection::Automatic,
         2,
         Arc::clone(&counters),

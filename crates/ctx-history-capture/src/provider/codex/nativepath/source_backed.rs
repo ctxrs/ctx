@@ -302,9 +302,10 @@ mod ingestion;
 pub(crate) use catalog::CodexExplicitSessionInventoryV0;
 use catalog::{bind_catalog_capabilities, bind_source_keys, rediscover_codex_root_inventory_v0};
 pub(crate) use catalog::{
-    discover_codex_root_inventory_v0, managed_codex_session_source,
-    observe_codex_explicit_session_source_backed_v0, writer_base_sources,
-    CodexExplicitSessionSourceBackedInputV0, CodexRootInventoryV0,
+    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
+    managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
+    writer_base_sources, CodexExplicitSessionSourceBackedInputV0, CodexRootInventoryV0,
+    CodexSessionTreeInventoryV0,
 };
 use cold::{cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdParallelOptionsV0};
 use hydration::validate_codex_locator;
