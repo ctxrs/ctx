@@ -75,7 +75,13 @@ pub(crate) fn write_python_helper(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-#[cfg(all(unix, any(test, ctx_cli_test_support_fixtures)))]
+#[cfg(all(
+    unix,
+    any(
+        all(test, not(ctx_cli_bazel_test)),
+        ctx_cli_test_support_fixtures
+    )
+))]
 pub(crate) fn initialize_current_query_store(data_root: &Path) {
     initialize_pro_installation_identity(data_root);
     let generation_id = super::initialize_generation_only_sql_projection(data_root);

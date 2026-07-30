@@ -11,6 +11,8 @@ CTX_CLI_RUSTC_FLAGS = [
     "--check-cfg=cfg(ctx_cli_test_support_fixtures)",
     "--check-cfg=cfg(ctx_cli_test_support_pro)",
     "--check-cfg=cfg(ctx_cli_test_support_upgrade)",
+    "--check-cfg=cfg(ctx_cli_bazel_test)",
+    "--cfg=ctx_cli_bazel_test",
     "--check-cfg=cfg(test)",
 ] + select({
     "@rules_rust//rust/platform:aarch64-apple-darwin": [
@@ -25,7 +27,7 @@ CTX_CLI_RUSTC_FLAGS = [
     "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
         "--cfg=ctx_semantic_fastembed",
     ],
-    "@rules_rust//rust/platform:x86_64-pc-windows-gnu": [
+    "//tools/bazel/platforms:x86_64-pc-windows-gnu": [
         "--cfg=ctx_semantic_fastembed",
     ],
     "@rules_rust//rust/platform:x86_64-unknown-freebsd": [

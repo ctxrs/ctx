@@ -1,4 +1,7 @@
-#[cfg(any(test, ctx_cli_test_support_fixtures))]
+#[cfg(any(
+    all(test, not(ctx_cli_bazel_test)),
+    ctx_cli_test_support_fixtures
+))]
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -93,7 +96,10 @@ pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Valu
     source
 }
 
-#[cfg(any(test, ctx_cli_test_support_fixtures))]
+#[cfg(any(
+    all(test, not(ctx_cli_bazel_test)),
+    ctx_cli_test_support_fixtures
+))]
 pub(crate) fn sqlite_column_text(conn: &Connection, sql: &str) -> String {
     let mut statement = conn.prepare(sql).unwrap();
     let rows = statement
@@ -107,7 +113,10 @@ pub(crate) fn sqlite_column_text(conn: &Connection, sql: &str) -> String {
     text
 }
 
-#[cfg(any(test, ctx_cli_test_support_fixtures))]
+#[cfg(any(
+    all(test, not(ctx_cli_bazel_test)),
+    ctx_cli_test_support_fixtures
+))]
 pub(crate) fn sqlite_count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |row| row.get(0)).unwrap()
 }
