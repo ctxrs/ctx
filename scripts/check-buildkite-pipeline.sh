@@ -18,6 +18,7 @@ macos_precommand_script="scripts/buildkite/macos_agent_pre_command.sh"
 macos_ca_file="scripts/apple-developer-id-g2-ca.pem"
 semantic_handoff_script="scripts/stage-semantic-release-handoff.sh"
 semantic_append_script="scripts/append-semantic-release-metadata.sh"
+staging_script="scripts/stage-github-release-assets.sh"
 test -f "${pipeline}"
 test -f "${public_ci_script}"
 test -f "${artifact_script}"
@@ -35,6 +36,7 @@ test -f "${macos_precommand_script}"
 test -f "${macos_ca_file}"
 test -f "${semantic_handoff_script}"
 test -f "${semantic_append_script}"
+test -f "${staging_script}"
 
 if [[ -e ".github/workflows/public-ci.yml" ]]; then
   printf 'public GitHub Actions CI workflow should be migrated to Buildkite\n' >&2
@@ -386,7 +388,7 @@ for required in \
   'CTX_BAZEL_REPOSITORY_CACHE' \
   'dpkg-query' \
   'default-jdk-headless' \
-  'sha256sum -c -' \
+  'public artifact checksum mismatch' \
   'python3-build' \
   'python3-venv' \
   'ctx_bootstrap_bazelisk' \
@@ -472,7 +474,8 @@ for required in \
     "${macos_evidence_script}" \
     "${macos_precommand_script}" \
     "${semantic_handoff_script}" \
-    "${semantic_append_script}"; do
+    "${semantic_append_script}" \
+    "${staging_script}"; do
     if grep -F -q -- "${required}" "${checked_file}"; then
       found=1
       break
