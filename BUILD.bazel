@@ -488,6 +488,7 @@ sh_binary(
         "scripts/public-cli-release-targets.py",
         "scripts/public-cli-runtime-authority.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
+        "scripts/release/detached-debug-symbols.py",
         "scripts/release/public-cli-bazel-build-info.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
@@ -636,6 +637,7 @@ sh_test(
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/public-cli-release-targets.py",
         "scripts/release/linux-bazel-release.Dockerfile",
+        "scripts/release/detached-debug-symbols.py",
         "scripts/release/public-cli-bazel-build-info.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
@@ -646,6 +648,19 @@ sh_test(
         "//crates/ctx-history-index:Cargo.toml",
     ],
     tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
+    name = "detached_debug_symbols_tests",
+    srcs = ["scripts/tests/detached-debug-symbols-test.py"],
+    data = ["scripts/release/detached-debug-symbols.py"],
+    main = "scripts/tests/detached-debug-symbols-test.py",
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
 )
 
 py_test(

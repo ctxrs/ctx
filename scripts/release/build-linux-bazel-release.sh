@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: build-linux-bazel-release.sh --platform <linux-x64|linux-arm64> --source-commit SHA --output-dir PATH
+Usage: build-linux-bazel-release.sh --platform <linux-x64|linux-arm64> --source-commit SHA --output-dir PATH [--private-symbols-dir PATH]
 
 Builds and packages one native Linux Core candidate through the matching
 //:ctx_release_<target> --config=release route. The package version and output
@@ -23,6 +23,7 @@ die() {
 platform=""
 source_commit=""
 output_dir=""
+private_symbols_dir=""
 while (( $# > 0 )); do
   case "$1" in
     --platform)
@@ -36,6 +37,10 @@ while (( $# > 0 )); do
     --output-dir)
       shift
       output_dir="${1:-}"
+      ;;
+    --private-symbols-dir)
+      shift
+      private_symbols_dir="${1:-}"
       ;;
     -h|--help)
       usage
@@ -81,6 +86,16 @@ esac
   echo "error: --output-dir is required" >&2
   exit 64
 }
+if [[ -z "${private_symbols_dir}" ]]; then
+  private_symbols_dir="${output_dir}.private-debug-symbols"
+fi
+[[ "${private_symbols_dir}" == /* ]] \
+  || die "--private-symbols-dir must be absolute"
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output must not already exist"
+private_symbols_parent="$(dirname "${private_symbols_dir}")"
+mkdir -p "${private_symbols_parent}"
+symbols_stage_parent=""
 [[ "$(uname -s)" == "Linux" ]] \
   || die "native Linux Bazel release construction requires Linux"
 [[ "$(uname -m)" == "${expected_host_arch}" ]] \
@@ -296,8 +311,14 @@ cleanup() {
     chmod -R u+w -- "${task_root}" 2>/dev/null || true
     rm -rf -- "${task_root}"
   fi
+  if [[ -n "${symbols_stage_parent:-}" \
+    && "${symbols_stage_parent}" == "${private_symbols_parent}/.ctx-symbol-stage."* \
+    && -d "${symbols_stage_parent}" && ! -L "${symbols_stage_parent}" ]]; then
+    rm -rf -- "${symbols_stage_parent}"
+  fi
 }
 trap cleanup EXIT
+symbols_stage_parent="$(mktemp -d "${private_symbols_parent}/.ctx-symbol-stage.XXXXXX")"
 install -d -m 0700 \
   "${task_root}/release-input" \
   "${cache_root}"
@@ -328,6 +349,7 @@ docker_run_args=(
   -v "${osv_scanner_input}:/release-advisory/osv-scanner:ro"
   -v "${osv_database_input}:/release-advisory/database:ro"
   -v "${osv_metadata_input}:/release-advisory/database-metadata.json:ro"
+  -v "${symbols_stage_parent}:/release-symbol-output:rw"
   -w "${repo_root}"
 )
 if [[ "${cache_root}" != "${task_root}/cache" ]]; then
@@ -386,6 +408,11 @@ docker run "${docker_run_args[@]}" \
     test -f "$rustc_runfile" -a -x "$rustc_runfile"
     install -m 0755 \
       "$artifact_runfile" "/build/release-input/${CTX_RELEASE_BINARY_NAME}"
+    python3 scripts/release/detached-debug-symbols.py prepare \
+      --artifact "/build/release-input/${CTX_RELEASE_BINARY_NAME}" \
+      --output-dir /build/release-input/private-debug-symbols \
+      --platform "${CTX_RELEASE_TARGET_ID}" \
+      --product ctx
     "$rustc_runfile" --version > /build/release-input/rustc.version
   '
 
@@ -439,8 +466,15 @@ docker run "${docker_run_args[@]}" \
     TEST_WORKSPACE=_main \
     "$route" \
       --build-info "/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json" \
-      --output-dir /release-output
+      --output-dir /release-output \
+      --private-symbols-dir /release-symbol-output/bundle
   '
+
+[[ -d "${symbols_stage_parent}/bundle" ]] \
+  || die "packaged release output is missing private debug symbols"
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output appeared during construction"
+mv "${symbols_stage_parent}/bundle" "${private_symbols_dir}"
 
 [[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
   || die "source commit changed during native Linux Bazel construction"
