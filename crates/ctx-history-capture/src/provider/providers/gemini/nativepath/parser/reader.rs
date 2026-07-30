@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) struct GeminiNativePageReader<'a> {
     pub(super) source: &'a GeminiTranscriptSource,
+    pub(super) source_file: crate::common::io::OpenedProviderSourceFile,
     pub(super) previous: Option<&'a GeminiPreviousSource>,
     pub(super) initial_observation: GeminiFileObservation,
     pub(super) source_hasher: Sha256,
@@ -259,7 +260,7 @@ impl<'a> GeminiNativePageReader<'a> {
         {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
-        self.source.source_file.revalidate()?;
+        self.source_file.revalidate_leaf()?;
         Ok(())
     }
 
@@ -675,7 +676,7 @@ impl<'a> GeminiNativePageReader<'a> {
         self.certify_source_range()?;
         let final_observation =
             GeminiFileObservation::from_metadata(&self.reader.get_ref().metadata()?)?;
-        self.source.source_file.revalidate()?;
+        self.source.authority.revalidate()?;
         self.retained_event_count = self
             .retained_event_count
             .saturating_add(self.state.retained_rows_this_scan);

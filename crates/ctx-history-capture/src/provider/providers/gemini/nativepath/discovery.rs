@@ -1,7 +1,6 @@
 use std::{
     fs::Metadata,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::UNIX_EPOCH,
 };
 
@@ -9,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::common::io::{
     open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
-    ProviderSourceDirectory,
+    ProviderSourceDirectory, ProviderSourceRoot,
 };
 use crate::{CaptureError, Result};
 
@@ -21,6 +20,7 @@ pub(super) const MAX_GEMINI_DISCOVERY_DEPTH: usize = 64;
 pub(super) const MAX_GEMINI_DISCOVERY_ENTRIES: usize = 100_000;
 pub(super) const MAX_GEMINI_DISCOVERY_PATH_BYTES: usize = 64 * 1024 * 1024;
 const INVENTORY_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-inventory-v1\0";
+type GeminiCatalogCandidate = (PathBuf, PathBuf, GeminiFileObservation, [u8; 32]);
 
 #[derive(Debug)]
 pub(super) struct DiscoveryBudget {
@@ -104,6 +104,16 @@ impl GeminiFileObservation {
     }
 }
 
+impl GeminiTranscriptSource {
+    pub(crate) fn open(&self) -> Result<OpenedProviderSourceFile> {
+        let opened = self.authority.open_file(&self.authority_relative_path)?;
+        if opened.ordinary_file_token() != self.ordinary_file_token {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(opened)
+    }
+}
+
 pub(crate) fn discover_gemini_transcripts(root: &Path) -> Result<GeminiDiscovery> {
     discover_gemini_transcripts_with_budget(root, DiscoveryBudget::default())
 }
@@ -128,19 +138,47 @@ fn discover_gemini_transcripts_with_budget(
     let opened_root = open_provider_source_path(root)?;
     let root_is_file = matches!(opened_root, OpenedProviderSourcePath::File(_));
     let layout_root = gemini_layout_root(&canonical_root, root_is_file);
-    let mut paths = Vec::<(PathBuf, Arc<OpenedProviderSourceFile>)>::new();
-    match opened_root {
+    let mut paths = Vec::new();
+    let authority = match opened_root {
         OpenedProviderSourcePath::File(file) => {
             budget.observe(&canonical_root)?;
+            let parent = canonical_root.parent().ok_or_else(|| {
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: canonical_root.clone(),
+                    reason: "Gemini transcript file has no parent authority",
+                }
+            })?;
+            let relative = canonical_root
+                .file_name()
+                .map(PathBuf::from)
+                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                    path: canonical_root.clone(),
+                    reason: "Gemini transcript file has no authority-relative name",
+                })?;
+            let authority = ProviderSourceRoot::open(parent)?;
             if canonical_root
                 .extension()
                 .and_then(|extension| extension.to_str())
                 == Some("jsonl")
             {
-                paths.push((canonical_root.clone(), Arc::new(file)));
+                let observation = GeminiFileObservation::from_metadata(file.metadata())?;
+                let ordinary_file_token = file.ordinary_file_token();
+                file.revalidate_leaf()?;
+                let reopened = authority.open_file(&relative)?;
+                if reopened.ordinary_file_token() != ordinary_file_token {
+                    return Err(CaptureError::SourceChangedDuringCapture);
+                }
+                reopened.revalidate_leaf()?;
+                paths.push((
+                    canonical_root.clone(),
+                    relative,
+                    observation,
+                    ordinary_file_token,
+                ));
             } else {
-                file.revalidate()?;
+                file.revalidate_leaf()?;
             }
+            authority
         }
         OpenedProviderSourcePath::Directory(directory) => {
             let authority = directory.authority_root();
@@ -150,13 +188,14 @@ fn discover_gemini_transcripts_with_budget(
                 budget.observe(&scan_path)?;
                 collect_candidates(&scan_path, scan_directory, &mut paths, &mut budget, 0)?;
             }
-            authority.revalidate()?;
+            authority
         }
-    }
+    };
+    authority.revalidate()?;
     paths.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     let mut transcripts = Vec::with_capacity(paths.len());
-    for (path, source_file) in paths {
+    for (path, authority_relative_path, observation, ordinary_file_token) in paths {
         let Some(layout) = gemini_transcript_layout(&layout_root, &path, root_is_file)? else {
             continue;
         };
@@ -168,11 +207,13 @@ fn discover_gemini_transcripts_with_budget(
                 .to_path_buf()
         };
         transcripts.push(GeminiTranscriptSource {
-            observation: GeminiFileObservation::from_metadata(source_file.metadata())?,
+            observation,
             path,
             relative_path,
             layout,
-            source_file,
+            ordinary_file_token,
+            authority_relative_path,
+            authority: authority.clone(),
         });
     }
 
@@ -211,7 +252,7 @@ fn gemini_scan_directory(
 fn collect_candidates(
     path: &Path,
     directory: ProviderSourceDirectory,
-    paths: &mut Vec<(PathBuf, Arc<OpenedProviderSourceFile>)>,
+    paths: &mut Vec<GeminiCatalogCandidate>,
     budget: &mut DiscoveryBudget,
     depth: usize,
 ) -> Result<()> {
@@ -238,9 +279,17 @@ fn collect_candidates(
             OpenedProviderSourcePath::File(file)
                 if child.extension().and_then(|extension| extension.to_str()) == Some("jsonl") =>
             {
-                paths.push((child, Arc::new(file)));
+                let observation = GeminiFileObservation::from_metadata(file.metadata())?;
+                let ordinary_file_token = file.ordinary_file_token();
+                file.revalidate_leaf()?;
+                paths.push((
+                    child,
+                    directory.relative_path().join(name),
+                    observation,
+                    ordinary_file_token,
+                ));
             }
-            OpenedProviderSourcePath::File(file) => file.revalidate()?,
+            OpenedProviderSourcePath::File(file) => file.revalidate_leaf()?,
         }
     }
     directory.revalidate()?;
@@ -385,6 +434,7 @@ fn inventory_digest(transcripts: &[GeminiTranscriptSource]) -> [u8; 32] {
                 .unwrap_or_default()
                 .to_be_bytes(),
         );
+        hasher.update(transcript.ordinary_file_token);
     }
     hasher.finalize().into()
 }

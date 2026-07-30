@@ -259,11 +259,3 @@ pub(super) fn classify_source_change(
         GeminiSourceChange::Rewrite
     }
 }
-
-pub(super) fn open_gemini_transcript(source: &GeminiTranscriptSource) -> Result<File> {
-    let file = source.source_file.file().try_clone()?;
-    if GeminiFileObservation::from_metadata(&file.metadata()?)? != source.observation {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    Ok(file)
-}

@@ -472,13 +472,13 @@ pub(crate) fn hydrate_gemini_source_backed_record(
     let range_end = byte_offset
         .checked_add(byte_length)
         .ok_or(GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    if source.source_file.len() < range_end {
+    let source_file = source.open()?;
+    if source_file.len() < range_end {
         return Err(GeminiSourceBackedError::LocatorRangeMissing);
     }
     let byte_length =
         usize::try_from(byte_length).map_err(|_| GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    let provider_bytes = source
-        .source_file
+    let provider_bytes = source_file
         .read_exact_range(
             byte_offset,
             byte_length,
