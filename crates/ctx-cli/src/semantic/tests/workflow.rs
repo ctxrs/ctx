@@ -113,6 +113,32 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
     Ok(())
 }
 
+#[test]
+fn restored_daemon_retry_deadline_is_clamped_to_runtime_maximum() {
+    let now_ms = utc_now().timestamp_millis();
+    let persisted = json!({
+        "consecutive_failures": 99,
+        "retry_not_before_at_ms": now_ms + 24 * 60 * 60 * 1_000,
+    });
+    let mut backoff = DaemonRetryBackoff::default();
+    backoff.restore(Some(&persisted));
+
+    let maximum_ms = DaemonRetryBackoff::MAX_DELAY.as_millis() as u64;
+    assert!(
+        backoff
+            .retry_after_ms()
+            .is_some_and(|remaining| remaining <= maximum_ms),
+        "{backoff:#?}"
+    );
+    assert!(
+        backoff.retry_not_before_at_ms.is_some_and(|deadline| {
+            deadline > now_ms && deadline <= now_ms + maximum_ms as i64
+        }),
+        "{backoff:#?}"
+    );
+    assert_eq!(backoff.consecutive_failures, 99);
+}
+
 #[cfg(ctx_semantic_fastembed)]
 #[test]
 fn verified_cache_missing_runtime_reports_model_load_failed() -> Result<()> {

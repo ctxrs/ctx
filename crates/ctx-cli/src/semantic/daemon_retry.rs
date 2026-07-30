@@ -144,18 +144,21 @@ impl DaemonRetryBackoff {
         let Some(retry_at_ms) = value.get("retry_not_before_at_ms").and_then(Value::as_i64) else {
             return;
         };
-        let remaining_ms = retry_at_ms.saturating_sub(utc_now().timestamp_millis());
+        let now_ms = utc_now().timestamp_millis();
+        let remaining_ms = retry_at_ms.saturating_sub(now_ms);
         if remaining_ms <= 0 {
             return;
         }
+        let delay = StdDuration::from_millis(remaining_ms as u64).min(Self::MAX_DELAY);
         self.consecutive_failures = value
             .get("consecutive_failures")
             .and_then(Value::as_u64)
             .unwrap_or(1)
             .min(u64::from(u32::MAX)) as u32;
-        self.retry_not_before =
-            Some(Instant::now() + StdDuration::from_millis(remaining_ms as u64));
-        self.retry_not_before_at_ms = Some(retry_at_ms);
+        self.retry_not_before = Some(Instant::now() + delay);
+        self.retry_not_before_at_ms = Some(
+            now_ms.saturating_add(delay.as_millis().min(i64::MAX as u128) as i64),
+        );
     }
 
     pub(super) fn reset(&mut self) {
