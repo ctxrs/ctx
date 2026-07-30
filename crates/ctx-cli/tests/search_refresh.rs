@@ -2,7 +2,7 @@ mod support;
 
 use ctx_history_index::{GenerationManifest, LEXICAL_SEGMENT_MERGE_FAN_IN};
 use std::{
-    io::Read,
+    io::{self, Read},
     process::{Child, Command as StdCommand, Stdio},
     time::SystemTime,
 };
@@ -110,8 +110,7 @@ fn launch_source_refresh_daemon(
     if let Some(codex_home) = codex_home {
         command.env("CODEX_HOME", codex_home);
     }
-    let child = command
-        .spawn()
+    let child = spawn_copied_test_binary(&mut command)
         .unwrap_or_else(|error| panic!("start isolated source-refresh daemon: {error}"));
     let mut daemon = SourceRefreshDaemon { child: Some(child) };
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -147,6 +146,27 @@ fn launch_source_refresh_daemon(
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn spawn_copied_test_binary(command: &mut StdCommand) -> io::Result<Child> {
+    const MAX_TRANSIENT_ATTEMPTS: usize = 10;
+    for attempt in 0..=MAX_TRANSIENT_ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            // Concurrent Bazel tests can briefly observe Linux ETXTBSY while
+            // the freshly published task-owned executable becomes runnable.
+            // This retry is deliberately test-only and tightly bounded.
+            Err(error)
+                if cfg!(unix)
+                    && error.raw_os_error() == Some(26)
+                    && attempt < MAX_TRANSIENT_ATTEMPTS =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded copied-binary launch loop must return")
 }
 
 fn assert_published_generation(search: &Value, expected_mode: &str) -> String {
