@@ -280,7 +280,7 @@ fn codex_reimport_rebuilds_from_provider_source() {
     let source_root = home_root(&temp).join(".codex/sessions");
     let source = source_root.join("2026/07/23/rollout-2026-07-23T01-00-00-source-authority.jsonl");
     fs::create_dir_all(source.parent().unwrap()).unwrap();
-    fs::write(&source, codex_source("provider authority before")).unwrap();
+    fs::write(&source, codex_source("ctxsupersededtoken")).unwrap();
 
     let initial = import_codex(&temp);
     assert_change(&initial, "changed");
@@ -314,7 +314,7 @@ fn codex_reimport_rebuilds_from_provider_source() {
 
     let rewritten_source = fs::read_to_string(&source)
         .unwrap()
-        .replace("provider authority before", "provider authority after!");
+        .replace("ctxsupersededtoken", "ctxreplacementtoken!");
     fs::write(&source, rewritten_source).unwrap();
 
     let replay = import_codex(&temp);
@@ -332,7 +332,7 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert_eq!(replay["sources"][0]["generation_changed"], true);
     let search = json_output(isolated_ctx(&temp).args([
         "search",
-        "provider authority after",
+        "ctxreplacementtoken",
         "--provider",
         "codex",
         "--refresh",
@@ -345,17 +345,20 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert_eq!(results[0]["provider"], "codex");
     assert!(results[0]["snippet"]
         .as_str()
-        .is_some_and(|text| text.contains("provider authority after")));
+        .is_some_and(|text| text.contains("ctxreplacementtoken")));
     let superseded = json_output(isolated_ctx(&temp).args([
         "search",
-        "provider authority before",
+        "ctxsupersededtoken",
         "--provider",
         "codex",
         "--refresh",
         "off",
         "--format=json",
     ]));
-    assert!(superseded["results"].as_array().unwrap().is_empty());
+    assert!(
+        superseded["results"].as_array().unwrap().is_empty(),
+        "{superseded:#}"
+    );
     let with_rejection = format!(
         "{}{{malformed json}}\n",
         fs::read_to_string(&source).unwrap()
