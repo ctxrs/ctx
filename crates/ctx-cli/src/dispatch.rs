@@ -37,7 +37,9 @@ use crate::{
     hydration_error::source_hydration_error_contract,
     integrations, local_usage, mcp,
     output::{JsonOutputFormat, OutputFormat, SqlFormat},
-    pro, semantic, upgrade,
+    pro, semantic,
+    ui::Ui,
+    upgrade,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +101,7 @@ pub(crate) fn run() -> ExitCode {
 pub(crate) fn run_cli() -> Result<()> {
     let started = Instant::now();
     let cli = Cli::parse();
+    let mut ui = Ui::stdio(cli.color);
     if let CommandRoot::Referral(args) = &cli.command {
         args.validate_invocation()?;
     }
@@ -175,6 +178,7 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut provider_refreshes,
             quiet,
             &mut config,
+            &mut ui,
         ),
         CommandRoot::Status(args) => run_status(
             args,
@@ -184,6 +188,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("status has a telemetry draft")
                 .status_mut(),
+            &mut ui,
         ),
         CommandRoot::Stats(args) => run_stats(args, data_root.clone(), config.local_usage.enabled),
         CommandRoot::Index(args) => run_index(
@@ -194,6 +199,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("index has a telemetry draft")
                 .index_mut(),
+            &mut ui,
         ),
         CommandRoot::Sources(args) => run_sources(
             args,
@@ -251,11 +257,11 @@ pub(crate) fn run_cli() -> Result<()> {
                 // completion hook below.
                 local_usage_draft = local_usage::CliUsage::excluded();
             }
-            validation.and_then(|()| pro::run_lifecycle(args, data_root.clone()))
+            validation.and_then(|()| pro::run_lifecycle(args, data_root.clone(), &mut ui))
         }
-        CommandRoot::Referral(args) => pro::run_referral(args, data_root.clone()),
+        CommandRoot::Referral(args) => pro::run_referral(args, data_root.clone(), &mut ui),
         CommandRoot::Blame(args) => {
-            crate::commands::blame::run(args, data_root.clone(), &mut local_usage_draft)
+            crate::commands::blame::run(args, data_root.clone(), &mut local_usage_draft, &mut ui)
         }
         CommandRoot::Sql(args) => run_sql(
             args,
@@ -291,6 +297,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("upgrade has a telemetry draft")
                 .upgrade_mut(),
+            &mut ui,
         ),
         CommandRoot::Doctor(args) => run_doctor(
             args,
@@ -299,6 +306,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("doctor has a telemetry draft")
                 .doctor_mut(),
+            &mut ui,
         ),
     };
     let duration = started.elapsed();
@@ -328,6 +336,7 @@ pub(crate) fn run_cli() -> Result<()> {
     } else {
         None
     };
+    ui.flush().context("flush structured terminal output")?;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     let delivery_result = flush_cli_output_then(&mut stdout, &mut stderr, || {

@@ -194,6 +194,7 @@ pub fn run(
     data_root: PathBuf,
     config: AppConfig,
     telemetry: &mut UpgradeTelemetry,
+    _ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     #[cfg(windows)]
     if args.replacement_helper {

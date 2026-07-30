@@ -20,6 +20,7 @@ pub(crate) fn run_status(
     data_root: PathBuf,
     quiet: bool,
     telemetry: &mut StatusTelemetry,
+    _ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     if let Some(mode) = args.usage {
         return run_usage_action(mode, &data_root, args.format.is_json(), quiet);

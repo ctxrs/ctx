@@ -139,6 +139,7 @@ pub(crate) fn run(
     args: BlameArgs,
     data_root: PathBuf,
     local_usage: &mut crate::local_usage::CliUsage,
+    _ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     let (target, limit, cursor, json) = match args.target {
         BlameTargetArgs::File(args) => (
