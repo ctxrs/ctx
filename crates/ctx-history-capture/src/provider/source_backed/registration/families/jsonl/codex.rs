@@ -343,9 +343,7 @@ pub fn register_codex_prompt_history_source_backed_route(
     let claimed_source = owned_source.clone();
     let capture_route = source.clone();
     let terminal_route = source.clone();
-    let terminal_evidence = Arc::new(Mutex::new(
-        None::<Result<(CertifiedSource, CertifiedSourceInventory), SourceBackedRouteError>>,
-    ));
+    let terminal_evidence = Arc::new(Mutex::new(None::<CodexPromptTerminalEvidence>));
     let scan_terminal_evidence = Arc::clone(&terminal_evidence);
     let source_terminal_evidence = Arc::clone(&terminal_evidence);
     let inventory_terminal_evidence = terminal_evidence;
@@ -357,7 +355,6 @@ pub fn register_codex_prompt_history_source_backed_route(
             certify_source_inventory(&terminal_route, std::slice::from_ref(&scan.certificate))?;
         Ok((scan.certificate, inventory))
     });
-    let source_terminal_capture = Arc::clone(&terminal_capture);
     let inventory_terminal_capture = terminal_capture;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
@@ -404,9 +401,12 @@ pub fn register_codex_prompt_history_source_backed_route(
                 }
                 sink.certify_source(scan.certificate.clone())
                     .map_err(route_coordinator_error)?;
-                let inventory = certify_source_inventory(&capture_route, &[scan.certificate])?;
-                sink.certify_complete_inventory(inventory)
+                let certificate = scan.certificate;
+                let inventory =
+                    certify_source_inventory(&capture_route, std::slice::from_ref(&certificate))?;
+                sink.certify_complete_inventory(inventory.clone())
                     .map_err(route_coordinator_error)?;
+                remember_codex_prompt_terminal(&scan_terminal_evidence, certificate, inventory)?;
                 return Ok(());
             };
 
@@ -520,31 +520,22 @@ pub fn register_codex_prompt_history_source_backed_route(
                     ));
                 }
             };
-            let inventory = certify_source_inventory(&capture_route, &[certificate])?;
-            sink.certify_complete_inventory(inventory)
-                .map_err(route_coordinator_error)
+            let inventory =
+                certify_source_inventory(&capture_route, std::slice::from_ref(&certificate))?;
+            sink.certify_complete_inventory(inventory.clone())
+                .map_err(route_coordinator_error)?;
+            remember_codex_prompt_terminal(&scan_terminal_evidence, certificate, inventory)
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
-        move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected) => cached_codex_prompt_evidence(
-                &source_terminal_evidence,
-                source_terminal_capture.as_ref(),
-            )
-            .is_some_and(|(current, _)| current == *expected),
-            SourceBackedRevalidationTarget::Deletion(deletion) => cached_codex_prompt_evidence(
-                &source_terminal_evidence,
-                source_terminal_capture.as_ref(),
-            )
-            .is_some_and(|(_, inventory)| deletion.verifies(&inventory)),
-        },
+        move |target| bind_codex_prompt_target(&source_terminal_evidence, target),
         move |request| hydration_resolver.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
-        cached_codex_prompt_evidence(
+        revalidate_codex_prompt_inventory(
             &inventory_terminal_evidence,
             inventory_terminal_capture.as_ref(),
+            expected,
         )
-        .is_some_and(|(_, current)| current == *expected)
     });
     registry.register(executable_route(
         source,
@@ -559,15 +550,140 @@ type CodexPromptTerminalCapture = dyn Fn() -> Result<(CertifiedSource, Certified
     + Send
     + Sync;
 
-fn cached_codex_prompt_evidence(
-    cached: &Mutex<
-        Option<Result<(CertifiedSource, CertifiedSourceInventory), SourceBackedRouteError>>,
-    >,
-    capture: &CodexPromptTerminalCapture,
-) -> Option<(CertifiedSource, CertifiedSourceInventory)> {
-    let mut cached = cached.lock().ok()?;
-    if cached.is_none() {
-        *cached = Some(capture());
+struct CodexPromptTerminalEvidence {
+    certificate: CertifiedSource,
+    inventory: CertifiedSourceInventory,
+}
+
+fn remember_codex_prompt_terminal(
+    state: &Mutex<Option<CodexPromptTerminalEvidence>>,
+    certificate: CertifiedSource,
+    inventory: CertifiedSourceInventory,
+) -> SourceBackedRouteResult<()> {
+    let mut state = state.lock().map_err(|_| {
+        SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::Internal,
+            "Codex prompt-history terminal evidence lock was poisoned",
+        )
+    })?;
+    *state = Some(CodexPromptTerminalEvidence {
+        certificate,
+        inventory,
+    });
+    Ok(())
+}
+
+fn bind_codex_prompt_target(
+    state: &Mutex<Option<CodexPromptTerminalEvidence>>,
+    target: SourceBackedRevalidationTarget<'_>,
+) -> bool {
+    let Ok(state) = state.lock() else {
+        return false;
+    };
+    let Some(expected) = state.as_ref() else {
+        return false;
+    };
+    match target {
+        SourceBackedRevalidationTarget::Source(source) => expected.certificate == *source,
+        SourceBackedRevalidationTarget::Deletion(deletion) => {
+            deletion.verifies(&expected.inventory)
+                && !expected
+                    .certificate
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(deletion.source())
+        }
     }
-    cached.as_ref()?.as_ref().ok().cloned()
+}
+
+fn revalidate_codex_prompt_inventory(
+    state: &Mutex<Option<CodexPromptTerminalEvidence>>,
+    capture: &CodexPromptTerminalCapture,
+    expected_inventory: &CertifiedSourceInventory,
+) -> bool {
+    let Ok(state) = state.lock() else {
+        return false;
+    };
+    let Some(expected) = state.as_ref() else {
+        return false;
+    };
+    if expected.inventory != *expected_inventory {
+        return false;
+    }
+    capture().is_ok_and(|(certificate, inventory)| {
+        certificate == expected.certificate && inventory == expected.inventory
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+    };
+
+    use super::*;
+    use crate::ProviderCatalogSupport;
+
+    #[test]
+    fn prompt_history_terminal_inventory_rejects_mutation_after_source_binding() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let history = temp.path().join("history.jsonl");
+        let first = serde_json::json!({
+            "session_id": "terminal-session",
+            "ts": 1_785_139_200,
+            "text": "before terminal callback",
+        });
+        fs::write(&history, format!("{first}\n")).unwrap();
+        let input = CodexPromptHistorySourceBackedInputV0::explicit(
+            &history,
+            CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0,
+        );
+        let retained = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
+        let scan =
+            scan_codex_prompt_history_source_backed_v0(retained.clone(), None, |_| Ok(())).unwrap();
+        let route = ProviderSource {
+            provider: CaptureProvider::Codex,
+            path: history.clone(),
+            exists: true,
+            source_format: "codex_history_jsonl",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        };
+        let inventory =
+            certify_source_inventory(&route, std::slice::from_ref(&scan.certificate)).unwrap();
+        let state = Mutex::new(Some(CodexPromptTerminalEvidence {
+            certificate: scan.certificate.clone(),
+            inventory: inventory.clone(),
+        }));
+        assert!(bind_codex_prompt_target(
+            &state,
+            SourceBackedRevalidationTarget::Source(&scan.certificate),
+        ));
+
+        let second = serde_json::json!({
+            "session_id": "terminal-session",
+            "ts": 1_785_139_201,
+            "text": "mutated between callbacks",
+        });
+        writeln!(
+            OpenOptions::new().append(true).open(&history).unwrap(),
+            "{second}"
+        )
+        .unwrap();
+        let capture = move || {
+            let current =
+                scan_codex_prompt_history_source_backed_v0(retained.clone(), None, |_| Ok(()))
+                    .map_err(route_error)?;
+            let inventory =
+                certify_source_inventory(&route, std::slice::from_ref(&current.certificate))?;
+            Ok((current.certificate, inventory))
+        };
+        assert!(!revalidate_codex_prompt_inventory(
+            &state, &capture, &inventory,
+        ));
+    }
 }

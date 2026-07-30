@@ -9,7 +9,6 @@ struct OpenHandsTerminalScan {
     inventory: Arc<EventFileInventory>,
     certificates: Vec<CertifiedSource>,
     complete_inventory: CertifiedSourceInventory,
-    revalidated: Option<bool>,
 }
 
 pub(super) fn register_openhands_route(
@@ -102,37 +101,15 @@ pub(super) fn register_openhands_route(
                 inventory,
                 certificates,
                 complete_inventory,
-                revalidated: None,
             });
             Ok(())
         },
         openhands_owns_source,
-        move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected) => {
-                with_revalidated_openhands_scan(&source_terminal_state, |scan| {
-                    scan.certificates
-                        .iter()
-                        .any(|certificate| certificate == expected)
-                })
-            }
-            SourceBackedRevalidationTarget::Deletion(deletion) => {
-                with_revalidated_openhands_scan(&source_terminal_state, |scan| {
-                    deletion.verifies(&scan.complete_inventory)
-                        && !scan.certificates.iter().any(|certificate| {
-                            certificate
-                                .observation()
-                                .source()
-                                .exact_descriptor_eq(deletion.source())
-                        })
-                })
-            }
-        },
+        move |target| bind_openhands_target(&source_terminal_state, target),
         move |request| hydration_adapter.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
-        with_revalidated_openhands_scan(&inventory_terminal_state, |scan| {
-            scan.complete_inventory == *expected
-        })
+        revalidate_openhands_inventory(&inventory_terminal_state, expected)
     })
     .with_batch_hydration(move |request| batch_hydration_adapter.hydrate_batch(request));
 
@@ -155,28 +132,48 @@ fn reset_openhands_terminal_state(
     Ok(())
 }
 
-fn with_revalidated_openhands_scan(
+fn bind_openhands_target(
     state: &Mutex<Option<OpenHandsTerminalScan>>,
-    evaluate: impl FnOnce(&OpenHandsTerminalScan) -> bool,
+    target: SourceBackedRevalidationTarget<'_>,
 ) -> bool {
-    let Ok(mut state) = state.lock() else {
+    let Ok(state) = state.lock() else {
         return false;
     };
-    let Some(scan) = state.as_mut() else {
+    let Some(scan) = state.as_ref() else {
         return false;
     };
-    let revalidated = match scan.revalidated {
-        Some(revalidated) => revalidated,
-        None => {
-            let revalidated = scan
-                .adapter
-                .revalidate_inventory(scan.inventory.as_ref())
-                .is_ok();
-            scan.revalidated = Some(revalidated);
-            revalidated
+    match target {
+        SourceBackedRevalidationTarget::Source(expected) => scan
+            .certificates
+            .iter()
+            .any(|certificate| certificate == expected),
+        SourceBackedRevalidationTarget::Deletion(deletion) => {
+            deletion.verifies(&scan.complete_inventory)
+                && !scan.certificates.iter().any(|certificate| {
+                    certificate
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(deletion.source())
+                })
         }
+    }
+}
+
+fn revalidate_openhands_inventory(
+    state: &Mutex<Option<OpenHandsTerminalScan>>,
+    expected: &CertifiedSourceInventory,
+) -> bool {
+    let Ok(state) = state.lock() else {
+        return false;
     };
-    revalidated && evaluate(scan)
+    let Some(scan) = state.as_ref() else {
+        return false;
+    };
+    scan.complete_inventory == *expected
+        && scan
+            .adapter
+            .revalidate_inventory(scan.inventory.as_ref())
+            .is_ok()
 }
 
 fn openhands_exact_replay_matches(
@@ -293,28 +290,27 @@ mod tests {
     }
 
     #[test]
-    fn openhands_terminal_revalidation_is_cached_and_fail_closed_per_scan() {
+    fn openhands_terminal_inventory_revalidation_is_fresh_on_every_call() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let selected = temp.path().join("openhands");
         let event = write_message(&selected, "conversation-terminal", "event-1", "before");
         let state = terminal_state(&selected);
+        let inventory = state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .complete_inventory
+            .clone();
 
-        assert!(with_revalidated_openhands_scan(&state, |_| true));
+        assert!(revalidate_openhands_inventory(&state, &inventory));
         fs::write(
             &event,
-            serde_json::to_vec(&message("event-1", "after-cache")).unwrap(),
+            serde_json::to_vec(&message("event-1", "changed-between-callbacks")).unwrap(),
         )
         .unwrap();
-        assert!(with_revalidated_openhands_scan(&state, |_| true));
-
-        let failed_state = terminal_state(&selected);
-        fs::write(
-            &event,
-            serde_json::to_vec(&message("event-1", "changed-before-terminal")).unwrap(),
-        )
-        .unwrap();
-        assert!(!with_revalidated_openhands_scan(&failed_state, |_| true));
-        assert!(!with_revalidated_openhands_scan(&failed_state, |_| true));
+        assert!(!revalidate_openhands_inventory(&state, &inventory));
+        assert!(!revalidate_openhands_inventory(&state, &inventory));
     }
 
     fn terminal_state(selected: &Path) -> Mutex<Option<OpenHandsTerminalScan>> {
@@ -328,7 +324,6 @@ mod tests {
             inventory,
             certificates: Vec::new(),
             complete_inventory,
-            revalidated: None,
         }))
     }
 
