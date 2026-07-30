@@ -64,7 +64,9 @@ cat >"${repo}/security/release-advisory-policy-v1.json" <<'EOF'
   "scanner": {
     "name": "osv-scanner",
     "version": "2.4.0",
-    "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "sha256_by_target": {
+      "linux-x64": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
     "max_database_age_hours": 48
   },
   "lockfiles": [
@@ -263,7 +265,9 @@ import sys
 policy_path = Path(sys.argv[1])
 scanner_path = Path(sys.argv[2])
 policy = json.loads(policy_path.read_text(encoding="utf-8"))
-policy["scanner"]["sha256"] = hashlib.sha256(scanner_path.read_bytes()).hexdigest()
+policy["scanner"]["sha256_by_target"]["linux-x64"] = hashlib.sha256(
+    scanner_path.read_bytes()
+).hexdigest()
 policy_path.write_text(json.dumps(policy), encoding="utf-8")
 PY
 
