@@ -6,8 +6,7 @@
 //! capability rather than reopening a canonicalized pathname.
 
 use std::{
-    collections::HashMap,
-    fs::File,
+    fs::{File, Metadata},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
@@ -34,14 +33,16 @@ use crate::{
     CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
+mod hydration;
 mod path;
+pub(crate) use hydration::CodexPromptHistorySourceBackedResolverV0;
 use path::absolute_lexical_path;
 
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const SOURCE_REVISION_KIND: &str = "codex-prompt-history-ordinary-file-v1";
-const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v3";
+const SOURCE_REVISION_KIND: &str = "codex-prompt-history-ordinary-file-v2";
+const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v4";
 const FRONTIER_KIND: &str = "codex-prompt-history-jsonl-frontier-v1";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
@@ -52,6 +53,50 @@ const PAGE_MAX_DOCUMENTS: usize = 64;
 const PAGE_MAX_RETAINED_BYTES: usize = 1024 * 1024;
 const DOCUMENT_METADATA_MAX_BYTES: usize = 64 * 1024;
 const MAX_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
+
+#[cfg(test)]
+std::thread_local! {
+    static FULL_SCAN_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PREFIX_HASH_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static AFTER_PREFIX_HASH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn reset_prompt_history_work_counters() {
+    FULL_SCAN_BYTES.set(0);
+    PREFIX_HASH_BYTES.set(0);
+}
+
+#[cfg(test)]
+fn prompt_history_full_scan_bytes() -> u64 {
+    FULL_SCAN_BYTES.get()
+}
+
+#[cfg(test)]
+fn prompt_history_prefix_hash_bytes() -> u64 {
+    PREFIX_HASH_BYTES.get()
+}
+
+#[cfg(test)]
+fn set_after_prompt_history_prefix_hash_hook(hook: impl FnOnce() + 'static) {
+    AFTER_PREFIX_HASH_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "prompt-history prefix-hash hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_prompt_history_prefix_hash_hook() {
+    AFTER_PREFIX_HASH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum CodexPromptHistorySourceBackedErrorV0 {
@@ -175,12 +220,14 @@ struct CheckpointV0 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ObservationWireV0 {
     length: u64,
     modified_after_epoch: bool,
     modified_seconds: u64,
     modified_nanos: u32,
     readonly: bool,
+    ordinary_file_token: [u8; 32],
     whole_source_digest: [u8; 32],
 }
 
@@ -302,13 +349,31 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         }
     }
 
-    source.opened.revalidate_same_object()?;
-    let opening_metadata = source.opened.file().metadata()?;
+    let (opening_metadata, opening_token) =
+        stable_current_ordinary_file_observation(&source.opened)?;
+    if let Some(prior) = prior {
+        if exact_ordinary_file_observation_matches(&opening_metadata, opening_token, prior)? {
+            let _checkpoint = decode_checkpoint(prior)?;
+            return Ok(CodexPromptHistorySourceBackedScanV0 {
+                source,
+                certificate: prior.clone(),
+                disposition: CodexPromptHistorySourceBackedDispositionV0::Unchanged,
+                emitted_documents: 0,
+                #[cfg(test)]
+                terminal: _checkpoint.terminal,
+            });
+        }
+    }
+
     let frozen_len = opening_metadata.len();
     let analysis = walk_complete_records(&source.opened, frozen_len, |_| Ok(()))?;
     verify_frozen_prefix(&source.opened, frozen_len, analysis.whole_source_digest)?;
 
-    let observation_wire = observation_wire(&opening_metadata, analysis.whole_source_digest)?;
+    let observation_wire = observation_wire(
+        &opening_metadata,
+        opening_token,
+        analysis.whole_source_digest,
+    )?;
     let observation = SourceObservation::new(
         source.source.clone(),
         SOURCE_REVISION_KIND,
@@ -443,6 +508,14 @@ fn walk_complete_records(
                 .position(|byte| *byte == b'\n')
                 .map_or(available.len(), |index| index.saturating_add(1));
             let chunk = &available[..take];
+            #[cfg(test)]
+            FULL_SCAN_BYTES.with(|bytes| {
+                bytes.set(
+                    bytes
+                        .get()
+                        .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX)),
+                );
+            });
             whole.update(chunk);
             complete.update(chunk);
             record_digest.update(chunk);
@@ -562,7 +635,42 @@ fn hash_opened_prefix(
     source: &OpenedProviderSourceFile,
     target: u64,
 ) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
-    if target > source.file().metadata()?.len() {
+    for _ in 0..2 {
+        source.revalidate_same_object()?;
+        let before = source.current_ordinary_file_token()?;
+        let observed_len = source.file().metadata()?.len();
+        let before_hash = source.current_ordinary_file_token()?;
+        if before != before_hash {
+            continue;
+        }
+
+        let digest = read_opened_prefix(source, target, observed_len)?;
+        if digest.is_some() {
+            #[cfg(test)]
+            run_after_prompt_history_prefix_hash_hook();
+        }
+        let confirmation = read_opened_prefix(source, target, observed_len)?;
+        if digest != confirmation {
+            return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
+        }
+
+        let after_hash = source.current_ordinary_file_token()?;
+        source.revalidate_same_object()?;
+        let after = source.current_ordinary_file_token()?;
+        if before != after_hash || after_hash != after {
+            continue;
+        }
+        return Ok(digest);
+    }
+    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
+}
+
+fn read_opened_prefix(
+    source: &OpenedProviderSourceFile,
+    target: u64,
+    observed_len: u64,
+) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
+    if target > observed_len {
         return Ok(None);
     }
     let mut file = opened_file_from_start(source)?;
@@ -577,13 +685,20 @@ fn hash_opened_prefix(
         if count == 0 {
             return Ok(None);
         }
+        #[cfg(test)]
+        PREFIX_HASH_BYTES.with(|hashed| {
+            hashed.set(
+                hashed
+                    .get()
+                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX)),
+            );
+        });
         digest.update(&bytes[..count]);
         remaining = remaining.saturating_sub(
             u64::try_from(count)
                 .map_err(|_| CodexPromptHistorySourceBackedErrorV0::CountMismatch)?,
         );
     }
-    source.revalidate_same_object()?;
     Ok(Some(digest.finalize().into()))
 }
 
@@ -592,7 +707,6 @@ fn verify_frozen_prefix(
     frozen_len: u64,
     expected_digest: [u8; 32],
 ) -> CodexPromptHistorySourceBackedResultV0<()> {
-    source.revalidate_same_object()?;
     let actual = hash_opened_prefix(source, frozen_len)?
         .ok_or(CodexPromptHistorySourceBackedErrorV0::SourceChanged)?;
     if actual != expected_digest {
@@ -602,7 +716,8 @@ fn verify_frozen_prefix(
 }
 
 fn observation_wire(
-    metadata: &std::fs::Metadata,
+    metadata: &Metadata,
+    ordinary_file_token: [u8; 32],
     whole_source_digest: [u8; 32],
 ) -> CodexPromptHistorySourceBackedResultV0<ObservationWireV0> {
     let (modified_after_epoch, duration) = match metadata.modified()?.duration_since(UNIX_EPOCH) {
@@ -615,8 +730,59 @@ fn observation_wire(
         modified_seconds: duration.as_secs(),
         modified_nanos: duration.subsec_nanos(),
         readonly: metadata.permissions().readonly(),
+        ordinary_file_token,
         whole_source_digest,
     })
+}
+
+fn stable_current_ordinary_file_observation(
+    source: &OpenedProviderSourceFile,
+) -> CodexPromptHistorySourceBackedResultV0<(Metadata, [u8; 32])> {
+    let opened_token = source.ordinary_file_token();
+    if source.current_ordinary_file_token()? == opened_token
+        && source.revalidate().is_ok()
+        && source.current_ordinary_file_token()? == opened_token
+    {
+        return Ok((source.metadata().clone(), opened_token));
+    }
+
+    for _ in 0..2 {
+        source.revalidate_same_object()?;
+        let before = source.current_ordinary_file_token()?;
+        let metadata = source.file().metadata()?;
+        let after_metadata = source.current_ordinary_file_token()?;
+        source.revalidate_same_object()?;
+        let after = source.current_ordinary_file_token()?;
+        if before == after_metadata && after_metadata == after {
+            return Ok((metadata, after));
+        }
+    }
+    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
+}
+
+fn exact_ordinary_file_observation_matches(
+    metadata: &Metadata,
+    ordinary_file_token: [u8; 32],
+    expected: &CertifiedSource,
+) -> CodexPromptHistorySourceBackedResultV0<bool> {
+    if expected.parser_revision() != PARSER_REVISION
+        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
+    {
+        return Ok(false);
+    }
+    let expected_observation = decode_observation(expected)?;
+    Ok(observation_wire(
+        metadata,
+        ordinary_file_token,
+        expected_observation.whole_source_digest,
+    )? == expected_observation)
+}
+
+fn decode_observation(
+    certificate: &CertifiedSource,
+) -> CodexPromptHistorySourceBackedResultV0<ObservationWireV0> {
+    serde_json::from_slice(certificate.observation().revision())
+        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)
 }
 
 /// Revalidates one previously staged prompt-history snapshot while allowing
@@ -634,11 +800,20 @@ pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
     {
         return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
     }
-    let observation: ObservationWireV0 = serde_json::from_slice(expected.observation().revision())
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)?;
+    let observation = decode_observation(expected)?;
     let checkpoint = decode_checkpoint(expected)?;
     if checkpoint.certified_prefix_bytes > observation.length {
         return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
+    }
+    let (current_metadata, current_token) =
+        stable_current_ordinary_file_observation(&source.opened)?;
+    if observation_wire(
+        &current_metadata,
+        current_token,
+        observation.whole_source_digest,
+    )? == observation
+    {
+        return Ok(());
     }
     verify_frozen_prefix(
         &source.opened,
@@ -763,236 +938,6 @@ fn retained_document_bytes(document: &LexicalDocument) -> usize {
 
 fn bounded_metadata(value: &str) -> Option<String> {
     (!value.is_empty() && value.len() <= DOCUMENT_METADATA_MAX_BYTES).then(|| value.to_owned())
-}
-
-/// Invocation-local resolver for exact prompt-history JSONL ranges.
-#[derive(Debug)]
-pub(crate) struct CodexPromptHistorySourceBackedResolverV0 {
-    routes: HashMap<SourceKey, CodexPromptHistorySourceBackedSourceV0>,
-}
-
-impl CodexPromptHistorySourceBackedResolverV0 {
-    pub(crate) fn new(
-        routes: impl IntoIterator<Item = CodexPromptHistorySourceBackedSourceV0>,
-    ) -> CodexPromptHistorySourceBackedResultV0<Self> {
-        let mut registered = HashMap::<SourceKey, CodexPromptHistorySourceBackedSourceV0>::new();
-        for route in routes {
-            if let Some(existing) = registered.get(&route.source) {
-                if !existing.source.exact_descriptor_eq(&route.source)
-                    || existing.input != route.input
-                {
-                    return Err(CodexPromptHistorySourceBackedErrorV0::DuplicateResolverSource);
-                }
-                continue;
-            }
-            registered.insert(route.source.clone(), route);
-        }
-        Ok(Self { routes: registered })
-    }
-
-    fn route_for(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> CodexPromptHistorySourceBackedResultV0<&CodexPromptHistorySourceBackedSourceV0> {
-        request.locator().validate_contract()?;
-        let route = self
-            .routes
-            .get(request.locator().source())
-            .ok_or(CodexPromptHistorySourceBackedErrorV0::LocatorSourceNotFound)?;
-        if !route.source.exact_descriptor_eq(request.locator().source()) {
-            return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-        }
-        Ok(route)
-    }
-
-    fn hydrate_exact(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> CodexPromptHistorySourceBackedResultV0<HydratedProviderRecord> {
-        let route = self.route_for(request)?;
-        hydrate_from_source(route, request)
-    }
-}
-
-impl ContentSourceResolver for CodexPromptHistorySourceBackedResolverV0 {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        self.hydrate_exact(request).map_err(hydration_failure)
-    }
-
-    fn hydrate_session(
-        &self,
-        request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        let Some(first) = request.events().first() else {
-            return Ok(Vec::new());
-        };
-        let first_route = self.route_for(first).map_err(hydration_failure)?;
-        request
-            .events()
-            .iter()
-            .map(|event| {
-                let route = self.route_for(event).map_err(hydration_failure)?;
-                if route.input != first_route.input {
-                    return Err(HydrationFailure {
-                        kind: HydrationFailureKind::InvalidLocator,
-                        detail: "Codex prompt-history session hydration crossed source routes"
-                            .to_owned(),
-                    });
-                }
-                let (_, _, _, native_session_id) =
-                    validate_locator(event.locator()).map_err(hydration_failure)?;
-                let session_id = stable_session_id(event.locator().source(), &native_session_id)
-                    .map_err(hydration_failure)?;
-                if session_id != request.session_id() {
-                    return Err(HydrationFailure {
-                        kind: HydrationFailureKind::InvalidLocator,
-                        detail: "Codex prompt-history locator belongs to another session"
-                            .to_owned(),
-                    });
-                }
-                hydrate_from_source(route, event).map_err(hydration_failure)
-            })
-            .collect()
-    }
-}
-
-fn hydrate_from_source(
-    source: &CodexPromptHistorySourceBackedSourceV0,
-    request: &EventHydrationRequest,
-) -> CodexPromptHistorySourceBackedResultV0<HydratedProviderRecord> {
-    let locator = request.locator();
-    let (byte_offset, byte_length, physical_ordinal, native_session_id) =
-        validate_locator(locator)?;
-    let range_end = byte_offset
-        .checked_add(byte_length)
-        .ok_or(CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
-    if range_end > source.opened.file().metadata()?.len() {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRangeMissing);
-    }
-    if byte_offset != 0 {
-        let boundary =
-            source
-                .opened
-                .read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
-        if boundary != *b"\n" {
-            return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-        }
-    }
-    let length = usize::try_from(byte_length)
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let provider_bytes = source.opened.read_exact_range_allow_append(
-        byte_offset,
-        length,
-        usize::try_from(MAX_HYDRATED_RECORD_BYTES)
-            .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?,
-    )?;
-    if !provider_bytes.ends_with(b"\n") {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-    }
-    if &Sha256::digest(&provider_bytes)[..] != locator.record_digest() {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorDigestMismatch);
-    }
-    let body = provider_bytes
-        .strip_suffix(b"\n")
-        .unwrap_or(&provider_bytes);
-    let body = body.strip_suffix(b"\r").unwrap_or(body);
-    let line: PromptLine = serde_json::from_slice(body)
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch)?;
-    if line.session_id != native_session_id
-        || line.session_id.trim().is_empty()
-        || chrono::DateTime::from_timestamp(line.ts, 0).is_none()
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch);
-    }
-    let session_id = stable_session_id(locator.source(), &line.session_id)?;
-    let native_item_key = NativeItemKey::certified_position(
-        EVENT_POSITION_KIND,
-        TypedKey::U64(physical_ordinal),
-        PositionStability::AppendStable,
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source: locator.source(),
-        session_id,
-        logical_item_kind: LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
-    if event_id != request.event_id() {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch);
-    }
-    Ok(HydratedProviderRecord {
-        event_id,
-        provider_bytes: prompt_lexical_body(&line.text).into_bytes(),
-    })
-}
-
-fn validate_locator(
-    locator: &SourceRecordLocator,
-) -> CodexPromptHistorySourceBackedResultV0<(u64, u64, u64, String)> {
-    if locator.source().provider() != CaptureProvider::Codex.as_str()
-        || locator.source().source_format() != SOURCE_FORMAT
-        || locator.source().schema_variant() != SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != SOURCE_IDENTITY_VERSION
-        || !matches!(locator.source().anchor(), SourceAnchor::CatalogLineage(_))
-        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-    }
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key: Some(TypedKey::Utf8(native_session_id)),
-        native_event_key: Some(TypedKey::U64(native_event_ordinal)),
-    } = locator.coordinate()
-    else {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-    };
-    if *byte_length == 0 || *byte_length > MAX_HYDRATED_RECORD_BYTES {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge);
-    }
-    if native_session_id.is_empty() || native_event_ordinal != physical_ordinal {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-    }
-    Ok((
-        *byte_offset,
-        *byte_length,
-        *physical_ordinal,
-        native_session_id.clone(),
-    ))
-}
-
-fn hydration_failure(error: CodexPromptHistorySourceBackedErrorV0) -> HydrationFailure {
-    let kind = match &error {
-        CodexPromptHistorySourceBackedErrorV0::LocatorDigestMismatch
-        | CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch
-        | CodexPromptHistorySourceBackedErrorV0::Capture(
-            CaptureError::SourceChangedDuringCapture
-            | CaptureError::InvalidProviderTranscriptPath { .. },
-        ) => HydrationFailureKind::StaleRecordEvidence,
-        CodexPromptHistorySourceBackedErrorV0::LocatorRangeMissing => {
-            HydrationFailureKind::MissingRecord
-        }
-        CodexPromptHistorySourceBackedErrorV0::SourceChanged => {
-            HydrationFailureKind::StaleSourceEvidence
-        }
-        CodexPromptHistorySourceBackedErrorV0::InvalidLocator
-        | CodexPromptHistorySourceBackedErrorV0::Resolver(_)
-        | CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge
-        | CodexPromptHistorySourceBackedErrorV0::LocatorSourceNotFound
-        | CodexPromptHistorySourceBackedErrorV0::DuplicateResolverSource => {
-            HydrationFailureKind::InvalidLocator
-        }
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    HydrationFailure {
-        kind,
-        detail: error.to_string(),
-    }
 }
 
 #[cfg(test)]

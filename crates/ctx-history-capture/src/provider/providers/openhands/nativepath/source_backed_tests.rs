@@ -498,6 +498,22 @@ fn active_source_family_contract_event_files_add_siblings_and_stale_rewrites() {
         message("event-b", "second exact body"),
     );
     let after_append = project(&root).unwrap().remove(0);
+    assert_eq!(after_append.documents.len(), 2);
+    let appended = after_append
+        .documents
+        .iter()
+        .find(|document| document.event_id != old.event_id)
+        .unwrap();
+    let adapter = OpenHandsEventFileAdapterV2::new(root.clone());
+    assert_eq!(
+        adapter
+            .hydrate_event(
+                &EventHydrationRequest::new(appended.event_id, appended.locator.clone()).unwrap()
+            )
+            .unwrap()
+            .provider_bytes,
+        b"second exact body"
+    );
     assert_eq!(
         after_append.source.observation().source().identity(),
         old_source
@@ -508,7 +524,6 @@ fn active_source_family_contract_event_files_add_siblings_and_stale_rewrites() {
         .find(|document| document.event_id == old.event_id)
         .unwrap();
     assert_eq!(old_after.session_id, old.session_id);
-    let adapter = OpenHandsEventFileAdapterV2::new(root.clone());
     let hydrated = adapter
         .hydrate_event(&EventHydrationRequest::new(old.event_id, old.locator.clone()).unwrap())
         .unwrap();

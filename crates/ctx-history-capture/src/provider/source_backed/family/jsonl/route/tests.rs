@@ -1,6 +1,10 @@
 use std::{fs, path::Path, sync::Arc};
 
-use ctx_history_core::SourceAnchor;
+use ctx_history_core::{
+    derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput, SourceAnchor,
+    SourceRecordLocator,
+};
 
 use super::*;
 
@@ -8,6 +12,20 @@ const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
 const TEST_SCHEMA: &str = "terminal-witness-v1";
 
 struct TestAdapter;
+
+struct TestHydrator;
+
+impl JsonlFamilyHydrator for TestHydrator {
+    fn hydrate(
+        &mut self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+        Ok(HydratedProviderRecord {
+            event_id: request.event_id(),
+            provider_bytes: b"frozen exact body".to_vec(),
+        })
+    }
+}
 
 impl JsonlFamilyAdapter for TestAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -78,11 +96,44 @@ impl JsonlFamilyAdapter for TestAdapter {
         _leaf: &JsonlFamilyLeaf,
         _source_file: Arc<OpenedProviderSourceFile>,
     ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        Err(hydration_error(
-            HydrationFailureKind::TemporarilyUnavailable,
-            "terminal witness tests never hydrate",
-        ))
+        Ok(Box::new(TestHydrator))
     }
+}
+
+fn hydration_request(source: SourceKey) -> EventHydrationRequest {
+    let native_session_key =
+        NativeSessionKey::native_id("terminal-witness.session", TypedKey::U64(1)).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "terminal-witness-session",
+        native_session_key: &native_session_key,
+    })
+    .unwrap();
+    let native_item_key =
+        NativeItemKey::native_id("terminal-witness.event", TypedKey::U64(1)).unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "terminal-witness-event",
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let locator = SourceRecordLocator::new(
+        source,
+        NativeRecordCoordinate::Jsonl {
+            byte_offset: 0,
+            byte_length: 21,
+            physical_ordinal: 0,
+            native_session_key: Some(TypedKey::U64(1)),
+            native_event_key: Some(TypedKey::U64(1)),
+        },
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
+        [1; 32],
+    )
+    .unwrap();
+    EventHydrationRequest::new(event_id, locator).unwrap()
 }
 
 fn expected_state(
@@ -212,6 +263,29 @@ fn active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append(
         .write_all(b"{\"message\":\"next refresh\"}\n")
         .unwrap();
     assert!(revalidate_complete_inventory(&adapter, &root, &resident, &inventory,).unwrap());
+
+    let hydration_source = adapter
+        .discover(&root)
+        .unwrap()
+        .leaves()
+        .first()
+        .unwrap()
+        .source()
+        .clone();
+    let request = hydration_request(hydration_source);
+    let append_path = first.clone();
+    set_after_jsonl_group_open_hook(move || {
+        OpenOptions::new()
+            .append(true)
+            .open(append_path)
+            .unwrap()
+            .write_all(b"{\"message\":\"during hydration\"}\n")
+            .unwrap();
+    });
+    let hydration_resident = Mutex::new(FamilyResident::default());
+    let hydrated = hydrate_single(&adapter, &root, &hydration_resident, &request)
+        .expect("append-safe hydrate");
+    assert_eq!(hydrated.provider_bytes, b"frozen exact body");
 }
 
 #[test]

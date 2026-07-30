@@ -15,10 +15,21 @@ use crate::{
 
 mod hydration;
 mod identity;
+mod revalidation;
 mod route;
 
+#[cfg(test)]
+pub(crate) use hydration::set_after_jsonl_hydration_observation_hook;
 pub(crate) use hydration::{visit_verified_ranges, JsonlHydrationRange};
 use identity::observe_metadata;
+use revalidation::hash_prefix;
+#[cfg(test)]
+pub(crate) use revalidation::{
+    jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_jsonl_prefix_hash_hook,
+};
+pub(crate) use revalidation::{
+    observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
+};
 pub(crate) use route::{
     jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
     JsonlFamilyLeaf, JsonlFamilyProjector,
@@ -817,55 +828,6 @@ where
     Ok(None)
 }
 
-pub(crate) fn observe_opened_file(
-    source_path: &Path,
-    opened: &OpenedProviderSourceFile,
-) -> Result<JsonlFileObservation> {
-    opened.revalidate()?;
-    let observation = observe_metadata(source_path, opened.file(), opened.metadata())?;
-    opened.revalidate()?;
-    Ok(observation)
-}
-
-pub(crate) fn revalidate_frozen_prefix(
-    source_path: &Path,
-    source_file: &OpenedProviderSourceFile,
-    frozen: &JsonlFileObservation,
-    prefix_length: u64,
-    expected_prefix_digest: [u8; 32],
-) -> Result<JsonlFileObservation> {
-    if prefix_length > frozen.length {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let before = observe_metadata(
-        source_path,
-        source_file.file(),
-        &source_file.file().metadata()?,
-    )?;
-    if !frozen.admits_frozen_prefix_in(&before) {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    source_file.revalidate_same_object()?;
-    let observed = hash_prefix(
-        &mut source_file.file().try_clone()?,
-        prefix_length,
-        new_prefix_hasher(),
-    )?;
-    if prefix_digest(&observed) != expected_prefix_digest {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let after = observe_metadata(
-        source_path,
-        source_file.file(),
-        &source_file.file().metadata()?,
-    )?;
-    if !frozen.admits_frozen_prefix_in(&after) {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    source_file.revalidate_same_object()?;
-    Ok(after)
-}
-
 enum RawLine {
     EndOfFile,
     IncompleteTail,
@@ -951,23 +913,6 @@ fn new_prefix_hasher() -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(PREFIX_HASH_DOMAIN);
     hasher
-}
-
-fn hash_prefix(file: &mut File, length: u64, mut hasher: Sha256) -> Result<Sha256> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut remaining = length;
-    let mut buffer = [0_u8; 64 * 1024];
-    while remaining > 0 {
-        let requested = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| CaptureError::SystemInvariant("JSONL prefix length exceeds usize"))?;
-        let read = file.read(&mut buffer[..requested])?;
-        if read == 0 {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        hasher.update(&buffer[..read]);
-        remaining = remaining.saturating_sub(read as u64);
-    }
-    Ok(hasher)
 }
 
 fn prefix_digest(hasher: &Sha256) -> [u8; 32] {

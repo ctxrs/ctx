@@ -3,18 +3,23 @@ use std::{
     io::Write,
     os::unix::fs::PermissionsExt,
     path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use ctx_history_core::{
     BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
     HydrationFailureKind,
 };
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
 
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, SourceBackedCoordinatorError,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceStatus,
@@ -49,7 +54,33 @@ fn qwen_route_fixture() -> (
 }
 
 fn qwen_registry(provider_root: &Path) -> SourceBackedProviderRegistry {
-    let source = ProviderSource {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registration::register(
+        &mut registry,
+        qwen_source(provider_root),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+fn qwen_registry_with_test_observer(
+    provider_root: &Path,
+    observer: registration::DirectJsonlRegistrationTestObserver,
+) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registration::register_with_test_observer(
+        &mut registry,
+        qwen_source(provider_root),
+        SourceBackedRouteSelection::Automatic,
+        observer,
+    )
+    .unwrap();
+    registry
+}
+
+fn qwen_source(provider_root: &Path) -> ProviderSource {
+    ProviderSource {
         provider: CaptureProvider::QwenCode,
         path: provider_root.to_path_buf(),
         exists: true,
@@ -59,10 +90,7 @@ fn qwen_registry(provider_root: &Path) -> SourceBackedProviderRegistry {
         catalog_support: ProviderCatalogSupport::None,
         status: ProviderSourceStatus::Available,
         unsupported_reason: None,
-    };
-    let mut registry = SourceBackedProviderRegistry::new();
-    registration::register(&mut registry, source, SourceBackedRouteSelection::Automatic).unwrap();
-    registry
+    }
 }
 
 fn writer_options() -> WriterOptions {
@@ -231,7 +259,7 @@ fn metadata_only_same_content_churn_is_a_logical_noop() {
 
 #[test]
 fn active_source_family_contract_direct_jsonl_freezes_discovery_and_terminal_boundaries() {
-    let (_temp, provider_root, transcript, _registry) = qwen_route_fixture();
+    let (temp, provider_root, transcript, _registry) = qwen_route_fixture();
     let adapter = super::super::qwen_code_source_backed_adapter();
     let inventory = adapter.discover(&provider_root).unwrap();
     let leaf = inventory.leaves()[0].clone();
@@ -290,6 +318,104 @@ fn active_source_family_contract_direct_jsonl_freezes_discovery_and_terminal_bou
         inventory.observation, current.observation,
         "append-log inventory identity must describe membership, not mutable length"
     );
+
+    let route_events = Arc::new(Mutex::new(Vec::new()));
+    let observed_route_events = Arc::clone(&route_events);
+    let registry = qwen_registry_with_test_observer(
+        &provider_root,
+        Arc::new(move |event| observed_route_events.lock().unwrap().push(event)),
+    );
+    let index_root = temp.path().join("append-route-index");
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    route_events.lock().unwrap().clear();
+
+    OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap()
+        .write_all(
+            concat!(
+                "{\"uuid\":\"qwen-event-5\",\"sessionId\":\"qwen-life\",",
+                "\"timestamp\":\"2026-07-25T12:00:05Z\",\"type\":\"assistant\",",
+                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"optimizedrouteonlymarker\"}]},",
+                "\"model\":\"qwen3-coder\"}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    assert_eq!(
+        *route_events.lock().unwrap(),
+        vec![
+            registration::DirectJsonlRegistrationTestEvent::BeginSourceAppend,
+            registration::DirectJsonlRegistrationTestEvent::SourceRevalidated,
+            registration::DirectJsonlRegistrationTestEvent::CompleteInventoryAccepted,
+        ],
+        "the direct append refresh must stage and certify against its retained base"
+    );
+    assert_eq!(
+        VerifiedIndex::open(&index_root)
+            .unwrap()
+            .search_event_candidates("optimizedrouteonlymarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn final_inventory_rejects_rewrite_after_per_source_terminal_revalidation() {
+    let (temp, provider_root, transcript, _registry) = qwen_route_fixture();
+    let index_root = temp.path().join("terminal-race-index");
+    let route_events = Arc::new(Mutex::new(Vec::new()));
+    let observed_route_events = Arc::clone(&route_events);
+    let rewrite_after_source_revalidation = Arc::new(AtomicBool::new(false));
+    let rewrite_is_armed = Arc::clone(&rewrite_after_source_revalidation);
+    let transcript_to_rewrite = transcript.clone();
+    let rewritten = QWEN_LIFECYCLE_TRANSCRIPT.replace("second sentinel", "rewritten value");
+    assert_eq!(rewritten.len(), QWEN_LIFECYCLE_TRANSCRIPT.len());
+    let registry = qwen_registry_with_test_observer(
+        &provider_root,
+        Arc::new(move |event| {
+            observed_route_events.lock().unwrap().push(event);
+            if event == registration::DirectJsonlRegistrationTestEvent::SourceRevalidated
+                && rewrite_is_armed.swap(false, Ordering::SeqCst)
+            {
+                fs::write(&transcript_to_rewrite, &rewritten).unwrap();
+            }
+        }),
+    );
+
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let before = VerifiedIndex::open(&index_root).unwrap();
+    let before_generation = before.generation_id().to_owned();
+    let before_documents = before.document_count();
+    drop(before);
+    route_events.lock().unwrap().clear();
+    rewrite_after_source_revalidation.store(true, Ordering::SeqCst);
+
+    let error =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::CompleteInventoryInvalidated { .. })
+    ));
+    assert_eq!(
+        *route_events.lock().unwrap(),
+        vec![
+            registration::DirectJsonlRegistrationTestEvent::BeginSourceAppend,
+            registration::DirectJsonlRegistrationTestEvent::SourceRevalidated,
+            registration::DirectJsonlRegistrationTestEvent::CompleteInventoryRejected,
+        ],
+        "the rewrite must occur after the source callback and fail the later evidence-aware inventory callback"
+    );
+    assert!(!rewrite_after_source_revalidation.load(Ordering::SeqCst));
+
+    let after = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(after.generation_id(), before_generation);
+    assert_eq!(after.document_count(), before_documents);
 }
 
 #[test]
@@ -390,7 +516,7 @@ fn route_batch_discovers_and_binds_once_instead_of_per_event() {
 
 #[test]
 fn repeated_single_hydration_reuses_one_resident_inventory_and_source_binding() {
-    let (temp, _provider_root, _transcript, registry) = qwen_route_fixture();
+    let (temp, _provider_root, transcript, registry) = qwen_route_fixture();
     let index_root = temp.path().join("index");
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     let source = cold.sources[0].observation().source();
@@ -407,6 +533,21 @@ fn repeated_single_hydration_reuses_one_resident_inventory_and_source_binding() 
     reset_hydration_work();
     super::super::reader::reset_provider_projection_count();
     let first = resolver.hydrate_event(&request).unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(transcript)
+        .unwrap()
+        .write_all(
+            concat!(
+                "{\"uuid\":\"qwen-hydration-append\",\"sessionId\":\"qwen-life\",",
+                "\"timestamp\":\"2026-07-25T12:00:05Z\",\"type\":\"assistant\",",
+                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"deferred hydration append\"}]},",
+                "\"model\":\"qwen3-coder\"}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
     let second = resolver.hydrate_event(&request).unwrap();
 
     assert_eq!(first, second);

@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 use super::{
-    observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
-    JsonlProbe, JsonlReader, JsonlRecordRef, JsonlSourceChange, JsonlSourceIdentity,
+    observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
+    JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlReader, JsonlRecordRef,
+    JsonlSourceChange, JsonlSourceIdentity,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -41,6 +42,8 @@ const FAMILY_DISCOVERY_REVISION: &str = "borrowed-jsonl-discovery-v1";
 const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
 
 mod hydration;
+#[cfg(test)]
+use hydration::set_after_jsonl_group_open_hook;
 use hydration::{hydrate_batch, hydrate_single};
 mod ownership;
 use ownership::base_sources_for_root;

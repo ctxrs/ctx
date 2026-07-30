@@ -302,7 +302,7 @@ fn hydrate_bound_group(
 ) -> DirectJsonlSourceBackedResult<Vec<HydratedProviderRecord>> {
     #[cfg(test)]
     record_hydration_work(0, 0, 1);
-    let source_file = leaf.open_verified()?;
+    let source_file = leaf.open_for_hydration()?;
     let mut sub_ordinals = Vec::with_capacity(requests.len());
     let mut ranges = Vec::with_capacity(requests.len());
     for request in requests {

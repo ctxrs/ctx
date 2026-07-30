@@ -51,8 +51,14 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-sdk:unit_tests",
 ]
 
-# Provider correctness is ordinary executable CI. This focused capture target
-# owns active-writer lifecycle contracts across source families.
+# Provider correctness is ordinary executable CI, not a second evidence system.
+#
+# The focused capture target fail-closes on an exact reviewed inventory of
+# active-writer seams across JSONL, SQLite-WAL, document/tree, and event-file
+# families. The complete-content target retains the broader lifecycle,
+# mutation-race, landed-route, and hydration matrix. The CLI targets prove
+# real-shape admission/rejection, discovery, refresh, exact hydration, and
+# user-facing source-backed behavior.
 _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:native_provider_real_shapes_tests",
     "//crates/ctx-cli:native_provider_rejections_tests",

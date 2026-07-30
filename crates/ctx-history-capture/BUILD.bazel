@@ -110,8 +110,14 @@ ctx_rust_test(
 sh_test(
     name = "active_source_family_contract_tests",
     srcs = ["tests/run-active-source-family-contracts.sh"],
-    args = ["$(rootpath :unit_tests)"],
-    data = [":unit_tests"],
+    args = [
+        "$(rootpath :unit_tests)",
+        "$(rootpath tests/active-source-family-contract-tests.txt)",
+    ],
+    data = [
+        ":unit_tests",
+        "tests/active-source-family-contract-tests.txt",
+    ],
     size = "small",
     tags = [
         "safe-presubmit",

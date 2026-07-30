@@ -205,6 +205,136 @@ fn active_source_family_contract_codex_hydration_remains_exact_during_append() {
 }
 
 #[test]
+fn active_source_family_contract_codex_hydration_accepts_append_after_source_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000086";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "postopenexactcontent")],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let event = VerifiedIndex::open(&index)
+        .unwrap()
+        .source_event_page(&codex_source_key(native_session_id).unwrap(), None, 8)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+    let source_path = session_path(&sessions, native_session_id);
+    let appended_record = format!("{}\n", message("assistant", "validproviderappend"));
+    let appended_bytes = appended_record.as_bytes().to_vec();
+
+    super::super::hydration::install_codex_hydration_after_source_open_hook({
+        let source_path = source_path.clone();
+        move || {
+            OpenOptions::new()
+                .append(true)
+                .open(source_path)
+                .unwrap()
+                .write_all(&appended_bytes)
+                .unwrap();
+        }
+    });
+
+    let hydrated = resolver.hydrate_event_request(&request).unwrap();
+    assert_eq!(hydrated.event_id, request.event_id());
+    assert_eq!(hydrated.provider_bytes, b"postopenexactcontent");
+    assert!(fs::read(source_path)
+        .unwrap()
+        .ends_with(appended_record.as_bytes()));
+}
+
+#[test]
+fn codex_exact_hydration_post_open_rewrite_and_replacement_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let rewrite_session_id = "019fa000-0000-7000-8000-000000000087";
+    let replacement_session_id = "019fa000-0000-7000-8000-000000000088";
+    write_session(
+        &sessions,
+        rewrite_session_id,
+        &[message("user", "postopenrewritesentinel")],
+    );
+    write_session(
+        &sessions,
+        replacement_session_id,
+        &[message("user", "postopenreplacementsentinel")],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let rewrite_event = verified
+        .source_event_page(&codex_source_key(rewrite_session_id).unwrap(), None, 8)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    let replacement_event = verified
+        .source_event_page(&codex_source_key(replacement_session_id).unwrap(), None, 8)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    let rewrite_request =
+        EventHydrationRequest::new(rewrite_event.event_id, rewrite_event.locator).unwrap();
+    let replacement_request =
+        EventHydrationRequest::new(replacement_event.event_id, replacement_event.locator).unwrap();
+    let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+
+    let rewrite_path = session_path(&sessions, rewrite_session_id);
+    super::super::hydration::install_codex_hydration_after_source_open_hook({
+        let rewrite_path = rewrite_path.clone();
+        move || {
+            let mut rewritten = fs::read(&rewrite_path).unwrap();
+            let marker = b"postopenrewritesentinel";
+            let marker_offset = rewritten
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .unwrap();
+            rewritten[marker_offset] = b'P';
+            fs::write(rewrite_path, rewritten).unwrap();
+        }
+    });
+    assert!(matches!(
+        resolver.hydrate_event_request(&rewrite_request),
+        Err(CodexSourceBackedErrorV0::LocatorDigestMismatch)
+    ));
+
+    let replacement_path = session_path(&sessions, replacement_session_id);
+    let replacement_bytes = fs::read(&replacement_path).unwrap();
+    super::super::hydration::install_codex_hydration_after_source_open_hook({
+        let replacement_path = replacement_path.clone();
+        move || {
+            fs::remove_file(&replacement_path).unwrap();
+            fs::write(replacement_path, replacement_bytes).unwrap();
+        }
+    });
+    let replacement_result = resolver.hydrate_event_request(&replacement_request);
+    assert!(
+        matches!(
+            replacement_result,
+            Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidProviderTranscriptPath {
+                    reason: "provider source changed while its authority handle was retained",
+                    ..
+                }
+            ))
+        ),
+        "unexpected replacement result: {replacement_result:?}"
+    );
+}
+
+#[test]
 fn source_backed_batch_rejects_duplicate_cross_source_invalid_ordinal_and_digest() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
