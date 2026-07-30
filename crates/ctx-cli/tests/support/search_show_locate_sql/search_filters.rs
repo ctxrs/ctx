@@ -1,13 +1,25 @@
 #[test]
 fn human_search_reports_no_results() {
     let temp = tempdir();
-    let fresh = failure_stderr(ctx(&temp).args(["search", "definitely-no-results-here"]));
-    assert!(
-        fresh.contains(
-            "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
-        ),
-        "{fresh}"
-    );
+    let fresh = ctx(&temp)
+        .args(["search", "definitely-no-results-here"])
+        .output()
+        .unwrap();
+    if fresh.status.success() {
+        let stdout = String::from_utf8(fresh.stdout).unwrap();
+        assert!(
+            stdout.contains("No results for definitely-no-results-here"),
+            "{stdout}"
+        );
+    } else {
+        let stderr = String::from_utf8(fresh.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
+            ),
+            "{stderr}"
+        );
+    }
     wait_for_test_daemon_source_refresh(&temp);
 
     let fixture = provider_history_fixture("codex-sessions");

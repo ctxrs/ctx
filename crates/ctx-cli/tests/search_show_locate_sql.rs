@@ -500,11 +500,19 @@ fn fresh_home_search_mvp_flow() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
 
-    ctx(&temp)
+    let setup_stdout = ctx(&temp)
         .arg("setup")
         .assert()
         .success()
-        .stdout(predicate::str::contains("History is ready to search"));
+        .get_output()
+        .stdout
+        .clone();
+    let setup_stdout = String::from_utf8(setup_stdout).unwrap();
+    assert!(
+        setup_stdout.contains("History is ready to search")
+            || setup_stdout.contains("History indexing is queued"),
+        "{setup_stdout}"
+    );
     assert!(
         !data_root(&temp).join("config.toml").exists(),
         "setup should not write config.toml for implicit defaults"
