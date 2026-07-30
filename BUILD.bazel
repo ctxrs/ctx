@@ -421,8 +421,17 @@ py_test(
         "scripts/tests/dependency-advisory-gate-test.py",
     ],
     data = glob(["scripts/tests/fixtures/dependency-advisory/**"]),
+    deps = ["@ctx_tomli//:lib"],
     main = "scripts/tests/dependency-advisory-gate-test.py",
     tags = ["release-gate", "security"],
+)
+
+py_binary(
+    name = "dependency_advisory_gate",
+    srcs = ["scripts/dependency-advisory-gate.py"],
+    deps = ["@ctx_tomli//:lib"],
+    main = "scripts/dependency-advisory-gate.py",
+    tags = ["release-gate", "release-tool", "security"],
 )
 
 py_binary(
@@ -461,7 +470,6 @@ sh_binary(
         "scripts/public-cli-runtime-authority.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
         "scripts/release/public-cli-bazel-build-info.py",
-        "scripts/dependency-advisory-gate.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
         "scripts/release_sbom/dependency_materials.py",
@@ -514,6 +522,7 @@ public_cli_release_advisory_gates(
 
 public_cli_release_route(
     name = "ctx_release_linux_x64",
+    advisory_gate = ":dependency_advisory_gate",
     artifact = "//crates/ctx-cli:ctx",
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
@@ -524,6 +533,7 @@ public_cli_release_route(
 
 public_cli_release_route(
     name = "ctx_release_linux_arm64",
+    advisory_gate = ":dependency_advisory_gate",
     artifact = "//crates/ctx-cli:ctx",
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
@@ -534,6 +544,7 @@ public_cli_release_route(
 
 public_cli_release_route(
     name = "ctx_release_macos_arm64",
+    advisory_gate = ":dependency_advisory_gate",
     artifact = "//crates/ctx-cli:ctx",
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
@@ -544,6 +555,7 @@ public_cli_release_route(
 
 public_cli_release_route(
     name = "ctx_release_macos_x64",
+    advisory_gate = ":dependency_advisory_gate",
     artifact = "//crates/ctx-cli:ctx",
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
@@ -554,6 +566,7 @@ public_cli_release_route(
 
 public_cli_release_route(
     name = "ctx_release_windows_x64",
+    advisory_gate = ":dependency_advisory_gate",
     artifact = "//crates/ctx-cli:ctx",
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
@@ -564,6 +577,7 @@ public_cli_release_route(
 
 public_cli_release_route(
     name = "ctx_release_freebsd_x64",
+    advisory_gate = ":dependency_advisory_gate",
     artifact = "//crates/ctx-cli:ctx",
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
@@ -597,7 +611,7 @@ sh_test(
         "contracts/release-targets-v1.json",
         "scripts/check-public-cli-build-info.py",
         "scripts/check-release-target-matrix.py",
-        "scripts/dependency-advisory-gate.py",
+        ":dependency_advisory_gate",
         "scripts/install-public-cli-candidate.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/public-cli-release-targets.py",

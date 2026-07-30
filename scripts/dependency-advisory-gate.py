@@ -15,10 +15,9 @@ import sys
 import tempfile
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 in the pinned Ubuntu 22.04 builder.
-    import tomli as tomllib
+# The Bazel release route carries this exact parser. Do not inherit a mutable
+# host package set or vary parsing behavior with the host Python minor version.
+import tomli as tomllib
 
 
 UTC = timezone.utc

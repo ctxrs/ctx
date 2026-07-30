@@ -155,6 +155,23 @@ register_toolchains("@ctx_llvm_mingw//:windows_x64_gnu_toolchain")
 # configurations retain their independently keyed linker behavior.
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 http_jar = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_jar")
+http_archive(
+    name = "ctx_tomli",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "lib",
+    srcs = glob(["tomli/*.py"]),
+    imports = ["."],
+)
+""",
+    sha256 = "939de3e7a6161af0c887ef91b7d41a53e7c5a1ca976325f429cb46ea9bc30ecc",
+    type = "zip",
+    urls = [
+        "https://files.pythonhosted.org/packages/97/75/10a9ebee3fd790d20926a90a2547f0bf78f371b2f13aa822c759680ca7b9/tomli-2.0.1-py3-none-any.whl",
+    ],
+)
 http_jar(
     name = "ctx_bazel_diff",
     sha256 = "331fa4d5f220e99e727d3c9a4fd89a23fe27806f99c4788fa9fa233e350fef5f",
