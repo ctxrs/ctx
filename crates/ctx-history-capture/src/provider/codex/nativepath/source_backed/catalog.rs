@@ -1,10 +1,20 @@
 use super::*;
 
+const CODEX_SESSION_TREE_UNION_INVENTORY_REVISION_KIND: &str =
+    "codex-session-tree-union-inventory-v0";
+const CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION: &str = "codex-session-tree-union-catalog-v0";
+
 #[derive(Debug)]
 pub(crate) struct CodexRootInventoryV0 {
     pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     pub(crate) certificate: CertifiedSourceInventory,
     pub(super) root: ProviderSourceRoot,
+}
+
+#[derive(Debug)]
+pub(crate) struct CodexSessionTreeInventoryV0 {
+    pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    pub(crate) certificate: CertifiedSourceInventory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +275,30 @@ pub(crate) fn discover_codex_root_inventory_v0(
     build_codex_root_inventory_v0(session_root, retained)
 }
 
+pub(crate) fn discover_codex_session_tree_inventory_v0(
+    session_roots: &[PathBuf],
+) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
+    let mut normalized_roots = session_roots
+        .iter()
+        .map(|root| absolute_lexical_path(root))
+        .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
+    normalized_roots.sort();
+    normalized_roots.dedup();
+    if normalized_roots.is_empty() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Codex session-tree authority has no inventory roots".to_owned(),
+            ),
+        ));
+    }
+
+    let mut retained_roots = Vec::with_capacity(normalized_roots.len());
+    for root in &normalized_roots {
+        retained_roots.push(discover_codex_session_catalog_retained(root)?);
+    }
+    build_codex_session_tree_inventory_v0(&normalized_roots, retained_roots)
+}
+
 pub(super) fn rediscover_codex_root_inventory_v0(
     session_root: &Path,
     root: &ProviderSourceRoot,
@@ -309,6 +343,77 @@ fn build_codex_root_inventory_v0(
     })
 }
 
+fn build_codex_session_tree_inventory_v0(
+    session_roots: &[PathBuf],
+    retained_roots: Vec<crate::provider::codex::catalog::RetainedCodexSessionCatalog>,
+) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
+    if session_roots.len() != retained_roots.len() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SystemInvariant(
+                "Codex session-tree roots did not match their retained inventories",
+            ),
+        ));
+    }
+
+    let mut rejected = 0_usize;
+    let mut failed = 0_usize;
+    let mut catalog_sources = Vec::new();
+    let mut root_revisions = Vec::with_capacity(session_roots.len());
+    for (session_root, retained) in session_roots.iter().zip(&retained_roots) {
+        let discovery = super::discover_codex_catalog_sources(&retained.sessions);
+        rejected = rejected.saturating_add(discovery.rejections.len());
+        failed = failed
+            .saturating_add(retained.summary.failed_sessions)
+            .saturating_add(discovery.ineligible);
+        catalog_sources.extend(bind_catalog_capabilities(
+            discovery.sources,
+            &retained.root,
+            session_root,
+        )?);
+        crate::provider::codex::catalog::ensure_catalog_source_bound(catalog_sources.len())?;
+        root_revisions.push(codex_root_revision_v0(session_root)?);
+    }
+    if rejected != 0 || failed != 0 {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog { rejected, failed });
+    }
+    for retained in &retained_roots {
+        retained.root.revalidate()?;
+    }
+
+    // Native session identity, not physical root or path, is the source
+    // identity. Bind only after every root is open so a session cannot be
+    // concurrently owned by both the live and archived inventories.
+    let mut sources = bind_source_keys(catalog_sources)?;
+    sources.sort_by(|left, right| {
+        left.1
+            .identity()
+            .digest()
+            .cmp(&right.1.identity().digest())
+            .then_with(|| {
+                left.1
+                    .exact_descriptor_digest()
+                    .cmp(&right.1.exact_descriptor_digest())
+            })
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let observation =
+        codex_session_tree_inventory_observation_v0(session_roots, &root_revisions, &sources)?;
+    let source_keys = sources
+        .iter()
+        .map(|(_, source_key, _)| source_key.clone())
+        .collect::<Vec<_>>();
+    let certificate = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION,
+        source_keys,
+    )?;
+    Ok(CodexSessionTreeInventoryV0 {
+        sources,
+        certificate,
+    })
+}
+
 fn codex_inventory_observation_v0(
     session_root: &Path,
     root_revision: &[u8; 32],
@@ -338,6 +443,51 @@ fn codex_inventory_observation_v0(
         CODEX_INVENTORY_AUTHORITY_NAMESPACE,
         TypedKey::bytes(authority_key.to_vec())?,
         CODEX_INVENTORY_REVISION_KIND,
+        revision.finalize().to_vec(),
+    )?)
+}
+
+fn codex_session_tree_inventory_observation_v0(
+    session_roots: &[PathBuf],
+    root_revisions: &[[u8; 32]],
+    sources: &[(CodexCatalogSource, SourceKey, String)],
+) -> CodexSourceBackedResultV0<SourceInventoryObservation> {
+    if session_roots.len() != root_revisions.len() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SystemInvariant(
+                "Codex session-tree root revisions did not match their roots",
+            ),
+        ));
+    }
+
+    let mut authority = Sha256::new();
+    authority.update(b"ctx.codex-session-tree-union-authority-v0\0");
+    authority.update((session_roots.len() as u64).to_be_bytes());
+    let mut revision = Sha256::new();
+    revision.update(b"ctx.codex-session-tree-union-inventory-v0\0");
+    revision.update((session_roots.len() as u64).to_be_bytes());
+    for (session_root, root_revision) in session_roots.iter().zip(root_revisions) {
+        let root_identity = crate::provider::provider_path_identity(session_root)?;
+        hash_inventory_field(&mut authority, root_identity.as_bytes());
+        hash_inventory_field(&mut revision, root_identity.as_bytes());
+        revision.update(root_revision);
+    }
+    let authority_key: [u8; 32] = authority.finalize().into();
+
+    revision.update((sources.len() as u64).to_be_bytes());
+    for (source, source_key, native_session_id) in sources {
+        revision.update(source_key.identity().digest());
+        revision.update(source_key.exact_descriptor_digest());
+        hash_inventory_field(&mut revision, source.source_root.as_bytes());
+        let path_identity = crate::provider::provider_path_identity(&source.source_path)?;
+        hash_inventory_field(&mut revision, path_identity.as_bytes());
+        hash_inventory_field(&mut revision, native_session_id.as_bytes());
+    }
+    Ok(SourceInventoryObservation::new(
+        CaptureProvider::Codex.as_str(),
+        CODEX_INVENTORY_AUTHORITY_NAMESPACE,
+        TypedKey::bytes(authority_key.to_vec())?,
+        CODEX_SESSION_TREE_UNION_INVENTORY_REVISION_KIND,
         revision.finalize().to_vec(),
     )?)
 }

@@ -111,6 +111,7 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
         .map(SourceBackedAutomaticRegistryIssue::Discovery)
         .collect::<Vec<_>>();
     let mut compound_provider_registered = HashSet::new();
+    let mut codex_session_tree_sources = Vec::new();
 
     for source in sources {
         if let Err(error) =
@@ -180,6 +181,12 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
             // not make its landed adapter unsupported.
             source.unsupported_reason = None;
         }
+        if source.provider == CaptureProvider::Codex
+            && source.source_format == "codex_session_jsonl_tree"
+        {
+            codex_session_tree_sources.push(source);
+            continue;
+        }
 
         let compound_provider = matches!(
             format_route.constructor,
@@ -215,10 +222,43 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
         }
     }
 
+    if !codex_session_tree_sources.is_empty() {
+        codex_session_tree_sources.sort_by(|left, right| {
+            codex_automatic_session_root_rank(&left.path)
+                .cmp(&codex_automatic_session_root_rank(&right.path))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        codex_session_tree_sources.dedup_by(|left, right| left.path == right.path);
+        let source = codex_session_tree_sources.first().cloned();
+        let registration = register_codex_session_tree_routes(
+            &mut registry,
+            codex_session_tree_sources,
+            SourceBackedRouteSelection::Automatic,
+        );
+        if let (Some(source), Err(error)) = (source, registration) {
+            let reason = SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                detail: error.to_string(),
+            };
+            registry.register(SourceBackedRoute::unsupported(
+                source.clone(),
+                automatic_unavailable_detail(&reason),
+            ));
+            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
+        }
+    }
+
     SourceBackedAutomaticRegistryBuild {
         registry,
         issues,
         discovery_duration: Duration::ZERO,
+    }
+}
+
+fn codex_automatic_session_root_rank(root: &Path) -> u8 {
+    match root.file_name().and_then(std::ffi::OsStr::to_str) {
+        Some("sessions") => 0,
+        Some("archived_sessions") => 1,
+        _ => 2,
     }
 }
 
