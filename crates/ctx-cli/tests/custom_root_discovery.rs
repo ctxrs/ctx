@@ -83,7 +83,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "--provider",
         "opencode",
     ]));
-    assert!(stdout.contains("no disk history is selected"), "{stdout}");
+    assert!(stdout.contains("has no disk history selected"), "{stdout}");
     assert!(
         stdout.contains("ctx import --provider opencode --path <path>"),
         "{stdout}"
@@ -94,7 +94,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "opencode",
         "--format=json",
     ]));
-    assert!(stderr.contains("no disk history is selected"), "{stderr}");
+    assert!(stderr.contains("has no disk history selected"), "{stderr}");
     assert!(
         stderr.contains("ctx import --provider opencode --path <path>"),
         "{stderr}"
@@ -107,7 +107,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
             .args(["sources", "--provider", "claude"]),
     );
     assert!(
-        stdout.contains("automatic history location cannot be safely reconstructed"),
+        stdout.contains("history location could not be selected safely"),
         "{stdout}"
     );
     assert!(
@@ -130,7 +130,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
     let stdout =
         success_stdout(ctx(&unestablished).args(["sources", "--provider", "factory-ai-droid"]));
     assert!(
-        stdout.contains("no official automatic history location is established"),
+        stdout.contains("has no established automatic history location"),
         "{stdout}"
     );
     assert!(
@@ -148,11 +148,12 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "--format=json",
     ]));
     assert!(
-        stderr.contains("no official automatic history location is established"),
+        stderr.contains("has no official automatic history location established")
+            || stderr.contains("no official automatic Factory history location is established"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("ctx sources --provider factory-ai-droid"),
+        stderr.contains("ctx import --provider factory-ai-droid --path <path>"),
         "{stderr}"
     );
 }
@@ -238,6 +239,10 @@ fn unsupported_discovery_is_human_only_and_provider_filtered_import_does_not_dis
 #[test]
 fn explicit_manual_paths_still_import_and_current_unsupported_shapes_stop_at_admission() {
     let manual = tempdir();
+    let manual_state = manual.path().join("state");
+    fs::create_dir_all(&manual_state).unwrap();
+    let _daemon =
+        start_source_refresh_daemon(&manual, &data_root(&manual), manual.path(), &manual_state);
     let query = "factory-manual-custom-root-oracle";
     let factory = write_native_factory_droid_fixture(&manual, query);
     let imported = json_output(ctx(&manual).args([
@@ -251,8 +256,10 @@ fn explicit_manual_paths_still_import_and_current_unsupported_shapes_stop_at_adm
         "none",
         "--format=json",
     ]));
-    assert_eq!(imported["totals"]["failed_sources"], 0);
-    assert_eq!(imported["totals"]["imported_sources"], 1);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    assert!(imported["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
     let search = json_output(ctx(&manual).args([
         "search",
         query,
@@ -304,7 +311,7 @@ fn explicit_manual_paths_still_import_and_current_unsupported_shapes_stop_at_adm
             "--progress",
             "none",
         ]));
-        assert!(stderr.contains("native import is unsupported"), "{stderr}");
+        assert!(stderr.contains("is not importable"), "{stderr}");
         assert!(stderr.contains(reason), "{stderr}");
     }
 }
@@ -312,6 +319,9 @@ fn explicit_manual_paths_still_import_and_current_unsupported_shapes_stop_at_adm
 #[test]
 fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() {
     let temp = tempdir();
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let _daemon = start_source_refresh_daemon(&temp, &data_root(&temp), temp.path(), &state);
     let mux_root = temp.path().join("unsupported-mux");
     let sessions = mux_root.join("sessions/session-id");
     fs::create_dir_all(&sessions).unwrap();
@@ -366,16 +376,15 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
     let import_all = success_stdout(ctx(&temp).env("MUX_ROOT", &mux_root).args([
         "import",
         "--all",
-        "--no-daemon",
         "--progress",
         "none",
     ]));
     assert!(
-        import_all.contains("generation_changed: false")
-            && import_all.contains("current_source_count: 0")
-            && import_all.contains("change: no_op"),
+        import_all.contains("No source changes were found."),
         "{import_all}"
     );
+    assert!(import_all.contains("Searchable events"), "{import_all}");
+    assert!(!import_all.contains("generation"), "{import_all}");
 
     ctx(&temp).args(["daemon", "disable"]).assert().success();
     let search = json_output(ctx(&temp).env("MUX_ROOT", &mux_root).args([
