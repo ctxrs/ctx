@@ -184,7 +184,7 @@ fn render_status_human(
     }
     let history_fields = history_values
         .iter()
-        .map(|(label, value)| Field::new(*label, value.as_str()))
+        .map(|(label, value)| Field::new(label, value.as_str()))
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));
@@ -208,7 +208,7 @@ fn render_status_human(
     service_values.push(("Local usage", local_usage_display(local_usage)));
     let service_fields = service_values
         .iter()
-        .map(|(label, value)| Field::new(*label, value.as_str()))
+        .map(|(label, value)| Field::new(label, value.as_str()))
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("Services", fields(context, &service_fields)));
@@ -249,7 +249,7 @@ fn render_status_human(
         }
         let pro_fields = pro_values
             .iter()
-            .map(|(label, value)| Field::new(*label, value.as_str()))
+            .map(|(label, value)| Field::new(label, value.as_str()))
             .collect::<Vec<_>>();
         document.push_blank();
         document.append(section("Pro", fields(context, &pro_fields)));

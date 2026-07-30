@@ -553,8 +553,6 @@ fn service_state(
         ("failed (recoverable)", Token::Error)
     } else if running {
         ("running", Token::Success)
-    } else if status == "completed" {
-        ("completed", Token::Success)
     } else {
         ("failed", Token::Error)
     }
