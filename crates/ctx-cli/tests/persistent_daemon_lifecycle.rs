@@ -602,6 +602,45 @@ mod native {
         );
     }
 
+    #[test]
+    fn finite_daemon_shutdown_does_not_need_its_deleted_socket_path() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let harness = Harness::new();
+        write_codex_session(harness.root(), "deleted socket shutdown oracle");
+        let child = harness.spawn(
+            &["daemon", "run", "--force", "--idle-exit-seconds", "1"],
+            None,
+        );
+        let pid = child.id();
+        wait_for_daemon(&harness, None);
+
+        let endpoint: Value = serde_json::from_slice(
+            &fs::read(harness.root().join("daemon/source-refresh-endpoint.json"))
+                .expect("read source-refresh endpoint identity"),
+        )
+        .expect("decode source-refresh endpoint identity");
+        let socket_path = endpoint["path"]
+            .as_str()
+            .map(PathBuf::from)
+            .expect("Unix source-refresh endpoint path");
+        fs::remove_file(&socket_path)
+            .expect("remove source-refresh socket before finite daemon shutdown");
+        let output = wait_for_output(
+            child,
+            Duration::from_secs(8),
+            &["daemon", "run", "--deleted-source-refresh-socket"],
+        );
+        assert!(
+            output.status.success(),
+            "daemon could not stop after its socket path disappeared:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        wait_for_process_state(pid, false, Duration::from_secs(2))
+            .expect("deleted-root daemon child must exit");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn concurrent_dead_daemon_triggers_all_join_the_replacement_owner() {

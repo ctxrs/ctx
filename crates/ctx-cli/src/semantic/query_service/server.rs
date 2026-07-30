@@ -5,7 +5,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::{fs, os::unix::net::UnixStream};
+use std::{fs, net::Shutdown, os::unix::net::UnixStream};
 
 use crate::semantic::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
 
@@ -41,6 +41,8 @@ pub(in crate::semantic) struct DaemonQueryService {
     pub(in crate::semantic) socket_path: PathBuf,
     #[cfg(unix)]
     pub(in crate::semantic) socket_runtime_dir: Option<PathBuf>,
+    #[cfg(unix)]
+    pub(in crate::semantic) shutdown_stream: UnixStream,
     #[cfg(windows)]
     pub(in crate::semantic) pipe_name: String,
 }
@@ -55,14 +57,14 @@ pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES: usize 
 
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
-        remove_daemon_service_endpoint(&self.data_root, self.service);
         self.activity.stop();
         #[cfg(unix)]
         {
-            let _ = UnixStream::connect(&self.socket_path);
+            let _ = self.shutdown_stream.shutdown(Shutdown::Both);
         }
         #[cfg(windows)]
         transport::wake_windows_daemon_query_pipe(&self.pipe_name);
+        remove_daemon_service_endpoint(&self.data_root, self.service);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
