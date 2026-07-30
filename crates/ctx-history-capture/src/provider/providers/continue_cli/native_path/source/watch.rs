@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use std::{
@@ -10,7 +13,9 @@ use std::{
     },
 };
 
-use super::{source_access, ContinueNativePathError};
+#[cfg(target_os = "linux")]
+use super::source_access;
+use super::ContinueNativePathError;
 
 #[cfg(target_os = "linux")]
 pub(super) struct RootMutationWatch {

@@ -42,16 +42,6 @@ fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     snapshot
 }
 
-fn assert_status_facts_stay_machine_only(result: &Value) {
-    let text = mcp_content_text(result);
-    for machine_only in ["local_usage", "pro_status", "automatic_upgrades"] {
-        assert!(
-            !text.contains(machine_only),
-            "MCP status machine fact {machine_only:?} leaked into text content:\n{text}"
-        );
-    }
-}
-
 #[test]
 fn mcp_status_exactly_matches_cli_json_for_pristine_unavailable_state() {
     let temp = tempdir();
@@ -721,6 +711,20 @@ fn mcp_search_returns_structured_json_without_refresh() {
                     }
                 }
             }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "semantic-only",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "onboarding",
+                        "provider": "codex",
+                        "limit": 5,
+                        "backend": "semantic"
+                    }
+                }
+            }),
         ],
     );
     let recovered = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
@@ -793,6 +797,12 @@ fn mcp_search_returns_structured_json_without_refresh() {
     );
     assert!(result_window["truncation"]["candidate_pool"].is_number());
     assert!(mcp_content_text(&search_responses[2]["result"]).ends_with("More results available.\n"));
+    assert_mcp_typed_error(
+        &search_responses[3]["result"],
+        "semantic_disabled",
+        false,
+        "semantic search is disabled",
+    );
     assert_eq!(recovered["daemon"]["running"], true, "{recovered:#}");
     assert_eq!(
         recovered["daemon"]["source_refresh_endpoint"]["available"], true,

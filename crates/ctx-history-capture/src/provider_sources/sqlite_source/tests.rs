@@ -125,11 +125,22 @@ fn stock_sqlite_initial_snapshot_succeeds_with_idle_wal_writer() {
     let snapshot =
         open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
     assert_eq!(read_values(&snapshot), ["before-wal"]);
-    assert_eq!(
-        snapshot.strategy(),
-        SqliteSourceSnapshotStrategy::ImmutableMain
-    );
-    assert_eq!(snapshot.copied_bytes(), 0);
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(
+            snapshot.strategy(),
+            SqliteSourceSnapshotStrategy::ImmutableMain
+        );
+        assert_eq!(snapshot.copied_bytes(), 0);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert_eq!(
+            snapshot.strategy(),
+            SqliteSourceSnapshotStrategy::CopiedFamily
+        );
+        assert!(snapshot.copied_bytes() > 0);
+    }
     assert_eq!(snapshot.evidence().wal_length(), None);
     snapshot.finish().unwrap();
     assert!(!wal.exists());

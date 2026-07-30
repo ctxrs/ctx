@@ -56,6 +56,19 @@ pub(super) fn tool_error_result(err: Error) -> Value {
     if let Some(error) = crate::hydration_error::source_hydration_error_contract(&err) {
         return source_hydration_tool_error(error);
     }
+    if let Some(error) = err.downcast_ref::<crate::semantic::SourceBackedSemanticNotReady>() {
+        let structured = error.structured();
+        return json!({
+            "isError": true,
+            "content": [
+                {
+                    "type": "text",
+                    "text": error.to_string(),
+                }
+            ],
+            "structuredContent": structured,
+        });
+    }
     if let Some(error) = err.downcast_ref::<InvalidToolRequest>() {
         let message = error.to_string();
         return json!({

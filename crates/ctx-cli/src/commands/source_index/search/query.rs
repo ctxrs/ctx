@@ -10,7 +10,7 @@ use crate::{
         normalize_source_identity_filters, parse_since_filter, SourceIdentityFilterArgs,
         SourceIdentityFilters,
     },
-    semantic::semantic_query_service_supported,
+    semantic::{semantic_query_service_supported, SourceBackedSemanticNotReady},
     transcript::shell_quote_arg,
     RefreshArg, SearchArgs, SearchBackendArg,
 };
@@ -213,14 +213,23 @@ pub(super) fn resolve_source_search_backend(
     }
     let semantic_enabled = config.semantic_search_enabled();
     match request.backend {
-        Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow!(
-            "semantic search is disabled. Set [search] semantic = true in ctx config to enable local semantic search"
+        Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow::Error::new(
+            SourceBackedSemanticNotReady::new(
+                "semantic_disabled",
+                "semantic search is disabled. Set [search] semantic = true in ctx config to enable local semantic search",
+            ),
         )),
-        Some(SearchBackendArg::Semantic) if !semantic_query_service_supported() => Err(anyhow!(
-            "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical"
-        )),
-        Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(anyhow!(
-            "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
+        Some(SearchBackendArg::Semantic) if !semantic_query_service_supported() => {
+            Err(anyhow::Error::new(SourceBackedSemanticNotReady::new(
+                "semantic_unsupported",
+                "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical",
+            )))
+        }
+        Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(anyhow::Error::new(
+            SourceBackedSemanticNotReady::new(
+                "semantic_daemon_disabled",
+                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical",
+            ),
         )),
         value
             if semantic_enabled
@@ -228,9 +237,10 @@ pub(super) fn resolve_source_search_backend(
                 && !config.daemon.enabled
                 && !matches!(value, Some(SearchBackendArg::Lexical)) =>
         {
-            Err(anyhow!(
-                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
-            ))
+            Err(anyhow::Error::new(SourceBackedSemanticNotReady::new(
+                "semantic_daemon_disabled",
+                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical",
+            )))
         }
         Some(value) => Ok(value),
         None if semantic_enabled => Ok(SearchBackendArg::Hybrid),
