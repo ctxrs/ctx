@@ -558,6 +558,50 @@ mod native {
         );
     }
 
+    #[test]
+    fn explicit_finite_idle_daemon_exits_without_orphaning() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let harness = Harness::new();
+        write_codex_session(harness.root(), "finite idle orphan oracle");
+        let child = harness.spawn(
+            &[
+                "daemon",
+                "run",
+                "--force",
+                "--idle-exit-seconds",
+                "1",
+            ],
+            None,
+        );
+        let pid = child.id();
+        let output = wait_for_output(
+            child,
+            Duration::from_secs(8),
+            &["daemon", "run", "--idle-exit-seconds", "1"],
+        );
+        assert!(
+            output.status.success(),
+            "finite-idle daemon failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        wait_for_process_state(pid, false, Duration::from_secs(2))
+            .expect("finite-idle daemon child must exit");
+        assert!(
+            read_lock(harness.root())
+                .as_ref()
+                .and_then(|lock| json_u32(lock, "pid"))
+                .is_none_or(|owner| !process_is_running(owner)),
+            "finite-idle daemon left a live lock owner"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            linux_daemon_processes(&harness).is_empty(),
+            "finite-idle daemon left a task-root orphan"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn concurrent_dead_daemon_triggers_all_join_the_replacement_owner() {
