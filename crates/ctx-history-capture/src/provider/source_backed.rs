@@ -63,22 +63,13 @@ use super::providers::{
         CursorSourceBackedPage, CursorSourceBackedRecord, CursorSourceBackedSink,
         CursorSourceBackedSourcePlan, CursorSourceBackedTerminal,
     },
-    deepagents::native_path::source_backed::{
-        DeepAgentsDatabaseSelectionV0, DeepAgentsLocatorResolverV0, DeepAgentsSourceBackedScannerV0,
-    },
-    forgecode::nativepath::source_backed::{
-        open_forgecode_source_backed_v0, ForgeCodeSourceBackedDiscoveryV0,
-        ForgeCodeSourceBackedResolverV0, ForgeCodeSourceSelectionV0,
-    },
+    deepagents::native_path::source_backed::DeepAgentsDatabaseSelectionV0,
+    forgecode::nativepath::source_backed::ForgeCodeSourceSelectionV0,
     goose::{
         GooseSourceBackedAdapterV0, GooseSourceBackedResolverV0, GooseSourceBackedSelectionV0,
         GooseSourceRouteV0,
     },
-    hermes::source_backed::{
-        hermes_source_backed_explicit, hydrate_hermes_source_backed_message,
-        scan_hermes_source_backed, HermesSourceBackedError, HermesSourceBackedRecord,
-        HermesSourceCandidate,
-    },
+    hermes::source_backed::{hermes_source_backed_explicit, HermesSourceCandidate},
     junie::nativepath::{
         JunieLocatorResolverV0, JunieSourceBackedEmissionV0, JunieSourceBackedScannerV0,
     },
@@ -110,10 +101,6 @@ use super::providers::{
     task_json::cline_nativepath::{
         cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
         roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
-    },
-    trae::nativepath::{
-        hydrate_trae_source_backed_locator_v0, scan_trae_source_backed_explicit_v0,
-        TraeSourceBackedErrorV0,
     },
     warp::{project_warp_source_backed_v0, resolve_warp_locator_v0, WarpSourceSelectionV0},
     zed::native_path::source_backed::{
