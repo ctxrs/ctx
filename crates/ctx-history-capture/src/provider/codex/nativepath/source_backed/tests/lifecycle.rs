@@ -252,11 +252,11 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
     for (native_session_id, sentinel) in [
         (
             "019fa000-0000-7000-8000-000000000032",
-            "uncommitted failure sentinel one",
+            "uncommittedfailuremarker one",
         ),
         (
             "019fa000-0000-7000-8000-000000000033",
-            "uncommitted failure sentinel two",
+            "uncommittedfailuremarker two",
         ),
     ] {
         write_session(
@@ -288,7 +288,7 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
         search_event_ids(&after, "visible baseline sentinel"),
         before_events
     );
-    assert!(search_event_ids(&after, "uncommitted failure sentinel").is_empty());
+    assert!(search_event_ids(&after, "uncommittedfailuremarker").is_empty());
 }
 
 #[test]
@@ -438,7 +438,7 @@ fn source_backed_rewrite_with_failed_append_proof_replaces_the_source() {
     write_session(
         &sessions,
         native_session_id,
-        &[message("user", "rewrite old sentinel")],
+        &[message("user", "rewriteoldmarker")],
     );
     let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
     let before = VerifiedIndex::open(&index).unwrap();
@@ -457,7 +457,7 @@ fn source_backed_rewrite_with_failed_append_proof_replaces_the_source() {
         &sessions,
         native_session_id,
         &[
-            message("assistant", "rewrite replacement sentinel"),
+            message("assistant", "rewritereplacementmarker"),
             message("user", "rewrite longer tail sentinel"),
         ],
     );
@@ -469,9 +469,9 @@ fn source_backed_rewrite_with_failed_append_proof_replaces_the_source() {
 
     let after = VerifiedIndex::open(&index).unwrap();
     assert_eq!(after.document_count(), 2);
-    assert!(search_event_ids(&after, "rewrite old sentinel").is_empty());
+    assert!(search_event_ids(&after, "rewriteoldmarker").is_empty());
     assert_eq!(
-        search_event_ids(&after, "rewrite replacement sentinel").len(),
+        search_event_ids(&after, "rewritereplacementmarker").len(),
         1
     );
     let after_events = after
@@ -499,7 +499,7 @@ fn source_backed_truncation_replaces_the_source_without_stale_documents() {
         native_session_id,
         &[
             message("user", "truncation retained sentinel"),
-            message("assistant", "truncation removed sentinel"),
+            message("assistant", "truncationremovedmarker"),
         ],
     );
     ingest_codex_source_backed_v0(&sessions, &index).unwrap();
@@ -520,7 +520,7 @@ fn source_backed_truncation_replaces_the_source_without_stale_documents() {
         search_event_ids(&after, "truncation retained sentinel").len(),
         1
     );
-    assert!(search_event_ids(&after, "truncation removed sentinel").is_empty());
+    assert!(search_event_ids(&after, "truncationremovedmarker").is_empty());
 }
 
 #[test]
@@ -534,7 +534,7 @@ fn source_backed_native_session_replacement_is_one_atomic_generation() {
     write_session(
         &sessions,
         previous_id,
-        &[message("user", "native owner before replacement")],
+        &[message("user", "nativeownerbeforemarker")],
     );
     ingest_codex_source_backed_v0(&sessions, &index).unwrap();
 
@@ -554,7 +554,7 @@ fn source_backed_native_session_replacement_is_one_atomic_generation() {
 
     let after = VerifiedIndex::open(&index).unwrap();
     assert_eq!(after.document_count(), 1);
-    assert!(search_event_ids(&after, "native owner before replacement").is_empty());
+    assert!(search_event_ids(&after, "nativeownerbeforemarker").is_empty());
     assert_eq!(
         search_event_ids(&after, "native owner after replacement").len(),
         1
@@ -637,7 +637,7 @@ fn source_backed_incomplete_inventory_preserves_the_prior_generation() {
         format!(
             "{}\n{}\n",
             session_meta(native_session_id),
-            message("assistant", "ambiguous duplicate inventory")
+            message("assistant", "ambiguousduplicatemarker")
         ),
     )
     .unwrap();
@@ -655,7 +655,7 @@ fn source_backed_incomplete_inventory_preserves_the_prior_generation() {
         search_event_ids(&after, "incomplete inventory baseline").len(),
         1
     );
-    assert!(search_event_ids(&after, "ambiguous duplicate inventory").is_empty());
+    assert!(search_event_ids(&after, "ambiguousduplicatemarker").is_empty());
 }
 
 #[test]
@@ -664,7 +664,7 @@ fn source_backed_final_inventory_revalidation_blocks_partial_publication() {
         write_session(
             session_root,
             "019fa000-0000-7000-8000-000000000046",
-            &[message("assistant", "late inventory sentinel")],
+            &[message("assistant", "lateinventorymarker")],
         );
     }
 
@@ -703,5 +703,5 @@ fn source_backed_final_inventory_revalidation_blocks_partial_publication() {
         search_event_ids(&after, "inventory baseline sentinel").len(),
         1
     );
-    assert!(search_event_ids(&after, "late inventory sentinel").is_empty());
+    assert!(search_event_ids(&after, "lateinventorymarker").is_empty());
 }
