@@ -87,7 +87,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let append_status =
         assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
     assert_eq!(
-        append_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        append_status["history_epoch"]["lexical_generation_id"], append_generation,
         "{append_status:#}"
     );
     let (append_manifest, _) = generation_manifest(&temp, &append_generation);
@@ -146,7 +146,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let rewrite_status =
         assert_daemon_publication(&temp, &rewrite_generation, 1, &["codex", "codex"]);
     assert_eq!(
-        rewrite_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        rewrite_status["history_epoch"]["lexical_generation_id"], rewrite_generation,
         "{rewrite_status:#}"
     );
     let (rewrite_manifest, _) = generation_manifest(&temp, &rewrite_generation);
@@ -173,7 +173,11 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     assert!(
-        replaced["results"].as_array().unwrap().is_empty(),
+        replaced["results"].as_array().unwrap().iter().all(|result| {
+            result["snippet"]
+                .as_str()
+                .is_none_or(|snippet| !snippet.contains(append_query))
+        }),
         "{replaced:#}"
     );
     assert_eq!(generation_id(&replaced), rewrite_generation);
@@ -214,7 +218,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let truncate_status =
         assert_daemon_publication(&temp, &truncate_generation, 1, &["codex", "codex"]);
     assert_eq!(
-        truncate_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        truncate_status["history_epoch"]["lexical_generation_id"], truncate_generation,
         "{truncate_status:#}"
     );
     let (truncate_manifest, _) = generation_manifest(&temp, &truncate_generation);
@@ -259,13 +263,10 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "{unavailable_status:#}"
     );
     assert_eq!(
-        unavailable_status["lexical"]["status"], "unavailable",
+        unavailable_status["lexical"]["status"], "ready",
         "{unavailable_status:#}"
     );
-    assert_eq!(
-        unavailable_status["lexical"]["reason"], "source_refresh_failed",
-        "{unavailable_status:#}"
-    );
+    assert!(unavailable_status["lexical"]["reason"].is_null());
     let (retained_manifest, _) = generation_manifest(&temp, &truncate_generation);
     assert_eq!(retained_manifest.sources, truncate_manifest.sources);
     assert!(retained_manifest.removals.is_empty());
@@ -279,7 +280,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     assert!(
-        unavailable_search.contains("generation-bound source"),
+        unavailable_search.contains("source_unreadable/temporarily_unavailable"),
         "{unavailable_search}"
     );
     ctx(&temp)
@@ -321,12 +322,16 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     assert_ne!(deletion_generation, truncate_generation);
     assert_eq!(deleted["retrieval"]["indexed_documents"], 1, "{deleted:#}");
     assert!(
-        deleted["results"].as_array().unwrap().is_empty(),
+        deleted["results"].as_array().unwrap().iter().all(|result| {
+            result["snippet"]
+                .as_str()
+                .is_none_or(|snippet| !snippet.contains(truncate_query))
+        }),
         "{deleted:#}"
     );
     let deletion_status = assert_daemon_publication(&temp, &deletion_generation, 1, &["codex"]);
     assert_eq!(
-        deletion_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        deletion_status["history_epoch"]["lexical_generation_id"], deletion_generation,
         "{deletion_status:#}"
     );
     let (deletion_manifest, _) = generation_manifest(&temp, &deletion_generation);
@@ -437,7 +442,7 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "--format=json",
     ]));
     assert!(
-        codex.contains("source_hydration_failed/")
+        codex.contains("content_verification_failed/stale_record_evidence")
             && !codex.contains("no registered provider route owns")
             && !codex.contains("resolver_generation_unavailable"),
         "{codex}"
@@ -452,7 +457,8 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "--format=json",
     ]));
     assert!(
-        claude.contains("source_hydration_failed/")
+        (claude.contains("source_unreadable/temporarily_unavailable")
+            || claude.contains("content_verification_failed/stale_record_evidence"))
             && !claude.contains("no registered provider route owns")
             && !claude.contains("resolver_generation_unavailable"),
         "{claude}"

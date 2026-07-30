@@ -10,16 +10,23 @@ pub(super) struct SourceRefreshDaemon {
 
 impl Drop for SourceRefreshDaemon {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Err(error) =
+            terminate_and_reap_test_child(&mut self.child, "setup source-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("setup daemon teardown also failed: {error}");
+            } else {
+                panic!("setup daemon teardown failed: {error}");
+            }
         }
     }
 }
 
 pub(super) fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    let data_root = data_root(temp);
+    fs::create_dir_all(&data_root).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root.join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
@@ -49,16 +56,9 @@ pub(super) fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshD
         .env("CTX_DAEMON_MODE", "full")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let spawn_deadline = Instant::now() + Duration::from_secs(1);
-    let child = loop {
-        match command.spawn() {
-            Ok(child) => break child,
-            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
-        }
-    };
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("start isolated source-refresh daemon: {error}"));
     let mut daemon = SourceRefreshDaemon { child: Some(child) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

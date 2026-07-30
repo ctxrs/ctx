@@ -14,17 +14,22 @@ mod unix {
     use super::support::*;
 
     struct DaemonGuard {
-        child: Child,
+        child: Option<Child>,
     }
 
     impl DaemonGuard {
         fn pid(&self) -> u32 {
-            self.child.id()
+            self.child.as_ref().expect("running daemon child").id()
         }
 
         fn assert_running(&mut self) {
             assert!(
-                self.child.try_wait().unwrap().is_none(),
+                self.child
+                    .as_mut()
+                    .expect("running daemon child")
+                    .try_wait()
+                    .unwrap()
+                    .is_none(),
                 "daemon exited unexpectedly"
             );
         }
@@ -32,7 +37,13 @@ mod unix {
         fn wait_for_exit(&mut self) -> std::process::ExitStatus {
             let deadline = Instant::now() + Duration::from_secs(20);
             loop {
-                if let Some(status) = self.child.try_wait().unwrap() {
+                if let Some(status) = self
+                    .child
+                    .as_mut()
+                    .expect("running daemon child")
+                    .try_wait()
+                    .unwrap()
+                {
                     return status;
                 }
                 assert!(
@@ -46,16 +57,25 @@ mod unix {
 
     impl Drop for DaemonGuard {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if let Err(error) =
+                terminate_and_reap_test_child(&mut self.child, "config-reload daemon")
+            {
+                if std::thread::panicking() {
+                    eprintln!("config-reload daemon teardown also failed: {error}");
+                } else {
+                    panic!("config-reload daemon teardown failed: {error}");
+                }
+            }
         }
     }
 
-    fn write_config(root: &Path, semantic: bool) {
-        write_mode_config(root, "full", semantic);
+    fn write_config(temp: &tempfile::TempDir, semantic: bool) {
+        write_mode_config(temp, "full", semantic);
     }
 
-    fn write_mode_config(root: &Path, daemon_mode: &str, semantic: bool) {
+    fn write_mode_config(temp: &tempfile::TempDir, daemon_mode: &str, semantic: bool) {
+        let root = data_root(temp);
+        fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("config.toml"),
             format!(
@@ -74,27 +94,14 @@ mod unix {
         command
             .args(["setup", "--catalog-only", "--progress", "none"])
             .env("CTX_DAEMON_AUTOSTART_OFF", "1");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match command.output() {
-                Ok(output) => {
-                    assert!(
-                        output.status.success(),
-                        "store initialization failed: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                    break;
-                }
-                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for copied test binary to become executable"
-                    );
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(error) => panic!("failed to run store initialization: {error}"),
-            }
-        }
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("run store initialization: {error}"));
+        assert!(
+            output.status.success(),
+            "store initialization failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn std_ctx_from_binary(temp: &tempfile::TempDir, binary: &Path) -> Command {
@@ -127,7 +134,7 @@ mod unix {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        DaemonGuard { child }
+        DaemonGuard { child: Some(child) }
     }
 
     fn read_json(path: PathBuf) -> Option<Value> {
@@ -136,12 +143,12 @@ mod unix {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     }
 
-    fn daemon_lifecycle(root: &Path) -> Option<Value> {
-        read_json(root.join("daemon/status.json"))
+    fn daemon_lifecycle(temp: &tempfile::TempDir) -> Option<Value> {
+        read_json(data_root(temp).join("daemon/status.json"))
     }
 
-    fn semantic_job(root: &Path) -> Option<Value> {
-        read_json(root.join("daemon/jobs/semantic-index.json"))
+    fn semantic_job(temp: &tempfile::TempDir) -> Option<Value> {
+        read_json(data_root(temp).join("daemon/jobs/semantic-index.json"))
     }
 
     fn wait_for(description: &str, mut condition: impl FnMut() -> bool) {
@@ -155,9 +162,9 @@ mod unix {
         }
     }
 
-    fn wait_for_disabled_cycle(root: &Path, pid: u32) {
+    fn wait_for_disabled_cycle(temp: &tempfile::TempDir, pid: u32) {
         wait_for("semantic-disabled daemon cycle", || {
-            let Some(lifecycle) = daemon_lifecycle(root) else {
+            let Some(lifecycle) = daemon_lifecycle(temp) else {
                 return false;
             };
             lifecycle["status"] == "running"
@@ -168,9 +175,9 @@ mod unix {
         });
     }
 
-    fn wait_for_active_cycle(root: &Path, pid: u32) {
+    fn wait_for_active_cycle(temp: &tempfile::TempDir, pid: u32) {
         wait_for("semantic-active daemon cycle", || {
-            let Some(lifecycle) = daemon_lifecycle(root) else {
+            let Some(lifecycle) = daemon_lifecycle(temp) else {
                 return false;
             };
             lifecycle["status"] == "running"
@@ -178,7 +185,7 @@ mod unix {
                 && lifecycle["semantic_runtime_active"] == true
                 && lifecycle["config_reload"]["status"] == "applied"
                 && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
-                && semantic_job(root).is_some_and(|job| job["status"] == "ready")
+                && semantic_job(temp).is_some_and(|job| job["status"] == "ready")
         });
     }
 
@@ -200,28 +207,28 @@ mod unix {
     fn semantic_opt_in_live_activates_the_existing_daemon() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(temp.path(), false);
+        write_config(&temp, false);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
         let original_pid = daemon.pid();
-        wait_for_disabled_cycle(temp.path(), original_pid);
+        wait_for_disabled_cycle(&temp, original_pid);
 
-        write_config(temp.path(), true);
+        write_config(&temp, true);
         let setup = run_supported_setup(&temp, &binary);
         assert_eq!(setup["schema_version"], 2);
         assert_eq!(setup["daemon_autostart"]["status"], "degraded");
         assert_eq!(setup["daemon_autostart"]["pid"], original_pid);
 
         wait_for("live semantic daemon activation", || {
-            let Some(lifecycle) = daemon_lifecycle(temp.path()) else {
+            let Some(lifecycle) = daemon_lifecycle(&temp) else {
                 return false;
             };
             lifecycle["pid"] == original_pid
                 && lifecycle["semantic_runtime_active"] == true
                 && lifecycle["config_reload"]["status"] == "applied"
                 && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
-                && temp.path().join("daemon/query-endpoint.json").exists()
-                && semantic_job(temp.path()).is_some_and(|job| job["status"] == "ready")
+                && data_root(&temp).join("daemon/query-endpoint.json").exists()
+                && semantic_job(&temp).is_some_and(|job| job["status"] == "ready")
         });
         daemon.assert_running();
 
@@ -238,15 +245,15 @@ mod unix {
             "applied"
         );
 
-        write_config(temp.path(), false);
+        write_config(&temp, false);
         let _setup = run_supported_setup(&temp, &binary);
         wait_for("live semantic daemon deactivation", || {
-            daemon_lifecycle(temp.path()).is_some_and(|lifecycle| {
+            daemon_lifecycle(&temp).is_some_and(|lifecycle| {
                 lifecycle["pid"] == original_pid
                     && lifecycle["semantic_runtime_active"] == false
                     && lifecycle["config_reload"]["status"] == "applied"
                     && lifecycle["config_reload"]["applied"]["semantic_enabled"] == false
-                    && !temp.path().join("daemon/query-endpoint.json").exists()
+                    && !data_root(&temp).join("daemon/query-endpoint.json").exists()
             })
         });
         daemon.assert_running();
@@ -264,40 +271,42 @@ mod unix {
     fn daemon_mode_switch_updates_query_endpoint_before_setup_handoff_returns() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_mode_config(temp.path(), "source-refresh-only", true);
+        write_mode_config(&temp, "source-refresh-only", true);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
         let original_pid = daemon.pid();
 
         wait_for("source-refresh-only daemon cycle", || {
-            daemon_lifecycle(temp.path()).is_some_and(|lifecycle| {
+            daemon_lifecycle(&temp).is_some_and(|lifecycle| {
                 lifecycle["status"] == "running"
                     && lifecycle["pid"] == original_pid
                     && lifecycle["semantic_runtime_active"] == false
                     && lifecycle["config_reload"]["status"] == "applied"
                     && lifecycle["config_reload"]["applied"]["daemon_mode"] == "source-refresh-only"
                     && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
-                    && !temp.path().join("daemon/query-endpoint.json").exists()
+                    && !data_root(&temp).join("daemon/query-endpoint.json").exists()
             })
         });
 
-        write_mode_config(temp.path(), "full", true);
+        write_mode_config(&temp, "full", true);
         let _setup = run_supported_setup(&temp, &binary);
-        let full = daemon_lifecycle(temp.path()).expect("full-mode lifecycle");
+        let full = daemon_lifecycle(&temp).expect("full-mode lifecycle");
         assert_eq!(full["pid"], original_pid);
         assert_eq!(full["semantic_runtime_active"], true);
         assert_eq!(full["config_reload"]["status"], "applied");
         assert_eq!(full["config_reload"]["applied"]["daemon_mode"], "full");
         assert_eq!(full["config_reload"]["applied"]["semantic_enabled"], true);
         assert!(
-            temp.path().join("daemon/query-endpoint.json").is_file(),
+            data_root(&temp)
+                .join("daemon/query-endpoint.json")
+                .is_file(),
             "full-mode setup returned before the query endpoint was live"
         );
         daemon.assert_running();
 
-        write_mode_config(temp.path(), "source-refresh-only", true);
+        write_mode_config(&temp, "source-refresh-only", true);
         let _setup = run_supported_setup(&temp, &binary);
-        let source_only = daemon_lifecycle(temp.path()).expect("source-refresh-only lifecycle");
+        let source_only = daemon_lifecycle(&temp).expect("source-refresh-only lifecycle");
         assert_eq!(source_only["pid"], original_pid);
         assert_eq!(source_only["semantic_runtime_active"], false);
         assert_eq!(source_only["config_reload"]["status"], "applied");
@@ -310,7 +319,7 @@ mod unix {
             true
         );
         assert!(
-            !temp.path().join("daemon/query-endpoint.json").exists(),
+            !data_root(&temp).join("daemon/query-endpoint.json").exists(),
             "source-refresh-only setup returned before the query endpoint was removed"
         );
         daemon.assert_running();
@@ -320,12 +329,12 @@ mod unix {
     fn setup_handoff_observes_event_driven_live_activation() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(temp.path(), false);
+        write_config(&temp, false);
         initialize_store(&temp, &binary);
         let daemon = spawn_daemon(&temp, &binary, 120);
-        wait_for_disabled_cycle(temp.path(), daemon.pid());
+        wait_for_disabled_cycle(&temp, daemon.pid());
 
-        write_config(temp.path(), true);
+        write_config(&temp, true);
         let setup = run_supported_setup(&temp, &binary);
         assert_eq!(setup["daemon_autostart"]["status"], "degraded");
         assert_eq!(setup["daemon_autostart"]["pid"], daemon.pid());
@@ -342,25 +351,27 @@ mod unix {
         );
         assert_eq!(status["jobs"]["semantic_index"]["enabled"], true);
         assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], true);
-        assert!(temp.path().join("daemon/query-endpoint.json").is_file());
+        assert!(data_root(&temp)
+            .join("daemon/query-endpoint.json")
+            .is_file());
     }
 
     #[test]
     fn malformed_reload_is_failed_and_retried_without_changing_live_state() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(temp.path(), false);
+        write_config(&temp, false);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
-        wait_for_disabled_cycle(temp.path(), daemon.pid());
+        wait_for_disabled_cycle(&temp, daemon.pid());
 
         fs::write(
-            temp.path().join("config.toml"),
+            data_root(&temp).join("config.toml"),
             "[search\nsemantic = true\n",
         )
         .unwrap();
         wait_for("failed config reload", || {
-            daemon_lifecycle(temp.path()).is_some_and(|status| {
+            daemon_lifecycle(&temp).is_some_and(|status| {
                 status["config_reload"]["status"] == "failed"
                     && status["config_reload"]["applied"]["semantic_enabled"] == false
                     && status["semantic_runtime_active"] == false
@@ -370,7 +381,7 @@ mod unix {
             })
         });
         daemon.assert_running();
-        assert!(!temp.path().join("daemon/query-endpoint.json").exists());
+        assert!(!data_root(&temp).join("daemon/query-endpoint.json").exists());
 
         let status = daemon_status(&temp, &binary);
         assert_eq!(status["config_reload"]["status"], "failed");
@@ -402,9 +413,9 @@ mod unix {
             "ordinary setup unexpectedly accepted malformed config: {stderr}"
         );
 
-        write_config(temp.path(), true);
+        write_config(&temp, true);
         wait_for("reload recovery and semantic activation", || {
-            daemon_lifecycle(temp.path()).is_some_and(|status| {
+            daemon_lifecycle(&temp).is_some_and(|status| {
                 status["config_reload"]["status"] == "applied"
                     && status["config_reload"]["applied"]["semantic_enabled"] == true
                     && status["semantic_runtime_active"] == true
@@ -417,20 +428,20 @@ mod unix {
     fn malformed_reload_preserves_active_semantic_job_status() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(temp.path(), true);
+        write_config(&temp, true);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
-        wait_for_active_cycle(temp.path(), daemon.pid());
+        wait_for_active_cycle(&temp, daemon.pid());
 
         fs::write(
-            temp.path().join("config.toml"),
+            data_root(&temp).join("config.toml"),
             "[search\nsemantic = false\n",
         )
         .unwrap();
         wait_for(
             "failed config reload with retained semantic runtime",
             || {
-                daemon_lifecycle(temp.path()).is_some_and(|status| {
+                daemon_lifecycle(&temp).is_some_and(|status| {
                     status["config_reload"]["status"] == "failed"
                         && status["config_reload"]["applied"]["semantic_enabled"] == true
                         && status["semantic_runtime_active"] == true
@@ -468,15 +479,17 @@ mod unix {
     fn semantic_activation_failure_never_reports_success() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(temp.path(), false);
+        write_config(&temp, false);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
-        wait_for_disabled_cycle(temp.path(), daemon.pid());
+        wait_for_disabled_cycle(&temp, daemon.pid());
 
-        fs::create_dir(temp.path().join("daemon/query-endpoint.json")).unwrap();
-        write_config(temp.path(), true);
+        fs::create_dir(data_root(&temp).join("daemon/query-endpoint.json")).unwrap();
+        write_config(&temp, true);
         let mut setup = ctx_from_binary(&temp, &binary);
-        setup.args(["setup", "--format=json", "--progress", "none"]);
+        setup
+            .args(["setup", "--format=json", "--progress", "none"])
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF");
         let setup_error = failure_stderr(&mut setup);
         assert!(
             setup_error.contains("ctx daemon did not become ready")
@@ -484,7 +497,7 @@ mod unix {
             "{setup_error}"
         );
         wait_for("failed semantic runtime activation", || {
-            daemon_lifecycle(temp.path()).is_some_and(|status| {
+            daemon_lifecycle(&temp).is_some_and(|status| {
                 status["config_reload"]["status"] == "activation_failed"
                     && status["semantic_runtime_active"] == false
             })
@@ -507,7 +520,7 @@ mod unix {
             "semantic_activation_failed"
         );
         assert!(
-            temp.path().join("daemon/query-endpoint.json").is_dir(),
+            data_root(&temp).join("daemon/query-endpoint.json").is_dir(),
             "the endpoint path should remain the blocking test fixture"
         );
     }
@@ -516,9 +529,9 @@ mod unix {
     fn initial_semantic_activation_failure_fails_daemon_startup_truthfully() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(temp.path(), true);
+        write_config(&temp, true);
         initialize_store(&temp, &binary);
-        fs::create_dir_all(temp.path().join("daemon/query-endpoint.json")).unwrap();
+        fs::create_dir_all(data_root(&temp).join("daemon/query-endpoint.json")).unwrap();
 
         let mut daemon = spawn_daemon(&temp, &binary, 1);
         assert!(!daemon.wait_for_exit().success());

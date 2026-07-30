@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    process::Child,
 };
 use tempfile::{Builder, TempDir, TempPath};
 
@@ -25,7 +26,18 @@ pub(crate) fn tempdir() -> TempDir {
 }
 
 pub(crate) fn ctx(temp: &TempDir) -> Command {
-    ctx_with_enabled_daemon(temp)
+    let persistent_daemon_test = temp
+        .path()
+        .join(PERSISTENT_DAEMON_TEST_ROOT_MARKER)
+        .is_file();
+    let binary = if persistent_daemon_test {
+        copied_ctx_binary(temp)
+    } else {
+        ctx_binary()
+    };
+    let mut command = Command::new(binary);
+    apply_hermetic_env(&mut command, temp);
+    command
 }
 
 pub(crate) fn data_root(temp: &TempDir) -> PathBuf {
@@ -49,7 +61,9 @@ pub(crate) fn ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
 
 pub(crate) fn ctx_with_enabled_daemon(temp: &TempDir) -> Command {
     let binary = copied_ctx_binary(temp);
-    ctx_from_binary(temp, &binary)
+    let mut command = ctx_from_binary(temp, &binary);
+    command.env_remove("CTX_DAEMON_AUTOSTART_OFF");
+    command
 }
 
 pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
@@ -75,12 +89,14 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         command.env_remove(name);
     }
     command.env_remove("CTX_DAEMON_ENABLED");
-    command.env_remove("CTX_DAEMON_AUTOSTART_OFF");
     if persistent_daemon_test {
+        command.env_remove("CTX_DAEMON_AUTOSTART_OFF");
         command.env_remove("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS");
     } else {
-        // Tests outside the persistent-daemon harness retain their explicit
-        // finite fallback until they adopt identity-bound teardown.
+        // Ordinary integration commands are process-local. Tests that
+        // explicitly remove this override retain a finite fallback until they
+        // adopt the identity-bound persistent-daemon harness.
+        command.env("CTX_DAEMON_AUTOSTART_OFF", "1");
         command.env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2");
     }
     command.env_remove("CTX_QUIET");
@@ -224,10 +240,18 @@ pub(crate) fn copied_binary(temp: &TempDir, source: &Path) -> PathBuf {
     } else {
         "ctx-test-copy"
     });
-    // `fs::copy` closes both file handles before returning. Convert only the
-    // resulting path into a TempPath so atomic publication cannot retain a
-    // writable descriptor on the executable inode.
-    fs::copy(source, &staged_path).unwrap();
+    {
+        let mut source_file = fs::File::open(source).unwrap();
+        let mut staged_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged_path)
+            .unwrap();
+        io::copy(&mut source_file, &mut staged_file).unwrap();
+        staged_file.sync_all().unwrap();
+        // Keep these handles lexically scoped: the inode is not renamed to its
+        // executable path until every writer and source handle is closed.
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -251,6 +275,40 @@ pub(crate) fn copied_binary(temp: &TempDir, source: &Path) -> PathBuf {
         }
     }
     target
+}
+
+pub(crate) fn terminate_and_reap_test_child(
+    child: &mut Option<Child>,
+    description: &str,
+) -> Result<Option<u32>, String> {
+    let Some(mut child) = child.take() else {
+        return Ok(None);
+    };
+    let pid = child.id();
+    if child
+        .try_wait()
+        .map_err(|error| format!("inspect {description} {pid}: {error}"))?
+        .is_none()
+    {
+        if let Err(kill_error) = child.kill() {
+            if child
+                .try_wait()
+                .map_err(|error| {
+                    format!(
+                        "inspect {description} {pid} after termination failed ({kill_error}): {error}"
+                    )
+                })?
+                .is_none()
+            {
+                return Err(format!("terminate {description} {pid}: {kill_error}"));
+            }
+            return Ok(Some(pid));
+        }
+        child
+            .wait()
+            .map_err(|error| format!("reap {description} {pid}: {error}"))?;
+    }
+    Ok(Some(pid))
 }
 
 pub(crate) fn hosted_install_marker_path(binary: &Path) -> PathBuf {

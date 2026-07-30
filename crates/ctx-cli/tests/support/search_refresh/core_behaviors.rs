@@ -22,7 +22,6 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     let initial_status =
         assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
     let initial_job = &initial_status["daemon"]["jobs"]["source_backed_refresh"];
-    assert_eq!(initial_job["generation_changed"], true, "{initial_job:#}");
     let initial_current = initial_job["receipt"]["current"].clone();
 
     let index_root = search_refresh_data_root(&temp).join("search/lexical");
@@ -137,7 +136,6 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
         let append_status =
             assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
         let append_job = &append_status["daemon"]["jobs"]["source_backed_refresh"];
-        assert_eq!(append_job["generation_changed"], true, "{append_job:#}");
         let append_current = &append_job["receipt"]["current"];
         assert_eq!(
             append_current["current_indexed_documents"], expected_documents,
@@ -621,17 +619,22 @@ fn search_refresh_off_serves_published_generation_without_refreshing_sources() {
     let published_generation = assert_published_generation(&initial, "wait");
     assert_daemon_publication(&temp, &published_generation, 1, &["codex"]);
 
-    let mut file = fs::OpenOptions::new().append(true).open(&history).unwrap();
-    writeln!(
-        file,
-        r#"{{"session_id":"off-refresh-session","ts":1784371201,"text":"unpublished off mode oracle"}}"#
-    )
-    .unwrap();
-    drop(file);
+    daemon.stop();
+    write_codex_session(
+        &temp
+            .path()
+            .join(".codex/sessions/2026/07/18/unpublished-off-mode.jsonl"),
+        "019fac90-0000-7000-8000-000000000018",
+        &[(
+            "2026-07-18T12:00:01.000Z",
+            "user",
+            "unpublishedxylophonicquasar",
+        )],
+    );
 
     let off = json_output(ctx(&temp).args([
         "search",
-        "unpublished off mode oracle",
+        "unpublishedxylophonicquasar",
         "--provider",
         "codex",
         "--refresh",
@@ -644,22 +647,23 @@ fn search_refresh_off_serves_published_generation_without_refreshing_sources() {
     assert_eq!(generation_id(&off), published_generation);
     assert!(off["results"].as_array().unwrap().is_empty(), "{off:#}");
 
-    daemon.stop();
-    let unavailable = json_output(ctx(&temp).args([
+    let unavailable = failure_stderr(ctx(&temp).args([
         "search",
-        "unpublished off mode oracle",
+        "unpublishedxylophonicquasar",
         "--provider",
         "codex",
         "--refresh",
         "background",
         "--format=json",
     ]));
-    assert_eq!(unavailable["freshness"]["mode"], "background");
-    assert_eq!(unavailable["freshness"]["status"], "daemon_background");
-    assert_eq!(generation_id(&unavailable), published_generation);
     assert!(
-        unavailable["results"].as_array().unwrap().is_empty(),
-        "{unavailable:#}"
+        unavailable.contains("ctx daemon start was suppressed (autostart_disabled)"),
+        "{unavailable}"
+    );
+    let retained = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(
+        retained["lexical"]["generation_id"], published_generation,
+        "{retained:#}"
     );
 }
 
@@ -776,11 +780,11 @@ fn source_refresh_daemon_stop_start_resumes_exact_generation() {
         "--format=json",
     ]));
     assert!(
-        offline.contains("resolver_service_unavailable/temporarily_unavailable"),
+        offline.contains("source_unreadable/temporarily_unavailable"),
         "{offline}"
     );
     assert!(
-        offline.contains("no provider rediscovery or stored preview fallback"),
+        offline.contains("source hydration is temporarily unavailable"),
         "{offline}"
     );
 

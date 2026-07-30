@@ -7,7 +7,9 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{copied_ctx_binary, ctx, ctx_from_binary, json_output};
+use super::{
+    copied_ctx_binary, ctx, ctx_from_binary, data_root, json_output, terminate_and_reap_test_child,
+};
 
 pub(crate) struct McpSourceRefreshDaemon {
     child: Option<Child>,
@@ -15,26 +17,31 @@ pub(crate) struct McpSourceRefreshDaemon {
 
 impl McpSourceRefreshDaemon {
     pub(crate) fn kill_and_wait(&mut self) -> u32 {
-        let mut child = self.child.take().expect("MCP source-refresh daemon");
-        let pid = child.id();
-        child.kill().expect("kill MCP source-refresh daemon");
-        child.wait().expect("wait for MCP source-refresh daemon");
-        pid
+        terminate_and_reap_test_child(&mut self.child, "MCP source-refresh daemon")
+            .expect("terminate and reap MCP source-refresh daemon")
+            .expect("MCP source-refresh daemon")
     }
 }
 
 impl Drop for McpSourceRefreshDaemon {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Err(error) =
+            terminate_and_reap_test_child(&mut self.child, "MCP source-refresh daemon")
+        {
+            if std::thread::panicking() {
+                eprintln!("MCP daemon teardown also failed: {error}");
+            } else {
+                panic!("MCP daemon teardown failed: {error}");
+            }
         }
     }
 }
 
 pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefreshDaemon {
+    let data_root = data_root(temp);
+    std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(
-        temp.path().join("config.toml"),
+        data_root.join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
@@ -65,16 +72,9 @@ pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefres
         .env("CTX_DAEMON_MODE", "full")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let spawn_deadline = Instant::now() + Duration::from_secs(1);
-    let child = loop {
-        match command.spawn() {
-            Ok(child) => break child,
-            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("start isolated MCP source-refresh daemon: {error}"),
-        }
-    };
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("start isolated MCP source-refresh daemon: {error}"));
     let mut daemon = McpSourceRefreshDaemon { child: Some(child) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
