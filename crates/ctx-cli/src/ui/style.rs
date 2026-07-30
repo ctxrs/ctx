@@ -1,5 +1,21 @@
 use anstyle::{AnsiColor, Color, Style};
 
+pub(crate) const CLAP_STYLES: clap::builder::styling::Styles =
+    clap::builder::styling::Styles::styled()
+        .header(Style::new().bold())
+        .usage(Style::new().bold())
+        .literal(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan))))
+        .placeholder(Style::new().dimmed())
+        .error(
+            Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Red)))
+                .bold(),
+        )
+        .valid(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))))
+        .invalid(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))))
+        .context(Style::new().dimmed())
+        .context_value(Style::new());
+
 /// Semantic roles for human output.
 ///
 /// State colors are reserved for markers and short state values. Ordinary
@@ -21,10 +37,10 @@ pub(crate) enum Token {
 impl Token {
     pub(crate) const fn style(self) -> Style {
         match self {
-            Self::Text | Self::Command => Style::new(),
+            Self::Text => Style::new(),
             Self::Heading => Style::new().bold(),
             Self::Label => Style::new().dimmed(),
-            Self::Accent | Self::Reference => {
+            Self::Accent | Self::Command | Self::Reference => {
                 Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan)))
             }
             Self::Success => Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))),

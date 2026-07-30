@@ -10,22 +10,26 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+mod render;
+
 use super::{
     commercial_api::{ReferralCreateResult, ReferralPayoutResult, ReferralStatusResult},
     commercial_config::selected_channel,
     commercial_lifecycle::{open_browser, CommercialLifecycleService},
     lifecycle::lifecycle_manifest::ReleaseChannel,
 };
-use crate::output::JsonOutputFormat;
+use crate::{
+    output::JsonOutputFormat,
+    ui::{Document, RenderContext, StreamKind, Ui},
+};
+use render::{
+    create as render_create_human, cta as render_cta_human, payout as render_payout_human,
+    payout_browser_notice as render_payout_browser_notice, status as render_status_human,
+};
 
-const REFERRAL_TAGLINE: &str = "Refer a developer. Earn $10/month toward your agent bill.";
-const REFERRAL_SECONDARY: &str = "Up to $120 per friend.";
 const REFERRAL_CODENAME_MIN_BYTES: usize = 3;
 const REFERRAL_CODENAME_MAX_BYTES: usize = 32;
 const REFERRAL_CTA_MARKER_PREFIX: &str = ".referral-cta-v1";
-pub(crate) const REFERRAL_CTA: &str = "Refer a developer. Earn $10/month toward your agent bill.\n\
-Up to $120 per friend.\n\
-ctx referral create <codename>";
 
 #[derive(Debug, Args)]
 pub(crate) struct ReferralArgs {
@@ -172,7 +176,7 @@ fn parse_country_code(value: &str) -> Result<CountryCode, String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReferralAuthMode {
-    Interactive,
+    Interactive { browser_enabled: bool },
     CachedOnly,
 }
 
@@ -181,20 +185,24 @@ trait ReferralService {
         &mut self,
         codename: &str,
         auth_mode: ReferralAuthMode,
+        ui: &mut Ui,
     ) -> Result<ReferralCreateResult>;
-    fn status(&mut self, auth_mode: ReferralAuthMode) -> Result<ReferralStatusResult>;
+    fn status(&mut self, auth_mode: ReferralAuthMode, ui: &mut Ui) -> Result<ReferralStatusResult>;
     fn payout(
         &mut self,
         country: Option<&str>,
         entity_type: Option<&str>,
         auth_mode: ReferralAuthMode,
+        ui: &mut Ui,
     ) -> Result<ReferralPayoutResult>;
 }
 
 impl CommercialLifecycleService {
-    fn referral_access_token(&self, auth_mode: ReferralAuthMode) -> Result<String> {
+    fn referral_access_token(&self, auth_mode: ReferralAuthMode, ui: &mut Ui) -> Result<String> {
         match auth_mode {
-            ReferralAuthMode::Interactive => self.access_token(),
+            ReferralAuthMode::Interactive { browser_enabled } => {
+                self.access_token(ui, true, browser_enabled)
+            }
             ReferralAuthMode::CachedOnly => {
                 self.access_token_noninteractive().map_err(|error| {
                     if crate::pro::stable_error_code(&error) == Some("authentication_required") {
@@ -215,15 +223,16 @@ impl ReferralService for CommercialLifecycleService {
         &mut self,
         codename: &str,
         auth_mode: ReferralAuthMode,
+        ui: &mut Ui,
     ) -> Result<ReferralCreateResult> {
-        let mut access_token = self.referral_access_token(auth_mode)?;
+        let mut access_token = self.referral_access_token(auth_mode, ui)?;
         let result = self.api.referral_create(&access_token, codename);
         access_token.zeroize();
         result
     }
 
-    fn status(&mut self, auth_mode: ReferralAuthMode) -> Result<ReferralStatusResult> {
-        let mut access_token = self.referral_access_token(auth_mode)?;
+    fn status(&mut self, auth_mode: ReferralAuthMode, ui: &mut Ui) -> Result<ReferralStatusResult> {
+        let mut access_token = self.referral_access_token(auth_mode, ui)?;
         let result = self.api.referral_status(&access_token);
         access_token.zeroize();
         result
@@ -234,8 +243,9 @@ impl ReferralService for CommercialLifecycleService {
         country: Option<&str>,
         entity_type: Option<&str>,
         auth_mode: ReferralAuthMode,
+        ui: &mut Ui,
     ) -> Result<ReferralPayoutResult> {
-        let mut access_token = self.referral_access_token(auth_mode)?;
+        let mut access_token = self.referral_access_token(auth_mode, ui)?;
         let result = self
             .api
             .referral_payout(&access_token, country, entity_type);
@@ -244,7 +254,7 @@ impl ReferralService for CommercialLifecycleService {
     }
 }
 
-pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, _ui: &mut crate::ui::Ui) -> Result<()> {
+pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
     args.validate_invocation()?;
     let json_output = args.json_output();
     prepare_referral_identity(&data_root, json_output)?;
@@ -256,31 +266,76 @@ pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, _ui: &mut crate::ui::U
         )
     })?;
     let mut service = CommercialLifecycleService::production(&data_root)?;
-    run_with_service(args, &mut service, &mut io::stdout().lock(), &open_browser)
+    run_with_service(
+        args,
+        &mut service,
+        &mut io::stdout().lock(),
+        ui,
+        &open_browser,
+    )
 }
 
-pub(crate) fn show_cta_once(data_root: &Path, eligible: bool, output: &mut impl io::Write) -> bool {
+pub(crate) fn show_cta_once<D>(data_root: &Path, eligible: bool, output: &mut D) -> bool
+where
+    D: CtaDestination + ?Sized,
+{
     let Ok(channel) = selected_channel() else {
         return false;
     };
     show_cta_once_for_channel(data_root, eligible, channel, output)
 }
 
-fn show_cta_once_for_channel(
+fn show_cta_once_for_channel<D>(
     data_root: &Path,
     eligible: bool,
     channel: ReleaseChannel,
-    output: &mut impl io::Write,
-) -> bool {
+    output: &mut D,
+) -> bool
+where
+    D: CtaDestination + ?Sized,
+{
     if !eligible || !claim_cta_marker(data_root, channel) {
         return false;
     }
-    let rendered = format!("\n{REFERRAL_CTA}\n");
-    if output.write_all(rendered.as_bytes()).is_ok() {
+    if output
+        .write_cta(&render_cta_human(output.cta_context()))
+        .is_ok()
+    {
         true
     } else {
         rollback_cta_marker(data_root, channel);
         false
+    }
+}
+
+pub(crate) trait CtaDestination {
+    fn cta_context(&self) -> &RenderContext;
+    fn write_cta(&mut self, document: &Document) -> io::Result<()>;
+}
+
+impl CtaDestination for Ui {
+    fn cta_context(&self) -> &RenderContext {
+        self.stderr_context()
+    }
+
+    fn write_cta(&mut self, document: &Document) -> io::Result<()> {
+        self.write_stderr(document)
+    }
+}
+
+impl<W> CtaDestination for W
+where
+    W: io::Write,
+{
+    fn cta_context(&self) -> &RenderContext {
+        static CONTEXT: std::sync::OnceLock<RenderContext> = std::sync::OnceLock::new();
+        CONTEXT.get_or_init(|| {
+            RenderContext::for_test(crate::ui::TestContext::pipe(StreamKind::Stderr))
+        })
+    }
+
+    fn write_cta(&mut self, document: &Document) -> io::Result<()> {
+        self.write_all(document.render_plain().as_bytes())
     }
 }
 
@@ -351,38 +406,59 @@ fn run_with_service(
     args: ReferralArgs,
     service: &mut dyn ReferralService,
     output: &mut impl io::Write,
+    ui: &mut Ui,
     opener: &impl Fn(&str) -> Result<()>,
 ) -> Result<()> {
     args.validate_invocation()?;
-    let auth_mode = if args.json_output() {
-        ReferralAuthMode::CachedOnly
-    } else {
-        ReferralAuthMode::Interactive
-    };
+    let json_output = args.json_output();
     match args.command {
         ReferralCommand::Create(args) => {
-            let result = service.create(args.codename.as_str(), auth_mode)?;
+            let auth_mode = if json_output {
+                ReferralAuthMode::CachedOnly
+            } else {
+                ReferralAuthMode::Interactive {
+                    browser_enabled: true,
+                }
+            };
+            let result = service.create(args.codename.as_str(), auth_mode, ui)?;
             if args.format.is_json() {
                 write_json(output, &create_output(&result))
             } else {
-                write!(output, "{}", render_create_human(&result))?;
+                let document = render_create_human(ui.stdout_context(), &result);
+                ui.write_stdout(&document)?;
                 Ok(())
             }
         }
         ReferralCommand::Status(args) => {
-            let result = service.status(auth_mode)?;
+            let auth_mode = if json_output {
+                ReferralAuthMode::CachedOnly
+            } else {
+                ReferralAuthMode::Interactive {
+                    browser_enabled: true,
+                }
+            };
+            let result = service.status(auth_mode, ui)?;
             if args.format.is_json() {
                 write_json(output, &status_output(&result))
             } else {
-                write!(output, "{}", render_status_human(&result))?;
+                let document = render_status_human(ui.stdout_context(), &result);
+                ui.write_stdout(&document)?;
                 Ok(())
             }
         }
         ReferralCommand::Payout(args) => {
+            let auth_mode = if json_output {
+                ReferralAuthMode::CachedOnly
+            } else {
+                ReferralAuthMode::Interactive {
+                    browser_enabled: !args.no_open,
+                }
+            };
             let result = service.payout(
                 args.country.as_ref().map(CountryCode::as_str),
                 args.entity_type.map(ReferralEntityType::as_str),
                 auth_mode,
+                ui,
             )?;
             if args.format.is_json() {
                 return write_json(output, &payout_output(&result, false));
@@ -391,11 +467,12 @@ fn run_with_service(
             if !args.no_open {
                 browser_opened = opener(&result.url).is_ok();
             }
-            write!(
-                output,
-                "{}",
-                render_payout_human(&result, args.no_open, browser_opened)
-            )?;
+            let document = render_payout_human(ui.stdout_context(), &result, browser_opened);
+            ui.write_stdout(&document)?;
+            if !args.no_open {
+                let notice = render_payout_browser_notice(ui.stderr_context(), browser_opened);
+                ui.write_stderr(&notice)?;
+            }
             Ok(())
         }
     }
@@ -490,119 +567,19 @@ fn payout_output(result: &ReferralPayoutResult, browser_opened: bool) -> Referra
     }
 }
 
-fn render_create_human(result: &ReferralCreateResult) -> String {
-    format!(
-        "{REFERRAL_TAGLINE}\n{REFERRAL_SECONDARY}\nCodename: {}\nShare: {}\n",
-        result.codename,
-        share_command(&result.codename)
-    )
-}
-
-fn render_status_human(result: &ReferralStatusResult) -> String {
-    format!(
-        "{REFERRAL_TAGLINE}\n{REFERRAL_SECONDARY}\nCodename: {}\nShare: {}\nAttributed: {}\nSubscribed: {}\nEarned: {}\nPending: {}\nManual review: {}\nPayable: {}\nProcessing: {}\nPaid: {}\nDebt: {}\nPayout: {}\n",
-        result.codename,
-        share_command(&result.codename),
-        result.attributed,
-        result.subscribed,
-        format_usd(result.earned_cents),
-        format_usd(result.pending_cents),
-        format_usd(result.manual_review_cents),
-        format_usd(result.payable_cents),
-        format_usd(result.processing_cents),
-        format_usd(result.paid_cents),
-        format_usd(result.debt_cents),
-        result.payout_state,
-    )
-}
-
-fn render_payout_human(
-    result: &ReferralPayoutResult,
-    no_open: bool,
-    browser_opened: bool,
-) -> String {
-    if no_open {
-        return format!(
-            "{REFERRAL_TAGLINE}\n{REFERRAL_SECONDARY}\nComplete Stripe payout setup:\n{}\n",
-            result.url
-        );
-    }
-    if browser_opened {
-        format!(
-            "{REFERRAL_TAGLINE}\n{REFERRAL_SECONDARY}\nStripe payout setup opened in your browser.\n"
-        )
-    } else {
-        format!(
-            "{REFERRAL_TAGLINE}\n{REFERRAL_SECONDARY}\nA browser could not be opened. Complete Stripe payout setup at:\n{}\n",
-            result.url
-        )
-    }
-}
-
-fn format_usd(cents: u64) -> String {
-    format!("${}.{:02}", cents / 100, cents % 100)
-}
-
 #[cfg(test)]
 mod cta_tests;
 
 #[cfg(test)]
-mod tests {
-    use std::cell::{Cell, RefCell};
+#[path = "referral/ui_tests.rs"]
+mod ui_tests;
 
+#[cfg(test)]
+mod tests {
     use clap::{CommandFactory as _, Parser as _};
-    use serde_json::Value;
 
     use super::*;
-    use crate::cli::{Cli, CommandRoot};
-
-    #[derive(Default)]
-    struct FakeReferralService {
-        auth_modes: RefCell<Vec<ReferralAuthMode>>,
-        create: Option<ReferralCreateResult>,
-        status: Option<ReferralStatusResult>,
-        payout: Option<ReferralPayoutResult>,
-    }
-
-    impl ReferralService for FakeReferralService {
-        fn create(
-            &mut self,
-            _codename: &str,
-            auth_mode: ReferralAuthMode,
-        ) -> Result<ReferralCreateResult> {
-            self.auth_modes.borrow_mut().push(auth_mode);
-            self.create
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("missing create fixture"))
-        }
-
-        fn status(&mut self, auth_mode: ReferralAuthMode) -> Result<ReferralStatusResult> {
-            self.auth_modes.borrow_mut().push(auth_mode);
-            self.status
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("missing status fixture"))
-        }
-
-        fn payout(
-            &mut self,
-            _country: Option<&str>,
-            _entity_type: Option<&str>,
-            auth_mode: ReferralAuthMode,
-        ) -> Result<ReferralPayoutResult> {
-            self.auth_modes.borrow_mut().push(auth_mode);
-            self.payout
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("missing payout fixture"))
-        }
-    }
-
-    fn parse(args: &[&str]) -> ReferralArgs {
-        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied())).unwrap();
-        let CommandRoot::Referral(args) = cli.command else {
-            panic!("expected referral command");
-        };
-        args
-    }
+    use crate::cli::Cli;
 
     fn create_result() -> ReferralCreateResult {
         ReferralCreateResult {
@@ -625,15 +602,6 @@ mod tests {
             debt_cents: 2_000,
             currency: "usd".to_owned(),
             payout_state: "paused".to_owned(),
-        }
-    }
-
-    fn payout_result() -> ReferralPayoutResult {
-        ReferralPayoutResult {
-            kind: "payout_onboarding_created".to_owned(),
-            payout_state: "onboarding_pending".to_owned(),
-            url: "https://connect.stripe.com/setup/s/test".to_owned(),
-            expires_at_unix: super::super::commercial_api::unix_time().unwrap() + 300,
         }
     }
 
@@ -704,12 +672,8 @@ mod tests {
     }
 
     #[test]
-    fn create_and_status_human_and_json_render_exact_share_command() {
+    fn create_and_status_json_preserve_the_exact_machine_contract() {
         let create = create_result();
-        assert_eq!(
-            render_create_human(&create),
-            "Refer a developer. Earn $10/month toward your agent bill.\nUp to $120 per friend.\nCodename: agent-smith\nShare: ctx pro --referral agent-smith\n"
-        );
         assert_eq!(
             serde_json::to_value(create_output(&create)).unwrap(),
             serde_json::json!({
@@ -722,10 +686,6 @@ mod tests {
         );
 
         let status = status_result();
-        assert_eq!(
-            render_status_human(&status),
-            "Refer a developer. Earn $10/month toward your agent bill.\nUp to $120 per friend.\nCodename: agent-smith\nShare: ctx pro --referral agent-smith\nAttributed: 4\nSubscribed: 3\nEarned: $70.00\nPending: $20.00\nManual review: $20.00\nPayable: $20.00\nProcessing: $10.00\nPaid: $20.00\nDebt: $20.00\nPayout: paused\n"
-        );
         assert_eq!(
             serde_json::to_value(status_output(&status)).unwrap(),
             serde_json::json!({
@@ -746,122 +706,6 @@ mod tests {
                 "payout_state": "paused",
             })
         );
-    }
-
-    #[test]
-    fn payout_no_open_and_json_are_browser_free_and_json_uses_cached_auth() {
-        for args in [
-            parse(&["referral", "payout", "--no-open"]),
-            parse(&["referral", "payout", "--format=json"]),
-        ] {
-            let json = args.json_output();
-            let fixture = payout_result();
-            let expected_expiry = fixture.expires_at_unix;
-            let mut service = FakeReferralService {
-                payout: Some(fixture),
-                ..FakeReferralService::default()
-            };
-            let calls = Cell::new(0);
-            let opener = |_: &str| {
-                calls.set(calls.get() + 1);
-                Ok(())
-            };
-            let mut output = Vec::new();
-            run_with_service(args, &mut service, &mut output, &opener).unwrap();
-            assert_eq!(calls.get(), 0);
-            assert_eq!(
-                service.auth_modes.into_inner(),
-                [if json {
-                    ReferralAuthMode::CachedOnly
-                } else {
-                    ReferralAuthMode::Interactive
-                }]
-            );
-            let rendered = String::from_utf8(output).unwrap();
-            if json {
-                let value: Value = serde_json::from_str(rendered.trim()).unwrap();
-                assert_eq!(
-                    value,
-                    serde_json::json!({
-                        "schema_version": 1,
-                        "payload_type": "referral_payout",
-                        "payout_state": "onboarding_pending",
-                        "onboarding_url": "https://connect.stripe.com/setup/s/test",
-                        "expires_at_unix": expected_expiry,
-                        "browser_opened": false,
-                    })
-                );
-            } else {
-                assert_eq!(
-                    rendered,
-                    "Refer a developer. Earn $10/month toward your agent bill.\nUp to $120 per friend.\nComplete Stripe payout setup:\nhttps://connect.stripe.com/setup/s/test\n"
-                );
-            }
-        }
-
-        let mut service = FakeReferralService {
-            payout: Some(payout_result()),
-            ..FakeReferralService::default()
-        };
-        let calls = Cell::new(0);
-        let opener = |url: &str| {
-            assert_eq!(url, "https://connect.stripe.com/setup/s/test");
-            calls.set(calls.get() + 1);
-            Ok(())
-        };
-        let mut output = Vec::new();
-        run_with_service(
-            parse(&["referral", "payout"]),
-            &mut service,
-            &mut output,
-            &opener,
-        )
-        .unwrap();
-        assert_eq!(calls.get(), 1);
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            "Refer a developer. Earn $10/month toward your agent bill.\nUp to $120 per friend.\nStripe payout setup opened in your browser.\n"
-        );
-    }
-
-    #[test]
-    fn every_json_command_uses_cached_auth_and_never_calls_the_payout_opener() {
-        let cases = [
-            (
-                parse(&["referral", "create", "agent-smith", "--format=json"]),
-                FakeReferralService {
-                    create: Some(create_result()),
-                    ..FakeReferralService::default()
-                },
-            ),
-            (
-                parse(&["referral", "status", "--format=json"]),
-                FakeReferralService {
-                    status: Some(status_result()),
-                    ..FakeReferralService::default()
-                },
-            ),
-            (
-                parse(&["referral", "payout", "--format=json"]),
-                FakeReferralService {
-                    payout: Some(payout_result()),
-                    ..FakeReferralService::default()
-                },
-            ),
-        ];
-        for (args, mut service) in cases {
-            let calls = Cell::new(0);
-            let opener = |_: &str| {
-                calls.set(calls.get() + 1);
-                Ok(())
-            };
-            run_with_service(args, &mut service, &mut Vec::new(), &opener).unwrap();
-            assert_eq!(calls.get(), 0);
-            assert_eq!(
-                service.auth_modes.into_inner(),
-                [ReferralAuthMode::CachedOnly]
-            );
-        }
     }
 
     #[test]

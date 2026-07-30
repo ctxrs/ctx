@@ -1,10 +1,63 @@
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    io,
+    sync::{Arc, Mutex},
+};
 
 use super::*;
+use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
 
 const SOURCE_MANIFEST_AUTHORITY_SENTINEL: &[u8] =
     b"v0.26 source-manifest authority; provider sources remain canonical";
 const SEMANTIC_INDEX_SENTINEL: &[u8] = b"v0.26 disposable semantic index";
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl SharedWriter {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn test_ui(width: usize) -> (Ui, SharedWriter, SharedWriter) {
+    let stdout = SharedWriter::default();
+    let stderr = SharedWriter::default();
+    let stdout_copy = stdout.clone();
+    let stderr_copy = stderr.clone();
+    let stdout_context = RenderContext::for_test(
+        TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never),
+    );
+    let stderr_context = RenderContext::for_test(
+        TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never),
+    );
+    (
+        Ui::with_writers(stdout, stdout_context, stderr, stderr_context),
+        stdout_copy,
+        stderr_copy,
+    )
+}
+
+fn run_uninstall(
+    data_root: &Path,
+    service: Option<&mut dyn ProDeletionService>,
+    disposition: UninstallDataDisposition,
+    json_output: bool,
+) -> Result<serde_json::Value> {
+    let (mut ui, _, _) = test_ui(80);
+    super::run_uninstall(data_root, service, disposition, json_output, &mut ui)
+}
 
 #[derive(Default)]
 struct RecordingDeletion {
@@ -504,6 +557,9 @@ fn manage_json_has_one_exact_nonsecret_access_shape() {
     validate_access_status("offline_grace", None, Some(200), Some(300)).unwrap();
     validate_access_status("locked", None, None, None).unwrap();
     assert!(validate_access_status("none", None, None, None).is_err());
+    assert!(!serde_json::to_string_pretty(&manage_payload(&plan, false))
+        .unwrap()
+        .contains('\u{1b}'));
 }
 
 #[test]
@@ -521,11 +577,23 @@ fn manage_json_never_invokes_the_browser_opener() {
             _installed_version: Option<&str>,
             _trial_only: bool,
             _referral_codename: Option<&str>,
+            _ui: &mut Ui,
+            human_output: bool,
+            _browser_enabled: bool,
         ) -> Result<ProSetupPlan> {
+            assert!(!human_output);
             bail!("unused")
         }
 
-        fn manage(&mut self, _data_root: &Path) -> Result<ProManagePlan> {
+        fn manage(
+            &mut self,
+            _data_root: &Path,
+            _ui: &mut Ui,
+            human_output: bool,
+            browser_enabled: bool,
+        ) -> Result<ProManagePlan> {
+            assert!(!human_output);
+            assert!(!browser_enabled);
             Ok(ProManagePlan {
                 portal_url: "https://billing.example.test/session".to_owned(),
                 access_state: "active".to_owned(),
@@ -543,16 +611,111 @@ fn manage_json_never_invokes_the_browser_opener() {
         Ok(())
     };
     let mut telemetry = ProLifecycleTelemetryV1::new(ProLifecycleOperationV1::Manage);
+    let (mut ui, stdout, stderr) = test_ui(80);
     run_manage_with_opener(
         root.path(),
         &mut ManageService,
         false,
         true,
         &mut telemetry,
+        &mut ui,
         &opener,
     )
     .unwrap();
     assert_eq!(calls.get(), 0);
+    assert!(stdout.text().is_empty());
+    assert!(stderr.text().is_empty());
+}
+
+#[test]
+fn manage_no_open_routes_the_primary_result_to_ui_stdout_only() {
+    struct ManageService;
+
+    impl ProLifecycleService for ManageService {
+        fn release_trust(&self) -> Result<ReleaseTrust> {
+            bail!("unused")
+        }
+
+        fn setup(
+            &mut self,
+            _data_root: &Path,
+            _installed_version: Option<&str>,
+            _trial_only: bool,
+            _referral_codename: Option<&str>,
+            _ui: &mut Ui,
+            human_output: bool,
+            _browser_enabled: bool,
+        ) -> Result<ProSetupPlan> {
+            assert!(human_output);
+            bail!("unused")
+        }
+
+        fn manage(
+            &mut self,
+            _data_root: &Path,
+            _ui: &mut Ui,
+            human_output: bool,
+            browser_enabled: bool,
+        ) -> Result<ProManagePlan> {
+            assert!(human_output);
+            assert!(!browser_enabled);
+            Ok(ProManagePlan {
+                portal_url: "https://billing.example.test/session".to_owned(),
+                access_state: "trial".to_owned(),
+                refresh_after_unix: Some(100),
+                access_deadline_unix: Some(200),
+                grace_deadline_unix: None,
+            })
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let calls = Cell::new(0);
+    let opener = |_: &str| {
+        calls.set(calls.get() + 1);
+        Ok(())
+    };
+    let mut telemetry = ProLifecycleTelemetryV1::new(ProLifecycleOperationV1::Manage);
+    let (mut ui, stdout, stderr) = test_ui(80);
+    run_manage_with_opener(
+        root.path(),
+        &mut ManageService,
+        true,
+        false,
+        &mut telemetry,
+        &mut ui,
+        &opener,
+    )
+    .unwrap();
+    assert_eq!(calls.get(), 0);
+    assert!(stdout
+        .text()
+        .starts_with("✓ ctx Pro account management is ready\n"));
+    assert!(stdout
+        .text()
+        .contains("Management link  https://billing.example.test/session"));
+    assert!(stderr.text().is_empty());
+}
+
+#[test]
+fn uninstall_human_routes_the_durable_result_to_ui_stdout() {
+    let LifecycleFixture { root, epoch, .. } = fixture();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    super::run_uninstall(
+        root.path(),
+        None,
+        UninstallDataDisposition::Keep,
+        false,
+        &mut ui,
+    )
+    .unwrap();
+    assert!(stdout.text().starts_with("✓ ctx Pro was removed\n"));
+    assert!(stdout
+        .text()
+        .contains("Pro graph              Preserved locally"));
+    assert!(stdout.text().contains("ctx pro\n"));
+    assert!(stderr.text().is_empty());
+    epoch.assert_preserved();
 }
 
 #[test]
@@ -596,27 +759,34 @@ fn ordinary_uninstall_then_delete_and_repeated_delete_are_idempotent() {
 #[test]
 fn tty_uninstall_prompt_is_exact_and_defaults_to_delete() {
     let mut input = std::io::Cursor::new(b"\n".to_vec());
-    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
     assert_eq!(
-        prompt_uninstall_data_disposition(&mut input, &mut output).unwrap(),
+        prompt_uninstall_data_disposition(&mut input, &mut ui).unwrap(),
         UninstallDataDisposition::Delete
     );
     assert_eq!(
-        String::from_utf8(output).unwrap(),
-        format!("{UNINSTALL_DATA_PROMPT} ")
+        stderr.text(),
+        "! Delete all local Pro data? It can be rebuilt if you set up Pro again. [Y/n]\n\
+         Canonical ctx history is always preserved.\n"
     );
+    assert!(stdout.text().is_empty());
 }
 
 #[test]
 fn tty_uninstall_prompt_can_preserve_data_and_reprompts_invalid_input() {
     let mut input = std::io::Cursor::new(b"maybe\nn\n".to_vec());
-    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
     assert_eq!(
-        prompt_uninstall_data_disposition(&mut input, &mut output).unwrap(),
+        prompt_uninstall_data_disposition(&mut input, &mut ui).unwrap(),
         UninstallDataDisposition::Keep
     );
     assert_eq!(
-        String::from_utf8(output).unwrap(),
-        format!("{UNINSTALL_DATA_PROMPT} Please answer y or n.\n{UNINSTALL_DATA_PROMPT} ")
+        stderr.text(),
+        "! Delete all local Pro data? It can be rebuilt if you set up Pro again. [Y/n]\n\
+         Canonical ctx history is always preserved.\n\
+         ! Please answer y or n.\n\
+         ! Delete all local Pro data? It can be rebuilt if you set up Pro again. [Y/n]\n\
+         Canonical ctx history is always preserved.\n"
     );
+    assert!(stdout.text().is_empty());
 }

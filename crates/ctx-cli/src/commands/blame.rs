@@ -17,13 +17,6 @@ use crate::{
     pro::{print_blame_result, DEFAULT_BLAME_LIMIT},
 };
 
-// Keep byte accounting coupled to the one human renderer without widening the
-// public Pro module surface. This compiles the pure renderer in this command's
-// ownership so the measured string and the emitted string share one source.
-#[path = "../pro/render.rs"]
-#[allow(dead_code)]
-mod local_usage_blame_render;
-
 #[derive(Debug, Args)]
 pub(crate) struct BlameArgs {
     #[command(subcommand)]
@@ -139,7 +132,7 @@ pub(crate) fn run(
     args: BlameArgs,
     data_root: PathBuf,
     local_usage: &mut crate::local_usage::CliUsage,
-    _ui: &mut crate::ui::Ui,
+    ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     let (target, limit, cursor, json) = match args.target {
         BlameTargetArgs::File(args) => (
@@ -184,7 +177,7 @@ pub(crate) fn run(
         let result = crate::pro::blame(&data_root, target, limit, cursor)
             .map_err(crate::pro::actionable_error)?;
         telemetry.complete(result.matches.len(), result.next.is_some());
-        emit_blame_result(&result, json, local_usage, print_blame_result)?;
+        emit_blame_result(&result, json, local_usage, ui, print_blame_result)?;
         let eligible = referral_cta_eligible(&result, json, interactive_human);
         crate::pro::show_cta_once(&data_root, eligible, &mut io::stderr().lock());
         Ok(())
@@ -204,19 +197,16 @@ fn emit_blame_result(
     result: &ctx_pro_host_protocol::BlameResult,
     json: bool,
     local_usage: &mut crate::local_usage::CliUsage,
-    emit: impl FnOnce(&ctx_pro_host_protocol::BlameResult, bool) -> Result<()>,
+    ui: &mut crate::ui::Ui,
+    emit: impl FnOnce(&ctx_pro_host_protocol::BlameResult, bool, &mut crate::ui::Ui) -> Result<usize>,
 ) -> Result<()> {
-    let measured_output_bytes = if json {
-        blame_json_output_bytes(result)?
-    } else {
-        local_usage_blame_render::render_blame_text(result).len()
-    };
-    emit(result, json)?;
+    let measured_output_bytes = emit(result, json, ui)?;
     local_usage.set_blame_result(result);
     local_usage.set_measured_output_bytes(measured_output_bytes);
     Ok(())
 }
 
+#[cfg(test)]
 fn blame_json_output_bytes(result: &ctx_pro_host_protocol::BlameResult) -> Result<usize> {
     Ok(serde_json::to_vec_pretty(result)?.len().saturating_add(1))
 }
@@ -284,6 +274,11 @@ fn parse_blame_limit(value: &str) -> std::result::Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::Write as _,
+        sync::{Arc, Mutex},
+    };
+
     use clap::Parser as _;
     use ctx_pro_host_protocol::{
         BlameResult, CommitBlameMatch, CommitFactType, CommitPredicate, FactConfidence, FactState,
@@ -291,6 +286,41 @@ mod tests {
     };
 
     use super::*;
+
+    fn sink_ui() -> crate::ui::Ui {
+        let stdout_context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+            crate::ui::StreamKind::Stdout,
+        ));
+        let stderr_context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+            crate::ui::StreamKind::Stderr,
+        ));
+        crate::ui::Ui::with_writers(io::sink(), stdout_context, io::sink(), stderr_context)
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl io::Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .map_err(|_| io::Error::other("shared blame writer was poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn line_range_parser_accepts_points_and_inclusive_ranges() {
@@ -338,8 +368,9 @@ mod tests {
         };
         let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
         let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        let mut ui = sink_ui();
 
-        let error = emit_blame_result(&result, true, &mut usage, |_, _| {
+        let error = emit_blame_result(&result, true, &mut usage, &mut ui, |_, _, _| {
             Err(anyhow!("simulated output failure"))
         })
         .unwrap_err();
@@ -386,8 +417,12 @@ mod tests {
         };
         let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
         let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        let mut ui = sink_ui();
 
-        emit_blame_result(&result, true, &mut usage, |_, _| Ok(())).unwrap();
+        emit_blame_result(&result, true, &mut usage, &mut ui, |result, _, _| {
+            blame_json_output_bytes(result)
+        })
+        .unwrap();
         let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
         assert_eq!(
             completed.result_metadata_for_test(),
@@ -403,7 +438,10 @@ mod tests {
 
         result.matches.clear();
         let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
-        emit_blame_result(&result, false, &mut usage, |_, _| Ok(())).unwrap();
+        let mut expected_ui = sink_ui();
+        let expected_bytes = print_blame_result(&result, false, &mut expected_ui).unwrap();
+        let mut ui = sink_ui();
+        emit_blame_result(&result, false, &mut usage, &mut ui, print_blame_result).unwrap();
         let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
         assert_eq!(
             completed.result_metadata_for_test(),
@@ -411,8 +449,56 @@ mod tests {
         );
         assert_eq!(
             completed.delivered_output_bytes_for_test(),
-            local_usage_blame_render::render_blame_text(&result).len() as u64
+            expected_bytes as u64
         );
+    }
+
+    #[test]
+    fn human_byte_accounting_is_plain_and_invariant_across_color_modes() {
+        let resource = |id: &str, kind| ResourceRef {
+            id: id.to_owned(),
+            kind,
+            display: id.to_owned(),
+        };
+        let result = BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit: resource("commit:abc1234", ResourceKind::Commit),
+                repository: resource("repository:ctx", ResourceKind::Repository),
+            },
+            git_snapshot: None,
+            matches: Vec::new(),
+            evidence: Vec::new(),
+            next: None,
+        };
+        let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
+        let mut observations = Vec::new();
+
+        for color in [crate::ui::ColorMode::Never, crate::ui::ColorMode::Always] {
+            let writer = SharedWriter::default();
+            let captured = writer.clone();
+            let stdout_context = crate::ui::RenderContext::for_test(
+                crate::ui::TestContext::tty(crate::ui::StreamKind::Stdout, 48).color(color),
+            );
+            let stderr_context = crate::ui::RenderContext::for_test(
+                crate::ui::TestContext::pipe(crate::ui::StreamKind::Stderr)
+                    .color(crate::ui::ColorMode::Never),
+            );
+            let mut ui =
+                crate::ui::Ui::with_writers(writer, stdout_context, io::sink(), stderr_context);
+            let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+            emit_blame_result(&result, false, &mut usage, &mut ui, print_blame_result).unwrap();
+            ui.flush().unwrap();
+            let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
+            observations.push((captured.text(), completed.delivered_output_bytes_for_test()));
+        }
+
+        let mut stripped = anstream::StripStream::new(Vec::new());
+        stripped.write_all(observations[1].0.as_bytes()).unwrap();
+        let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+        assert_eq!(observations[0].0, stripped);
+        assert_eq!(observations[0].1, observations[1].1);
+        assert_eq!(observations[0].1, observations[0].0.len() as u64);
+        assert!(observations[1].0.contains("\u{1b}["));
     }
 
     #[test]
@@ -470,7 +556,7 @@ mod tests {
         let crate::cli::CommandRoot::Blame(args) = cli.command else {
             panic!("expected blame command");
         };
-        let mut ui = crate::ui::Ui::stdio(crate::ui::ColorMode::Never);
+        let mut ui = sink_ui();
 
         let error = run(args, PathBuf::from("/unused"), &mut usage, &mut ui).unwrap_err();
         assert!(error.to_string().contains("invalid_request"));

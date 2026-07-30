@@ -14,6 +14,9 @@ use ctx_pro_host_protocol::ProFilesystemLayout;
 use ctx_pro_host_protocol::{Capability, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION};
 use serde_json::json;
 
+#[path = "lifecycle_commands/render.rs"]
+mod render;
+
 use super::{
     default_helper_path, install_marker_path, install_verified_bundle, previous_helper_path,
     previous_marker_path, publish_helper_path, publish_marker_path,
@@ -49,7 +52,12 @@ use crate::{
         ProMaterializationTelemetryV1, ProReconcileOutcomeV1, ProUninstallDataDispositionV1,
     },
     output::JsonOutputFormat,
-    pro::{stable_error_code, PRO_MONTHLY_PRICE_DISPLAY},
+    pro::stable_error_code,
+    ui::Ui,
+};
+use render::{
+    browser_notice as render_browser_notice, manage as render_manage_human,
+    setup as render_setup_human, uninstall as render_uninstall_human,
 };
 
 #[derive(Debug, Args)]
@@ -187,8 +195,17 @@ pub(crate) trait ProLifecycleService {
         installed_version: Option<&str>,
         trial_only: bool,
         referral_codename: Option<&str>,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
     ) -> Result<ProSetupPlan>;
-    fn manage(&mut self, data_root: &Path) -> Result<ProManagePlan>;
+    fn manage(
+        &mut self,
+        data_root: &Path,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
+    ) -> Result<ProManagePlan>;
 }
 
 /// Local-only destruction seam. Implementations may locate and delete native
@@ -199,14 +216,10 @@ pub(crate) trait ProDeletionService {
     fn finish_deletion(&mut self, data_root: &Path) -> Result<()>;
 }
 
-pub(crate) fn run_lifecycle(
-    args: ProArgs,
-    data_root: PathBuf,
-    _ui: &mut crate::ui::Ui,
-) -> Result<()> {
+pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
     let started = Instant::now();
     let mut telemetry = ProLifecycleTelemetryV1::new(args.telemetry_operation());
-    let result = run_lifecycle_inner(args, &data_root, &mut telemetry);
+    let result = run_lifecycle_inner(args, &data_root, &mut telemetry, ui);
     if let Err(error) = &result {
         telemetry.fail(stable_error_code(error));
     }
@@ -227,6 +240,7 @@ fn run_lifecycle_inner(
     args: ProArgs,
     data_root: &Path,
     telemetry: &mut ProLifecycleTelemetryV1,
+    ui: &mut Ui,
 ) -> Result<()> {
     args.validate_invocation()?;
     let json_output = args.json_output();
@@ -260,6 +274,7 @@ fn run_lifecycle_inner(
                 trial_only,
                 referral.as_ref().map(ReferralCodename::as_str),
                 telemetry,
+                ui,
             )
         }
         Some(ProCommand::Manage(args)) => {
@@ -270,10 +285,11 @@ fn run_lifecycle_inner(
                 args.no_open,
                 json_output,
                 telemetry,
+                ui,
             )
         }
         Some(ProCommand::Uninstall(args)) => {
-            let disposition = uninstall_data_disposition(&args, json_output)?;
+            let disposition = uninstall_data_disposition(&args, json_output, ui)?;
             telemetry.uninstall_data = Some(match disposition {
                 UninstallDataDisposition::Delete => ProUninstallDataDispositionV1::Delete,
                 UninstallDataDisposition::Keep => ProUninstallDataDispositionV1::Preserve,
@@ -281,11 +297,11 @@ fn run_lifecycle_inner(
             match disposition {
                 UninstallDataDisposition::Delete => {
                     let mut service = LocalDeletionService::production();
-                    run_uninstall(data_root, Some(&mut service), disposition, json_output)
+                    run_uninstall(data_root, Some(&mut service), disposition, json_output, ui)
                         .map(|_| ())
                 }
                 UninstallDataDisposition::Keep => {
-                    run_uninstall(data_root, None, disposition, json_output).map(|_| ())
+                    run_uninstall(data_root, None, disposition, json_output, ui).map(|_| ())
                 }
             }
         }
@@ -295,6 +311,7 @@ fn run_lifecycle_inner(
 fn uninstall_data_disposition(
     args: &ProUninstallArgs,
     json_output: bool,
+    ui: &mut Ui,
 ) -> Result<UninstallDataDisposition> {
     if args.delete_data {
         return Ok(UninstallDataDisposition::Delete);
@@ -305,26 +322,14 @@ fn uninstall_data_disposition(
     if json_output || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         bail!("invalid_request: noninteractive uninstall requires --delete-data or --keep-data");
     }
-    prompt_uninstall_data_disposition(&mut io::stdin().lock(), &mut io::stderr().lock())
+    prompt_uninstall_data_disposition(&mut io::stdin().lock(), ui)
 }
 
 fn prompt_uninstall_data_disposition(
     input: &mut impl io::BufRead,
-    output: &mut impl io::Write,
+    ui: &mut Ui,
 ) -> Result<UninstallDataDisposition> {
-    loop {
-        write!(output, "{UNINSTALL_DATA_PROMPT} ")?;
-        output.flush()?;
-        let mut answer = String::new();
-        if input.read_line(&mut answer)? == 0 {
-            bail!("cancelled: uninstall confirmation was not provided");
-        }
-        match answer.trim() {
-            "" | "y" | "Y" | "yes" | "YES" => return Ok(UninstallDataDisposition::Delete),
-            "n" | "N" | "no" | "NO" => return Ok(UninstallDataDisposition::Keep),
-            _ => writeln!(output, "Please answer y or n.")?,
-        }
-    }
+    render::prompt_uninstall_data_disposition(input, ui)
 }
 
 pub(crate) fn lifecycle_status_json(data_root: &Path) -> serde_json::Value {
@@ -399,6 +404,7 @@ fn run_setup(
     trial_only: bool,
     referral_codename: Option<&str>,
     telemetry: &mut ProLifecycleTelemetryV1,
+    ui: &mut Ui,
 ) -> Result<()> {
     let trust = service.release_trust()?;
     let target = default_helper_path(data_root);
@@ -414,6 +420,9 @@ fn run_setup(
             installation.installed_version(),
             trial_only,
             referral_codename,
+            ui,
+            !json_output,
+            !json_output,
         )?;
         Ok((installation, plan))
     })?;
@@ -477,6 +486,7 @@ fn run_setup(
             &plan.account_state,
             helper_updated,
             json_output,
+            ui,
         );
     }
     // An empty repository-root set still materializes canonical transcript evidence.
@@ -499,8 +509,8 @@ fn run_setup(
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        println!("ctx Pro is ready.");
-        println!("materialized observations: {}", report.observations);
+        let document = render_setup_human(ui.stdout_context(), &plan.account_state);
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
@@ -528,6 +538,7 @@ fn run_manage(
     no_open: bool,
     json_output: bool,
     telemetry: &mut ProLifecycleTelemetryV1,
+    ui: &mut Ui,
 ) -> Result<()> {
     run_manage_with_opener(
         data_root,
@@ -535,6 +546,7 @@ fn run_manage(
         no_open,
         json_output,
         telemetry,
+        ui,
         &open_browser,
     )
 }
@@ -545,9 +557,12 @@ fn run_manage_with_opener(
     no_open: bool,
     json_output: bool,
     telemetry: &mut ProLifecycleTelemetryV1,
+    ui: &mut Ui,
     opener: &dyn Fn(&str) -> Result<()>,
 ) -> Result<()> {
-    let plan = with_pro_initialization(data_root, || service.manage(data_root))?;
+    let plan = with_pro_initialization(data_root, || {
+        service.manage(data_root, ui, !json_output, !json_output && !no_open)
+    })?;
     validate_portal_url(&plan.portal_url)?;
     validate_access_status(
         &plan.access_state,
@@ -576,29 +591,15 @@ fn run_manage_with_opener(
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        println!(
-            "Manage ctx Pro: {}",
-            value["portal_url"].as_str().unwrap_or("")
-        );
-        if !no_open && !browser_opened {
-            println!("A browser could not be opened; use the URL above.");
-        }
-        crate::local_usage::render_human_summary(&usage_report, false);
-        if let Some(action) = conversion_action {
-            if action["kind"] == "pro_restore_access" {
-                println!(
-                    "Restore ctx Pro access; the local graph is preserved: {}",
-                    action["command"].as_str().unwrap_or("ctx pro manage")
-                );
-            } else {
-                println!(
-                    "Continue with ctx Pro for {}: {}",
-                    action["price"]
-                        .as_str()
-                        .unwrap_or(PRO_MONTHLY_PRICE_DISPLAY),
-                    action["command"].as_str().unwrap_or("ctx pro manage")
-                );
-            }
+        let document = render_manage_human(ui.stdout_context(), &plan, browser_opened);
+        ui.write_stdout(&document)?;
+        if !no_open {
+            let notice = render_browser_notice(
+                ui.stderr_context(),
+                browser_opened,
+                "ctx Pro account management",
+            );
+            ui.write_stderr(&notice)?;
         }
     }
     Ok(())
@@ -709,16 +710,17 @@ fn run_uninstall(
     service: Option<&mut dyn ProDeletionService>,
     disposition: UninstallDataDisposition,
     json_output: bool,
+    ui: &mut Ui,
 ) -> Result<serde_json::Value> {
     let delete_data = disposition == UninstallDataDisposition::Delete;
     let target = default_helper_path(data_root);
     let initial_state = inspect_local_pro_uninstall_state(data_root)?;
     if !initial_state.any_artifact() {
-        return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output);
+        return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output, ui);
     }
     let Some(_lifecycle_lock) = super::lifecycle_lock::LifecycleLock::acquire(&target, false)?
     else {
-        return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output);
+        return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output, ui);
     };
     let state = inspect_local_pro_uninstall_state(data_root)?;
     pending_materialization::clear(data_root)?;
@@ -763,38 +765,21 @@ fn run_uninstall(
     } else {
         LocalProDataOutcome::Absent
     };
-    emit_uninstall_result(helper_removed, data_outcome, json_output)
+    emit_uninstall_result(helper_removed, data_outcome, json_output, ui)
 }
 
 fn emit_uninstall_result(
     helper_removed: bool,
     data_outcome: LocalProDataOutcome,
     json_output: bool,
+    ui: &mut Ui,
 ) -> Result<serde_json::Value> {
     let value = uninstall_payload(helper_removed, data_outcome);
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        match data_outcome {
-            LocalProDataOutcome::Deleted => {
-                println!("Local Pro data was deleted. Canonical ctx history was preserved.");
-                println!("next: ctx pro (rebuild Pro data)");
-            }
-            LocalProDataOutcome::Preserved => {
-                println!("ctx Pro was removed. Local Pro data was preserved.");
-                println!("next: ctx pro (restore preserved Pro data)");
-            }
-            LocalProDataOutcome::Absent if helper_removed => {
-                println!(
-                    "ctx Pro was removed. No local Pro data was found. Canonical ctx history was preserved."
-                );
-            }
-            LocalProDataOutcome::Absent => {
-                println!(
-                    "No ctx Pro installation or local Pro data was found. Canonical ctx history was preserved."
-                );
-            }
-        }
+        let document = render_uninstall_human(ui.stdout_context(), helper_removed, data_outcome);
+        ui.write_stdout(&document)?;
     }
     Ok(value)
 }

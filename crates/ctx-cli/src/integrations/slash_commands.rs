@@ -15,6 +15,11 @@ use crate::analytics::{
     count_bucket, IntegrationResult, IntegrationScope, IntegrationTelemetry, TargetSelection,
 };
 use crate::output::JsonOutputFormat;
+use crate::ui::{
+    diagnostic, empty_state, fields, hint, outcome, section, table, Action, Diagnostic,
+    DiagnosticLevel, Document, EmptyState, Field, Hint, Outcome, OutcomeState, RenderContext,
+    Table, Ui,
+};
 
 const COMMAND_NAME: &str = "ctx-history";
 const METADATA_FILE: &str = ".ctx-slash-commands.json";
@@ -492,6 +497,7 @@ pub(crate) fn run_install(
     args: SlashCommandInstallArgs,
     context: &PathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let agents = selected_agents(&args, context);
     telemetry.resolved_agents = Some(count_bucket(agents.len() as u64));
@@ -531,9 +537,13 @@ pub(crate) fn run_install(
             }))?
         );
     } else {
-        print_install_results(&results);
+        let document = render_install_results(ui.stdout_context(), &results);
+        ui.write_stdout(&document)?;
     }
     if failed > 0 {
+        if !args.format.is_json() {
+            return Err(crate::dispatch::rendered_cli_error());
+        }
         return Err(anyhow!(
             "failed to install slash commands for {failed} target(s)"
         ));
@@ -726,42 +736,136 @@ fn metadata_is_current(
     })
 }
 
-fn print_install_results(results: &[InstallResult]) {
+fn render_install_results(context: &RenderContext, results: &[InstallResult]) -> Document {
     if results.is_empty() {
-        println!("No separate slash-command targets detected");
-        println!(
-            "Use --agent opencode, --agent mimocode, --agent gemini-cli, --agent qwen-code, or --agent windsurf to install explicitly."
+        return empty_state(
+            context,
+            EmptyState {
+                title: "No separate slash-command targets detected",
+                detail: "Select a file-based agent explicitly, or install the bundled Agent Skill.",
+                action: Some(Action {
+                    command: "ctx integrations install skills",
+                }),
+            },
         );
-        println!("For skill-based agents, run `ctx integrations install skills`.");
-        return;
     }
-    println!("ctx slash commands: /{COMMAND_NAME}");
+
+    let failed = results.iter().filter(|result| !result.success).count();
+    let updated = results.iter().filter(|result| result.updated).count();
+    let title = if failed > 0 {
+        match failed {
+            1 => "1 slash-command target needs attention".to_owned(),
+            count => format!("{count} slash-command targets need attention"),
+        }
+    } else if updated > 0 {
+        match updated {
+            1 => "1 slash-command target updated".to_owned(),
+            count => format!("{count} slash-command targets updated"),
+        }
+    } else {
+        "Slash-command integration is ready".to_owned()
+    };
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if failed > 0 {
+                OutcomeState::Warning
+            } else {
+                OutcomeState::Success
+            },
+            title: &title,
+            detail: Some("Invoke the installed entry point as /ctx-history."),
+        },
+    );
+    let mut targets = Table::new(["Agent", "Status", "Location"]);
     for result in results {
-        let verb = if result.already_installed {
-            match result.status {
-                SlashCommandInstallStatus::SkillOnly => "skill-only",
-                SlashCommandInstallStatus::ManualOnly => "manual",
-                _ => "current",
-            }
-        } else if !result.success {
-            "skipped"
-        } else if result.updated {
-            "updated"
-        } else {
-            "installed"
-        };
-        let path = result
+        let location = result
             .path
             .as_ref()
-            .map(|path| format!(" -> {}", path.display()))
-            .unwrap_or_default();
-        let detail = result
-            .error
-            .as_deref()
-            .or(result.note.as_deref())
-            .map(|message| format!(" - {message}"))
-            .unwrap_or_default();
-        println!("  {verb}: {}{path}{detail}", result.agent.display_name());
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| match result.status {
+                SlashCommandInstallStatus::SkillOnly => "Agent Skill".to_owned(),
+                SlashCommandInstallStatus::ManualOnly => "manual setup".to_owned(),
+                _ => "-".to_owned(),
+            });
+        targets.push_row([
+            result.agent.display_name().to_owned(),
+            install_result_verb(result).to_owned(),
+            location,
+        ]);
+    }
+    document.push_blank();
+    document.append(section("Targets", table(context, &targets)));
+
+    for result in results.iter().filter(|result| !result.success) {
+        let summary = format!("{} was not changed", result.agent.display_name());
+        let command = format!(
+            "ctx integrations install slash-commands --agent {} --force",
+            result.agent.id()
+        );
+        document.push_blank();
+        document.append(diagnostic(
+            context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: &summary,
+                detail: result.error.as_deref(),
+                fields: &[],
+                action: (result.status == SlashCommandInstallStatus::Modified)
+                    .then_some(Action { command: &command }),
+            },
+        ));
+    }
+
+    if results
+        .iter()
+        .any(|result| result.status == SlashCommandInstallStatus::SkillOnly)
+    {
+        document.push_blank();
+        document.append(hint(
+            context,
+            Hint {
+                text: "Skill-based agents use the bundled Agent Skill.",
+            },
+            Some(Action {
+                command: "ctx integrations install skills",
+            }),
+        ));
+    }
+    let manual_notes = results
+        .iter()
+        .filter(|result| result.status == SlashCommandInstallStatus::ManualOnly)
+        .filter_map(|result| {
+            result
+                .note
+                .as_deref()
+                .map(|note| (result.agent.display_name(), note))
+        })
+        .collect::<Vec<_>>();
+    if !manual_notes.is_empty() {
+        let guidance = manual_notes
+            .iter()
+            .map(|(agent, note)| Field::new(*agent, *note))
+            .collect::<Vec<_>>();
+        document.push_blank();
+        document.append(section("Manual setup", fields(context, &guidance)));
+    }
+    document
+}
+
+fn install_result_verb(result: &InstallResult) -> &'static str {
+    if result.already_installed {
+        match result.status {
+            SlashCommandInstallStatus::SkillOnly => "skill-only",
+            SlashCommandInstallStatus::ManualOnly => "manual",
+            _ => "current",
+        }
+    } else if !result.success {
+        "skipped"
+    } else if result.updated {
+        "updated"
+    } else {
+        "installed"
     }
 }
 
@@ -821,116 +925,5 @@ fn sha256_hex(body: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn selected_agents_default_to_detected_file_based_targets() {
-        let temp = tempdir().unwrap();
-        let xdg = temp.path().join("xdg");
-        fs::create_dir_all(xdg.join("opencode")).unwrap();
-        fs::create_dir_all(xdg.join("mimocode")).unwrap();
-        let context = PathContext::for_tests(temp.path().to_owned(), temp.path().to_owned())
-            .with_xdg_config_home(xdg);
-        let args = SlashCommandInstallArgs {
-            agent: Vec::new(),
-            all_agents: false,
-            project: false,
-            format: JsonOutputFormat::Json,
-            force: false,
-        };
-
-        assert_eq!(
-            selected_agents(&args, &context),
-            vec![
-                SlashCommandAgentArg::OpenCode,
-                SlashCommandAgentArg::MiMoCode
-            ]
-        );
-    }
-
-    #[test]
-    fn opencode_install_is_idempotent_and_refreshes_stale_owned_file() {
-        let temp = tempdir().unwrap();
-        let xdg = temp.path().join("xdg");
-        let context = PathContext::for_tests(temp.path().to_owned(), temp.path().to_owned())
-            .with_xdg_config_home(xdg.clone());
-        let target = match SlashCommandAgentArg::OpenCode.install_plan(false, &context) {
-            SlashCommandPlan::File(target) => target,
-            _ => panic!("expected file target"),
-        };
-
-        let first = install_file_target(&target, false).unwrap();
-        assert_eq!(first.previous_status, SlashCommandInstallStatus::Missing);
-        assert!(!first.already_installed);
-        assert!(xdg
-            .join("opencode")
-            .join("commands")
-            .join("ctx-history.md")
-            .exists());
-
-        let second = install_file_target(&target, false).unwrap();
-        assert_eq!(second.previous_status, SlashCommandInstallStatus::Current);
-        assert!(second.already_installed);
-
-        let old_body = "---\ndescription: old\n---\n\nold\n";
-        fs::write(target.command_path(), old_body).unwrap();
-        let mut metadata = SlashCommandMetadata::current(&target);
-        metadata
-            .files
-            .insert(target.filename.clone(), sha256_hex(old_body.as_bytes()));
-        fs::write(
-            target.base_dir.join(METADATA_FILE),
-            serde_json::to_vec_pretty(&metadata).unwrap(),
-        )
-        .unwrap();
-
-        let refreshed = install_file_target(&target, false).unwrap();
-        assert_eq!(refreshed.previous_status, SlashCommandInstallStatus::Stale);
-        assert!(refreshed.updated);
-        assert!(fs::read_to_string(target.command_path())
-            .unwrap()
-            .contains("Search local agent history with ctx"));
-    }
-
-    #[test]
-    fn modified_command_requires_force() {
-        let temp = tempdir().unwrap();
-        let context = PathContext::for_tests(temp.path().to_owned(), temp.path().to_owned());
-        let target = match SlashCommandAgentArg::GeminiCli.install_plan(true, &context) {
-            SlashCommandPlan::File(target) => target,
-            _ => panic!("expected file target"),
-        };
-        fs::create_dir_all(&target.base_dir).unwrap();
-        fs::write(target.command_path(), "prompt = 'local'\n").unwrap();
-
-        let skipped = install_file_target(&target, false).unwrap();
-        assert!(!skipped.success);
-        assert_eq!(skipped.previous_status, SlashCommandInstallStatus::Modified);
-        assert!(fs::read_to_string(target.command_path())
-            .unwrap()
-            .contains("local"));
-
-        let forced = install_file_target(&target, true).unwrap();
-        assert!(forced.success);
-        assert_eq!(forced.previous_status, SlashCommandInstallStatus::Modified);
-        assert!(fs::read_to_string(target.command_path())
-            .unwrap()
-            .contains("{{args}}"));
-    }
-
-    #[test]
-    fn skill_only_agents_do_not_write_codex_prompts() {
-        let temp = tempdir().unwrap();
-        let context = PathContext::for_tests(temp.path().to_owned(), temp.path().to_owned());
-        let result = install_plan(
-            SlashCommandAgentArg::Codex.install_plan(false, &context),
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(result.status, SlashCommandInstallStatus::SkillOnly);
-        assert!(!temp.path().join(".codex").join("prompts").exists());
-    }
-}
+#[path = "slash_commands/tests.rs"]
+mod tests;

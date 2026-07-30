@@ -1,8 +1,13 @@
 use std::cell::{Cell, RefCell};
 
 use crate::pro::commercial_api::BillingState;
+use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
 
 use super::*;
+
+fn stderr_context(width: usize) -> RenderContext {
+    RenderContext::for_test(TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never))
+}
 
 fn elapsed_since(clock: &Cell<i64>, start: i64) -> Duration {
     Duration::from_secs(u64::try_from(clock.get() - start).unwrap())
@@ -10,9 +15,18 @@ fn elapsed_since(clock: &Cell<i64>, start: i64) -> Duration {
 
 #[test]
 fn paid_checkout_prompt_uses_the_fixed_monthly_price() {
+    let context = stderr_context(80);
     assert_eq!(
-        render_paid_checkout_prompt("https://checkout.stripe.test/session"),
-        "Start ctx Pro for $20/month at:\n  https://checkout.stripe.test/session"
+        render_paid_checkout_prompt(&context, "https://checkout.stripe.test/session")
+            .render_plain(),
+        concat!(
+            "Complete checkout to continue\n\n",
+            "Product        $20/month\n",
+            "Checkout link  https://checkout.stripe.test/session\n\n",
+            "Hint: Complete the Stripe-hosted checkout.\n\n",
+            "Next\n",
+            "  https://checkout.stripe.test/session\n",
+        )
     );
 }
 
@@ -38,18 +52,13 @@ fn only_terminal_anonymous_trial_states_enter_paid_conversion() {
 #[test]
 fn trial_only_never_enters_paid_auth_with_an_existing_session() {
     let anonymous_calls = Cell::new(0);
-    let paid_calls = Cell::new(0);
     let error = setup_with_access_policy(
         true,
         false,
         Some(EntitlementAccessKind::Active),
-        || {
+        || -> Result<()> {
             anonymous_calls.set(anonymous_calls.get() + 1);
             bail!("anonymous_trial_identity_ambiguous: denied")
-        },
-        || {
-            paid_calls.set(paid_calls.get() + 1);
-            Ok(())
         },
     )
     .unwrap_err();
@@ -59,7 +68,58 @@ fn trial_only_never_enters_paid_auth_with_an_existing_session() {
         Some("anonymous_trial_identity_ambiguous")
     );
     assert_eq!(anonymous_calls.get(), 1);
-    assert_eq!(paid_calls.get(), 0);
+}
+
+#[test]
+fn terminal_trial_state_requests_paid_conversion_without_claiming_completion() {
+    let result = setup_with_access_policy(
+        false,
+        false,
+        Some(EntitlementAccessKind::Trial),
+        || -> Result<()> { bail!("anonymous_trial_already_consumed: denied") },
+    )
+    .unwrap();
+    assert!(matches!(
+        result,
+        SetupAccessPolicy::PaidRequired {
+            trial_unavailable: true
+        }
+    ));
+    assert_eq!(
+        render_trial_conversion(&stderr_context(80)).render_plain(),
+        "! The free Pro trial is unavailable for this device\n\
+         Sign in to continue with paid Pro.\n"
+    );
+}
+
+#[test]
+fn sign_in_and_checkout_renderers_fit_supported_widths_and_sanitize_values() {
+    use unicode_width::UnicodeWidthStr as _;
+
+    for width in [32, 48, 80, 120] {
+        let context = stderr_context(width);
+        for document in [
+            render_device_sign_in(
+                &context,
+                "https://auth.example.test/device?next=\u{1b}[2J",
+                "ABCD-EFGH\nsecret",
+            ),
+            render_paid_checkout_prompt(
+                &context,
+                "https://checkout.stripe.test/session?next=\u{1b}[2J",
+            ),
+        ] {
+            let rendered = document.render_plain();
+            assert!(!rendered.contains('\u{1b}'));
+            assert!(rendered.contains("\\x1b"));
+            assert!(rendered.contains("\\n") || !rendered.contains("secret"));
+            let maximum = context.content_width().unwrap_or(1);
+            assert!(
+                rendered.lines().all(|line| line.width() <= maximum),
+                "{rendered:?}"
+            );
+        }
+    }
 }
 
 fn commercial_state(access_state: &str, access_deadline_unix: Option<i64>) -> CommercialState {

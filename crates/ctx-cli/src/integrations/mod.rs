@@ -74,7 +74,11 @@ impl IntegrationsArgs {
     }
 }
 
-pub(crate) fn run(args: IntegrationsArgs, telemetry: &mut IntegrationTelemetry) -> Result<()> {
+pub(crate) fn run(
+    args: IntegrationsArgs,
+    telemetry: &mut IntegrationTelemetry,
+    ui: &mut crate::ui::Ui,
+) -> Result<()> {
     match args.command {
         IntegrationCommand::Install(args) => match args.target {
             IntegrationInstallTarget::Mcp(args) => {
@@ -95,7 +99,7 @@ pub(crate) fn run(args: IntegrationsArgs, telemetry: &mut IntegrationTelemetry) 
                 telemetry.target = Some(IntegrationTarget::SlashCommands);
                 slash_commands::insert_install_analytics(telemetry, &args);
                 let context = slash_commands::PathContext::from_env()?;
-                slash_commands::run_install(args, &context, telemetry)
+                slash_commands::run_install(args, &context, telemetry, ui)
             }
         },
         IntegrationCommand::Status(args) => match args.target {

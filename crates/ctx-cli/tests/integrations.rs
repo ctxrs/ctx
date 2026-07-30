@@ -8,6 +8,7 @@ fn slash_commands_install_opencode_global_and_is_idempotent() {
     let xdg = temp.path().join("xdg-config");
 
     let first = json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
+        "--color=always",
         "integrations",
         "install",
         "slash-commands",

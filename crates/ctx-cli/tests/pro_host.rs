@@ -81,8 +81,14 @@ fn commit_blame_human_output_preserves_production_grouping() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Produced by"))
-        .stdout(predicate::str::contains("session-producer"))
+        .stdout(predicate::str::contains(
+            "Produced by\n  session session-producer\n    id",
+        ))
+        .stdout(predicate::str::contains("state       asserted"))
+        .stdout(predicate::str::contains(
+            "Evidence\n  [1]  ctx show event 00000000-0000-0000-0000-000000000001",
+        ))
+        .stdout(predicate::str::contains("\u{1b}[").not())
         .stdout(predicate::str::contains("Also recorded").not());
 }
 

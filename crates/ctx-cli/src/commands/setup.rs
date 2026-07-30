@@ -11,6 +11,10 @@ use crate::semantic::{
     daemon_autostart_suppression_reason, semantic_query_service_supported,
     source_epoch_status_report, DaemonHandoff, SourceBackedRefreshMode,
 };
+use crate::ui::{
+    fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, RenderContext, Span,
+    Token, Ui,
+};
 use crate::{config, SetupArgs};
 
 pub(crate) fn run_setup(
@@ -20,7 +24,7 @@ pub(crate) fn run_setup(
     _provider_refreshes: &mut crate::commands::import::ProviderRefreshCollector,
     quiet: bool,
     config: &mut config::AppConfig,
-    _ui: &mut crate::ui::Ui,
+    ui: &mut Ui,
 ) -> Result<()> {
     let semantic_supported = semantic_query_service_supported();
     if args.semantic && (!config.daemon.enabled || args.no_daemon) {
@@ -116,7 +120,8 @@ pub(crate) fn run_setup(
     if json_output {
         print_json(output)?;
     } else if !quiet {
-        print_setup_human(
+        let document = render_setup_human(
+            ui.stdout_context(),
             &data_root,
             mode,
             &source.report,
@@ -128,6 +133,7 @@ pub(crate) fn run_setup(
                 supervisor: &supervisor,
             },
         );
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
@@ -244,67 +250,381 @@ struct DaemonAutostartHuman<'a> {
     supervisor: &'a Value,
 }
 
-fn print_setup_human(
+fn render_setup_human(
+    context: &RenderContext,
     data_root: &std::path::Path,
     mode: &str,
     source: &Value,
     refresh_request: &Value,
     daemon: DaemonAutostartHuman<'_>,
-) {
-    println!("ctx source-backed history epoch: {mode}");
-    if let Some(generation) = source["lexical"]["generation_id"].as_str() {
-        println!("Lexical generation: {generation}");
-    }
-    if let Some(path) = source["lexical"]["path"].as_str() {
-        println!("Lexical path: {path}");
-    }
-    if let Some(path) = source["semantic"]["flat_f32"]["path"].as_str() {
-        println!("Semantic path: {path}");
-    }
-    println!(
-        "Source refresh: {}",
-        refresh_request["status"].as_str().unwrap_or("unavailable")
+) -> Document {
+    let refresh_status = refresh_request["status"].as_str().unwrap_or("unavailable");
+    let queued = mode == "pending"
+        || matches!(
+            refresh_status,
+            "accepted" | "pending" | "queued" | "running"
+        );
+    let (state, title, detail) = if mode == "ready" {
+        (
+            OutcomeState::Success,
+            "History is ready to search",
+            queued.then_some("A refresh is running; the current index remains searchable."),
+        )
+    } else if queued {
+        (
+            OutcomeState::Neutral,
+            "History indexing is queued",
+            Some("Background indexing will publish the first searchable index."),
+        )
+    } else {
+        (
+            OutcomeState::Warning,
+            "History is not ready",
+            Some("Setup completed, but no verified search index is available."),
+        )
+    };
+    let mut document = outcome(
+        context,
+        Outcome {
+            state,
+            title,
+            detail,
+        },
     );
+
+    let source_count = source["indexed_sources"]
+        .as_u64()
+        .or_else(|| source["lexical"]["certified_sources"].as_u64())
+        .or_else(|| source["refresh"]["certified_source_count"].as_u64())
+        .or_else(|| refresh_request["source_count"].as_u64());
+    let mut history_values = Vec::new();
+    if let Some(count) = source_count {
+        history_values.push(("Sources", counted(count, "source", "sources").to_owned()));
+    }
+    if let Some(count) = source["indexed_sessions"].as_u64() {
+        history_values.push(("Sessions", counted(count, "session", "sessions")));
+    }
+    let event_count = source["indexed_events"]
+        .as_u64()
+        .or_else(|| source["lexical"]["indexed_documents"].as_u64());
+    if let Some(count) = event_count {
+        history_values.push((
+            "Events",
+            counted(count, "searchable event", "searchable events"),
+        ));
+    }
+    history_values.push(("Refresh", human_refresh_status(refresh_request).to_owned()));
+    history_values.push(("Semantic", component_status(&source["semantic"]).to_owned()));
+    if let Some(status) = daemon_human_status(&daemon) {
+        history_values.push(("Background", status));
+    }
+    let history_fields = history_values
+        .iter()
+        .map(|(label, value)| Field::new(*label, value.as_str()))
+        .collect::<Vec<_>>();
+    document.push_blank();
+    document.append(section("History", fields(context, &history_fields)));
+
+    let data_root = data_root.display().to_string();
+    document.push_blank();
+    document.append(section(
+        "Data",
+        fields(context, &[Field::new("Root", &data_root)]),
+    ));
+
+    let next_command = if mode == "ready" {
+        "ctx search \"test failure\""
+    } else if queued {
+        "ctx index watch"
+    } else if daemon.requested && daemon.handoff.is_none() {
+        "ctx daemon status"
+    } else if matches!(daemon.reason, Some("daemon_disabled" | "explicit_opt_out")) {
+        "ctx daemon enable"
+    } else {
+        "ctx doctor"
+    };
+    document.push_blank();
+    document.append(section(
+        "Next",
+        Document::from_line(
+            Line::new()
+                .with(Span::text("  "))
+                .with(Span::new(next_command, Token::Command)),
+        ),
+    ));
+    document
+}
+
+fn component_status(component: &Value) -> &str {
+    component
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable")
+}
+
+fn human_refresh_status(refresh_request: &Value) -> String {
+    let status = component_status(refresh_request);
+    match status {
+        "accepted" | "pending" | "queued" | "running" => "in progress".to_owned(),
+        "published" => "ready".to_owned(),
+        "unavailable" => refresh_request
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(humanize_code)
+            .map(|reason| format!("unavailable ({reason})"))
+            .unwrap_or_else(|| "unavailable".to_owned()),
+        status => humanize_code(status),
+    }
+}
+
+fn daemon_human_status(daemon: &DaemonAutostartHuman<'_>) -> Option<String> {
     match daemon.handoff {
-        Some(handoff) if supervisor_persistently_verified(daemon.supervisor) => {
-            println!(
-                "Daemon is persistently supervised and running (PID {}).",
-                handoff.pid
-            )
-        }
-        Some(handoff) => println!(
-            "Daemon is running (PID {}) with degraded persistence: {}.",
-            handoff.pid,
-            daemon
+        Some(_) if supervisor_persistently_verified(daemon.supervisor) => None,
+        Some(_) => {
+            let limitation = daemon
                 .supervisor
                 .get("limitation")
                 .and_then(Value::as_str)
-                .unwrap_or("native per-user supervisor unavailable")
-        ),
+                .unwrap_or("persistent supervision is unavailable");
+            Some(format!("running with degraded maintenance ({limitation})"))
+        }
         None if daemon.requested => {
-            println!("Daemon handoff was not verified; run `ctx daemon status`.")
+            Some("startup was not verified; run ctx daemon status".to_owned())
         }
         None if daemon.reason == Some("explicit_opt_out") => {
-            println!("Daemon refresh was skipped because --no-daemon was used.")
+            Some("skipped because --no-daemon was used".to_owned())
         }
-        None if daemon.reason == Some("daemon_disabled") => {
-            println!("Daemon refresh is unavailable because daemon maintenance is disabled.")
+        None if daemon.reason == Some("daemon_disabled") => Some("disabled".to_owned()),
+        None => None,
+    }
+}
+
+fn humanize_code(value: &str) -> String {
+    value.replace('_', " ")
+}
+
+fn counted(count: u64, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{} {noun}", grouped_count(count))
+}
+
+fn grouped_count(count: u64) -> String {
+    let digits = count.to_string();
+    let mut reversed = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
+    for (index, character) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            reversed.push(',');
         }
-        None => {}
+        reversed.push(character);
     }
-    println!("Data: {}", data_root.display());
-    println!();
-    println!("Next:");
-    println!("  ctx status");
-    if mode == "ready" {
-        println!("  ctx search \"test failure\"");
-    } else {
-        println!("  ctx daemon status");
-    }
+    reversed.chars().rev().collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
+    use serde_json::json;
+    use unicode_width::UnicodeWidthStr as _;
+
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    use super::*;
+
+    fn context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn assert_fits(document: &Document, context: &RenderContext) {
+        let width = context.content_width().unwrap_or(1);
+        for line in document.render_plain().lines() {
+            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+        }
+    }
+
+    fn strip_ansi(rendered: &str) -> String {
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream.write_all(rendered.as_bytes()).unwrap();
+        String::from_utf8(stream.into_inner()).unwrap()
+    }
+
+    fn installed_supervisor() -> Value {
+        json!({
+            "status": "installed",
+            "registration_verified": true,
+            "live_owner_verified": true,
+        })
+    }
+
+    fn ready_source() -> Value {
+        json!({
+            "indexed_sources": 1,
+            "indexed_sessions": 2,
+            "indexed_events": 1000,
+            "lexical": {
+                "status": "ready",
+                "certified_sources": 9,
+                "indexed_documents": 9,
+            },
+            "refresh": {"status": "ready"},
+            "semantic": {"status": "disabled"},
+        })
+    }
+
+    fn render_ready(context: &RenderContext) -> Document {
+        let supervisor = installed_supervisor();
+        render_setup_human(
+            context,
+            std::path::Path::new("/tmp/ctx"),
+            "ready",
+            &ready_source(),
+            &json!({"status": "published"}),
+            DaemonAutostartHuman {
+                requested: false,
+                reason: None,
+                handoff: None,
+                supervisor: &supervisor,
+            },
+        )
+    }
+
+    #[test]
+    fn setup_ready_is_outcome_first_and_has_one_search_action() {
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_ready(&context);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(rendered.starts_with("✓ History is ready to search\n\nHistory\n"));
+            assert!(rendered.contains("Sources   1 source\n"));
+            assert!(rendered.contains("Sessions  2 sessions\n"));
+            assert!(normalized.contains("Events 1,000 searchable events"));
+            assert!(!rendered.contains("9 sources"));
+            assert!(!rendered.contains("9 searchable events"));
+            assert!(rendered.contains("Next\n  ctx search \"test failure\"\n"));
+            assert!(!rendered.contains("Generation"));
+            assert!(!rendered.contains("PID"));
+            assert_eq!(rendered.matches("\nNext\n").count(), 1);
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn setup_events_fall_back_to_the_equivalent_lexical_document_count() {
+        let source = json!({
+            "lexical": {
+                "status": "ready",
+                "indexed_documents": 1,
+            },
+            "refresh": {"status": "ready"},
+            "semantic": {"status": "disabled"},
+        });
+        let supervisor = installed_supervisor();
+        let document = render_setup_human(
+            &context(80, ColorMode::Never),
+            std::path::Path::new("/tmp/ctx"),
+            "ready",
+            &source,
+            &json!({"status": "published"}),
+            DaemonAutostartHuman {
+                requested: false,
+                reason: None,
+                handoff: None,
+                supervisor: &supervisor,
+            },
+        );
+        let rendered = document.render_plain();
+        assert!(rendered.contains("Events    1 searchable event\n"));
+        assert!(!rendered.contains("Sessions"));
+    }
+
+    #[test]
+    fn setup_queued_has_watch_as_its_primary_action_without_an_eta() {
+        let source = json!({
+            "lexical": {"status": "pending"},
+            "refresh": {"status": "pending"},
+            "semantic": {"status": "disabled"},
+        });
+        let refresh = json!({"status": "pending"});
+        let supervisor = installed_supervisor();
+        let handoff = DaemonHandoff {
+            pid: 42,
+            heartbeat_at_ms: 1,
+        };
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_setup_human(
+                &context,
+                std::path::Path::new("/tmp/ctx"),
+                "pending",
+                &source,
+                &refresh,
+                DaemonAutostartHuman {
+                    requested: true,
+                    reason: None,
+                    handoff: Some(&handoff),
+                    supervisor: &supervisor,
+                },
+            );
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("History indexing is queued\n"));
+            assert!(rendered.contains("Refresh   in progress\n"));
+            assert!(rendered.contains("Next\n  ctx index watch\n"));
+            assert!(!rendered.contains("Estimated"));
+            assert!(!rendered.contains("ctx search"));
+            assert!(!rendered.contains("42"));
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn setup_degraded_explains_disabled_background_work_and_recovery() {
+        let source = json!({
+            "lexical": {"status": "unavailable"},
+            "refresh": {"status": "unavailable"},
+            "semantic": {"status": "disabled"},
+        });
+        let refresh = json!({
+            "status": "unavailable",
+            "reason": "daemon_disabled",
+        });
+        let supervisor = json!({"status": "not_installed"});
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_setup_human(
+                &context,
+                std::path::Path::new("/tmp/ctx"),
+                "unavailable",
+                &source,
+                &refresh,
+                DaemonAutostartHuman {
+                    requested: false,
+                    reason: Some("daemon_disabled"),
+                    handoff: None,
+                    supervisor: &supervisor,
+                },
+            );
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("! History is not ready\n"));
+            assert!(rendered.contains("Background  disabled\n"));
+            assert!(rendered.contains("Next\n  ctx daemon enable\n"));
+            assert!(!rendered.contains("ctx index watch"));
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn setup_plain_output_equals_ansi_stripped_styled_output() {
+        let context = context(80, ColorMode::Always);
+        let document = render_ready(&context);
+        assert_eq!(
+            strip_ansi(&document.render(&context)),
+            document.render_plain()
+        );
+    }
+
     #[test]
     fn setup_source_has_no_legacy_store_runtime_dependency() {
         let source = include_str!("setup.rs");

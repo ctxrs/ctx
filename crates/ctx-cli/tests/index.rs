@@ -2,6 +2,38 @@ mod support;
 
 use support::*;
 
+fn import_ready_history(temp: &TempDir) {
+    let fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--format=json",
+    ]));
+}
+
+fn strip_ansi(rendered: &[u8]) -> Vec<u8> {
+    let mut stream = anstream::StripStream::new(Vec::new());
+    stream.write_all(rendered).unwrap();
+    stream.into_inner()
+}
+
+fn contains_cursor_up(rendered: &[u8]) -> bool {
+    rendered.windows(2).enumerate().any(|(offset, prefix)| {
+        if prefix != b"\x1b[" {
+            return false;
+        }
+        let parameters = &rendered[offset + 2..];
+        let digits = parameters
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        digits > 0 && parameters.get(digits) == Some(&b'A')
+    })
+}
+
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64"),
@@ -43,8 +75,9 @@ fn remove_semantic_cache_env(command: &mut Command) {
 fn index_status_and_watch_are_read_only_for_missing_store() {
     let temp = tempdir();
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
-    assert_eq!(status["schema_version"], 1);
+    let status =
+        json_output(ctx(&temp).args(["--color=always", "index", "status", "--format=json"]));
+    assert_eq!(status["schema_version"], 2);
     assert_eq!(status["initialized"], false);
     assert_eq!(status["lexical"]["status"], "missing");
     assert_eq!(status["local_only"], true);
@@ -209,15 +242,7 @@ fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
 #[test]
 fn index_wait_lexical_reports_ready_after_import() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-    ]));
+    import_ready_history(&temp);
 
     let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["initialized"], true);
@@ -246,15 +271,7 @@ fn index_wait_lexical_reports_ready_after_import() {
 #[test]
 fn index_wait_default_skips_semantic_when_disabled_after_import() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-    ]));
+    import_ready_history(&temp);
 
     let wait = json_output(ctx(&temp).args([
         "index",
@@ -277,18 +294,11 @@ fn index_wait_default_skips_semantic_when_disabled_after_import() {
 #[test]
 fn index_watch_default_skips_semantic_when_disabled_after_import() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-    ]));
+    import_ready_history(&temp);
 
     let output = ctx(&temp)
         .args([
+            "--color=always",
             "index",
             "watch",
             "--format=jsonl",
@@ -300,6 +310,7 @@ fn index_watch_default_skips_semantic_when_disabled_after_import() {
         .get_output()
         .clone();
     let snapshots = String::from_utf8(output.stdout).unwrap();
+    assert!(!snapshots.contains('\u{1b}'), "{snapshots:?}");
     let snapshots = snapshots.lines().collect::<Vec<_>>();
     assert_eq!(snapshots.len(), 1, "{snapshots:#?}");
     let status: Value = serde_json::from_str(snapshots[0]).unwrap();
@@ -311,15 +322,7 @@ fn index_watch_default_skips_semantic_when_disabled_after_import() {
 #[test]
 fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-    ]));
+    import_ready_history(&temp);
 
     let output = ctx(&temp)
         .args([
@@ -349,15 +352,7 @@ fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
 #[test]
 fn index_wait_all_stays_strict_when_semantic_is_disabled() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-    ]));
+    import_ready_history(&temp);
 
     let output = ctx(&temp)
         .args([
@@ -383,4 +378,162 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
     assert_eq!(stdout["index"]["lexical"]["status"], "ready");
     assert_eq!(stdout["index"]["semantic"]["enabled"], false);
     assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+}
+
+#[test]
+fn human_status_and_wait_share_the_ready_document() {
+    let temp = tempdir();
+    import_ready_history(&temp);
+
+    let status = ctx(&temp)
+        .args(["--color=never", "index", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let wait = ctx(&temp)
+        .args([
+            "--color=never",
+            "index",
+            "wait",
+            "--lexical",
+            "--timeout-seconds",
+            "1",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(status, wait);
+    let rendered = String::from_utf8(status).unwrap();
+    assert!(
+        rendered.starts_with("✓ Your history is searchable\n")
+            || rendered.starts_with("OK Your history is searchable\n"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("\nProcessed  "));
+    assert!(rendered.contains("\nSessions   "));
+    assert!(rendered.contains("\nRecords    "));
+    assert!(rendered.contains("\nSemantic search  Off\n"));
+    assert!(!rendered.contains("lexical_status:"));
+    assert!(!rendered.contains('\u{1b}'));
+}
+
+#[test]
+fn human_wait_blocked_renders_the_final_searchable_snapshot() {
+    let temp = tempdir();
+    import_ready_history(&temp);
+
+    let output = ctx(&temp)
+        .args([
+            "--color=never",
+            "index",
+            "wait",
+            "--semantic",
+            "--timeout-seconds",
+            "1",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(
+        stdout.starts_with("✓ Your history is searchable\n")
+            || stdout.starts_with("OK Your history is searchable\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Semantic search  Off"));
+    assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+}
+
+#[test]
+fn human_wait_timeout_renders_the_final_active_snapshot() {
+    let temp = tempdir();
+    import_ready_history(&temp);
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = false\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+
+    let output = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args([
+            "--color=never",
+            "index",
+            "wait",
+            "--semantic",
+            "--timeout-seconds",
+            "1",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(stdout.matches("Semantic search").count() >= 2, "{stdout}");
+    assert!(stdout.contains("Your history is searchable"), "{stdout}");
+    assert!(stdout.contains("Embedded"));
+    assert!(stdout.contains("Throughput"));
+    assert!(stdout.contains("Remaining"));
+    assert!(
+        stderr.contains("timed out before indexing was ready"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn forced_color_on_a_pipe_adds_only_sgr_not_cursor_motion() {
+    let temp = tempdir();
+    import_ready_history(&temp);
+
+    let plain = ctx(&temp)
+        .args(["--color=never", "index", "watch", "--interval-seconds", "1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let automatic = ctx(&temp)
+        .args(["index", "watch", "--interval-seconds", "1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let styled = ctx(&temp)
+        .args([
+            "--color=always",
+            "index",
+            "watch",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(automatic, plain);
+    assert!(!automatic.contains(&b'\x1b'));
+    assert!(styled.windows(2).any(|bytes| bytes == b"\x1b["));
+    assert_eq!(strip_ansi(&styled), plain);
+    assert!(!contains_cursor_up(&styled));
+    assert!(!styled.contains(&b'\r'));
+    assert!(!styled.windows(4).any(|bytes| bytes == b"\x1b[2K"));
 }

@@ -1,29 +1,27 @@
-commit      abcdef
-repository  ctxrs/ctx
+Commit      abcdef
+Repository  ctxrs/ctx
 
 Produced by
-
-    commit abcdef -> session producer
-  confidence     explicit
-  state          asserted
-  evidence       [1]
+  session producer
+    confidence    explicit
+    state         asserted
+    evidence      [1]
 
 Possible producers
-
-    commit abcdef -> session possible
-  confidence     ambiguous
-  state          ambiguous
-  evidence       [2]
+  session possible
+    confidence    ambiguous
+    state         ambiguous
+    evidence      [2]
 
 Also recorded
-
   referenced_by
-    commit abcdef -> session observer
-  confidence     explicit
-  state          asserted
-  evidence       [3]
+    subject       commit abcdef
+    object        session observer
+    confidence    explicit
+    state         asserted
+    evidence      [3]
 
 Evidence
-  [1] ctx show event 00000000-0000-0000-0000-000000000001
-  [2] ctx show event 00000000-0000-0000-0000-000000000002
-  [3] ctx show event 00000000-0000-0000-0000-000000000003
+  [1]  ctx show event 00000000-0000-0000-0000-000000000001
+  [2]  ctx show event 00000000-0000-0000-0000-000000000002
+  [3]  ctx show event 00000000-0000-0000-0000-000000000003

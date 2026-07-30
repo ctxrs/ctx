@@ -13,30 +13,19 @@ pub(super) fn pad_after(text: &str, target_width: usize) -> String {
 }
 
 pub(super) fn wrap_text(text: &str, width: Option<usize>) -> Vec<String> {
+    let text = crate::ui::document::neutralize_controls(text);
     let Some(width) = width else {
-        return split_owned_lines(text);
+        return vec![text];
     };
     let width = width.max(1);
     let mut wrapped = Vec::new();
 
-    for logical_line in text.split('\n') {
-        let logical_line = crate::ui::document::neutralize_controls(logical_line);
-        wrap_logical_line(&logical_line, width, &mut wrapped);
-    }
+    wrap_logical_line(&text, width, &mut wrapped);
 
     if wrapped.is_empty() {
         wrapped.push(String::new());
     }
     wrapped
-}
-
-fn split_owned_lines(text: &str) -> Vec<String> {
-    let lines = text.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>();
-    if lines.is_empty() {
-        vec![String::new()]
-    } else {
-        lines
-    }
 }
 
 fn wrap_logical_line(line: &str, width: usize, output: &mut Vec<String>) {

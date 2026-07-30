@@ -18,6 +18,7 @@ use crate::{
     net,
     output::JsonOutputFormat,
     semantic::{semantic_native_accelerator_target, SemanticNativeAcceleratorTarget},
+    ui::Ui,
 };
 
 use super::download::DownloadedArtifact;
@@ -47,6 +48,8 @@ mod daemon;
 pub(crate) use daemon::{
     finish_daemon_auto_upgrade, prepare_daemon_auto_upgrade, PreparedDaemonUpgrade,
 };
+mod human;
+use human::{render_auto_mode, render_outcome};
 mod status;
 use status::render_status;
 
@@ -194,7 +197,7 @@ pub fn run(
     data_root: PathBuf,
     config: AppConfig,
     telemetry: &mut UpgradeTelemetry,
-    _ui: &mut crate::ui::Ui,
+    ui: &mut Ui,
 ) -> Result<()> {
     #[cfg(windows)]
     if args.replacement_helper {
@@ -230,7 +233,11 @@ pub fn run(
                 let channel = check.channel.as_deref().or(args.channel.as_deref());
                 let outcome = check_upgrade(&data_root, &config, channel, "upgrade_check")?;
                 insert_upgrade_outcome_analytics(telemetry, &outcome);
-                render_outcome(&outcome, check.format.is_json() || args.format.is_json())
+                render_outcome(
+                    &outcome,
+                    check.format.is_json() || args.format.is_json(),
+                    ui,
+                )
             }
             Some(UpgradeCommand::Status(status)) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::StatusChecked);
@@ -238,21 +245,24 @@ pub fn run(
                     &data_root,
                     &config,
                     status.format.is_json() || args.format.is_json(),
+                    ui,
                 )
             }
             Some(UpgradeCommand::Enable) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoEnabled);
-                set_auto_mode(&data_root, "apply")
+                set_auto_mode(&data_root, "apply")?;
+                render_auto_mode(true, args.format.is_json(), ui)
             }
             Some(UpgradeCommand::Disable) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoDisabled);
-                set_auto_mode(&data_root, "off")
+                set_auto_mode(&data_root, "off")?;
+                render_auto_mode(false, args.format.is_json(), ui)
             }
             None => {
                 let outcome =
                     apply_upgrade(&data_root, &config, args.channel.as_deref(), args.dry_run)?;
                 insert_upgrade_outcome_analytics(telemetry, &outcome);
-                render_outcome(&outcome, args.format.is_json())
+                render_outcome(&outcome, args.format.is_json(), ui)
             }
         }
     })();
@@ -949,16 +959,4 @@ fn build_upgrade_plan(
         metadata,
         semantic_provisioning,
     })
-}
-
-fn render_outcome(outcome: &UpgradeOutcome, json_output: bool) -> Result<()> {
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&outcome.json())?);
-    } else {
-        println!("{}", outcome.message);
-        for warning in &outcome.warnings {
-            eprintln!("warning: {warning}");
-        }
-    }
-    Ok(())
 }

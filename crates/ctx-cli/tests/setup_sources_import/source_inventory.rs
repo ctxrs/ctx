@@ -28,7 +28,7 @@ fn setup_skips_empty_codex_session_tree() {
 fn sources_default_hides_unsupported_missing_locations() {
     let temp = tempdir();
 
-    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
+    let sources = json_output(ctx(&temp).args(["--color=always", "sources", "--format=json"]));
     assert_eq!(sources["scope"], "default");
     assert!(sources["hidden_missing_sources"].as_u64().unwrap() > 0);
     let visible = sources["sources"].as_array().unwrap();
@@ -51,7 +51,7 @@ fn sources_default_hides_unsupported_missing_locations() {
         .stdout
         .clone();
     let text = String::from_utf8(text).unwrap();
-    assert!(text.contains("missing provider locations hidden"));
+    assert!(text.contains("missing provider locations are hidden"));
     assert!(text.contains("ctx sources --all"));
 
     let all_sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));

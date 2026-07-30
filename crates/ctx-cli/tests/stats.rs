@@ -95,13 +95,14 @@ fn pristine_disabled_and_malformed_stats_are_truthful_and_create_nothing() {
         format!("[local_usage]\nenabled = nope\n# {marker}\n"),
     )
     .unwrap();
-    let output = enabled(ctx(&malformed).args(["stats", "--format=json"]))
+    let output = enabled(ctx(&malformed).args(["--color=always", "stats", "--format=json"]))
         .assert()
         .failure()
         .get_output()
         .clone();
     assert!(output.stdout.is_empty());
     let encoded = String::from_utf8(output.stderr).unwrap();
+    assert!(!encoded.as_bytes().contains(&0x1b));
     let report: Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(report["state"], "error");
     assert_eq!(report["error"]["code"], "local_usage_config_unavailable");
@@ -277,9 +278,7 @@ fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
     enabled(ctx(&temp).args(["stats"]))
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Measured local facts — definition 2",
-        ))
+        .stdout(predicate::str::contains("Measured usage · definition 2"))
         .stdout(predicate::str::contains("Approximate token-equivalents"))
         .stdout(predicate::str::contains("Estimated context reduction"))
         .stdout(predicate::str::contains("matched_normalized_sessions_v1"))
@@ -291,8 +290,8 @@ fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cli/search"))
-        .stdout(predicate::str::contains("context_bytes=20"))
-        .stdout(predicate::str::contains("complete=1"));
+        .stdout(predicate::str::contains("20 covered"))
+        .stdout(predicate::str::contains("1 complete"));
 }
 
 #[test]

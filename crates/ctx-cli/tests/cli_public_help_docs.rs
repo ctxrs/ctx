@@ -745,7 +745,7 @@ fn daemon_run_rejects_internal_autostart_metadata_flags() {
 fn docs_commands_expose_embedded_docs_and_man_pages() {
     let temp = tempdir();
 
-    let list = json_output(ctx(&temp).args(["docs", "list", "--format=json"]));
+    let list = json_output(ctx(&temp).args(["--color=always", "docs", "list", "--format=json"]));
     assert_eq!(list["schema_version"], 1);
     assert!(list["topics"]
         .as_array()
@@ -885,6 +885,7 @@ fn docs_show_out_creates_parent_directories() {
 
     ctx(&temp)
         .args([
+            "--color=always",
             "docs",
             "show",
             "cli-reference",
@@ -900,6 +901,7 @@ fn docs_show_out_creates_parent_directories() {
     );
     let body = fs::read_to_string(&out).unwrap();
     assert!(body.contains("CLI Reference"), "{body}");
+    assert!(!body.as_bytes().contains(&0x1b), "{body}");
 }
 
 #[cfg(unix)]
