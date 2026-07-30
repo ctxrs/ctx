@@ -145,18 +145,17 @@ impl QualificationHelperBundle {
             .ok_or_else(|| anyhow::anyhow!("invalid_request: qualification stage is invalid"))?;
         verify_platform_private_directory(parent)
             .context("invalid_request: qualification stage permissions are unsafe")?;
-        let retained = self
-            .stage
-            .helper_handle
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("invalid_request: qualification stage is unavailable"))?
+        let retained_handle = self.stage.helper_handle.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("invalid_request: qualification stage is unavailable")
+        })?;
+        let retained = retained_handle
             .metadata()
             .context("invalid_request: inspect retained qualification helper")?;
         let mut named = open_verified_helper(&self.path)?;
         let opened = named
             .metadata()
             .context("invalid_request: inspect staged qualification helper")?;
-        if !same_file_identity(&retained, &opened) {
+        if !same_file_identity(retained_handle, &retained, &named, &opened)? {
             bail!("invalid_request: qualification helper changed during validation");
         }
         verify_reader_digest(&mut named, opened.len(), &self.sha256)?;
@@ -220,17 +219,20 @@ fn open_verified_source(path: &Path) -> Result<VerifiedSource> {
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         bail!("invalid_request: qualification helper must be a regular non-symlink file");
     }
-    verify_private_executable(path, &metadata)?;
-    if metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES {
-        bail!("invalid_request: qualification helper size is outside allowed bounds");
-    }
     let file = open_without_following_symlinks(path)
         .context("invalid_request: open qualification helper")?;
     let opened = file
         .metadata()
         .context("invalid_request: inspect opened qualification helper")?;
-    if !same_file_identity(&metadata, &opened) {
+    if !opened.file_type().is_file()
+        || opened.file_type().is_symlink()
+        || !opened_file_matches_path(path, &metadata, &file, &opened)?
+    {
         bail!("invalid_request: qualification helper changed during validation");
+    }
+    verify_private_executable(path, &opened)?;
+    if opened.len() == 0 || opened.len() > MAX_ARTIFACT_BYTES {
+        bail!("invalid_request: qualification helper size is outside allowed bounds");
     }
     Ok(VerifiedSource {
         file,
@@ -335,17 +337,20 @@ fn open_verified_helper(path: &Path) -> Result<File> {
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         bail!("invalid_request: qualification helper must be a regular non-symlink file");
     }
-    verify_private_executable(path, &metadata)?;
-    if metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES {
-        bail!("invalid_request: qualification helper size is outside allowed bounds");
-    }
     let file = open_without_following_symlinks(path)
         .context("invalid_request: open qualification helper")?;
     let opened = file
         .metadata()
         .context("invalid_request: inspect opened qualification helper")?;
-    if !same_file_identity(&metadata, &opened) {
+    if !opened.file_type().is_file()
+        || opened.file_type().is_symlink()
+        || !opened_file_matches_path(path, &metadata, &file, &opened)?
+    {
         bail!("invalid_request: qualification helper changed during validation");
+    }
+    verify_private_executable(path, &opened)?;
+    if opened.len() == 0 || opened.len() > MAX_ARTIFACT_BYTES {
+        bail!("invalid_request: qualification helper size is outside allowed bounds");
     }
     Ok(file)
 }
@@ -384,7 +389,9 @@ fn create_stage_directory() -> Result<PathBuf> {
     for _ in 0..16 {
         let path =
             std::env::temp_dir().join(format!("ctx-pro-qualification-{}", Uuid::new_v4().simple()));
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt as _;
@@ -460,23 +467,101 @@ fn verify_private_executable(_path: &Path, metadata: &fs::Metadata) -> Result<()
 }
 
 #[cfg(unix)]
-fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    left.dev() == right.dev() && left.ino() == right.ino()
+fn opened_file_matches_path(
+    _path: &Path,
+    before: &fs::Metadata,
+    file: &File,
+    opened: &fs::Metadata,
+) -> Result<bool> {
+    same_file_identity(file, before, file, opened)
 }
 
 #[cfg(windows)]
-fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
+fn opened_file_matches_path(
+    path: &Path,
+    _before: &fs::Metadata,
+    file: &File,
+    opened: &fs::Metadata,
+) -> Result<bool> {
+    let named = open_without_following_symlinks(path)
+        .context("invalid_request: reopen qualification helper by name")?;
+    let named_metadata = named
+        .metadata()
+        .context("invalid_request: inspect reopened qualification helper")?;
+    same_file_identity(file, opened, &named, &named_metadata)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_file_identity(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    false
+fn opened_file_matches_path(
+    _path: &Path,
+    _before: &fs::Metadata,
+    _file: &File,
+    _opened: &fs::Metadata,
+) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn same_file_identity(
+    _left_file: &File,
+    left: &fs::Metadata,
+    _right_file: &File,
+    right: &fs::Metadata,
+) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(windows)]
+fn same_file_identity(
+    left_file: &File,
+    left: &fs::Metadata,
+    right_file: &File,
+    right: &fs::Metadata,
+) -> Result<bool> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    Ok(left.is_file()
+        && right.is_file()
+        && left.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && right.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && windows_file_identity(left_file)? == windows_file_identity(right_file)?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(
+    _left_file: &File,
+    _left: &fs::Metadata,
+    _right_file: &File,
+    _right: &fs::Metadata,
+) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> Result<(u32, u64)> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle as _};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+    };
+
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: `file` owns a live handle and `information` is a valid out pointer.
+    if unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("invalid_request: inspect qualification helper file identity");
+    }
+    // SAFETY: the successful call initialized the complete structure.
+    let information = unsafe { information.assume_init() };
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok((information.dwVolumeSerialNumber, file_index))
 }
 
 #[cfg(test)]

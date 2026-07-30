@@ -1,9 +1,6 @@
-use std::{collections::BTreeMap, env, ffi::OsString};
-
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
-use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::{collections::BTreeMap, env, ffi::OsString, path::Path};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::utc_now;

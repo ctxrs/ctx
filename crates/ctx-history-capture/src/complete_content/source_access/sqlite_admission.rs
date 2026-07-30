@@ -4,11 +4,15 @@ use std::path::Path;
 use uuid::Uuid;
 
 use super::{
-    bounded_sqlite_component_bytes, copy_bounded_handle, ctx_sqlite_snapshot_tempdir,
-    map_capture_error, map_io_error, open_brokered_file, open_ctx_owned_sqlite_read_snapshot,
-    revalidate_opened_file, sqlite_sidecar_path, validate_observed_snapshot_reservation,
-    validate_source_snapshot, AuthorizedSourceRoute, BrokeredSqliteSource, CompleteContentError,
-    CompleteContentErrorKind, CtxOwnedSqliteReadSnapshot, FrozenFile, ReadOnlySqliteConnection,
+    bounded_sqlite_component_bytes, ctx_sqlite_snapshot_tempdir, map_capture_error,
+    open_ctx_owned_sqlite_read_snapshot, sqlite_sidecar_path,
+    validate_observed_snapshot_reservation, validate_source_snapshot, AuthorizedSourceRoute,
+    BrokeredSqliteSource, CompleteContentError, CompleteContentErrorKind,
+    CtxOwnedSqliteReadSnapshot, ReadOnlySqliteConnection,
+};
+#[cfg(unix)]
+use super::{
+    copy_bounded_handle, map_io_error, open_brokered_file, revalidate_opened_file, FrozenFile,
 };
 
 #[cfg(unix)]
