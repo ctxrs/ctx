@@ -374,7 +374,51 @@ docker run "${docker_run_args[@]}" \
     test -f "$artifact_runfile" -a -x "$artifact_runfile"
     test -f "$rustc_runfile" -a -x "$rustc_runfile"
     install -m 0755 "$artifact_runfile" /build/release-input/ctx
-    install -m 0755 "$rustc_runfile" /build/release-input/bazel-rustc
+    rustc_real="$(readlink -f "$rustc_runfile")"
+    test -f "$rustc_real" -a -x "$rustc_real"
+    rustc_driver="$(
+      ldd "$rustc_real" \
+        | awk '"'"'$1 ~ /^librustc_driver-[0-9a-f]+[.]so$/ && $2 == "=>" {
+            print $3
+          }'"'"'
+    )"
+    test -n "$rustc_driver"
+    test "$(printf "%s\n" "$rustc_driver" | wc -l)" -eq 1
+    test -f "$rustc_driver"
+    install -m 0755 "$rustc_real" /build/release-input/bazel-rustc.bin
+    install -d -m 0755 /build/release-input/bazel-rustc.lib
+    rustc_lib_dir="$(dirname "$rustc_driver")"
+    while IFS= read -r rustc_library; do
+      install -m 0444 \
+        "$rustc_library" \
+        "/build/release-input/bazel-rustc.lib/$(basename "$rustc_library")"
+    done < <(
+      find "$rustc_lib_dir" \
+        -maxdepth 1 \
+        -type f \
+        -name "*.so*" \
+        -print \
+        | sort
+    )
+    test -f \
+      "/build/release-input/bazel-rustc.lib/$(basename "$rustc_driver")"
+    test "$(
+      find /build/release-input/bazel-rustc.lib \
+        -maxdepth 1 \
+        -type f \
+        -name "libLLVM.so*" \
+        -print \
+        | wc -l
+    )" -ge 1
+    cat > /build/release-input/bazel-rustc <<'"'"'WRAPPER'"'"'
+#!/usr/bin/env bash
+set -euo pipefail
+tool_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+exec env -u LD_PRELOAD \
+  "LD_LIBRARY_PATH=${tool_root}/bazel-rustc.lib" \
+  "${tool_root}/bazel-rustc.bin" "$@"
+WRAPPER
+    chmod 0755 /build/release-input/bazel-rustc
     python3 scripts/release/detached-debug-symbols.py prepare \
       --artifact /build/release-input/ctx \
       --output-dir /build/release-input/private-debug-symbols \
@@ -439,6 +483,13 @@ docker run "${docker_run_args[@]}" \
     install -m 0755 \
       /build/release-input/bazel-rustc \
       /release-output/bazel-rustc
+    install -m 0755 \
+      /build/release-input/bazel-rustc.bin \
+      /release-output/bazel-rustc.bin
+    install -d -m 0755 /release-output/bazel-rustc.lib
+    cp -a \
+      /build/release-input/bazel-rustc.lib/. \
+      /release-output/bazel-rustc.lib/
   '
 
 [[ -d "${symbols_stage_parent}/bundle" ]] \
@@ -454,6 +505,7 @@ mv "${symbols_stage_parent}/bundle" "${private_symbols_dir}"
 for leaf in \
   ctx \
   bazel-rustc \
+  bazel-rustc.bin \
   ctx.sha256 \
   ctx.version \
   ctx.build-info.json \
@@ -463,6 +515,37 @@ for leaf in \
 done
 [[ "$(stat -c '%a' "${output_dir}/bazel-rustc")" == "755" ]] \
   || die "packaged dogfood Bazel rustc must have mode 0755"
+[[ "$(stat -c '%a' "${output_dir}/bazel-rustc.bin")" == "755" ]] \
+  || die "packaged dogfood Bazel rustc binary must have mode 0755"
+mapfile -t rustc_driver_outputs < <(
+  find "${output_dir}/bazel-rustc.lib" \
+    -maxdepth 1 \
+    -type f \
+    -name 'librustc_driver-*.so' \
+    -print
+)
+[[ "${#rustc_driver_outputs[@]}" == "1" ]] \
+  || die "packaged dogfood Bazel rustc must have exactly one driver library"
+mapfile -t rustc_llvm_outputs < <(
+  find "${output_dir}/bazel-rustc.lib" \
+    -maxdepth 1 \
+    -type f \
+    -name 'libLLVM.so*' \
+    -print
+)
+[[ "${#rustc_llvm_outputs[@]}" -ge 1 ]] \
+  || die "packaged dogfood Bazel rustc must have its LLVM runtime"
+while IFS= read -r rustc_library_output; do
+  [[ "$(stat -c '%a' "${rustc_library_output}")" == "444" ]] \
+    || die "packaged dogfood Bazel rustc libraries must have mode 0444"
+done < <(
+  find "${output_dir}/bazel-rustc.lib" \
+    -maxdepth 1 \
+    -type f \
+    -print
+)
+[[ "$("${output_dir}/bazel-rustc" --version)" == "${rust_version}" ]] \
+  || die "packaged dogfood Bazel rustc no longer reports the declared version"
 
 trap - EXIT
 cleanup
