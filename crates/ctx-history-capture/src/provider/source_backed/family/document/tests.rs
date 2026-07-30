@@ -60,6 +60,7 @@ impl SyntheticLeaf {
 struct SyntheticState {
     available: bool,
     leaves: Vec<SyntheticLeaf>,
+    durable_replay: bool,
     parser_v2: bool,
     scan_counts: HashMap<u8, usize>,
     hydration_parses: usize,
@@ -80,6 +81,7 @@ impl SyntheticAdapter {
             state: Arc::new(Mutex::new(SyntheticState {
                 available: true,
                 leaves,
+                durable_replay: true,
                 ..SyntheticState::default()
             })),
         }
@@ -90,7 +92,14 @@ impl SyntheticAdapter {
             .leaves
             .iter()
             .cloned()
-            .map(|leaf| ObservedDocumentLeaf::new(leaf.fingerprint(), leaf))
+            .map(|leaf| {
+                let fingerprint = leaf.fingerprint();
+                if state.durable_replay {
+                    ObservedDocumentLeaf::new(fingerprint, leaf)
+                } else {
+                    ObservedDocumentLeaf::always_scan(fingerprint, leaf)
+                }
+            })
             .collect::<Vec<_>>();
         let tree_fingerprint = synthetic_tree_fingerprint(&leaves);
         CompleteDocumentTree::new(tree_fingerprint, leaves, tree_fingerprint)
@@ -130,6 +139,20 @@ impl SyntheticAdapter {
             .unwrap();
         leaf.revision = revision;
         leaf.body = body.to_owned();
+    }
+
+    fn use_logical_snapshot_scans(&self) {
+        self.state.lock().unwrap().durable_replay = false;
+    }
+
+    fn touch_physical_revision(&self, physical_id: u8, revision: u8) {
+        let mut state = self.state.lock().unwrap();
+        let leaf = state
+            .leaves
+            .iter_mut()
+            .find(|leaf| leaf.physical_id == physical_id)
+            .unwrap();
+        leaf.revision = revision;
     }
 }
 
@@ -196,16 +219,22 @@ impl ReplacementDocumentTree for SyntheticAdapter {
             ));
         }
         *state.scan_counts.entry(leaf.physical_id).or_default() += 1;
+        let durable_replay = state.durable_replay;
         drop(state);
 
         let source = leaf.source();
         let document = synthetic_document(leaf);
         sink.begin_source(source.clone())?;
         sink.emit_document(document)?;
+        let revision = if durable_replay {
+            vec![leaf.physical_id, leaf.revision]
+        } else {
+            leaf.content_digest().to_vec()
+        };
         let observation = SourceObservation::new(
             source.clone(),
             "synthetic-document-observation-v1",
-            vec![leaf.physical_id, leaf.revision],
+            revision,
         )
         .map_err(document_contract_error)?;
         Ok(DocumentSourceTerminal {
@@ -513,6 +542,42 @@ fn replacement_tree_cold_noop_changes_delete_and_unavailable_are_exact() {
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
+    );
+}
+
+#[test]
+fn logical_snapshot_leaf_scans_once_and_discards_identical_staging() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let adapter = SyntheticAdapter::new(vec![SyntheticLeaf {
+        physical_id: 1,
+        logical_id: 1,
+        revision: 1,
+        body: "logical rows".to_owned(),
+    }]);
+    adapter.use_logical_snapshot_scans();
+    let registry = fixture_registry(temp.path(), adapter.clone());
+
+    let cold = publish(&index_root, &registry);
+    assert_eq!(adapter.scan_count(1), 1);
+
+    adapter.reset_scan_counts();
+    adapter.touch_physical_revision(1, 2);
+    let physical_only = publish(&index_root, &registry);
+    assert_eq!(adapter.scan_count(1), 1);
+    assert_eq!(
+        physical_only.commit.generation_id,
+        cold.commit.generation_id
+    );
+    assert_eq!(physical_only.commit.opstamp, cold.commit.opstamp);
+
+    adapter.reset_scan_counts();
+    adapter.replace(1, 3, "changed logical rows");
+    let logical_change = publish(&index_root, &registry);
+    assert_eq!(adapter.scan_count(1), 1);
+    assert_ne!(
+        logical_change.commit.generation_id,
+        cold.commit.generation_id
     );
 }
 
