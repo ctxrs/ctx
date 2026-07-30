@@ -428,6 +428,7 @@ ctx_cli_integration_test(
     name = "native_providers_tests",
     src = "tests/native_providers.rs",
     extra_srcs = [
+        "tests/support/native_providers/daemon.rs",
         "tests/support/native_providers/sqlite_sources.rs",
         "tests/support/native_providers/workspace_sources.rs",
     ],
