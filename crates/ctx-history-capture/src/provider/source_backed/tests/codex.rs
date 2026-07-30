@@ -1,4 +1,5 @@
 use super::*;
+use std::{fs::OpenOptions, io::Write};
 
 #[test]
 fn codex_history_and_sessions_publish_one_fresh_generation_and_hydrate_exactly() {
@@ -365,6 +366,363 @@ fn codex_session_roots_recover_exact_hydration_before_a_successor_refresh() {
             .collect::<Vec<_>>(),
         vec![active_text.as_bytes(), archived_text.as_bytes()]
     );
+fn codex_session_tree_route_parallel_cold_scan_matches_single_worker_and_preserves_lifecycle() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_ids = [
+        "019fb000-0000-7000-8000-000000000001",
+        "019fb000-0000-7000-8000-000000000002",
+        "019fb000-0000-7000-8000-000000000003",
+        "019fb000-0000-7000-8000-000000000004",
+    ];
+    let mut expected_bodies = HashSet::new();
+    for (index, native_session_id) in native_session_ids.iter().enumerate() {
+        let messages = [
+            format!("routeparallelidentity{index}sentinel"),
+            format!("routeparallelcontent{index}sentinel"),
+        ];
+        expected_bodies.extend(messages.iter().map(|message| message.as_bytes().to_vec()));
+        fs::write(
+            sessions.join(format!("rollout-{native_session_id}.jsonl")),
+            codex_rollout_bytes(
+                native_session_id,
+                &messages.iter().map(String::as_str).collect::<Vec<_>>(),
+            ),
+        )
+        .unwrap();
+    }
+
+    let single_counters = Arc::new(Mutex::new(Vec::new()));
+    let mut single_registry = SourceBackedProviderRegistry::new();
+    register_codex_session_tree_route_for_test(
+        &mut single_registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+        1,
+        Arc::clone(&single_counters),
+        None,
+    )
+    .unwrap();
+    let parallel_counters = Arc::new(Mutex::new(Vec::new()));
+    let mut parallel_registry = SourceBackedProviderRegistry::new();
+    register_codex_session_tree_route_for_test(
+        &mut parallel_registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+        4,
+        Arc::clone(&parallel_counters),
+        None,
+    )
+    .unwrap();
+
+    let writer_options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+    let single_index_root = temp.path().join("single-index");
+    let single = refresh_source_backed_generation(
+        &single_index_root,
+        &single_registry,
+        writer_options.clone(),
+    )
+    .unwrap();
+    let parallel_index_root = temp.path().join("parallel-index");
+    let parallel = refresh_source_backed_generation(
+        &parallel_index_root,
+        &parallel_registry,
+        writer_options.clone(),
+    )
+    .unwrap();
+    let single_scan = single_counters.lock().unwrap()[0];
+    let parallel_scan = parallel_counters.lock().unwrap()[0];
+    assert_eq!(single_scan.scanner_workers, 1);
+    assert_eq!(parallel_scan.scanner_workers, 4);
+    assert_eq!(single_scan.catalog_sources, 4);
+    assert_eq!(parallel_scan.catalog_sources, 4);
+    assert_eq!(single_scan.cold_sources, 4);
+    assert_eq!(parallel_scan.cold_sources, 4);
+    assert_eq!(single_scan.staged_documents, 8);
+    assert_eq!(parallel_scan.staged_documents, 8);
+    assert_eq!(single_scan.complete_records_scanned, 12);
+    assert_eq!(parallel_scan.complete_records_scanned, 12);
+    let mut normalized_single_scan = single_scan;
+    let mut normalized_parallel_scan = parallel_scan;
+    normalized_single_scan.scanner_workers = 0;
+    normalized_parallel_scan.scanner_workers = 0;
+    assert_eq!(normalized_single_scan, normalized_parallel_scan);
+    assert_eq!(single.commit.indexed_documents, 8);
+    assert_eq!(parallel.commit.indexed_documents, 8);
+
+    let single_verified = VerifiedIndex::open(&single_index_root).unwrap();
+    let parallel_verified = VerifiedIndex::open(&parallel_index_root).unwrap();
+    assert_eq!(
+        single_verified.manifest().sources,
+        parallel_verified.manifest().sources
+    );
+    assert_eq!(single.commit.generation_id, parallel.commit.generation_id);
+    let source_events = |verified: &VerifiedIndex| {
+        verified
+            .manifest()
+            .sources
+            .iter()
+            .flat_map(|source| {
+                verified
+                    .source_event_page(source.observation().source(), None, 10)
+                    .unwrap()
+                    .items
+            })
+            .collect::<Vec<_>>()
+    };
+    let single_events = source_events(&single_verified);
+    let parallel_events = source_events(&parallel_verified);
+    assert_eq!(single_events, parallel_events);
+    let requests = single_events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let request = BatchHydrationRequest::new(requests).unwrap();
+    let single_content = single_registry
+        .resolver_registry()
+        .hydrate_batch(&request)
+        .unwrap()
+        .records()
+        .iter()
+        .map(|record| record.provider_bytes.clone())
+        .collect::<Vec<_>>();
+    let parallel_content = parallel_registry
+        .resolver_registry()
+        .hydrate_batch(&request)
+        .unwrap()
+        .records()
+        .iter()
+        .map(|record| record.provider_bytes.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(single_content, parallel_content);
+    assert_eq!(
+        parallel_content.into_iter().collect::<HashSet<_>>(),
+        expected_bodies
+    );
+    let cold_generation = parallel.commit.generation_id;
+    drop(single_verified);
+    drop(parallel_verified);
+
+    let replay = refresh_source_backed_generation(
+        &parallel_index_root,
+        &parallel_registry,
+        writer_options.clone(),
+    )
+    .unwrap();
+    let replay_scan = parallel_counters.lock().unwrap()[1];
+    assert_eq!(replay.commit.generation_id, cold_generation);
+    assert_eq!(replay_scan.scanner_workers, 0);
+    assert_eq!(replay_scan.replayed_sources, 4);
+    assert_eq!(replay_scan.staged_documents, 0);
+
+    let append_record = serde_json::json!({
+        "timestamp": "2026-07-29T12:01:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "input_text",
+                "text": "routeappendlifecyclesentinel"
+            }]
+        }
+    });
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(sessions.join(format!("rollout-{}.jsonl", native_session_ids[0])))
+            .unwrap(),
+        "{append_record}"
+    )
+    .unwrap();
+    refresh_source_backed_generation(
+        &parallel_index_root,
+        &parallel_registry,
+        writer_options.clone(),
+    )
+    .unwrap();
+    let append_scan = parallel_counters.lock().unwrap()[2];
+    assert_eq!(append_scan.scanner_workers, 1);
+    assert_eq!(append_scan.appended_sources, 1);
+    assert_eq!(append_scan.replayed_sources, 3);
+    assert_eq!(append_scan.staged_documents, 1);
+
+    fs::write(
+        sessions.join(format!("rollout-{}.jsonl", native_session_ids[1])),
+        codex_rollout_bytes(
+            native_session_ids[1],
+            &["routereplacementlifecyclesentinel"],
+        ),
+    )
+    .unwrap();
+    refresh_source_backed_generation(
+        &parallel_index_root,
+        &parallel_registry,
+        writer_options.clone(),
+    )
+    .unwrap();
+    let replacement_scan = parallel_counters.lock().unwrap()[3];
+    assert_eq!(replacement_scan.scanner_workers, 1);
+    assert_eq!(replacement_scan.replaced_sources, 1);
+    assert_eq!(replacement_scan.replayed_sources, 3);
+    assert_eq!(replacement_scan.staged_documents, 1);
+
+    fs::remove_file(sessions.join(format!("rollout-{}.jsonl", native_session_ids[2]))).unwrap();
+    refresh_source_backed_generation(&parallel_index_root, &parallel_registry, writer_options)
+        .unwrap();
+    let deletion_scan = parallel_counters.lock().unwrap()[4];
+    assert_eq!(deletion_scan.scanner_workers, 0);
+    assert_eq!(deletion_scan.replayed_sources, 3);
+    assert_eq!(deletion_scan.deleted_sources, 1);
+    let lifecycle_index = VerifiedIndex::open(&parallel_index_root).unwrap();
+    assert_eq!(lifecycle_index.document_count(), 6);
+    assert_eq!(
+        lifecycle_index
+            .search_event_candidates("routeappendlifecyclesentinel", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        lifecycle_index
+            .search_event_candidates("routereplacementlifecyclesentinel", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(lifecycle_index
+        .search_event_candidates("routeparallelidentity2sentinel", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn codex_session_tree_parallel_route_keeps_failed_terminal_certification_atomic() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let baseline_id = "019fb000-0000-7000-8000-000000000011";
+    fs::write(
+        sessions.join(format!("rollout-{baseline_id}.jsonl")),
+        codex_rollout_bytes(baseline_id, &["atomicbaselinesentinel"]),
+    )
+    .unwrap();
+    let mut baseline_registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut baseline_registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    let writer_options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+    refresh_source_backed_generation(&index_root, &baseline_registry, writer_options.clone())
+        .unwrap();
+    let baseline = VerifiedIndex::open(&index_root).unwrap();
+    let baseline_generation = baseline.generation_id().to_owned();
+    let baseline_sources = baseline.manifest().sources.clone();
+    drop(baseline);
+
+    fs::remove_file(sessions.join(format!("rollout-{baseline_id}.jsonl"))).unwrap();
+    for (native_session_id, marker) in [
+        (
+            "019fb000-0000-7000-8000-000000000012",
+            "uncommittedparallelroutesentinelone",
+        ),
+        (
+            "019fb000-0000-7000-8000-000000000013",
+            "uncommittedparallelroutesentineltwo",
+        ),
+    ] {
+        fs::write(
+            sessions.join(format!("rollout-{native_session_id}.jsonl")),
+            codex_rollout_bytes(native_session_id, &[marker]),
+        )
+        .unwrap();
+    }
+    let late_sessions = sessions.clone();
+    let after_scan: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let late_id = "019fb000-0000-7000-8000-000000000014";
+        fs::write(
+            late_sessions.join(format!("rollout-{late_id}.jsonl")),
+            codex_rollout_bytes(late_id, &["lateinventorycertificationsentinel"]),
+        )
+        .unwrap();
+    });
+    let counters = Arc::new(Mutex::new(Vec::new()));
+    let mut failing_registry = SourceBackedProviderRegistry::new();
+    register_codex_session_tree_route_for_test(
+        &mut failing_registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+        2,
+        Arc::clone(&counters),
+        Some(after_scan),
+    )
+    .unwrap();
+    let error = refresh_source_backed_generation(&index_root, &failing_registry, writer_options)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            SourceBackedCoordinatorError::Index(IndexError::CompleteInventoryInvalidated {
+                provider,
+                authority_namespace,
+            }) if provider == "codex" && authority_namespace == "codex.sessions-root"
+        ),
+        "unexpected terminal certification error: {error:?}"
+    );
+    let failed_scan = counters.lock().unwrap()[0];
+    assert_eq!(failed_scan.scanner_workers, 2);
+    assert_eq!(failed_scan.cold_sources, 2);
+    assert_eq!(failed_scan.deleted_sources, 1);
+
+    let after = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(after.generation_id(), baseline_generation);
+    assert_eq!(after.manifest().sources, baseline_sources);
+    assert_eq!(after.document_count(), 1);
+    assert_eq!(
+        after
+            .search_event_candidates("atomicbaselinesentinel", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(after
+        .search_event_candidates("uncommittedparallelroutesentinelone", 10)
+        .unwrap()
+        .is_empty());
+    assert!(after
+        .search_event_candidates("lateinventorycertificationsentinel", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

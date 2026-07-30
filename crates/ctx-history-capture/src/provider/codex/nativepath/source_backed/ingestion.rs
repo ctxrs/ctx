@@ -22,8 +22,6 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
 
     let phase_started = Instant::now();
     let opening_inventory = discover_codex_root_inventory_v0(session_root)?;
-    counters.catalog_sources = u64::try_from(opening_inventory.sources.len())
-        .map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
     timings.discovery = phase_started.elapsed();
 
     let writer_options = WriterOptions::default();
@@ -32,47 +30,22 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
     timings.writer_open = phase_started.elapsed();
     let base_sources = writer_base_sources(&writer);
     let CodexRootInventoryV0 {
-        mut sources,
+        sources,
         certificate: opening_certificate,
         root: opening_root,
     } = opening_inventory;
-    counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
-        total.saturating_add(source.catalog_observation.len)
-    });
-    let use_parallel_cold = sources.len() > 1
-        && sources
-            .iter()
-            .all(|(_, source_key, _)| !base_sources.contains_key(source_key));
-    if use_parallel_cold {
-        sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
-    }
     let mut revalidation = HashMap::<SourceKey, CodexTerminalSourceEvidenceV0>::new();
 
-    if use_parallel_cold {
-        let worker_count = cold_scanner_worker_count(
-            counters.catalog_sources,
-            writer_options.indexer_threads,
-            cold_options.scanner_workers,
-        )?;
-        ingest_codex_cold_parallel_v0(
-            sources,
-            &mut writer,
-            &mut revalidation,
-            &mut timings,
-            &mut counters,
-            worker_count,
-            cold_options,
-        )?;
-    } else {
-        ingest_codex_sources_serial_v0(
-            sources,
-            &base_sources,
-            &mut writer,
-            &mut revalidation,
-            &mut timings,
-            &mut counters,
-        )?;
-    }
+    ingest_codex_sources_with_options_v0(
+        sources,
+        &base_sources,
+        &mut writer,
+        &mut revalidation,
+        &mut timings,
+        &mut counters,
+        writer_options.indexer_threads,
+        cold_options,
+    )?;
 
     for base in base_sources.values() {
         let source = base.observation().source();
@@ -138,6 +111,83 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
         timings,
         counters,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ingest_codex_sources_v0(
+    sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    base_sources: &HashMap<SourceKey, CertifiedSource>,
+    writer: &mut GenerationWriter,
+    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+    timings: &mut CodexSourceBackedPhaseTimingsV0,
+    counters: &mut CodexSourceBackedCountersV0,
+    indexer_threads: usize,
+    scanner_workers: Option<usize>,
+) -> CodexSourceBackedResultV0<()> {
+    ingest_codex_sources_with_options_v0(
+        sources,
+        base_sources,
+        writer,
+        revalidation,
+        timings,
+        counters,
+        indexer_threads,
+        ColdParallelOptionsV0 {
+            scanner_workers,
+            #[cfg(test)]
+            fail_source_index: None,
+            #[cfg(test)]
+            before_commit_revalidation: None,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_codex_sources_with_options_v0(
+    mut sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    base_sources: &HashMap<SourceKey, CertifiedSource>,
+    writer: &mut GenerationWriter,
+    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+    timings: &mut CodexSourceBackedPhaseTimingsV0,
+    counters: &mut CodexSourceBackedCountersV0,
+    indexer_threads: usize,
+    cold_options: ColdParallelOptionsV0,
+) -> CodexSourceBackedResultV0<()> {
+    counters.catalog_sources =
+        u64::try_from(sources.len()).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
+    counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
+        total.saturating_add(source.catalog_observation.len)
+    });
+    let use_parallel_cold = sources.len() > 1
+        && sources
+            .iter()
+            .all(|(_, source_key, _)| !base_sources.contains_key(source_key));
+    if use_parallel_cold {
+        sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
+        let worker_count = cold_scanner_worker_count(
+            counters.catalog_sources,
+            indexer_threads,
+            cold_options.scanner_workers,
+        )?;
+        ingest_codex_cold_parallel_v0(
+            sources,
+            writer,
+            revalidation,
+            timings,
+            counters,
+            worker_count,
+            cold_options,
+        )
+    } else {
+        ingest_codex_sources_serial_v0(
+            sources,
+            base_sources,
+            writer,
+            revalidation,
+            timings,
+            counters,
+        )
+    }
 }
 
 pub(crate) fn ingest_codex_sources_serial_v0(

@@ -1,6 +1,8 @@
 use super::*;
 use std::sync::Mutex;
 
+use crate::provider::codex::nativepath::ingest_codex_sources_v0;
+
 #[cfg(test)]
 type ExplicitCodexStageHook = Box<dyn FnOnce(CodexSourceBackedCountersV0)>;
 
@@ -147,12 +149,75 @@ impl CodexSessionTreeRuntime {
             .and_then(|resolver| resolver.hydrate_batch_request(request))
             .map_err(codex_locator_hydration_failure)
     }
+#[cfg(test)]
+type CodexSessionTreeCounterObserver =
+    Arc<dyn Fn(CodexSourceBackedCountersV0) + Send + Sync + 'static>;
+#[cfg(test)]
+type CodexSessionTreeAfterScan = Arc<dyn Fn() + Send + Sync + 'static>;
+
+#[derive(Clone)]
+struct CodexSessionTreeScanControl {
+    indexer_threads: usize,
+    scanner_workers: Option<usize>,
+    #[cfg(test)]
+    counter_observer: Option<CodexSessionTreeCounterObserver>,
+    #[cfg(test)]
+    after_scan: Option<CodexSessionTreeAfterScan>,
 }
 
 pub(super) fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+) -> SourceBackedCoordinatorResult<()> {
+    // The route sink does not expose its writer options yet. The production
+    // path reserves the runtime-derived default indexer budget until a shared
+    // scheduler supplies explicit scanner capacity through this seam.
+    register_codex_session_tree_route_with_scan_control(
+        registry,
+        source,
+        selection,
+        CodexSessionTreeScanControl {
+            indexer_threads: WriterOptions::default().indexer_threads,
+            scanner_workers: None,
+            #[cfg(test)]
+            counter_observer: None,
+            #[cfg(test)]
+            after_scan: None,
+        },
+    )
+}
+
+#[cfg(test)]
+pub(in crate::provider::source_backed) fn register_codex_session_tree_route_for_test(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    scanner_workers: usize,
+    observed_counters: Arc<Mutex<Vec<CodexSourceBackedCountersV0>>>,
+    after_scan: Option<CodexSessionTreeAfterScan>,
+) -> SourceBackedCoordinatorResult<()> {
+    let observer: CodexSessionTreeCounterObserver = Arc::new(move |counters| {
+        observed_counters.lock().unwrap().push(counters);
+    });
+    register_codex_session_tree_route_with_scan_control(
+        registry,
+        source,
+        selection,
+        CodexSessionTreeScanControl {
+            indexer_threads: 1,
+            scanner_workers: Some(scanner_workers),
+            counter_observer: Some(observer),
+            after_scan,
+        },
+    )
+}
+
+fn register_codex_session_tree_route_with_scan_control(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    scan_control: CodexSessionTreeScanControl,
 ) -> SourceBackedCoordinatorResult<()> {
     let root = source.path.clone();
     let capture_root = root.clone();
@@ -187,13 +252,15 @@ pub(super) fn register_codex_session_tree_route(
             let mut revalidation = HashMap::new();
             let mut timings = CodexSourceBackedPhaseTimingsV0::default();
             let mut counters = CodexSourceBackedCountersV0::default();
-            ingest_codex_sources_serial_v0(
+            ingest_codex_sources_v0(
                 opening.sources.clone(),
                 &base_sources,
                 sink.writer,
                 &mut revalidation,
                 &mut timings,
                 &mut counters,
+                scan_control.indexer_threads,
+                scan_control.scanner_workers,
             )
             .map_err(route_error)?;
             for base in base_sources.values() {
@@ -210,6 +277,7 @@ pub(super) fn register_codex_session_tree_route(
                         opening.certificate.clone(),
                     )
                     .map_err(route_coordinator_error)?;
+                    counters.deleted_sources = counters.deleted_sources.saturating_add(1);
                 }
             }
             *capture_terminal_evidence.lock().map_err(|_| {
@@ -221,6 +289,14 @@ pub(super) fn register_codex_session_tree_route(
                 inventory: opening.certificate,
                 sources: revalidation,
             });
+            #[cfg(test)]
+            if let Some(observer) = &scan_control.counter_observer {
+                observer(counters);
+            }
+            #[cfg(test)]
+            if let Some(after_scan) = &scan_control.after_scan {
+                after_scan();
+            }
             Ok(())
         },
         move |candidate| ownership_runtime.owns_source(candidate),
