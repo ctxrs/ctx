@@ -120,11 +120,32 @@ fn task_json_thousand_task_cold_membership_and_scan_work_is_linear() {
     for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
         let fixture = ManyTaskFixture::new(provider, TASKS);
         let operations = Arc::new(TaskJsonFixtureOperations::default());
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            open_file_descriptors_beneath(&fixture.root),
+            0,
+            "closed fixture construction must establish a zero-descriptor baseline"
+        );
+        #[cfg(target_os = "linux")]
+        let terminal_source_fds = Arc::new(AtomicUsize::new(usize::MAX));
+        #[cfg(target_os = "linux")]
+        let terminal_hook = {
+            let fixture_root = fixture.root.clone();
+            let terminal_source_fds = Arc::clone(&terminal_source_fds);
+            Some(Arc::new(move || {
+                terminal_source_fds.store(
+                    open_file_descriptors_beneath(&fixture_root),
+                    Ordering::SeqCst,
+                );
+            }) as Arc<dyn Fn() + Send + Sync>)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let terminal_hook = None;
         let registry = registry(
             provider,
             fixture.source(),
             Some(Arc::clone(&operations)),
-            None,
+            terminal_hook,
         );
         let index_root = fixture._temp.path().join("linear-cold-index");
 
@@ -143,7 +164,22 @@ fn task_json_thousand_task_cold_membership_and_scan_work_is_linear() {
             "cold projection must scan each task exactly once"
         );
         assert_eq!(operations.hydration_scans(), 0);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            terminal_source_fds.load(Ordering::SeqCst),
+            1,
+            "terminal task-tree authority must retain only its shared source-root descriptor"
+        );
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_file_descriptors_beneath(root: &Path) -> usize {
+    fs::read_dir("/proc/self/fd")
+        .expect("enumerate Linux process descriptors")
+        .filter_map(Result::ok)
+        .filter(|entry| fs::read_link(entry.path()).is_ok_and(|target| target.starts_with(root)))
+        .count()
 }
 
 #[test]
