@@ -222,8 +222,6 @@ impl EventFileInventory {
                     let _handle = transient_handle(TransientHandleKind::Leaf);
                     let observation = observe_opened_ordinary_file(&selected_path, &file)
                         .map_err(|error| changed(&selected_path, error))?;
-                    file.revalidate()
-                        .map_err(|error| changed(&selected_path, error))?;
                     drop(file);
                     observation
                 };
@@ -547,8 +545,6 @@ fn discover_directory(
                 let Some(coordinates) = classify(&display_path)
                     .map_err(|error| invalid(&display_path, error.to_string()))?
                 else {
-                    file.revalidate()
-                        .map_err(|error| discovery_error(&display_path, error, error_mode))?;
                     continue;
                 };
                 state.leaves.push(admit_leaf(
