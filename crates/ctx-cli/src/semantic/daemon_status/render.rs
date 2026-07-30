@@ -12,7 +12,8 @@ enum DaemonPresentation {
     Healthy,
     Partial,
     Failed,
-    Running,
+    Completed,
+    Stopped,
     Disabled,
 }
 
@@ -91,7 +92,9 @@ pub(in crate::semantic) fn render_daemon_status_human(
         || matches!(status, "failed" | "stale_lock")
         || (!running && enabled && status != "completed");
 
-    let presentation = if !enabled || status == "disabled" {
+    let presentation = if status == "completed" {
+        DaemonPresentation::Completed
+    } else if !enabled || status == "disabled" {
         DaemonPresentation::Disabled
     } else if service_failed {
         DaemonPresentation::Failed
@@ -107,7 +110,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
     } else if running {
         DaemonPresentation::Healthy
     } else {
-        DaemonPresentation::Running
+        DaemonPresentation::Stopped
     };
 
     let (outcome_state, title, detail) = match presentation {
@@ -142,10 +145,8 @@ pub(in crate::semantic) fn render_daemon_status_human(
             "Daemon failed",
             Some("Automatic history refresh is not running."),
         ),
-        DaemonPresentation::Running if status == "completed" => {
-            (OutcomeState::Neutral, "Daemon run completed", None)
-        }
-        DaemonPresentation::Running => (OutcomeState::Neutral, "Daemon is not running", None),
+        DaemonPresentation::Completed => (OutcomeState::Success, "Daemon run completed", None),
+        DaemonPresentation::Stopped => (OutcomeState::Neutral, "Daemon is not running", None),
         DaemonPresentation::Disabled => (
             OutcomeState::Neutral,
             "Daemon is disabled",
@@ -193,6 +194,9 @@ pub(in crate::semantic) fn render_daemon_status_human(
     if recoverable {
         service_details.push(("Recovery", "available".to_owned()));
     }
+    if matches!(presentation, DaemonPresentation::Completed) && !enabled {
+        service_details.push(("Automatic refresh", "disabled".to_owned()));
+    }
     if matches!(presentation, DaemonPresentation::Failed) {
         if let Some(reason) = daemon
             .get("reason")
@@ -214,8 +218,12 @@ pub(in crate::semantic) fn render_daemon_status_human(
     document.append(section("Service", service));
 
     if history.is_some() || source_refresh.is_some() {
-        let (history_state, history_token) =
-            history_state(history, source_refresh, enabled, rejected_records);
+        let (history_state, history_token) = history_state(
+            history,
+            source_refresh,
+            enabled || matches!(presentation, DaemonPresentation::Completed),
+            rejected_records,
+        );
         let mut history_document = state_field("Status", history_state, history_token);
         let mut history_details = Vec::new();
         if history_catching_up {
@@ -537,7 +545,9 @@ fn service_state(
     recoverable: bool,
     status: &str,
 ) -> (&'static str, Token) {
-    if !enabled || status == "disabled" {
+    if status == "completed" {
+        ("completed", Token::Success)
+    } else if !enabled || status == "disabled" {
         ("disabled", Token::Text)
     } else if recoverable {
         ("failed (recoverable)", Token::Error)

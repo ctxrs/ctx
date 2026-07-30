@@ -179,6 +179,42 @@ fn disabled_status_is_clear_and_enable_is_the_only_action() {
 }
 
 #[test]
+fn completed_forced_run_wins_over_disabled_persistent_preference() {
+    let report = json!({
+        "enabled": false,
+        "status": "completed",
+        "mode": "once",
+        "running": false,
+        "semantic_runtime_active": false,
+        "config_reload": {"status": "applied"},
+        "jobs": {
+            "history_refresh": {"status": "completed"},
+            "source_backed_refresh": {"status": "completed"},
+            "semantic_index": {"status": "disabled", "reason": "semantic_disabled"}
+        }
+    });
+    let rendered = render_status(&context(80), &report).render_plain();
+
+    assert!(
+        rendered.starts_with("✓ Daemon run completed\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Service\nStatus  completed\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Automatic refresh  disabled\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("History refresh\nStatus  ready\n"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("\nNext\n"), "{rendered}");
+}
+
+#[test]
 fn catching_up_status_keeps_search_availability_and_progress_visible() {
     let mut report = running_report();
     report["jobs"]["source_backed_refresh"] = json!({
