@@ -1,7 +1,5 @@
 use super::super::*;
 use super::receipts::SourcePredicate;
-use ctx_history_core::SourceInventoryObservation;
-use sha2::{Digest, Sha256};
 
 pub(crate) trait ProviderCaptureSink {
     fn base_source(&self, source: &SourceKey) -> Option<CertifiedSource>;
@@ -145,23 +143,14 @@ pub(super) type ProviderCaptureCallback =
 #[derive(Clone)]
 pub(super) struct CapturedRouteInventoryAuthority {
     provider: String,
-    route_key: [u8; 32],
+    route: ProviderSource,
 }
 
 impl CapturedRouteInventoryAuthority {
     pub(super) fn new(route: &ProviderSource) -> Self {
-        let path = route.path.as_os_str().as_encoded_bytes();
-        let mut digest = Sha256::new();
-        digest.update(b"ctx.captured-route-authority\0");
-        digest.update((route.provider.as_str().len() as u64).to_be_bytes());
-        digest.update(route.provider.as_str().as_bytes());
-        digest.update((route.source_format.len() as u64).to_be_bytes());
-        digest.update(route.source_format.as_bytes());
-        digest.update((path.len() as u64).to_be_bytes());
-        digest.update(path);
         Self {
             provider: route.provider.as_str().to_owned(),
-            route_key: digest.finalize().into(),
+            route: route.clone(),
         }
     }
 
@@ -169,40 +158,8 @@ impl CapturedRouteInventoryAuthority {
         &self,
         certificates: &[CertifiedSource],
     ) -> SourceBackedRouteResult<CertifiedSourceInventory> {
-        let mut sources = certificates
-            .iter()
-            .map(|certificate| certificate.observation().source().clone())
-            .collect::<Vec<_>>();
-        sources.sort_by_key(SourceKey::exact_descriptor_digest);
-        let mut revision = Sha256::new();
-        revision.update(b"ctx.captured-route-inventory\0");
-        revision.update((sources.len() as u64).to_be_bytes());
-        for source in &sources {
-            revision.update(source.exact_descriptor_digest());
-        }
-        let observation = SourceInventoryObservation::new(
-            self.provider.clone(),
-            "ctx.captured-route",
-            TypedKey::bytes(self.route_key.to_vec()).map_err(captured_route_contract)?,
-            "ctx-captured-route-source-set-v1",
-            revision.finalize().to_vec(),
-        )
-        .map_err(captured_route_contract)?;
-        CertifiedSourceInventory::certify(
-            observation.clone(),
-            observation,
-            "ctx-captured-route-inventory-v1",
-            sources,
-        )
-        .map_err(captured_route_contract)
+        certify_source_inventory(&self.route, certificates)
     }
-}
-
-pub(crate) fn certify_captured_route_inventory(
-    route: &ProviderSource,
-    certificates: &[CertifiedSource],
-) -> SourceBackedRouteResult<CertifiedSourceInventory> {
-    CapturedRouteInventoryAuthority::new(route).certify(certificates)
 }
 
 pub(super) struct CapturedRouteEvidence {
