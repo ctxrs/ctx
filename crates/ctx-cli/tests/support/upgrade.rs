@@ -19,7 +19,7 @@ use flate2::{write::GzEncoder, Compression};
 #[cfg(unix)]
 use tar::{Builder as TarBuilder, EntryType, Header};
 
-use super::{copied_binary, copied_ctx_binary, data_root, file_url};
+use super::{copied_binary, copied_ctx_binary, data_root, file_url, FiniteDaemonTestRoot};
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -466,6 +466,18 @@ pub(crate) fn managed_candidate_from_binary(
 }
 
 #[cfg(unix)]
+pub(crate) fn managed_bound_candidate_from_binary(
+    temp: &FiniteDaemonTestRoot,
+    source: &Path,
+    install_attempt_id: &str,
+) -> PathBuf {
+    let bound = copied_ctx_binary(temp);
+    fs::remove_file(&bound).unwrap();
+    let target = copied_binary(temp, source);
+    finish_managed_candidate_at(target, install_attempt_id)
+}
+
+#[cfg(unix)]
 pub(crate) fn managed_candidate_in(
     temp: &TempDir,
     directory: &str,
@@ -486,6 +498,11 @@ fn finish_managed_candidate(
     let target = bin_dir.join("ctx");
     fs::create_dir(&bin_dir).unwrap();
     fs::rename(copied, &target).unwrap();
+    finish_managed_candidate_at(target, install_attempt_id)
+}
+
+#[cfg(unix)]
+fn finish_managed_candidate_at(target: PathBuf, install_attempt_id: &str) -> PathBuf {
     if fs::metadata(&target).unwrap().len() > 128 * 1024 * 1024 {
         let stripped = std::process::Command::new("strip")
             .arg("-S")
