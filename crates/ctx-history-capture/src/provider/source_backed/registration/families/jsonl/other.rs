@@ -368,71 +368,9 @@ pub(super) fn register_pi_route(
             PiSourceBackedRoot::explicit(source.path.clone())
         }
     };
-    let context = ProviderAdapterContext {
-        machine_id: "source-backed-pi".to_owned(),
-        source_path: Some(source.path.clone()),
-        source_root: Some(source.path.clone()),
-        imported_at: DateTime::<Utc>::UNIX_EPOCH,
-    };
-    let capture_root = root.clone();
-    let capture_context = context.clone();
-    let hydration_root = root;
-    let hydration_context = context;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let mut begun = HashSet::new();
-            let mut sink_failure = None;
-            let projection = project_pi_source_backed_root_cold(
-                &capture_root,
-                capture_context.clone(),
-                |page| {
-                    if sink_failure.is_some() {
-                        return;
-                    }
-                    if begun.insert(page.source.identity().digest()) {
-                        if let Err(error) = sink.begin(page.source) {
-                            sink_failure = Some(error);
-                            return;
-                        }
-                    }
-                    for document in page.documents {
-                        if let Err(error) = sink.document(document) {
-                            sink_failure = Some(error);
-                            return;
-                        }
-                    }
-                },
-            )
-            .map_err(route_error)?;
-            if let Some(error) = sink_failure {
-                return Err(error);
-            }
-            for source in projection.sources {
-                if begun.insert(source.route.source.identity().digest()) {
-                    sink.begin(source.route.source)?;
-                }
-                sink.certify(source.certificate)?;
-            }
-            let _inventory = projection.inventory;
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::Pi, "pi_session_jsonl"),
-        move |request| {
-            let projection = project_pi_source_backed_root_cold(
-                &hydration_root,
-                hydration_context.clone(),
-                |_| {},
-            )
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            PiSourceBackedResolver::new(projection.sources.into_iter().map(|source| source.route))
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                })?
-                .hydrate_event(request)
-        },
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        pi_source_backed_adapter(),
+        root.path().to_path_buf(),
     );
     registry.register(executable_route(
         source,

@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 use super::{
-    observe_opened_file, JsonlCheckpoint, JsonlFileObservation, JsonlReader, JsonlRecordRef,
-    JsonlSourceChange, JsonlSourceIdentity,
+    observe_opened_file, JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlReader,
+    JsonlRecordRef, JsonlSourceChange, JsonlSourceIdentity,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -132,6 +132,7 @@ pub(crate) struct JsonlFamilyLeaf {
     authority: Arc<ProviderSourceRoot>,
     observation: JsonlFileObservation,
     binding: TypedKey,
+    identity_probe: Option<JsonlProbe>,
 }
 
 impl JsonlFamilyLeaf {
@@ -152,6 +153,32 @@ impl JsonlFamilyLeaf {
             authority,
             observation,
             binding,
+            identity_probe: None,
+        })
+    }
+
+    pub(crate) fn observe_after_identity_probe(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+        identity_probe: JsonlProbe,
+    ) -> Result<Self> {
+        let opened = authority.open_file(&authority_path)?;
+        let observation = observe_opened_file(&source_path, &opened)?;
+        if observation != identity_probe.observation {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        drop(opened);
+        Ok(Self {
+            source,
+            source_path,
+            authority_path,
+            authority,
+            observation,
+            binding,
+            identity_probe: Some(identity_probe),
         })
     }
 
@@ -415,7 +442,7 @@ fn scan_leaf(
             .then_some(previous.as_ref())
             .flatten()
             .map(|checkpoint| &checkpoint.physical),
-        None,
+        leaf.identity_probe.clone(),
     )
     .map_err(route_invalid)?;
 
@@ -461,7 +488,7 @@ fn scan_leaf(
     let mut projector = adapter
         .projector(leaf, opened, DateTime::<Utc>::UNIX_EPOCH)
         .map_err(route_invalid)?;
-    let mut physical_records = 0_u64;
+    let mut physical_records = u64::from(leaf.identity_probe.is_some());
     let mut represented_records = 0_u64;
     let mut documents = 0_u64;
     while reader
