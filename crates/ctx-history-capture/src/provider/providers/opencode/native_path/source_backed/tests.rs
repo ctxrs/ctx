@@ -1,25 +1,19 @@
-use std::{
-    ffi::OsString,
-    fs,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Barrier, Mutex,
-    },
-    thread,
-};
+use std::{ffi::OsString, fs};
 
 use ctx_history_core::{
     BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
     LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
 };
-use ctx_history_index::WriterOptions;
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, SourceBackedCoordinatorError,
+        SourceBackedProviderRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
+        SourceBackedRouteSelection,
     },
     provider_sources::{
         discover_provider_sources_for_provider_with_context, provider_source_for_path,
@@ -65,16 +59,14 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
             })
             .unwrap();
 
-        assert_eq!(
-            registration.mutation_policy(),
-            OpenCodeSourceMutationPolicy::UnchangedOrReplace
-        );
         assert_eq!(scan.certificate.counts().complete_records, 2);
         assert_eq!(scan.certificate.counts().retained_records, 2);
         assert_eq!(scan.certificate.counts().indexed_documents, 2);
         assert!(scan.certificate.frontier().is_none());
-        assert_eq!(scan.emitted_pages, 1);
-        assert_eq!(scan.schema_family, "session_message_seq");
+        assert_eq!(
+            scan.source.schema_variant(),
+            "opencode-family-session_message_seq-v1"
+        );
         assert_eq!(documents.len(), 2);
         let first_row: serde_json::Value = serde_json::from_str(&expected[0]).unwrap();
         let expected_first_body = first_row["text"].as_str().unwrap();
@@ -265,7 +257,7 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     let registration = opencode_source_backed_registration();
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("opencode.sqlite");
-    create_fixture(&path, "opencode", SOURCE_BACKED_PAGE_ROWS + 1);
+    create_fixture(&path, "opencode", 65);
 
     let writer = Connection::open(&path).unwrap();
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
@@ -286,7 +278,6 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     let mut documents = Vec::new();
     registration
         .scan(&path, &mut |page| {
-            assert!(page.len() <= SOURCE_BACKED_PAGE_ROWS);
             documents.extend(page);
             Ok(())
         })
@@ -436,37 +427,29 @@ fn schema_policy_and_projection_classification_changes_replace() {
 }
 
 #[test]
-fn one_decode_pass_streams_bounded_pages_and_uses_a_transient_terminal_fence() {
+fn one_decode_pass_streams_logical_rows_directly_without_a_page_bridge() {
     for registration in opencode_family_source_backed_registrations() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp
             .path()
             .join(format!("{}.sqlite", registration.provider().as_str()));
-        let row_count = SOURCE_BACKED_PAGE_ROWS * 2 + 1;
+        let row_count = 129;
         create_fixture(&path, registration.provider().as_str(), row_count);
 
         let mut documents = Vec::new();
-        let mut page_lengths = Vec::new();
         let baseline = registration
             .scan(&path, &mut |page| {
-                page_lengths.push(page.len());
+                assert_eq!(page.len(), 1);
                 documents.extend(page);
                 Ok(())
             })
             .unwrap();
         assert_eq!(documents.len(), row_count);
         assert_eq!(
-            page_lengths,
-            vec![SOURCE_BACKED_PAGE_ROWS, SOURCE_BACKED_PAGE_ROWS, 1]
+            baseline.certificate.counts().complete_records,
+            row_count as u64
         );
-        assert_eq!(baseline.emitted_pages, 3);
-        assert_eq!(baseline.row_decode_passes, 1);
-        assert_eq!(baseline.decoded_rows, row_count as u64);
-        assert_eq!(baseline.peak_buffered_rows, SOURCE_BACKED_PAGE_ROWS as u64);
         assert!(baseline.certificate.frontier().is_none());
-        assert!(registration
-            .terminal_fence(&path, &baseline.terminal_fence)
-            .unwrap());
 
         let request =
             EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone())
@@ -475,15 +458,13 @@ fn one_decode_pass_streams_bounded_pages_and_uses_a_transient_terminal_fence() {
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch("vacuum").unwrap();
         drop(connection);
-        assert!(!registration
-            .terminal_fence(&path, &baseline.terminal_fence)
-            .unwrap());
 
         let replay = registration.scan(&path, &mut |_| Ok(())).unwrap();
         assert_eq!(replay.certificate, baseline.certificate);
-        assert_eq!(replay.row_decode_passes, 1);
-        assert_eq!(replay.decoded_rows, row_count as u64);
-        assert_eq!(replay.peak_buffered_rows, SOURCE_BACKED_PAGE_ROWS as u64);
+        assert_eq!(
+            replay.certificate.counts().complete_records,
+            row_count as u64
+        );
         assert_eq!(
             resolver.hydrate_event(&request).unwrap().provider_bytes,
             documents[0].body.as_bytes()
@@ -569,6 +550,8 @@ fn logical_same_route_replacement_preserves_the_certificate_without_append() {
         drop(connection);
         let replay = refresh_source_backed_generation(&index, &registry, options).unwrap();
 
+        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
+        assert_eq!(replay.commit.opstamp, cold.commit.opstamp);
         assert_eq!(replay.commit.indexed_documents, 2);
         assert_eq!(replay.sources, cold.sources);
         assert!(cold.removals.is_empty());
@@ -581,45 +564,64 @@ fn logical_same_route_replacement_preserves_the_certificate_without_append() {
 }
 
 #[test]
-fn provider_local_route_is_one_pass_replacement_only_and_batch_hydrated() {
-    let route = include_str!("registration.rs");
-    assert!(route.contains("scan_replacement("));
-    assert!(route.contains(".with_batch_hydration("));
-    assert!(route.contains("certify_complete_inventory("));
-    assert!(!route.contains(concat!("captured_route_", "driver")));
-    assert!(!route.contains(concat!("begin_source_", "append")));
-    assert!(!route.contains(concat!("certify_source_", "append")));
-}
+fn route_deletes_a_missing_database_and_preserves_on_acquisition_unavailable() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let moved = temp.path().join("opencode.moved.sqlite");
+    let index = temp.path().join("index");
+    create_fixture(&path, "opencode", 2);
+    let source = provider_source_for_path(registration.provider(), path.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+    )
+    .unwrap();
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+    let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    let old_source = cold.sources[0].observation().source().clone();
 
-#[test]
-fn terminal_fence_verdict_is_computed_once_and_false_stays_fail_closed() {
-    for verdict in [true, false] {
-        let cached = Arc::new(Mutex::new(None));
-        let calls = Arc::new(AtomicU64::new(0));
-        let barrier = Arc::new(Barrier::new(8));
-        let threads = (0..8)
-            .map(|_| {
-                let cached = Arc::clone(&cached);
-                let calls = Arc::clone(&calls);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    let mut cached = cached.lock().unwrap();
-                    registration::cache_terminal_fence_result(&mut cached, || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        verdict
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        let results = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
+    fs::rename(&path, &moved).unwrap();
+    let deleted = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert!(deleted.sources.is_empty());
+    assert!(deleted
+        .removals
+        .iter()
+        .any(|removal| removal.deletion.source().exact_descriptor_eq(&old_source)));
 
-        assert_eq!(results, vec![verdict; 8]);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
+    fs::rename(&moved, &path).unwrap();
+    let restored = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert_eq!(restored.sources.len(), 1);
+    let retained_generation = restored.commit.generation_id.clone();
+    let writer = Connection::open(&path).unwrap();
+    writer.execute_batch("begin immediate").unwrap();
+    writer
+        .execute(
+            "update session_message set time_updated = time_updated + 1 where id = 'message-0'",
+            [],
+        )
+        .unwrap();
+    let error = refresh_source_backed_generation(&index, &registry, options).unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Unavailable,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(
+        VerifiedIndex::open(&index).unwrap().generation_id(),
+        retained_generation
+    );
+    writer.execute_batch("rollback").unwrap();
 }
 
 #[test]
