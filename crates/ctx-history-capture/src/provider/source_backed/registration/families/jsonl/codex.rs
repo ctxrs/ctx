@@ -2,8 +2,8 @@ use super::*;
 use std::sync::Mutex;
 
 use crate::provider::codex::nativepath::{
-    discover_codex_session_tree_inventory_v0, ingest_codex_sources_v0, CodexSessionTreeInventoryV0,
-    CodexSourceBackedResultV0,
+    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
+    ingest_codex_sources_v0, CodexSessionTreeInventoryV0, CodexSourceBackedResultV0,
 };
 
 #[cfg(test)]
@@ -41,6 +41,65 @@ fn run_after_explicit_codex_stage_hook(counters: CodexSourceBackedCountersV0) {
 struct CodexSessionTreeTerminalEvidence {
     inventory: CertifiedSourceInventory,
     sources: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+}
+
+#[derive(Debug)]
+struct CodexSessionTreeRuntime {
+    resolver: Mutex<Arc<CodexLocatorResolverV0>>,
+}
+
+impl CodexSessionTreeRuntime {
+    fn new(inventory: &CodexSessionTreeInventoryV0) -> CodexSourceBackedResultV0<Self> {
+        Ok(Self {
+            resolver: Mutex::new(Arc::new(
+                CodexLocatorResolverV0::from_session_tree_inventory(inventory)?,
+            )),
+        })
+    }
+
+    fn install_inventory(
+        &self,
+        inventory: &CodexSessionTreeInventoryV0,
+    ) -> CodexSourceBackedResultV0<()> {
+        let resolver = Arc::new(CodexLocatorResolverV0::from_session_tree_inventory(
+            inventory,
+        )?);
+        *self.resolver.lock().map_err(|_| {
+            CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(
+                "Codex resident resolver lock was poisoned".to_owned(),
+            ))
+        })? = resolver;
+        Ok(())
+    }
+
+    fn resolver(&self) -> CodexSourceBackedResultV0<Arc<CodexLocatorResolverV0>> {
+        self.resolver
+            .lock()
+            .map(|resolver| Arc::clone(&resolver))
+            .map_err(|_| {
+                CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(
+                    "Codex resident resolver lock was poisoned".to_owned(),
+                ))
+            })
+    }
+
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        self.resolver()
+            .and_then(|resolver| resolver.hydrate_event_request(request))
+            .map_err(codex_locator_hydration_failure)
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        self.resolver()
+            .and_then(|resolver| resolver.hydrate_batch_request(request))
+            .map_err(codex_locator_hydration_failure)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -200,6 +259,10 @@ fn register_codex_session_tree_route_with_scan_control(
         .collect::<Vec<_>>();
     let initial_inventory = discover_codex_route_inventory(&roots)
         .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?;
+    let runtime = Arc::new(
+        CodexSessionTreeRuntime::new(&initial_inventory)
+            .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?,
+    );
     let mut initial_ownership = CodexSessionTreeOwnership::default();
     for (_, source_key, _) in &initial_inventory.sources {
         initial_ownership.remember(source_key);
@@ -207,8 +270,9 @@ fn register_codex_session_tree_route_with_scan_control(
 
     let capture_roots = Arc::new(roots);
     let complete_inventory_revalidation_roots = Arc::clone(&capture_roots);
-    let hydration_roots = Arc::clone(&capture_roots);
-    let batch_hydration_roots = Arc::clone(&capture_roots);
+    let capture_runtime = Arc::clone(&runtime);
+    let hydration_runtime = Arc::clone(&runtime);
+    let batch_hydration_runtime = runtime;
     let capture_initial_inventory = Arc::new(Mutex::new(Some(initial_inventory)));
     let ownership = Arc::new(Mutex::new(initial_ownership));
     let capture_ownership = Arc::clone(&ownership);
@@ -238,6 +302,9 @@ fn register_codex_session_tree_route_with_scan_control(
                     || discover_codex_route_inventory(&capture_roots),
                     Ok::<CodexSessionTreeInventoryV0, CodexSourceBackedErrorV0>,
                 )
+                .map_err(route_error)?;
+            capture_runtime
+                .install_inventory(&opening)
                 .map_err(route_error)?;
             sink.certify_complete_inventory(opening.certificate.clone())
                 .map_err(route_coordinator_error)?;
@@ -352,15 +419,7 @@ fn register_codex_session_tree_route_with_scan_control(
                 }
             }
         },
-        move |request| {
-            let hydrated = CodexLocatorResolverV0::discover(hydration_roots.iter())
-                .and_then(|resolver| resolver.hydrate(request.locator()))
-                .map_err(codex_locator_hydration_failure)?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: codex_display_bytes(hydrated)?,
-            })
-        },
+        move |request| hydration_runtime.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
         let terminal = inventory_terminal_evidence
@@ -388,11 +447,7 @@ fn register_codex_session_tree_route_with_scan_control(
                 })
             })
     })
-    .with_batch_hydration(move |request| {
-        CodexLocatorResolverV0::discover(batch_hydration_roots.iter())
-            .and_then(|resolver| resolver.hydrate_batch_request(request))
-            .map_err(codex_locator_hydration_failure)
-    });
+    .with_batch_hydration(move |request| batch_hydration_runtime.hydrate_batch(request));
     registry.register(executable_route(
         source,
         selection,
