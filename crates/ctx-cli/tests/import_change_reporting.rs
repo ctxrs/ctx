@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    io::Read,
+    io::{Read, Write},
     process::{Child, Command as StdCommand, Stdio},
 };
 
@@ -351,8 +351,14 @@ fn codex_reimport_rebuilds_from_provider_source() {
 
     let rewritten_source = fs::read_to_string(&source)
         .unwrap()
-        .replace("ctxsupersededtoken", "ctxreplacementtoken!");
-    fs::write(&source, rewritten_source).unwrap();
+        .replace("ctxsupersededtoken", "ctxreplacementtext");
+    assert_eq!(
+        rewritten_source.len(),
+        fs::metadata(&source).unwrap().len() as usize
+    );
+    let mut source_file = fs::OpenOptions::new().write(true).open(&source).unwrap();
+    source_file.write_all(rewritten_source.as_bytes()).unwrap();
+    source_file.sync_all().unwrap();
 
     let replay = import_codex(&temp);
     assert_change(&replay, "changed");
@@ -369,7 +375,7 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert_eq!(replay["sources"][0]["generation_changed"], true);
     let search = json_output(isolated_ctx(&temp).args([
         "search",
-        "ctxreplacementtoken",
+        "ctxreplacementtext",
         "--provider",
         "codex",
         "--refresh",
@@ -382,7 +388,7 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert_eq!(results[0]["provider"], "codex");
     assert!(results[0]["snippet"]
         .as_str()
-        .is_some_and(|text| text.contains("ctxreplacementtoken")));
+        .is_some_and(|text| text.contains("ctxreplacementtext")));
     let superseded = json_output(isolated_ctx(&temp).args([
         "search",
         "ctxsupersededtoken",
