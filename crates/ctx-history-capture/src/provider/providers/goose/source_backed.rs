@@ -8,7 +8,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
     CaptureProvider, EventIdentityInput, EventType, HydrationFailure, LocatorRevisionPolicy,
     NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
@@ -60,13 +60,12 @@ pub(crate) use hydration::GooseSourceBackedResolverV0;
 const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
 const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
 const GOOSE_SOURCE_SCHEMA_VARIANT: &str = "goose-sessions-sqlite-v0";
-const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v1";
+const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v2";
 const GOOSE_NATIVE_SESSION_NAMESPACE: &str = "goose.session";
 const GOOSE_NATIVE_EVENT_NAMESPACE: &str = "goose.message";
 const GOOSE_LOGICAL_SESSION_KIND: &str = "goose-session";
 const GOOSE_LOGICAL_EVENT_KIND: &str = "goose-event";
 const GOOSE_LOGICAL_RELATION: &str = "goose-messages-native-id-v4";
-const GOOSE_AGENT_TYPE: &str = "goose";
 const GOOSE_MAX_EXPLICIT_RETAINED_ROUTES: usize = 32;
 const GOOSE_LOGICAL_DATABASE_DOMAIN: &[u8] = b"ctx.goose.logical-database.v1\0";
 const GOOSE_LOGICAL_SESSION_DOMAIN: &[u8] = b"ctx.goose.logical-session.v1\0";
@@ -735,7 +734,7 @@ fn goose_lexical_document(
                 .to_string_lossy()
                 .into_owned(),
         ),
-        agent_type: GOOSE_AGENT_TYPE.to_owned(),
+        agent_type: AgentType::Primary.as_str().to_owned(),
         is_primary: true,
         event_sequence,
         occurred_at_unix_ms,

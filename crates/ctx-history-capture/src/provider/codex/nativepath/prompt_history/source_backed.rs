@@ -15,13 +15,13 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor,
-    SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    CertifiedSourceAppend, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
+    ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
 const SOURCE_REVISION_KIND: &str = "codex-prompt-history-ordinary-file-v1";
-const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v1";
+const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v2";
 const FRONTIER_KIND: &str = "codex-prompt-history-jsonl-frontier-v1";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
@@ -649,7 +649,7 @@ fn lexical_document(
         provider_session_id: bounded_metadata(&record.line.session_id),
         branch: None,
         source_path: source.path().to_str().and_then(bounded_metadata),
-        agent_type: "codex".to_owned(),
+        agent_type: AgentType::Primary.as_str().to_owned(),
         is_primary: true,
         event_sequence: record.physical_ordinal,
         occurred_at_unix_ms,

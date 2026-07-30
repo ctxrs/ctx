@@ -290,6 +290,7 @@ fn lifecycle_case(provider: CaptureProvider) {
                     "api_conversation_history.json" | "ui_messages.json" | "claude_messages.json"
                 )
             })
+            && event.agent_type == "primary"
             && event.is_primary
             && matches!(
                 event.locator.coordinate(),
