@@ -8,8 +8,9 @@ use tantivy::{Index, ReloadPolicy, Searcher};
 use uuid::Uuid;
 
 use crate::{
-    durable_directory::DurableMmapDirectory, load_manifest_for_metas, meta_generation,
-    searcher_generation, validate_schema, verify_searcher, GenerationManifest, IndexError, Result,
+    analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
+    load_manifest_for_metas, meta_generation, searcher_generation, validate_schema,
+    verify_searcher, GenerationManifest, IndexError, Result,
 };
 
 /// A verified reader pinned to one immutable lexical generation.
@@ -27,6 +28,7 @@ impl VerifiedIndex {
         let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = directory.root_path().to_path_buf();
         let index = Index::open(directory)?;
+        register_body_analyzer(&index);
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let manifest = load_manifest_for_metas(&root, &metas)?;

@@ -107,8 +107,9 @@ impl VerifiedIndex {
 
     /// Searches full policy-selected event text using ordinary analyzed text.
     ///
-    /// Every analyzed token is required. QueryParser operators and field
-    /// syntax are intentionally not accepted.
+    /// An analyzed token admits a partial match. Full query-term coverage ranks
+    /// ahead of partial coverage, followed by ordinary lexical relevance.
+    /// QueryParser operators and field syntax are intentionally not accepted.
     pub fn search_event_candidates(
         &self,
         natural_text: &str,
@@ -137,9 +138,9 @@ impl VerifiedIndex {
 
     /// Searches OR-composed natural-text alternatives with shared filters.
     ///
-    /// Tokens within one alternative remain conjunctive; matching any
-    /// alternative admits the event. This is the indexed implementation of
-    /// the CLI's repeated `--term` contract.
+    /// Matching any unique analyzed token admits the event. Results rank by
+    /// query-term coverage before ordinary lexical relevance. This is the
+    /// indexed implementation of the CLI's repeated `--term` contract.
     pub fn search_event_candidates_any_with_filters(
         &self,
         natural_texts: &[&str],
@@ -150,31 +151,27 @@ impl VerifiedIndex {
             return Ok(Vec::new());
         }
         let fields = fields_from_schema(self.searcher.schema())?;
-        let mut alternatives: Vec<Box<dyn Query>> = Vec::new();
+        let mut query_terms = BTreeSet::new();
         for natural_text in natural_texts {
-            let terms = self.body_query_terms(natural_text, fields)?;
-            if terms.is_empty() {
-                continue;
-            }
-            alternatives.push(Box::new(BooleanQuery::intersection(
-                terms
-                    .into_iter()
-                    .map(|term| {
-                        Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
-                            as Box<dyn Query>
-                    })
-                    .collect(),
-            )));
+            query_terms.extend(self.body_query_terms(natural_text, fields)?);
         }
-        if alternatives.is_empty() {
+        if query_terms.is_empty() {
             return Ok(Vec::new());
         }
+        let ranking_terms = query_terms.into_iter().collect::<Vec<_>>();
+        let mut alternatives = ranking_terms
+            .iter()
+            .cloned()
+            .map(|term| {
+                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>
+            })
+            .collect::<Vec<_>>();
         let body_query: Box<dyn Query> = if alternatives.len() == 1 {
-            alternatives.pop().expect("one alternative")
+            alternatives.pop().expect("one query term")
         } else {
             Box::new(BooleanQuery::union(alternatives))
         };
-        self.collect_event_candidates(body_query, filters, limit, fields)
+        self.collect_event_candidates(body_query, &ranking_terms, filters, limit, fields)
     }
 
     /// Lists filtered metadata records without requiring a lexical term.
@@ -187,20 +184,23 @@ impl VerifiedIndex {
             return Ok(Vec::new());
         }
         let fields = fields_from_schema(self.searcher.schema())?;
-        self.collect_event_candidates(Box::new(AllQuery), filters, limit, fields)
+        self.collect_event_candidates(Box::new(AllQuery), &[], filters, limit, fields)
     }
 
     fn collect_event_candidates(
         &self,
         body_query: Box<dyn Query>,
+        ranking_terms: &[Term],
         filters: &EventSearchFilters,
         limit: usize,
         fields: Fields,
     ) -> Result<Vec<EventSearchCandidate>> {
         validate_event_sort_fast_fields(&self.searcher)?;
+        let coverage_by_segment =
+            self.query_term_coverage_by_segment(ranking_terms, fields.body_search)?;
         let source_identity_query = self.source_identity_query(filters, fields)?;
         let query = filtered_event_query(body_query, source_identity_query, filters, fields)?;
-        let collector = TopDocs::with_limit(limit).tweak_score(|segment_reader| {
+        let collector = TopDocs::with_limit(limit).tweak_score(move |segment_reader| {
             // These readers were checked above. The fallbacks keep this
             // infallible collector closure panic-free if Tantivy ever changes
             // when it resolves a validated fast field.
@@ -214,30 +214,61 @@ impl VerifiedIndex {
                 .u64(EVENT_ID_LOW_FIELD)
                 .ok()
                 .map(|column| column.first_or_default_col(0));
+            let coverage = coverage_by_segment
+                .get(&segment_reader.segment_id())
+                .cloned()
+                .unwrap_or_default();
             move |doc, score| {
                 let high = high.as_ref().map_or(0, |column| column.get_val(doc));
                 let low = low.as_ref().map_or(0, |column| column.get_val(doc));
-                (score, Reverse((high, low)))
+                (
+                    coverage.get(&doc).copied().unwrap_or(0),
+                    score,
+                    Reverse((high, low)),
+                )
             }
         });
-        type ScoredDocAddress = ((Score, Reverse<(u64, u64)>), DocAddress);
+        type ScoredDocAddress = ((u32, Score, Reverse<(u64, u64)>), DocAddress);
         let hits: Vec<ScoredDocAddress> = self.searcher.search(query.as_ref(), &collector)?;
         let mut candidates = Vec::with_capacity(hits.len());
-        for ((score, _), address) in hits {
+        for ((_, score, _), address) in hits {
             candidates.push(EventSearchCandidate {
                 event: self.event_record(address, fields)?,
                 score,
             });
         }
-        candidates.sort_by(|left, right| {
-            right.score.total_cmp(&left.score).then_with(|| {
-                left.event
-                    .event_id
-                    .as_uuid()
-                    .cmp(&right.event.event_id.as_uuid())
-            })
-        });
         Ok(candidates)
+    }
+
+    fn query_term_coverage_by_segment(
+        &self,
+        terms: &[Term],
+        body_field: tantivy::schema::Field,
+    ) -> Result<HashMap<SegmentId, Arc<HashMap<DocId, u32>>>> {
+        let mut coverage_by_segment = HashMap::new();
+        for segment in self.searcher.segment_readers() {
+            let mut coverage = HashMap::<DocId, u32>::new();
+            if !terms.is_empty() {
+                let inverted = segment.inverted_index(body_field)?;
+                for term in terms {
+                    let Some(mut postings) =
+                        inverted.read_postings(term, IndexRecordOption::Basic)?
+                    else {
+                        continue;
+                    };
+                    let mut doc = postings.doc();
+                    while doc != TERMINATED {
+                        if !segment.is_deleted(doc) {
+                            let count = coverage.entry(doc).or_default();
+                            *count = count.saturating_add(1);
+                        }
+                        doc = postings.advance();
+                    }
+                }
+            }
+            coverage_by_segment.insert(segment.segment_id(), Arc::new(coverage));
+        }
+        Ok(coverage_by_segment)
     }
 
     fn source_identity_query(

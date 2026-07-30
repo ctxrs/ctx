@@ -241,11 +241,8 @@ pub(in crate::commands::source_index) fn index_search_filters(
         .flatten()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .map(|provider_session_id| ExcludedSessionTree {
-            provider: LEGACY_ACTIVE_SESSION_PROVIDER.as_str().to_owned(),
-            provider_session_id,
-            session_id: None,
-        });
+        .map(|provider_session_id| excluded_active_session_tree(index, provider_session_id))
+        .transpose()?;
     Ok(EventSearchFilters {
         session_id,
         provider: request
@@ -267,5 +264,27 @@ pub(in crate::commands::source_index) fn index_search_filters(
         file: request.file.as_ref().map(|path| path.display().to_string()),
         exclude_session_tree,
         ..EventSearchFilters::default()
+    })
+}
+
+fn excluded_active_session_tree(
+    index: &VerifiedIndex,
+    provider_session_id: String,
+) -> Result<ExcludedSessionTree> {
+    let sessions = index.sessions_by_provider_session_id(
+        &provider_session_id,
+        Some(LEGACY_ACTIVE_SESSION_PROVIDER.as_str()),
+    )?;
+    let session_id = match sessions.as_slice() {
+        [session] => Some(session.root_session_id.as_uuid()),
+        [first, second] if first.root_session_id == second.root_session_id => {
+            Some(first.root_session_id.as_uuid())
+        }
+        _ => None,
+    };
+    Ok(ExcludedSessionTree {
+        provider: LEGACY_ACTIVE_SESSION_PROVIDER.as_str().to_owned(),
+        provider_session_id,
+        session_id,
     })
 }

@@ -3,6 +3,7 @@
 //! A Tantivy commit names a durable immutable source-revision manifest, so
 //! readers observe either the previous complete generation or the next one.
 
+mod analyzer;
 mod contracts;
 mod durable_directory;
 mod identity;
@@ -183,6 +184,7 @@ impl GenerationWriter {
                 IndexSettings::default(),
             )?
         };
+        analyzer::register_body_analyzer(&index);
         drop(initialization_guard);
         let fields = fields_from_schema(&index.schema())?;
         validate_schema(&index.schema())?;

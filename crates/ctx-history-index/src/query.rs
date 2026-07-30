@@ -2,8 +2,9 @@ mod execution;
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
     ops::Bound,
+    sync::Arc,
 };
 
 use ctx_history_core::{
@@ -13,20 +14,21 @@ use ctx_history_core::{
 use serde::{Deserialize, Serialize};
 use tantivy::{
     collector::{DocSetCollector, TopDocs},
+    index::SegmentId,
     query::{
         AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, RegexQuery,
         TermQuery, TermSetQuery,
     },
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
-    DocAddress, DocSet, Score, TantivyDocument, Term, TERMINATED,
+    DocAddress, DocId, DocSet, Score, TantivyDocument, Term, TERMINATED,
 };
 use uuid::Uuid;
 
 use super::{fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex};
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
-const BODY_ANALYZER: &str = "default";
+use crate::analyzer::BODY_ANALYZER;
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
