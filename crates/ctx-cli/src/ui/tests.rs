@@ -147,6 +147,9 @@ fn bootstrap_conservatively_recognizes_explicit_machine_output() {
         "json"
     ])));
     assert!(scan_machine_output_hint(&args(&["ctx", "mcp", "serve"])));
+    assert!(scan_machine_output_hint(&args(&[
+        "ctx", "mcp", "--quiet", "serve"
+    ])));
     assert!(!scan_machine_output_hint(&args(&[
         "ctx", "search", "failure"
     ])));

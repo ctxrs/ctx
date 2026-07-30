@@ -421,7 +421,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
 
     assert!(iteration.did_work);
     assert!(!iteration.failed);
-    assert!(calls.borrow().is_empty());
+    assert_eq!(&*calls.borrow(), &["relational_projection"]);
     assert!(!legacy_database.exists());
     assert_eq!(fs::read(&legacy_semantic_job)?, b"legacy-semantic-job");
     assert!(ctx_history_index::VerifiedIndex::open(
@@ -435,7 +435,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
     );
     assert_eq!(
         report["jobs"]["semantic_index"]["reason"],
-        "source_backed_semantic_not_integrated"
+        "semantic_disabled"
     );
     Ok(())
 }

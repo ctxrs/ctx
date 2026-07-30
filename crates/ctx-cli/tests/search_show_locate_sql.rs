@@ -28,8 +28,9 @@ fn start_source_refresh_daemon_with_env(
     temp: &TempDir,
     extra_env: &[(&str, &Path)],
 ) -> SourceRefreshDaemon {
+    fs::create_dir_all(data_root(temp)).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root(temp).join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
@@ -126,7 +127,7 @@ fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             || stderr.contains("no such table: source_backed_relational_state"))
             && Instant::now() < deadline
         {
-            if let Ok(job) = fs::read(temp.path().join("daemon/jobs/relational-catch-up.json"))
+            if let Ok(job) = fs::read(data_root(temp).join("daemon/jobs/relational-catch-up.json"))
                 .and_then(|bytes| {
                     serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
                 })
@@ -370,7 +371,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
 #[test]
 fn sql_reads_generation_only_projection_and_supports_formats_and_input_sources() {
     let temp = tempdir();
-    let generation_id = initialize_generation_only_sql_projection(temp.path());
+    let generation_id = initialize_generation_only_sql_projection(&data_root(&temp));
     assert!(!temp.path().join("work.sqlite").exists());
 
     let json =
@@ -457,11 +458,11 @@ fn fresh_sql_is_read_only_and_initializes_no_legacy_store() {
     let json = json_output(ctx(&temp).args(["sql", "SELECT 1 AS one", "--format=json"]));
     assert_eq!(json["rows"], json!([[1]]));
     assert!(!temp.path().join("work.sqlite").exists());
-    assert!(temp.path().join("relational.sqlite").is_file());
+    assert!(data_root(&temp).join("relational.sqlite").is_file());
 
     let stderr = failure_stderr(ctx(&temp).args(["sql", "CREATE TABLE nope(x INTEGER)"]));
     assert!(stderr.contains("SQL query must be read-only"));
-    let conn = Connection::open(temp.path().join("relational.sqlite")).unwrap();
+    let conn = Connection::open(data_root(&temp).join("relational.sqlite")).unwrap();
     assert_eq!(
         sqlite_count(
             &conn,
@@ -503,9 +504,9 @@ fn fresh_home_search_mvp_flow() {
         .arg("setup")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Daemon is running"));
+        .stdout(predicate::str::contains("History indexing"));
     assert!(
-        !temp.path().join("config.toml").exists(),
+        !data_root(&temp).join("config.toml").exists(),
         "setup should not write config.toml for implicit defaults"
     );
 
@@ -645,7 +646,7 @@ fn fresh_home_search_mvp_flow() {
     let human_search = String::from_utf8(human_search).unwrap();
     assert!(human_search.starts_with("1 result\n\n"), "{human_search}");
     assert!(human_search.contains("1. "));
-    assert!(human_search.contains("Session  codex | "), "{human_search}");
+    assert!(human_search.contains("Session  codex · "), "{human_search}");
     assert!(
         human_search.contains("Inspect\n     ctx show session"),
         "{human_search}"
@@ -857,7 +858,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
         .assert()
         .failure();
 
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(data_root(&temp).join("usage.sqlite")).unwrap();
     let totals = |operation: &str, outcome: &str, value_class: &str| {
         connection
             .query_row(
@@ -1014,7 +1015,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     );
 
     fs::write(
-        temp.path().join("config.toml"),
+        data_root(&temp).join("config.toml"),
         "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
     )
     .unwrap();

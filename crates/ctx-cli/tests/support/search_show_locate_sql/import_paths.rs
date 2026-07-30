@@ -14,7 +14,7 @@ fn pi_cli_imports_directory_tree_path() {
     write_pi_session_jsonl(
         &project.join("2026-06-24T12-01-00-000Z_pi-dir-beta.jsonl"),
         "pi-dir-beta",
-        "pi directory beta oracle",
+        "ctxpibetauniquetoken",
     );
 
     let imported = json_output(ctx(&temp).args([
@@ -43,16 +43,16 @@ fn pi_cli_imports_directory_tree_path() {
 
     let search = json_output(ctx(&temp).args([
         "search",
-        "pi directory beta oracle",
+        "ctxpibetauniquetoken",
         "--provider",
         "pi",
         "--format=json",
     ]));
-    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 1, "message");
+    assert_search_provider_oracle(&search, "pi", "ctxpibetauniquetoken", 1, "message");
     assert!(search["results"][0]["snippet"]
         .as_str()
         .unwrap()
-        .contains("pi directory beta oracle"));
+        .contains("ctxpibetauniquetoken"));
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn pi_cli_rejects_wrong_file_import_path() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("has no valid session header")
+            predicate::str::contains("Pi explicit JSONL file has no valid session header")
                 .and(predicate::str::contains(path.to_str().unwrap())),
         );
 }
@@ -176,15 +176,15 @@ fn import_path_requires_provider_before_initializing_source_epoch() {
             "ctx import --path requires --provider",
         ));
     assert!(
-        !temp.path().join("search").exists(),
+        !data_root(&temp).join("search").exists(),
         "native path import without provider should not initialize lexical state"
     );
     assert!(
-        !temp.path().join("relational.sqlite").exists(),
+        !data_root(&temp).join("relational.sqlite").exists(),
         "native path import without provider should not initialize relational state"
     );
     assert!(
-        !temp.path().join("catalogs").exists(),
+        !data_root(&temp).join("catalogs").exists(),
         "native path import without provider should not initialize source catalogs"
     );
 }
@@ -211,7 +211,7 @@ fn import_rejects_symlinked_provider_root() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("symlinked Pi session roots are rejected")
+            predicate::str::contains("symlinked explicit provider source roots are rejected")
                 .and(predicate::str::contains(path.to_str().unwrap())),
         );
 }

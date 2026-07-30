@@ -28,6 +28,10 @@ pub(crate) fn ctx(temp: &TempDir) -> Command {
     ctx_with_enabled_daemon(temp)
 }
 
+pub(crate) fn data_root(temp: &TempDir) -> PathBuf {
+    temp.path().join("ctx-data")
+}
+
 fn ctx_binary() -> PathBuf {
     let program = PathBuf::from(Command::cargo_bin("ctx").unwrap().get_program());
     if program.is_absolute() {
@@ -53,7 +57,7 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         .path()
         .join(PERSISTENT_DAEMON_TEST_ROOT_MARKER)
         .is_file();
-    command.env("CTX_DATA_ROOT", temp.path());
+    command.env("CTX_DATA_ROOT", data_root(temp));
     command.env("HOME", temp.path());
     command.env("CTX_ANALYTICS_ENABLED", "false");
     // Existing integration tests do not exercise local usage unless they opt in

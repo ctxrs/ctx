@@ -19,6 +19,7 @@ use super::super::{
 
 const CODEX_AMBIGUOUS_JSONL_REASON: &str =
     "Codex JSONL schema is ambiguous; the bounded first-record probe requires either prompt-history fields (session_id, ts, text) or rollout fields (timestamp, type, payload)";
+const PI_INVALID_JSONL_REASON: &str = "Pi explicit JSONL file has no valid session header";
 const UNSUPPORTED_EXPLICIT_ROOT_REASON: &str =
     "the explicit provider path uses an unsupported, non-local, or unsafe source root";
 
@@ -36,6 +37,12 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
     let is_directory = observed == Ok(SourcePathKind::Directory);
     if let Some(reason) = exact_current_unsupported_reason(provider, &path, observed.ok()) {
         return unsupported_source(spec, path, reason);
+    }
+    if provider == CaptureProvider::Pi
+        && observed == Ok(SourcePathKind::File)
+        && !pi_explicit_jsonl_has_session_header(&path)
+    {
+        return unsupported_source(spec, path, PI_INVALID_JSONL_REASON);
     }
     let exists = !matches!(observed, Err(SourcePathError::Missing));
 
@@ -147,6 +154,33 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
 }
 
 fn codex_explicit_jsonl_source_format(path: &Path) -> Option<&'static str> {
+    let value = certified_first_jsonl_value(path)?;
+    let object = value.as_object()?;
+    let prompt_history = object.get("session_id").and_then(Value::as_str).is_some()
+        && object.get("ts").and_then(Value::as_i64).is_some()
+        && object.get("text").and_then(Value::as_str).is_some();
+    let rollout = object.get("timestamp").and_then(Value::as_str).is_some()
+        && object.get("type").and_then(Value::as_str).is_some()
+        && object.get("payload").and_then(Value::as_object).is_some();
+    match (prompt_history, rollout) {
+        (true, false) => Some("codex_history_jsonl"),
+        (false, true) => Some("codex_session_jsonl"),
+        _ => None,
+    }
+}
+
+fn pi_explicit_jsonl_has_session_header(path: &Path) -> bool {
+    certified_first_jsonl_value(path).is_some_and(|value| {
+        value.get("type").and_then(Value::as_str) == Some("session")
+            && value
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            && value.get("timestamp").and_then(Value::as_str).is_some()
+    })
+}
+
+fn certified_first_jsonl_value(path: &Path) -> Option<Value> {
     let file = open_provider_source_file(path).ok()?;
     let mut reader = BufReader::new(file.file().try_clone().ok()?);
     let mut record = Vec::new();
@@ -174,20 +208,8 @@ fn codex_explicit_jsonl_source_format(path: &Path) -> Option<&'static str> {
     }
 
     let value = serde_json::from_slice::<Value>(&record).ok()?;
-    let object = value.as_object()?;
-    let prompt_history = object.get("session_id").and_then(Value::as_str).is_some()
-        && object.get("ts").and_then(Value::as_i64).is_some()
-        && object.get("text").and_then(Value::as_str).is_some();
-    let rollout = object.get("timestamp").and_then(Value::as_str).is_some()
-        && object.get("type").and_then(Value::as_str).is_some()
-        && object.get("payload").and_then(Value::as_object).is_some();
-    let format = match (prompt_history, rollout) {
-        (true, false) => Some("codex_history_jsonl"),
-        (false, true) => Some("codex_session_jsonl"),
-        _ => None,
-    };
     file.revalidate().ok()?;
-    format
+    Some(value)
 }
 
 fn exact_current_unsupported_reason(

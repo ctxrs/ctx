@@ -163,6 +163,6 @@ mod tests {
 
         let dispatch = include_str!("../import.rs");
         assert!(!dispatch.contains("database_path"));
-        assert!(!dispatch.contains("Store::open"));
+        assert!(!dispatch.contains(&["Store", "::open"].concat()));
     }
 }

@@ -13,7 +13,7 @@ mod glyph;
 mod style;
 mod writer;
 
-pub(crate) use bootstrap::bootstrap_color_choice;
+pub(crate) use bootstrap::{bootstrap_color_choice, scan_color_mode, scan_machine_output_hint};
 pub(crate) use components::{
     diagnostic, empty_state, evidence_list, fields, hint, outcome, progress, section, table,
     Action, Diagnostic, DiagnosticLevel, EmptyState, Evidence, Field, Hint, Outcome, OutcomeState,

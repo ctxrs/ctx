@@ -5,17 +5,17 @@
   "provenance_kind": "content_addressed_candidate",
   "scope": "selected_typed_telemetry_contract_inventory",
   "files": {
-    "crates/ctx-cli/src/analytics/operation.rs": "9532976e13e7d66003ca4e41744e688eeaff2421ab3810ab5eb96465dc7fba25",
-    "crates/ctx-cli/src/analytics/daemon.rs": "5a7337e9b144fcbdc8ed4f5f96b72ec517c447d56e0eb20a27e99eb91959fd72",
+    "crates/ctx-cli/src/analytics/operation.rs": "f06bd20bc3de99b708a6d3fdf1ff11ad2cfb343f29b0c49925313b64bafe024e",
+    "crates/ctx-cli/src/analytics/daemon.rs": "d9a48d77809b2999cbed51b470419396ca13a42179b5ae577bf220a2426534ae",
     "crates/ctx-cli/src/analytics/mcp.rs": "951eb98a057dee7ff67f0746e878752cfa174a57bee74e8a2f5da5d5ac8d8070",
     "crates/ctx-cli/src/analytics/runtime.rs": "b2ab7fb8655d1eafc34e997472f2fdb0a4afa33029a8b92b47f9f752e4d951a6",
-    "crates/ctx-cli/src/analytics/pro.rs": "d72121e4876179dc691061af5a471efa651180ea486e6c7cd6837b4e09aa194e",
+    "crates/ctx-cli/src/analytics/pro.rs": "086b5d2e7b227258a522c168f8fdc9c855f0dbd4236a52b14de4d94e85fb2510",
     "crates/ctx-cli/src/analytics/buckets.rs": "46e2d96819cbb2c83534b38d5be6500e175b014c6ee9f6d4ad41cdb5421fc566",
-    "crates/ctx-cli/src/analytics/provider.rs": "7ed0cf239abb7617a9111faf946b1e43ec406431d7896e51c2533057cd2f4fda",
+    "crates/ctx-cli/src/analytics/provider.rs": "21a9a670ca9958df30b9af3b2bf7bc875cd28c03781000e25ade1bf09c78a1ed",
     "crates/ctx-cli/src/analytics/product.rs": "90c84843faf1550d417da4e7e77134c6a2fc9d6425018b6b0c458be74e358387",
     "crates/ctx-cli/src/analytics/sender.rs": "a17a2b75e0178c6d16e5add6e4e58c5c634dbc3644cd832840a9abb60ce29fb2",
-    "crates/ctx-cli/src/upgrade/command.rs": "0b91291c968dfc5137e4100f9071048a5cb5d67884ba86e71a1cabdcfb90c1a0",
-    "crates/ctx-cli/src/upgrade/command/daemon.rs": "548cc098fb7d95f80c839728e56bec7555665a1e9e5d13da082678fa3e7fe31e",
-    "crates/ctx-cli/src/upgrade/state.rs": "451c3511656fe99e35d52ebfc7e890ede9a152c8b841013b6bbd537f124ec397"
+    "crates/ctx-cli/src/upgrade/command.rs": "fd47ea62b2930b78e923dbb5a046466d076d47a705591bc0a254f168a2ff0bea",
+    "crates/ctx-cli/src/upgrade/command/daemon.rs": "e0006c93dbf400be045cce25515a30e7f5226d579c15169bb5043820f390dd24",
+    "crates/ctx-cli/src/upgrade/state.rs": "99c35db0aa7d0f652463576602f0d2df100225b18003fa3a9a2b3bd668693407"
   }
 }

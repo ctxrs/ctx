@@ -136,6 +136,20 @@ fn normalized_query_alternative(value: &str) -> Option<String> {
 }
 
 pub(super) fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
+    if request
+        .workspace
+        .as_deref()
+        .is_some_and(|workspace| workspace.trim().is_empty())
+    {
+        return Err(anyhow!("query filter workspace is empty"));
+    }
+    if request
+        .file
+        .as_ref()
+        .is_some_and(|file| file.to_str().is_some_and(|file| file.trim().is_empty()))
+    {
+        return Err(anyhow!("query filter file is empty"));
+    }
     let source_identity = normalized_source_identity_filters(request)?;
     if !source_identity.is_empty()
         && request
@@ -158,6 +172,20 @@ pub(super) fn validate_search_request(request: &SourceSearchRequest) -> Result<(
         return Err(anyhow!(
             "semantic and hybrid search need a non-empty text query"
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn normalize_search_request(request: &mut SourceSearchRequest) -> Result<()> {
+    if request.workspace.is_some() {
+        request.workspace = normalized_optional_text(request.workspace.as_deref())
+            .map(Some)
+            .ok_or_else(|| anyhow!("query filter workspace is empty"))?;
+    }
+    if let Some(file) = request.file.as_ref().and_then(|file| file.to_str()) {
+        let file = normalized_optional_text(Some(file))
+            .ok_or_else(|| anyhow!("query filter file is empty"))?;
+        request.file = Some(PathBuf::from(file));
     }
     Ok(())
 }
@@ -253,7 +281,7 @@ pub(in crate::commands::source_index) fn index_search_filters(
         provider_key: source_identity.provider_key,
         source_id: source_identity.source_id,
         source_format: source_identity.source_format,
-        workspace: request.workspace.clone(),
+        workspace: normalized_optional_text(request.workspace.as_deref()),
         since_unix_ms,
         event_type,
         agent_scope: if request.primary_only || !request.include_subagents {
@@ -261,10 +289,20 @@ pub(in crate::commands::source_index) fn index_search_filters(
         } else {
             AgentScope::All
         },
-        file: request.file.as_ref().map(|path| path.display().to_string()),
+        file: request
+            .file
+            .as_ref()
+            .and_then(|path| normalized_optional_text(Some(&path.display().to_string()))),
         exclude_session_tree,
         ..EventSearchFilters::default()
     })
+}
+
+fn normalized_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn excluded_active_session_tree(

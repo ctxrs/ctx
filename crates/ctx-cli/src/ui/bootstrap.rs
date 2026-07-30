@@ -20,7 +20,7 @@ where
     mode.as_anstream().write_global();
 }
 
-pub(super) fn scan_color_mode<I>(arguments: I) -> Option<ColorMode>
+pub(crate) fn scan_color_mode<I>(arguments: I) -> Option<ColorMode>
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -55,7 +55,7 @@ where
 /// Conservatively recognizes explicit machine-output spellings before Clap
 /// renders a possible parse error. Dispatch remains the authoritative command
 /// classifier after parsing.
-pub(super) fn scan_machine_output_hint(arguments: &[OsString]) -> bool {
+pub(crate) fn scan_machine_output_hint(arguments: &[OsString]) -> bool {
     let arguments = arguments
         .iter()
         .skip(1)
@@ -82,7 +82,10 @@ pub(super) fn scan_machine_output_hint(arguments: &[OsString]) -> bool {
         }
     }
 
-    arguments.windows(2).any(|pair| pair == ["mcp", "serve"])
+    arguments
+        .iter()
+        .position(|argument| *argument == "mcp")
+        .is_some_and(|position| arguments[position + 1..].contains(&"serve"))
 }
 
 fn machine_format(value: &str) -> bool {

@@ -31,7 +31,7 @@ fn human_search_reports_no_results() {
         .stdout
         .clone();
     let indexed = String::from_utf8(indexed).unwrap();
-    assert!(indexed.contains("no results for definitely-no-results-here"));
+    assert!(indexed.contains("No results for definitely-no-results-here"));
 
     let term_only = ctx(&temp)
         .args(["search", "--term", "term-only-no-results"])
@@ -41,7 +41,7 @@ fn human_search_reports_no_results() {
         .stdout
         .clone();
     let term_only = String::from_utf8(term_only).unwrap();
-    assert!(term_only.contains("no results for term-only-no-results"));
+    assert!(term_only.contains("No results for term-only-no-results"));
 }
 
 #[test]

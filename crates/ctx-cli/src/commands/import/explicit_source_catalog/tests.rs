@@ -7,7 +7,7 @@ mod tests {
     };
     use ctx_history_index::WriterOptions;
     use serde_json::json;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     use super::*;
 
@@ -21,6 +21,10 @@ mod tests {
 
     fn custom_source(path: &Path) -> ProviderSource {
         custom_provider_source(path.to_path_buf(), true).unwrap()
+    }
+
+    fn test_data_root(temp: &TempDir) -> PathBuf {
+        temp.path().join("ctx-data")
     }
 
     fn write_custom_history(path: &Path, marker: &str) {
@@ -90,19 +94,20 @@ mod tests {
     fn first_add_and_idempotent_upsert_are_metadata_only() {
         let temp = tempdir().unwrap();
         let source_path = temp.path().join("custom.jsonl");
+        let data_root = test_data_root(&temp);
         write_custom_history(&source_path, "catalog first add");
         let source = custom_source(&source_path);
 
-        let first = upsert_explicit_source(temp.path(), &source).unwrap();
-        let second = upsert_explicit_source(temp.path(), &source).unwrap();
+        let first = upsert_explicit_source(&data_root, &source).unwrap();
+        let second = upsert_explicit_source(&data_root, &source).unwrap();
 
         assert!(first.changed);
         assert!(!second.changed);
         assert_eq!(first.authority, second.authority);
         assert_eq!(first.catalog_lineage, second.catalog_lineage);
         assert_eq!(first.authority.revision(), 1);
-        assert!(!ctx_history_core::database_path(temp.path().to_path_buf()).exists());
-        let bytes = fs::read(catalog_root(temp.path()).join(catalog_revision_filename(1))).unwrap();
+        assert!(!ctx_history_core::database_path(data_root.clone()).exists());
+        let bytes = fs::read(catalog_root(&data_root).join(catalog_revision_filename(1))).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         for forbidden in [
             "preview",
@@ -121,16 +126,17 @@ mod tests {
         let temp = tempdir().unwrap();
         let first_path = temp.path().join("first.jsonl");
         let second_path = temp.path().join("second.jsonl");
+        let data_root = test_data_root(&temp);
         write_custom_history(&first_path, "first path");
         write_custom_history(&second_path, "second path");
-        let first = upsert_explicit_source(temp.path(), &custom_source(&first_path)).unwrap();
+        let first = upsert_explicit_source(&data_root, &custom_source(&first_path)).unwrap();
 
         let conflict =
-            upsert_explicit_source(temp.path(), &custom_source(&second_path)).unwrap_err();
+            upsert_explicit_source(&data_root, &custom_source(&second_path)).unwrap_err();
         assert!(conflict.to_string().contains("prior path still exists"));
 
         fs::remove_file(&first_path).unwrap();
-        let moved = upsert_explicit_source(temp.path(), &custom_source(&second_path)).unwrap();
+        let moved = upsert_explicit_source(&data_root, &custom_source(&second_path)).unwrap();
         assert_eq!(moved.catalog_lineage, first.catalog_lineage);
         assert_eq!(moved.authority.revision(), 2);
     }
@@ -138,12 +144,13 @@ mod tests {
     #[test]
     fn disable_publishes_certified_deletion_but_missing_enabled_path_does_not() {
         let temp = tempdir().unwrap();
+        let data_root = test_data_root(&temp);
         let source_path = temp.path().join("custom.jsonl");
-        let index_root = temp.path().join("index");
+        let index_root = data_root.join("index");
         write_custom_history(&source_path, "certified catalog deletion");
         let source = custom_source(&source_path);
-        upsert_explicit_source(temp.path(), &source).unwrap();
-        refresh_catalog(temp.path(), &index_root);
+        upsert_explicit_source(&data_root, &source).unwrap();
+        refresh_catalog(&data_root, &index_root);
         let first = VerifiedIndex::open(&index_root).unwrap();
         let first_generation = first.generation_id().to_owned();
         assert_eq!(first.manifest().sources.len(), 1);
@@ -151,7 +158,7 @@ mod tests {
         fs::remove_file(&source_path).unwrap();
         let mut missing_build = empty_build();
         let missing =
-            register_explicit_source_catalog_routes(temp.path(), &index_root, &mut missing_build)
+            register_explicit_source_catalog_routes(&data_root, &index_root, &mut missing_build)
                 .unwrap_err();
         assert!(missing
             .to_string()
@@ -160,9 +167,9 @@ mod tests {
         assert_eq!(retained.generation_id(), first_generation);
         assert_eq!(retained.manifest().sources.len(), 1);
 
-        disable_explicit_source(temp.path(), CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT)
+        disable_explicit_source(&data_root, CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT)
             .unwrap();
-        refresh_catalog(temp.path(), &index_root);
+        refresh_catalog(&data_root, &index_root);
         let deleted = VerifiedIndex::open(&index_root).unwrap();
         assert!(deleted.manifest().sources.is_empty());
         assert_eq!(deleted.manifest().removals.len(), 1);
@@ -174,26 +181,28 @@ mod tests {
     #[test]
     fn custom_history_refreshes_end_to_end_without_work_sqlite() {
         let temp = tempdir().unwrap();
+        let data_root = test_data_root(&temp);
         let source_path = temp.path().join("custom.jsonl");
-        let index_root = temp.path().join("index");
+        let index_root = data_root.join("index");
         write_custom_history(&source_path, "source catalog end to end");
-        upsert_explicit_source(temp.path(), &custom_source(&source_path)).unwrap();
+        upsert_explicit_source(&data_root, &custom_source(&source_path)).unwrap();
 
-        refresh_catalog(temp.path(), &index_root);
+        refresh_catalog(&data_root, &index_root);
 
         let verified = VerifiedIndex::open(&index_root).unwrap();
         assert_eq!(verified.manifest().sources.len(), 1);
         assert_eq!(verified.manifest().indexed_documents, 1);
-        assert!(!ctx_history_core::database_path(temp.path().to_path_buf()).exists());
+        assert!(!ctx_history_core::database_path(data_root).exists());
     }
 
     #[test]
     fn malformed_committed_catalog_fails_closed_but_abandoned_staging_is_ignored() {
         let temp = tempdir().unwrap();
+        let data_root = test_data_root(&temp);
         let source_path = temp.path().join("custom.jsonl");
         write_custom_history(&source_path, "catalog integrity");
-        upsert_explicit_source(temp.path(), &custom_source(&source_path)).unwrap();
-        let root = catalog_root(temp.path());
+        upsert_explicit_source(&data_root, &custom_source(&source_path)).unwrap();
+        let root = catalog_root(&data_root);
         fs::write(
             root.join(format!(
                 "{CATALOG_STAGING_PREFIX}orphan{CATALOG_STAGING_SUFFIX}"
@@ -201,20 +210,21 @@ mod tests {
             b"{malformed",
         )
         .unwrap();
-        assert_eq!(load_catalog(temp.path()).unwrap().authority.revision(), 1);
+        assert_eq!(load_catalog(&data_root).unwrap().authority.revision(), 1);
 
         fs::write(
             root.join(catalog_revision_filename(1)),
             b"{\"schema_version\":1}",
         )
         .unwrap();
-        let error = load_catalog(temp.path()).unwrap_err();
+        let error = load_catalog(&data_root).unwrap_err();
         assert!(error.to_string().contains("decode explicit source catalog"));
     }
 
     #[test]
     fn unsupported_explicit_format_is_rejected_before_catalog_creation() {
         let temp = tempdir().unwrap();
+        let data_root = test_data_root(&temp);
         let rollout = temp.path().join("rollout.jsonl");
         fs::write(
             &rollout,
@@ -223,19 +233,20 @@ mod tests {
         .unwrap();
         let mut source = provider_source_for_path(CaptureProvider::Codex, rollout);
         source.source_format = "unlanded_test_format";
-        let error = upsert_explicit_source(temp.path(), &source).unwrap_err();
+        let error = upsert_explicit_source(&data_root, &source).unwrap_err();
         assert!(error
             .to_string()
             .contains("has no landed source-backed adapter"));
-        assert!(!catalog_root(temp.path()).exists());
+        assert!(!catalog_root(&data_root).exists());
     }
 
     #[test]
     fn automatic_and_explicit_authorities_merge_or_fail_without_double_ingestion() {
         let temp = tempdir().unwrap();
+        let data_root = test_data_root(&temp);
         let custom = temp.path().join("custom.jsonl");
         write_custom_history(&custom, "automatic explicit merge");
-        upsert_explicit_source(temp.path(), &custom_source(&custom)).unwrap();
+        upsert_explicit_source(&data_root, &custom_source(&custom)).unwrap();
 
         let automatic_source_path = temp.path().join("automatic.jsonl");
         fs::write(
@@ -258,18 +269,19 @@ mod tests {
             discovery_duration: Duration::ZERO,
         };
         register_explicit_source_catalog_routes(
-            temp.path(),
-            &temp.path().join("index"),
+            &data_root,
+            &data_root.join("index"),
             &mut build,
         )
         .unwrap();
         assert_eq!(build.registry.executable_route_count(), 2);
 
         let native = tempdir().unwrap();
+        let native_data_root = test_data_root(&native);
         let prompt = native.path().join("history.jsonl");
         fs::write(&prompt, r#"{"session_id":"one","ts":1,"text":"prompt"}"#).unwrap();
         let source = provider_source_for_path(CaptureProvider::Codex, prompt);
-        upsert_explicit_source(native.path(), &source).unwrap();
+        upsert_explicit_source(&native_data_root, &source).unwrap();
         let mut duplicate_registry = SourceBackedProviderRegistry::new();
         register_landed_source_backed_route(
             &mut duplicate_registry,
@@ -283,8 +295,8 @@ mod tests {
             discovery_duration: Duration::ZERO,
         };
         let error = register_explicit_source_catalog_routes(
-            native.path(),
-            &native.path().join("index"),
+            &native_data_root,
+            &native_data_root.join("index"),
             &mut duplicate,
         )
         .unwrap_err();
