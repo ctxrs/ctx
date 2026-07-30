@@ -1,15 +1,12 @@
 use std::{
-    fs::{self, Metadata},
+    fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::common::io::{
     ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
 };
-use crate::{fnv1a64, CaptureError, Result};
-
-use super::{MUX_CAPTURE_REVISION, MUX_POLICY_REVISION};
+use crate::{CaptureError, Result};
 
 pub(super) const MUX_MAX_DIRECTORY_DEPTH: usize = 128;
 
@@ -84,99 +81,6 @@ fn mux_parent_session_id_from_path(dir: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MuxFrozenFile {
-    pub(super) length: u64,
-    modified: SystemTime,
-    readonly: bool,
-    device: Option<u64>,
-    inode: Option<u64>,
-}
-
-impl MuxFrozenFile {
-    pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-
-        #[cfg(unix)]
-        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
-        #[cfg(not(unix))]
-        let (device, inode) = (None, None);
-
-        Ok(Self {
-            length: metadata.len(),
-            modified: metadata.modified()?,
-            readonly: metadata.permissions().readonly(),
-            device,
-            inode,
-        })
-    }
-
-    fn revision_component(&self, output: &mut String) {
-        let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        output.push_str(&format!(
-            "{}\0{side}{seconds}.{nanos:09}\0{}\0{:?}\0{:?}\n",
-            self.length, self.readonly, self.device, self.inode,
-        ));
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MuxFileObservation {
-    pub(super) canonical_path: PathBuf,
-    pub(super) content: MuxFrozenFile,
-    metadata: Option<MuxFrozenFile>,
-}
-
-impl MuxFileObservation {
-    pub(super) fn from_admitted(
-        canonical_path: PathBuf,
-        content: &Metadata,
-        metadata: Option<&Metadata>,
-    ) -> Result<Self> {
-        Ok(Self {
-            canonical_path,
-            content: MuxFrozenFile::from_metadata(content)?,
-            metadata: metadata.map(MuxFrozenFile::from_metadata).transpose()?,
-        })
-    }
-
-    pub(super) fn source_revision(&self, kind: &str) -> String {
-        let mut input = format!(
-            "mux-{kind}-v1\0capture={MUX_CAPTURE_REVISION}\0policy={MUX_POLICY_REVISION}\ncontent\n"
-        );
-        self.content.revision_component(&mut input);
-        input.push_str("metadata\n");
-        match &self.metadata {
-            Some(metadata) => metadata.revision_component(&mut input),
-            None => input.push_str("missing\n"),
-        }
-        format!("mux-{kind}-v1:fnv1a64:{:016x}", fnv1a64(input.as_bytes()))
-    }
-
-    pub(super) fn content_identity(&self) -> String {
-        format!(
-            "mux-file-v1:{:?}:{:?}",
-            self.content.device, self.content.inode
-        )
-    }
-
-    pub(super) fn metadata_revision(&self) -> String {
-        let mut input = "mux-metadata-v1\n".to_owned();
-        match &self.metadata {
-            Some(metadata) => metadata.revision_component(&mut input),
-            None => input.push_str("missing\n"),
-        }
-        format!("mux-metadata-v1:fnv1a64:{:016x}", fnv1a64(input.as_bytes()))
-    }
-}
-
 pub(super) fn visit_mux_session_sources(
     root: &Path,
     visit: &mut dyn FnMut(MuxSessionSource) -> Result<()>,
@@ -239,44 +143,4 @@ fn visit_mux_session_sources_at_depth(
         }
     }
     Ok(visited)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-
-    #[test]
-    fn revision_component_preserves_exact_field_and_byte_order() {
-        let frozen = MuxFrozenFile {
-            length: 17,
-            modified: UNIX_EPOCH + Duration::new(23, 45),
-            readonly: true,
-            device: Some(7),
-            inode: Some(11),
-        };
-        let mut encoded = String::new();
-
-        frozen.revision_component(&mut encoded);
-
-        assert_eq!(
-            encoded.as_bytes(),
-            b"17\0+23.000000045\0true\0Some(7)\0Some(11)\n"
-        );
-
-        let observation = MuxFileObservation {
-            canonical_path: PathBuf::new(),
-            content: frozen,
-            metadata: None,
-        };
-        assert_eq!(
-            observation.source_revision("chat-jsonl"),
-            "mux-chat-jsonl-v1:fnv1a64:e350839c0c65661c"
-        );
-        assert_eq!(
-            observation.metadata_revision(),
-            "mux-metadata-v1:fnv1a64:ac13c47bd7db561b"
-        );
-    }
 }

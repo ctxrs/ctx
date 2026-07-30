@@ -261,59 +261,10 @@ pub(super) fn register_mux_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root.clone();
-    let batch_hydration_root = root;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            for candidate in
-                discover_mux_source_backed_sources(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
-                    .map_err(route_error)?
-            {
-                let base = sink.base_source(candidate.source_key());
-                sink.begin(candidate.source_key().clone())?;
-                let receipt = scan_mux_source_backed(&candidate, base.as_ref(), |page| {
-                    for record in page.records {
-                        sink.document(record.document).map_err(|error| {
-                            crate::provider::providers::mux::native_path::MuxSourceBackedError::Capture(
-                                CaptureError::InvalidPayload(error.to_string()),
-                            )
-                        })?;
-                    }
-                    Ok(())
-                })
-                .map_err(route_error)?;
-                match receipt.disposition {
-                    MuxSourceBackedDisposition::Append { proof } => {
-                        sink.certify_append(proof)?;
-                    }
-                    MuxSourceBackedDisposition::Cold
-                    | MuxSourceBackedDisposition::Unchanged
-                    | MuxSourceBackedDisposition::Replacement { .. } => {
-                        sink.certify(receipt.certificate)?;
-                    }
-                }
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::Mux, "mux_session_jsonl"),
-        move |request| {
-            let resolver = MuxSourceBackedResolverV0::discover_for_hydration(
-                &hydration_root,
-                DateTime::<Utc>::UNIX_EPOCH,
-            )?;
-            resolver.hydrate_event(request)
-        },
-    )
-    .with_batch_hydration(move |request| {
-        let resolver = MuxSourceBackedResolverV0::discover_for_hydration(
-            &batch_hydration_root,
-            DateTime::<Utc>::UNIX_EPOCH,
-        )?;
-        resolver.hydrate_batch(request)
-    });
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        mux_jsonl_adapter(),
+        source.path.clone(),
+    );
     registry.register(executable_route(
         source,
         selection,

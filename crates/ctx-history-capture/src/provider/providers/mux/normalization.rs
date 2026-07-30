@@ -1,42 +1,28 @@
-use std::path::PathBuf;
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::provider::normalization::{
-    provider_capped_json, provider_capped_json_value, provider_local_preview, provider_policy_body,
-    provider_policy_event_text, provider_result_identifier_evidence,
-    provider_result_outcome_evidence, provider_role, provider_value_text,
+    provider_capped_json, provider_local_preview, provider_policy_body, provider_policy_event_text,
+    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
+    provider_value_text,
 };
 use crate::{MUX_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
 
-use super::metadata::{mux_string_pointer, mux_value_timestamp};
+use super::metadata::mux_value_timestamp;
 
 #[derive(Debug, Clone)]
 pub(super) struct MuxMessageRow {
-    pub(super) line_number: usize,
-    pub(super) source_path: PathBuf,
     pub(super) value: Value,
-    pub(super) is_partial: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct MuxCoreEvent {
-    pub(super) provider_event_index: u64,
-    // Hash, cursor, and metadata remain exact native-event evidence for
-    // non-Core materializers.
-    #[allow(dead_code)]
-    pub(super) provider_event_hash: String,
-    #[allow(dead_code)]
-    pub(super) cursor: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
     pub(super) occurred_at: DateTime<Utc>,
     pub(super) payload: Value,
-    #[allow(dead_code)]
-    pub(super) metadata: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,23 +42,13 @@ pub(super) struct MuxOutputProjection {
     pub(super) exit_code: Option<i32>,
 }
 
-pub(super) fn mux_core_event(
-    event_index: u64,
-    row: &MuxMessageRow,
-    occurred_at: DateTime<Utc>,
-    model: Option<&str>,
-) -> MuxCoreEvent {
+pub(super) fn mux_core_event(row: &MuxMessageRow, occurred_at: DateTime<Utc>) -> MuxCoreEvent {
     let role = row
         .value
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let event_type = mux_event_type(&row.value);
-    let model_value = model
-        .map(str::to_owned)
-        .or_else(|| mux_message_model(&row.value));
-    let provider_event_hash = mux_event_id(&row.value, row.line_number, role, row.is_partial);
-    let cursor = format!("{}:line:{}", row.source_path.display(), row.line_number);
     let text = mux_event_text(&row.value, event_type);
     let body = row.value.clone();
     let retained_text = provider_policy_event_text(event_type, &text, &body);
@@ -80,9 +56,6 @@ pub(super) fn mux_core_event(
     let result_evidence = provider_result_identifier_evidence(event_type, &text, &body);
     let result_outcome = provider_result_outcome_evidence(event_type, &body);
     MuxCoreEvent {
-        provider_event_index: event_index,
-        provider_event_hash,
-        cursor,
         event_type,
         role: Some(provider_role(Some(role))),
         occurred_at,
@@ -93,21 +66,6 @@ pub(super) fn mux_core_event(
             "result_outcome": result_outcome,
             "source_format": MUX_SOURCE_FORMAT,
             "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-        }),
-        metadata: json!({
-            "source": MUX_SOURCE_FORMAT,
-            "source_format": MUX_SOURCE_FORMAT,
-            "line": row.line_number,
-            "is_partial": row.is_partial,
-            "role": role,
-            "message_id": row.value.get("id").and_then(Value::as_str),
-            "workspace_id": row.value.get("workspaceId").and_then(Value::as_str),
-            "history_sequence": mux_history_sequence(&row.value),
-            "model": model_value,
-            "usage": row.value.pointer("/metadata/usage").map(|usage| provider_capped_json_value(usage, PROVIDER_MAX_PREVIEW_CHARS)),
-            "provider_metadata": row.value.pointer("/metadata/providerMetadata").map(|metadata| provider_capped_json_value(metadata, PROVIDER_MAX_PREVIEW_CHARS)),
-            "mux_metadata": row.value.pointer("/metadata/muxMetadata").map(|metadata| provider_capped_json_value(metadata, PROVIDER_MAX_PREVIEW_CHARS)),
-            "partial": row.value.pointer("/metadata/partial").and_then(Value::as_bool),
         }),
     }
 }
@@ -521,10 +479,6 @@ pub(super) fn mux_history_sequence(value: &Value) -> Option<i64> {
         Some(Value::String(raw)) => raw.parse::<i64>().ok(),
         _ => None,
     }
-}
-
-pub(super) fn mux_message_model(value: &Value) -> Option<String> {
-    mux_string_pointer(value, &["/metadata/model", "/model"])
 }
 
 pub(super) fn mux_message_timestamp_opt(value: &Value) -> Option<DateTime<Utc>> {

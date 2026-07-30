@@ -273,6 +273,7 @@ pub(crate) struct JsonlReader {
     finished: bool,
     outcome: Option<JsonlScanOutcome>,
     record_buffer: Vec<u8>,
+    whole_record: bool,
 }
 
 impl JsonlReader {
@@ -281,6 +282,24 @@ impl JsonlReader {
         source_file: Arc<OpenedProviderSourceFile>,
         previous: Option<&JsonlCheckpoint>,
         probe: Option<JsonlProbe>,
+    ) -> Result<Self> {
+        Self::open_with_framing(identity, source_file, previous, probe, false)
+    }
+
+    pub(crate) fn open_whole_record(
+        identity: JsonlSourceIdentity,
+        source_file: Arc<OpenedProviderSourceFile>,
+        previous: Option<&JsonlCheckpoint>,
+    ) -> Result<Self> {
+        Self::open_with_framing(identity, source_file, previous, None, true)
+    }
+
+    fn open_with_framing(
+        identity: JsonlSourceIdentity,
+        source_file: Arc<OpenedProviderSourceFile>,
+        previous: Option<&JsonlCheckpoint>,
+        probe: Option<JsonlProbe>,
+        whole_record: bool,
     ) -> Result<Self> {
         source_file.revalidate()?;
         let observation = observe_metadata(
@@ -366,6 +385,7 @@ impl JsonlReader {
             finished: false,
             outcome: None,
             record_buffer: Vec::new(),
+            whole_record,
         })
     }
 
@@ -414,6 +434,9 @@ impl JsonlReader {
         if self.skip_scan {
             self.finish(true).map_err(E::from)?;
             return Ok(None);
+        }
+        if self.whole_record {
+            return self.visit_whole_record(visit);
         }
 
         let mut records = 0_usize;
@@ -499,6 +522,56 @@ impl JsonlReader {
         if records == 0 {
             return Ok(None);
         }
+        Ok(Some(JsonlPage))
+    }
+
+    fn visit_whole_record<E>(
+        &mut self,
+        visit: &mut impl FnMut(JsonlRecordRef<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<JsonlPage>, E>
+    where
+        E: From<CaptureError>,
+    {
+        if self.complete_prefix_end != 0 || self.next_physical_ordinal != 0 {
+            return Err(E::from(CaptureError::InvalidPayload(
+                "whole-record JSON source has a non-empty scan frontier".to_owned(),
+            )));
+        }
+        if self.observation.length == 0 {
+            self.finish(true).map_err(E::from)?;
+            return Ok(None);
+        }
+        let length = usize::try_from(self.observation.length).map_err(|_| {
+            E::from(CaptureError::InvalidPayload(
+                "whole-record JSON source exceeds platform limits".to_owned(),
+            ))
+        })?;
+        if length > MAX_PROVIDER_JSONL_LINE_BYTES || length > PAGE_MAX_BYTES {
+            return Err(E::from(CaptureError::InvalidPayload(format!(
+                "{} exceeds the {} byte whole-record JSON limit",
+                self.identity.source_path.display(),
+                MAX_PROVIDER_JSONL_LINE_BYTES.min(PAGE_MAX_BYTES)
+            ))));
+        }
+        self.record_buffer.resize(length, 0);
+        self.reader
+            .read_exact(&mut self.record_buffer)
+            .map_err(CaptureError::from)
+            .map_err(E::from)?;
+        self.prefix_hasher.update(&self.record_buffer);
+        let evidence = JsonlRecordEvidence {
+            physical_ordinal: 0,
+            byte_start: 0,
+            byte_end_exclusive: self.observation.length,
+            record_digest: Sha256::digest(&self.record_buffer).into(),
+        };
+        visit(JsonlRecordRef {
+            bytes: &self.record_buffer,
+            evidence,
+        })?;
+        self.complete_prefix_end = self.observation.length;
+        self.next_physical_ordinal = 1;
+        self.finish(true).map_err(E::from)?;
         Ok(Some(JsonlPage))
     }
 
