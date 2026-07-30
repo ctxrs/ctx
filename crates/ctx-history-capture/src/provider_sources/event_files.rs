@@ -1,5 +1,14 @@
+//! Bounded physical inventory for trees whose logical sources group event files.
+//!
+//! The inventory retains one root authority plus sorted leaf paths, metadata,
+//! and strong observations. Discovery and terminal re-enumeration walk
+//! depth-first, so directory handles are bounded by depth and leaf handles are
+//! closed immediately after observation. Body reads reopen one exact leaf
+//! through the retained authority, verify it before and after the bounded read,
+//! and close it before returning bytes to the provider projector.
+
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     fs::Metadata,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -25,6 +34,10 @@ const INVENTORY_OBSERVATION_DOMAIN: &[u8] = b"ctx.event-files.inventory-observat
 std::thread_local! {
     static INVENTORY_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACTIVE_LEAF_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PEAK_LEAF_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACTIVE_DIRECTORY_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PEAK_DIRECTORY_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +110,7 @@ pub(crate) enum EventFileInventoryError {
 }
 
 pub(crate) type EventFileInventoryResult<T> = std::result::Result<T, EventFileInventoryError>;
+type EventFileClassifier = fn(&Path) -> Result<Option<EventFileCoordinates>>;
 
 #[derive(Debug)]
 pub(crate) struct EventFileLeaf {
@@ -104,7 +118,7 @@ pub(crate) struct EventFileLeaf {
     display_path: PathBuf,
     coordinates: EventFileCoordinates,
     observation: OrdinaryFileObservation,
-    opened: OpenedProviderSourceFile,
+    metadata: Metadata,
 }
 
 impl EventFileLeaf {
@@ -121,7 +135,7 @@ impl EventFileLeaf {
     }
 
     pub(crate) fn metadata(&self) -> &Metadata {
-        self.opened.metadata()
+        &self.metadata
     }
 }
 
@@ -155,11 +169,7 @@ impl<'inventory> EventFileGroup<'inventory> {
     }
 
     pub(crate) fn read_leaf(&self, leaf: &EventFileLeaf) -> EventFileInventoryResult<Vec<u8>> {
-        #[cfg(test)]
-        BODY_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
-        leaf.opened
-            .read_all_bounded(self.inventory.limits.max_record_bytes)
-            .map_err(|error| changed(leaf.display_path(), error))
+        self.inventory.read_leaf(self.group_key(), leaf)
     }
 
     pub(crate) fn revalidate(&self) -> EventFileInventoryResult<()> {
@@ -170,18 +180,19 @@ impl<'inventory> EventFileGroup<'inventory> {
 #[derive(Debug)]
 pub(crate) struct EventFileInventory {
     selected_path: PathBuf,
+    selected_relative_path: PathBuf,
     selected_file: bool,
-    root: Option<ProviderSourceRoot>,
-    retained_directories: Vec<ProviderSourceDirectory>,
+    root: ProviderSourceRoot,
     groups: Vec<OwnedEventFileGroup>,
     limits: EventFileLimits,
+    classify: EventFileClassifier,
 }
 
 impl EventFileInventory {
     pub(crate) fn open(
         selected: &Path,
         limits: EventFileLimits,
-        mut classify: impl FnMut(&Path) -> Result<Option<EventFileCoordinates>>,
+        classify: EventFileClassifier,
     ) -> EventFileInventoryResult<Self> {
         #[cfg(test)]
         INVENTORY_OPENS.with(|opens| opens.set(opens.get().saturating_add(1)));
@@ -190,7 +201,7 @@ impl EventFileInventory {
         validate_path(&selected_path, limits.max_path_bytes)?;
         let opened = open_provider_source_path(&selected_path)
             .map_err(|error| unavailable(&selected_path, error))?;
-        match opened {
+        let (root, selected_relative_path, selected_file, initial_observation) = match opened {
             OpenedProviderSourcePath::File(file) => {
                 if limits.max_entries == 0 {
                     return Err(EventFileInventoryError::LimitExceeded {
@@ -200,122 +211,62 @@ impl EventFileInventory {
                         observed: 1,
                     });
                 }
-                let coordinates = classify(&selected_path)
-                    .map_err(|error| invalid(&selected_path, error.to_string()))?
-                    .ok_or_else(|| EventFileInventoryError::NoAcceptedExactFile {
-                        path: selected_path.clone(),
-                    })?;
                 let relative = selected_path
                     .file_name()
                     .map(PathBuf::from)
                     .ok_or_else(|| invalid(&selected_path, "selected file has no leaf name"))?;
-                let leaf = admit_leaf(relative, selected_path.clone(), coordinates, file, limits)?;
-                let groups = build_groups(vec![leaf])?;
-                let inventory = Self {
-                    selected_path,
-                    selected_file: true,
-                    root: None,
-                    retained_directories: Vec::new(),
-                    groups,
-                    limits,
+                let parent = selected_path
+                    .parent()
+                    .ok_or_else(|| invalid(&selected_path, "selected file has no parent"))?;
+                let initial_observation = {
+                    let _handle = transient_handle(TransientHandleKind::Leaf);
+                    let observation = observe_opened_ordinary_file(&selected_path, &file)
+                        .map_err(|error| changed(&selected_path, error))?;
+                    file.revalidate()
+                        .map_err(|error| changed(&selected_path, error))?;
+                    drop(file);
+                    observation
                 };
-                inventory.revalidate_all()?;
-                Ok(inventory)
+                let root =
+                    ProviderSourceRoot::open(parent).map_err(|error| unavailable(parent, error))?;
+                (root, relative, true, Some(initial_observation))
             }
             OpenedProviderSourcePath::Directory(directory) => {
                 let root = directory.authority_root();
-                let mut pending = VecDeque::from([(directory, 0_usize)]);
-                let mut retained_directories = Vec::new();
-                let mut leaves = Vec::new();
-                let mut observed_entries = 0_usize;
-
-                while let Some((directory, depth)) = pending.pop_front() {
-                    if depth > limits.max_depth {
-                        return Err(EventFileInventoryError::LimitExceeded {
-                            path: root.named_path().join(directory.relative_path()),
-                            limit: EventFileLimit::Depth,
-                            maximum: limits.max_depth,
-                            observed: depth,
-                        });
-                    }
-                    let names = directory
-                        .entries(limits.max_entries.saturating_add(1))
-                        .map_err(|error| {
-                            inventory_entries_error(
-                                &root.named_path().join(directory.relative_path()),
-                                error,
-                                limits.max_entries,
-                            )
-                        })?;
-                    let next_count = observed_entries.saturating_add(names.len());
-                    if next_count > limits.max_entries {
-                        return Err(EventFileInventoryError::LimitExceeded {
-                            path: root.named_path().join(directory.relative_path()),
-                            limit: EventFileLimit::Entries,
-                            maximum: limits.max_entries,
-                            observed: next_count,
-                        });
-                    }
-                    observed_entries = next_count;
-
-                    for name in names {
-                        let relative_path = directory.relative_path().join(&name);
-                        let display_path = root.named_path().join(&relative_path);
-                        validate_path(&display_path, limits.max_path_bytes)?;
-                        match directory
-                            .open_child(&name)
-                            .map_err(|error| unavailable(&display_path, error))?
-                        {
-                            OpenedProviderSourcePath::Directory(child) => {
-                                let child_depth = depth.saturating_add(1);
-                                if child_depth > limits.max_depth {
-                                    return Err(EventFileInventoryError::LimitExceeded {
-                                        path: display_path,
-                                        limit: EventFileLimit::Depth,
-                                        maximum: limits.max_depth,
-                                        observed: child_depth,
-                                    });
-                                }
-                                pending.push_back((child, child_depth));
-                            }
-                            OpenedProviderSourcePath::File(file) => {
-                                let Some(coordinates) = classify(&display_path)
-                                    .map_err(|error| invalid(&display_path, error.to_string()))?
-                                else {
-                                    file.revalidate()
-                                        .map_err(|error| changed(&display_path, error))?;
-                                    continue;
-                                };
-                                leaves.push(admit_leaf(
-                                    relative_path,
-                                    display_path,
-                                    coordinates,
-                                    file,
-                                    limits,
-                                )?);
-                            }
-                        }
-                    }
-                    directory.revalidate().map_err(|error| {
-                        changed(&root.named_path().join(directory.relative_path()), error)
-                    })?;
-                    retained_directories.push(directory);
-                }
-                root.revalidate()
-                    .map_err(|error| changed(root.named_path(), error))?;
-                let groups = build_groups(leaves)?;
-                let inventory = Self {
-                    selected_path,
-                    selected_file: false,
-                    root: Some(root),
-                    retained_directories,
-                    groups,
-                    limits,
-                };
-                inventory.revalidate_all()?;
-                Ok(inventory)
+                drop(directory);
+                (root, PathBuf::new(), false, None)
+            }
+        };
+        let groups = discover_groups(
+            &root,
+            &selected_path,
+            &selected_relative_path,
+            selected_file,
+            limits,
+            classify,
+            DiscoveryErrorMode::Unavailable,
+        )?;
+        if let Some(initial_observation) = initial_observation {
+            let discovered = groups
+                .first()
+                .and_then(|group| group.leaves.first())
+                .map(|leaf| &leaf.observation);
+            if discovered != Some(&initial_observation) {
+                return Err(source_changed(
+                    &selected_path,
+                    "selected event file changed while its retained parent authority was opened",
+                ));
             }
         }
+        Ok(Self {
+            selected_path,
+            selected_relative_path,
+            selected_file,
+            root,
+            groups,
+            limits,
+            classify,
+        })
     }
 
     pub(crate) fn selected_path(&self) -> &Path {
@@ -328,6 +279,11 @@ impl EventFileInventory {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.groups.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_authority_handles(&self) -> usize {
+        1
     }
 
     pub(crate) fn groups(
@@ -367,67 +323,290 @@ impl EventFileInventory {
             .find(|group| group.group_key == group_key)
             .ok_or_else(|| EventFileInventoryError::MissingGroup(group_key.to_owned()))?;
         for leaf in &group.leaves {
-            leaf.opened
-                .revalidate()
-                .map_err(|error| changed(leaf.display_path(), error))?;
+            self.verify_leaf(leaf)?;
         }
-        self.revalidate_directories_and_root()
+        self.root
+            .revalidate()
+            .map_err(|error| changed(self.root.named_path(), error))
     }
 
     pub(crate) fn revalidate_all(&self) -> EventFileInventoryResult<()> {
-        for group in &self.groups {
-            for leaf in &group.leaves {
-                leaf.opened
-                    .revalidate()
-                    .map_err(|error| changed(leaf.display_path(), error))?;
-            }
-        }
-        self.revalidate_directories_and_root()
-    }
-
-    fn revalidate_directories_and_root(&self) -> EventFileInventoryResult<()> {
-        for directory in &self.retained_directories {
-            let path = self
-                .root
-                .as_ref()
-                .map(|root| root.named_path().join(directory.relative_path()))
-                .unwrap_or_else(|| self.selected_path.clone());
-            directory
-                .revalidate()
-                .map_err(|error| changed(&path, error))?;
-        }
-        if let Some(root) = &self.root {
-            root.revalidate()
-                .map_err(|error| changed(root.named_path(), error))?;
+        let current = discover_groups(
+            &self.root,
+            &self.selected_path,
+            &self.selected_relative_path,
+            self.selected_file,
+            self.limits,
+            self.classify,
+            DiscoveryErrorMode::Changed,
+        )
+        .map_err(|error| match error {
+            error @ EventFileInventoryError::SourceChanged { .. } => error,
+            error => source_changed(
+                &self.selected_path,
+                format!("event-file terminal inventory changed: {error}"),
+            ),
+        })?;
+        if !same_snapshot(&self.groups, &current) {
+            return Err(source_changed(
+                &self.selected_path,
+                "event-file paths or metadata changed after inventory",
+            ));
         }
         Ok(())
     }
+
+    fn read_leaf(
+        &self,
+        group_key: &str,
+        leaf: &EventFileLeaf,
+    ) -> EventFileInventoryResult<Vec<u8>> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.group_key == group_key)
+            .ok_or_else(|| EventFileInventoryError::MissingGroup(group_key.to_owned()))?;
+        if !group
+            .leaves
+            .iter()
+            .any(|candidate| std::ptr::eq(candidate, leaf))
+        {
+            return Err(invalid(
+                leaf.display_path(),
+                "event-file leaf does not belong to the requested retained group",
+            ));
+        }
+        let opened = self.open_verified_leaf(leaf)?;
+        let _handle = transient_handle(TransientHandleKind::Leaf);
+        #[cfg(test)]
+        BODY_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
+        let bytes = opened
+            .read_all_bounded(self.limits.max_record_bytes)
+            .map_err(|error| changed(leaf.display_path(), error))?;
+        let closing = observe_opened_ordinary_file(leaf.display_path(), &opened)
+            .map_err(|error| changed(leaf.display_path(), error))?;
+        if closing != leaf.observation {
+            return Err(source_changed(
+                leaf.display_path(),
+                "event-file leaf fingerprint changed while its body was read",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn verify_leaf(&self, leaf: &EventFileLeaf) -> EventFileInventoryResult<()> {
+        let _opened = self.open_verified_leaf(leaf)?;
+        let _handle = transient_handle(TransientHandleKind::Leaf);
+        Ok(())
+    }
+
+    fn open_verified_leaf(
+        &self,
+        leaf: &EventFileLeaf,
+    ) -> EventFileInventoryResult<OpenedProviderSourceFile> {
+        let opened = self
+            .root
+            .open_file(leaf.selected_relative_path())
+            .map_err(|error| changed(leaf.display_path(), error))?;
+        let _handle = transient_handle(TransientHandleKind::Leaf);
+        let observation = observe_opened_ordinary_file(leaf.display_path(), &opened)
+            .map_err(|error| changed(leaf.display_path(), error))?;
+        if observation != leaf.observation {
+            return Err(source_changed(
+                leaf.display_path(),
+                "event-file leaf fingerprint no longer matches its inventory",
+            ));
+        }
+        Ok(opened)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DiscoveryErrorMode {
+    Unavailable,
+    Changed,
+}
+
+struct DiscoveryState {
+    leaves: Vec<EventFileLeaf>,
+    observed_entries: usize,
+}
+
+fn discover_groups(
+    root: &ProviderSourceRoot,
+    selected_path: &Path,
+    selected_relative_path: &Path,
+    selected_file: bool,
+    limits: EventFileLimits,
+    classify: EventFileClassifier,
+    error_mode: DiscoveryErrorMode,
+) -> EventFileInventoryResult<Vec<OwnedEventFileGroup>> {
+    let mut state = DiscoveryState {
+        leaves: Vec::new(),
+        observed_entries: 0,
+    };
+    if selected_file {
+        if limits.max_entries == 0 {
+            return Err(EventFileInventoryError::LimitExceeded {
+                path: selected_path.to_path_buf(),
+                limit: EventFileLimit::Entries,
+                maximum: 0,
+                observed: 1,
+            });
+        }
+        let opened = root
+            .open_file(selected_relative_path)
+            .map_err(|error| discovery_error(selected_path, error, error_mode))?;
+        let _handle = transient_handle(TransientHandleKind::Leaf);
+        let coordinates = classify(selected_path)
+            .map_err(|error| invalid(selected_path, error.to_string()))?
+            .ok_or_else(|| match error_mode {
+                DiscoveryErrorMode::Unavailable => EventFileInventoryError::NoAcceptedExactFile {
+                    path: selected_path.to_path_buf(),
+                },
+                DiscoveryErrorMode::Changed => source_changed(
+                    selected_path,
+                    "selected event file is no longer accepted by its classifier",
+                ),
+            })?;
+        state.leaves.push(admit_leaf(
+            selected_relative_path.to_path_buf(),
+            selected_path.to_path_buf(),
+            coordinates,
+            opened,
+            limits,
+        )?);
+    } else {
+        let directory = root
+            .open_directory(selected_relative_path)
+            .map_err(|error| discovery_error(selected_path, error, error_mode))?;
+        discover_directory(root, directory, 0, limits, classify, error_mode, &mut state)?;
+    }
+    root.revalidate()
+        .map_err(|error| discovery_error(root.named_path(), error, error_mode))?;
+    build_groups(state.leaves)
+}
+
+fn discover_directory(
+    root: &ProviderSourceRoot,
+    directory: ProviderSourceDirectory,
+    depth: usize,
+    limits: EventFileLimits,
+    classify: EventFileClassifier,
+    error_mode: DiscoveryErrorMode,
+    state: &mut DiscoveryState,
+) -> EventFileInventoryResult<()> {
+    let _handle = transient_handle(TransientHandleKind::Directory);
+    let directory_path = root.named_path().join(directory.relative_path());
+    if depth > limits.max_depth {
+        return Err(EventFileInventoryError::LimitExceeded {
+            path: directory_path,
+            limit: EventFileLimit::Depth,
+            maximum: limits.max_depth,
+            observed: depth,
+        });
+    }
+    let remaining = limits.max_entries.saturating_sub(state.observed_entries);
+    let names = directory
+        .entries(remaining.saturating_add(1))
+        .map_err(|error| {
+            inventory_entries_error(&directory_path, error, limits.max_entries, error_mode)
+        })?;
+    let next_count = state.observed_entries.saturating_add(names.len());
+    if next_count > limits.max_entries {
+        return Err(EventFileInventoryError::LimitExceeded {
+            path: directory_path,
+            limit: EventFileLimit::Entries,
+            maximum: limits.max_entries,
+            observed: next_count,
+        });
+    }
+    state.observed_entries = next_count;
+
+    for name in names {
+        let relative_path = directory.relative_path().join(&name);
+        let display_path = root.named_path().join(&relative_path);
+        validate_path(&display_path, limits.max_path_bytes)?;
+        match directory
+            .open_child(&name)
+            .map_err(|error| discovery_error(&display_path, error, error_mode))?
+        {
+            OpenedProviderSourcePath::Directory(child) => {
+                discover_directory(
+                    root,
+                    child,
+                    depth.saturating_add(1),
+                    limits,
+                    classify,
+                    error_mode,
+                    state,
+                )?;
+            }
+            OpenedProviderSourcePath::File(file) => {
+                let _handle = transient_handle(TransientHandleKind::Leaf);
+                let Some(coordinates) = classify(&display_path)
+                    .map_err(|error| invalid(&display_path, error.to_string()))?
+                else {
+                    file.revalidate()
+                        .map_err(|error| discovery_error(&display_path, error, error_mode))?;
+                    continue;
+                };
+                state.leaves.push(admit_leaf(
+                    relative_path,
+                    display_path,
+                    coordinates,
+                    file,
+                    limits,
+                )?);
+            }
+        }
+    }
+    directory
+        .revalidate()
+        .map_err(|error| discovery_error(&directory_path, error, error_mode))
+}
+
+fn same_snapshot(left: &[OwnedEventFileGroup], right: &[OwnedEventFileGroup]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left_group, right_group)| {
+            left_group.group_key == right_group.group_key
+                && left_group.leaves.len() == right_group.leaves.len()
+                && left_group.leaves.iter().zip(&right_group.leaves).all(
+                    |(left_leaf, right_leaf)| {
+                        left_leaf.selected_relative_path == right_leaf.selected_relative_path
+                            && left_leaf.display_path == right_leaf.display_path
+                            && left_leaf.coordinates == right_leaf.coordinates
+                            && left_leaf.observation == right_leaf.observation
+                    },
+                )
+        })
 }
 
 fn admit_leaf(
     selected_relative_path: PathBuf,
     display_path: PathBuf,
     coordinates: EventFileCoordinates,
-    opened: OpenedProviderSourceFile,
+    file: OpenedProviderSourceFile,
     limits: EventFileLimits,
 ) -> EventFileInventoryResult<EventFileLeaf> {
     validate_coordinates(&display_path, &coordinates, limits.max_path_bytes)?;
     let maximum_record_bytes = u64::try_from(limits.max_record_bytes).unwrap_or(u64::MAX);
-    if opened.len() > maximum_record_bytes {
+    if file.len() > maximum_record_bytes {
         return Err(EventFileInventoryError::RecordTooLarge {
             path: display_path,
             maximum: limits.max_record_bytes,
-            observed: opened.len(),
+            observed: file.len(),
         });
     }
-    let observation = observe_opened_ordinary_file(&display_path, &opened)
+    let observation = observe_opened_ordinary_file(&display_path, &file)
         .map_err(|error| changed(&display_path, error))?;
+    let metadata = file.metadata().clone();
     Ok(EventFileLeaf {
         selected_relative_path,
         display_path,
         coordinates,
         observation,
-        opened,
+        metadata,
     })
 }
 
@@ -580,6 +759,7 @@ fn inventory_entries_error(
     path: &Path,
     error: CaptureError,
     maximum: usize,
+    error_mode: DiscoveryErrorMode,
 ) -> EventFileInventoryError {
     if matches!(
         &error,
@@ -593,7 +773,18 @@ fn inventory_entries_error(
             observed: maximum.saturating_add(1),
         }
     } else {
-        unavailable(path, error)
+        discovery_error(path, error, error_mode)
+    }
+}
+
+fn discovery_error(
+    path: &Path,
+    error: CaptureError,
+    error_mode: DiscoveryErrorMode,
+) -> EventFileInventoryError {
+    match error_mode {
+        DiscoveryErrorMode::Unavailable => unavailable(path, error),
+        DiscoveryErrorMode::Changed => changed(path, error),
     }
 }
 
@@ -604,10 +795,61 @@ fn changed(path: &Path, error: CaptureError) -> EventFileInventoryError {
     }
 }
 
+fn source_changed(path: &Path, detail: impl Into<String>) -> EventFileInventoryError {
+    EventFileInventoryError::SourceChanged {
+        path: path.to_path_buf(),
+        detail: detail.into(),
+    }
+}
+
 fn invalid(path: &Path, detail: impl Into<String>) -> EventFileInventoryError {
     EventFileInventoryError::InvalidPath {
         path: path.to_path_buf(),
         detail: detail.into(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TransientHandleKind {
+    Leaf,
+    Directory,
+}
+
+#[cfg(not(test))]
+struct TransientHandleGuard;
+
+#[cfg(not(test))]
+fn transient_handle(_kind: TransientHandleKind) -> TransientHandleGuard {
+    TransientHandleGuard
+}
+
+#[cfg(test)]
+struct TransientHandleGuard {
+    kind: TransientHandleKind,
+}
+
+#[cfg(test)]
+fn transient_handle(kind: TransientHandleKind) -> TransientHandleGuard {
+    let (active, peak) = match kind {
+        TransientHandleKind::Leaf => (&ACTIVE_LEAF_HANDLES, &PEAK_LEAF_HANDLES),
+        TransientHandleKind::Directory => (&ACTIVE_DIRECTORY_HANDLES, &PEAK_DIRECTORY_HANDLES),
+    };
+    active.with(|active| {
+        let next = active.get().saturating_add(1);
+        active.set(next);
+        peak.with(|peak| peak.set(peak.get().max(next)));
+    });
+    TransientHandleGuard { kind }
+}
+
+#[cfg(test)]
+impl Drop for TransientHandleGuard {
+    fn drop(&mut self) {
+        let active = match self.kind {
+            TransientHandleKind::Leaf => &ACTIVE_LEAF_HANDLES,
+            TransientHandleKind::Directory => &ACTIVE_DIRECTORY_HANDLES,
+        };
+        active.with(|active| active.set(active.get().saturating_sub(1)));
     }
 }
 
@@ -616,20 +858,38 @@ fn invalid(path: &Path, detail: impl Into<String>) -> EventFileInventoryError {
 pub(crate) struct EventFileIoCounts {
     pub inventory_opens: usize,
     pub body_reads: usize,
+    pub peak_transient_leaf_handles: usize,
+    pub peak_transient_directory_handles: usize,
+    pub active_transient_leaf_handles: usize,
+    pub active_transient_directory_handles: usize,
 }
 
 #[cfg(test)]
 pub(crate) fn count_event_file_io<T>(operation: impl FnOnce() -> T) -> (T, EventFileIoCounts) {
     INVENTORY_OPENS.with(|opens| opens.set(0));
     BODY_READS.with(|reads| reads.set(0));
+    ACTIVE_LEAF_HANDLES.with(|handles| handles.set(0));
+    PEAK_LEAF_HANDLES.with(|handles| handles.set(0));
+    ACTIVE_DIRECTORY_HANDLES.with(|handles| handles.set(0));
+    PEAK_DIRECTORY_HANDLES.with(|handles| handles.set(0));
     let output = operation();
     let inventory_opens = INVENTORY_OPENS.with(|opens| opens.replace(0));
     let body_reads = BODY_READS.with(|reads| reads.replace(0));
+    let peak_transient_leaf_handles = PEAK_LEAF_HANDLES.with(|handles| handles.replace(0));
+    let peak_transient_directory_handles =
+        PEAK_DIRECTORY_HANDLES.with(|handles| handles.replace(0));
+    let active_transient_leaf_handles = ACTIVE_LEAF_HANDLES.with(|handles| handles.replace(0));
+    let active_transient_directory_handles =
+        ACTIVE_DIRECTORY_HANDLES.with(|handles| handles.replace(0));
     (
         output,
         EventFileIoCounts {
             inventory_opens,
             body_reads,
+            peak_transient_leaf_handles,
+            peak_transient_directory_handles,
+            active_transient_leaf_handles,
+            active_transient_directory_handles,
         },
     )
 }
