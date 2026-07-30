@@ -11,8 +11,8 @@ use super::{
 use crate::{
     cli::Cli,
     ui::{
-        canonical_human_output_bytes, ColorMode, Document, RenderContext, StreamKind, TestContext,
-        Token,
+        canonical_human_output_bytes, is_copyable_atom, ColorMode, Document, RenderContext,
+        StreamKind, TestContext, Token,
     },
 };
 
@@ -158,14 +158,13 @@ fn assert_fits(document: &Document, context: &RenderContext) {
     let available = context.content_width().unwrap_or(1);
     let plain = document.render_plain();
     for (line, rendered) in document.lines().iter().zip(plain.lines()) {
-        let preserves_unbroken_command_arg = line
+        let preserves_unbroken_copyable_atom = line
             .spans()
             .iter()
-            .filter(|span| span.token() == Token::Command)
             .flat_map(|span| span.content().split_whitespace())
-            .any(|word| word.width() > available);
+            .any(|word| is_copyable_atom(word) && word.width() > available);
         assert!(
-            rendered.width() <= available || preserves_unbroken_command_arg,
+            rendered.width() <= available || preserves_unbroken_copyable_atom,
             "{rendered:?} is {} columns in a {available}-column content area",
             rendered.width()
         );
@@ -185,13 +184,9 @@ fn assert_control_safe(rendered: &str) {
 }
 
 fn assert_value_survives_layout(rendered: &str, value: &str) {
-    let compact = rendered
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
     assert!(
-        compact.contains(value),
-        "{value:?} was not retained across renderer-controlled lines in {rendered:?}"
+        rendered.contains(value),
+        "{value:?} was split or removed by renderer-controlled lines in {rendered:?}"
     );
 }
 
@@ -278,7 +273,7 @@ fn narrow_actions_preserve_full_ids_inside_copyable_commands() {
 }
 
 #[test]
-fn primary_verbose_narrow_and_long_id_cases_fit_reference_widths() {
+fn primary_verbose_narrow_and_long_id_cases_preserve_reference_atoms() {
     for width in [32, 48, 80, 120] {
         let context = context(width, ColorMode::Never);
         let documents = [

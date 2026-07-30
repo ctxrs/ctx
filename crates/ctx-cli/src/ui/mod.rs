@@ -15,9 +15,9 @@ mod writer;
 
 pub(crate) use bootstrap::{bootstrap_color_choice, scan_color_mode, scan_machine_output_hint};
 pub(crate) use components::{
-    diagnostic, empty_state, evidence_list, fields, hint, outcome, progress, section, table,
-    Action, Diagnostic, DiagnosticLevel, EmptyState, Evidence, Field, Hint, Outcome, OutcomeState,
-    Progress, Table,
+    diagnostic, empty_state, evidence_list, fields, hint, is_copyable_atom, outcome, progress,
+    section, table, Action, Diagnostic, DiagnosticLevel, EmptyState, Evidence, Field, Hint,
+    Outcome, OutcomeState, Progress, Table,
 };
 pub(crate) use context::{ColorMode, RenderContext, StreamKind, TestContext};
 pub(crate) use document::{Document, Line, Span};
