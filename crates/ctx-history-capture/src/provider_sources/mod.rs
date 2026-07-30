@@ -45,10 +45,11 @@ pub(crate) use resolvers::{
 };
 pub use specs::{provider_source_spec, provider_source_specs};
 pub(crate) use sqlite_source::{
-    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
-    retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot, SqliteLogicalSnapshot,
+    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_physical_revision,
+    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+    CtxOwnedSqliteReadSnapshot, SqliteLogicalSnapshot, SqlitePhysicalReplayHint,
     SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-    SqliteSourceReadSnapshot,
+    SqliteSourcePhysicalRevision, SqliteSourceReadSnapshot,
 };
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
