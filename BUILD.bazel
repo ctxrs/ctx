@@ -151,6 +151,12 @@ filegroup(
 )
 
 filegroup(
+    name = "provider_import_policy",
+    srcs = ["docs/provider-import-policy.md"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "complete_content_provider_capabilities",
     srcs = ["docs/complete-content-provider-capabilities.json"],
     visibility = ["//visibility:public"],

@@ -440,7 +440,7 @@ fn oversized_shared_memory_is_typed_unavailable_before_hashing() {
 }
 
 #[test]
-fn stock_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation() {
+fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let writer = create_persistent_wal(&database);
