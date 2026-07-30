@@ -136,6 +136,9 @@ pub(in crate::provider::providers::forgecode) fn forgecode_logical_record_digest
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
+    // SQLite rowid is acquisition-only; logical evidence starts with the
+    // provider-native conversation values.
+    let values = values.get(1..).unwrap_or_default();
     digest.update((values.len() as u64).to_be_bytes());
     for value in values {
         match value {

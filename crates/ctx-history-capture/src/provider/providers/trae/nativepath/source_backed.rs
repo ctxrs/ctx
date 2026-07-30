@@ -8,8 +8,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
     EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    SubrecordSelector, TypedKey,
+    SourceAnchor, SourceKey, SourceRecordLocator, SourceResolverContractError, SubrecordSelector,
+    TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
@@ -19,13 +19,21 @@ use super::scanner::{
     absolute_trae_path, acquire_source, packed_native_index, TraeCoreRecord, TraeFrontier,
     TraeScanner, TraeSourceAuthority,
 };
-use crate::CaptureError;
+use crate::{
+    provider_sources::{SqliteLogicalSnapshot, SqliteSourceEvidence},
+    CaptureError,
+};
 
 use super::super::{TRAE_CHAT_KEYS, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 
+mod hydration;
+mod replacement;
+
+pub(crate) use hydration::{hydrate_trae_source_backed_locator_v0, TraeLocatorResolverV0};
+pub(crate) use replacement::TraeReplacementTree;
+
 const TRAE_SOURCE_ANCHOR_NAMESPACE: &str = "trae.workspace-storage";
 const TRAE_SOURCE_SCHEMA_VARIANT: &str = "trae-itemtable-json-v1";
-const TRAE_SOURCE_REVISION_KIND: &str = "trae-sqlite-snapshot-v1";
 const TRAE_SOURCE_BACKED_PARSER_REVISION: &str = "trae-itemtable-source-backed-v1";
 const TRAE_NATIVE_SESSION_NAMESPACE: &str = "trae.itemtable-session-v1";
 const TRAE_SESSION_POSITION_KIND: &str = "trae.itemtable-session-position-v1";
@@ -34,8 +42,8 @@ const TRAE_NATIVE_MESSAGE_NAMESPACE: &str = "trae.itemtable-message-v1";
 const TRAE_MESSAGE_POSITION_KIND: &str = "trae.itemtable-message-position-v1";
 const TRAE_LOGICAL_SESSION_KIND: &str = "trae-session";
 const TRAE_LOGICAL_EVENT_KIND: &str = "trae-message";
-const TRAE_LOCATOR_NAMESPACE: &str = "trae.itemtable-json-message-v1";
 const TRAE_LOCATOR_RELATION: &str = "ItemTable";
+const TRAE_SOURCE_BACKED_PAGE_ROWS: usize = 64;
 
 #[derive(Debug, Error)]
 pub(crate) enum TraeSourceBackedErrorV0 {
@@ -73,11 +81,16 @@ pub(crate) struct TraeSourceBackedPageV0 {
 #[derive(Debug, Clone)]
 pub(crate) struct TraeSourceBackedScanV0 {
     pub(crate) source: CertifiedSource,
+    pub(crate) terminal_fence: TraeSourceTerminalFence,
+    pub(crate) row_decode_passes: u64,
+    pub(crate) decoded_rows: u64,
+    pub(crate) emitted_pages: u64,
+    pub(crate) peak_buffered_documents: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TraeHydratedRecordV0 {
-    pub(crate) exact_text: String,
+#[derive(Debug, Clone)]
+pub(crate) struct TraeSourceTerminalFence {
+    evidence: SqliteSourceEvidence,
 }
 
 /// Scans exactly one explicitly supplied `state.vscdb` leaf.
@@ -90,105 +103,83 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
 ) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
     let canonical_path = explicit_trae_leaf(path)?;
     let authority = acquire_source(&canonical_path, DateTime::<Utc>::UNIX_EPOCH)?;
+    scan_trae_authority(&canonical_path, &authority, emit)
+}
+
+pub(super) fn scan_trae_authority(
+    canonical_path: &Path,
+    authority: &TraeSourceAuthority,
+    emit: &mut dyn FnMut(TraeSourceBackedPageV0) -> TraeSourceBackedResultV0<()>,
+) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
     let source = source_key(&authority)?;
-    let opening = source_observation(&source, &authority.source_revision)?;
-    let revision_digest = source_revision_digest(&authority.source_revision);
     let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
     let mut counts = ScannedSourceCounts::default();
-    while let Some(page) = authority
-        .database
-        .read(&canonical_path, |conn| scanner.next_page(conn))?
-    {
-        let complete_records = u64::try_from(page.logical_units)
-            .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
-        let rejected_records = u64::try_from(page.rejections.len())
-            .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
-        let mut documents = Vec::with_capacity(page.core.len());
-        for record in page.core {
-            if let Some(document) = lexical_document(&source, &authority, revision_digest, record)?
-            {
-                documents.push(document);
+    let mut emitted_pages = 0_u64;
+    let mut peak_buffered_documents = 0_u64;
+    authority.database.read_provider(canonical_path, |conn| {
+        while let Some(page) = scanner.next_page(conn)? {
+            let complete_records = u64::try_from(page.logical_units)
+                .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
+            let rejected_records = u64::try_from(page.rejections.len())
+                .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
+            let mut documents = Vec::with_capacity(page.core.len());
+            for record in page.core {
+                if let Some(document) = lexical_document(&source, authority, record)? {
+                    documents.push(document);
+                }
+            }
+            let retained_records = u64::try_from(documents.len())
+                .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
+            let ignored_records = complete_records
+                .checked_sub(
+                    retained_records
+                        .checked_add(rejected_records)
+                        .ok_or(TraeSourceBackedErrorV0::CountMismatch)?,
+                )
+                .ok_or(TraeSourceBackedErrorV0::CountMismatch)?;
+
+            counts.complete_records = checked_add(counts.complete_records, complete_records)?;
+            counts.retained_records = checked_add(counts.retained_records, retained_records)?;
+            counts.rejected_records = checked_add(counts.rejected_records, rejected_records)?;
+            counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
+            counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
+            peak_buffered_documents = peak_buffered_documents.max(retained_records);
+            if !documents.is_empty() {
+                if documents.len() > TRAE_SOURCE_BACKED_PAGE_ROWS {
+                    return Err(TraeSourceBackedErrorV0::CountMismatch);
+                }
+                emitted_pages = checked_add(emitted_pages, 1)?;
+                emit(TraeSourceBackedPageV0 { documents })?;
             }
         }
-        let retained_records =
-            u64::try_from(documents.len()).map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
-        let ignored_records = complete_records
-            .checked_sub(
-                retained_records
-                    .checked_add(rejected_records)
-                    .ok_or(TraeSourceBackedErrorV0::CountMismatch)?,
-            )
-            .ok_or(TraeSourceBackedErrorV0::CountMismatch)?;
-
-        counts.complete_records = checked_add(counts.complete_records, complete_records)?;
-        counts.retained_records = checked_add(counts.retained_records, retained_records)?;
-        counts.rejected_records = checked_add(counts.rejected_records, rejected_records)?;
-        counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
-        counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
-        emit(TraeSourceBackedPageV0 { documents })?;
-    }
+        Ok(())
+    })?;
 
     authority.database.revalidate()?;
     counts.certified_bytes = scanner.certified_source_bytes();
-    let closing = source_observation(&source, &authority.source_revision)?;
-    let source = CertifiedSource::certify(
-        opening,
-        closing,
+    let decoded_rows = scanner.decoded_rows();
+    let source = SqliteLogicalSnapshot::new(
         TRAE_SOURCE_BACKED_PARSER_REVISION,
+        &authority.schema_evidence,
         scanner.source_content_digest(),
         counts,
-    )?;
-    Ok(TraeSourceBackedScanV0 { source })
-}
-
-pub(crate) fn hydrate_trae_source_backed_locator_v0(
-    path: &Path,
-    locator: &SourceRecordLocator,
-) -> TraeSourceBackedResultV0<TraeHydratedRecordV0> {
-    locator.validate_contract()?;
-    let canonical_path = explicit_trae_leaf(path)?;
-    let authority = acquire_source(&canonical_path, DateTime::<Utc>::UNIX_EPOCH)?;
-    let source = source_key(&authority)?;
-    if !source.exact_descriptor_eq(locator.source()) {
-        return Err(TraeSourceBackedErrorV0::LocatorSourceMismatch);
-    }
-    let current_revision_digest = source_revision_digest(&authority.source_revision);
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || locator.certified_source_revision_digest() != Some(&current_revision_digest)
-    {
-        return Err(TraeSourceBackedErrorV0::SourceRevisionMismatch);
-    }
-    let coordinate = decode_locator(locator)?;
-    let key_index = TRAE_CHAT_KEYS
-        .iter()
-        .position(|candidate| *candidate == coordinate.chat_key)
-        .and_then(|index| u16::try_from(index).ok())
-        .ok_or(TraeSourceBackedErrorV0::InvalidLocator)?;
-    let value = authority
-        .database
-        .read(&canonical_path, |conn| {
-            super::super::trae_complete_value(conn, key_index)
-        })?
-        .ok_or(TraeSourceBackedErrorV0::LocatorValueMissing)?;
-    let actual_digest: [u8; 32] = Sha256::digest(&value).into();
-    if actual_digest != coordinate.value_digest || &actual_digest != locator.record_digest() {
-        return Err(TraeSourceBackedErrorV0::LocatorValueDigestMismatch);
-    }
-    let (_, exact_text) = super::super::trae_complete_message(
-        &value,
-        key_index,
-        coordinate.session_index,
-        coordinate.message_index,
-        &coordinate.provider_session_id,
-    )?
-    .ok_or(TraeSourceBackedErrorV0::LocatorMessageMissing)?;
-    Ok(TraeHydratedRecordV0 { exact_text })
+    )
+    .certify(source)?;
+    Ok(TraeSourceBackedScanV0 {
+        source,
+        terminal_fence: TraeSourceTerminalFence {
+            evidence: authority.database.evidence().clone(),
+        },
+        row_decode_passes: 1,
+        decoded_rows,
+        emitted_pages,
+        peak_buffered_documents,
+    })
 }
 
 fn lexical_document(
     source: &SourceKey,
     authority: &TraeSourceAuthority,
-    revision_digest: [u8; 32],
     record: TraeCoreRecord,
 ) -> TraeSourceBackedResultV0<Option<LexicalDocument>> {
     let body = record.lexical_text;
@@ -246,22 +237,21 @@ fn lexical_document(
         native_item_key: &item_key,
         subrecord_selector: Some(&subrecord),
     })?;
-    let coordinate = NativeRecordCoordinate::ProviderNative {
-        namespace: TRAE_LOCATOR_NAMESPACE.to_owned(),
-        coordinate: TypedKey::composite(vec![
-            TypedKey::utf8(TRAE_LOCATOR_RELATION)?,
+    let coordinate = NativeRecordCoordinate::ProviderSqlite {
+        logical_relation: TRAE_LOCATOR_RELATION.to_owned(),
+        primary_key: TypedKey::composite(vec![
             TypedKey::utf8(record.chat_key)?,
-            TypedKey::bytes(record.value_digest.to_vec())?,
             TypedKey::U64(u64::from(record.raw_session_index)),
             TypedKey::U64(u64::from(record.message_index)),
             TypedKey::utf8(&record.provider_session_id)?,
         ])?,
+        row_version: Some(TypedKey::bytes(record.value_digest.to_vec())?),
     };
     let locator = SourceRecordLocator::new(
         source.clone(),
         coordinate,
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record.value_digest,
     )?;
     let event_sequence = packed_native_index(
@@ -296,10 +286,12 @@ fn lexical_document(
 }
 
 fn source_key(authority: &TraeSourceAuthority) -> TraeSourceBackedResultV0<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        TRAE_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(&authority.workspace_id)?,
-    )?;
+    source_key_for_workspace(&authority.workspace_id)
+}
+
+fn source_key_for_workspace(workspace_id: &str) -> TraeSourceBackedResultV0<SourceKey> {
+    let anchor =
+        SourceAnchor::provider_native(TRAE_SOURCE_ANCHOR_NAMESPACE, TypedKey::utf8(workspace_id)?)?;
     Ok(SourceKey::derive(
         CaptureProvider::Trae.as_str(),
         TRAE_STATE_VSCDB_SOURCE_FORMAT,
@@ -309,22 +301,7 @@ fn source_key(authority: &TraeSourceAuthority) -> TraeSourceBackedResultV0<Sourc
     )?)
 }
 
-fn source_observation(
-    source: &SourceKey,
-    source_revision: &str,
-) -> TraeSourceBackedResultV0<SourceObservation> {
-    Ok(SourceObservation::new(
-        source.clone(),
-        TRAE_SOURCE_REVISION_KIND,
-        source_revision.as_bytes().to_vec(),
-    )?)
-}
-
-fn source_revision_digest(source_revision: &str) -> [u8; 32] {
-    Sha256::digest(source_revision.as_bytes()).into()
-}
-
-fn explicit_trae_leaf(path: &Path) -> TraeSourceBackedResultV0<PathBuf> {
+pub(super) fn explicit_trae_leaf(path: &Path) -> TraeSourceBackedResultV0<PathBuf> {
     crate::common::io::ensure_provider_path_parents_are_not_symlinks(path)?;
     let metadata = fs::symlink_metadata(path).map_err(CaptureError::from)?;
     if metadata.file_type().is_symlink()
@@ -339,57 +316,6 @@ fn explicit_trae_leaf(path: &Path) -> TraeSourceBackedResultV0<PathBuf> {
 fn checked_add(left: u64, right: u64) -> TraeSourceBackedResultV0<u64> {
     left.checked_add(right)
         .ok_or(TraeSourceBackedErrorV0::CountMismatch)
-}
-
-struct DecodedLocator {
-    chat_key: String,
-    value_digest: [u8; 32],
-    session_index: u32,
-    message_index: u32,
-    provider_session_id: String,
-}
-
-fn decode_locator(locator: &SourceRecordLocator) -> TraeSourceBackedResultV0<DecodedLocator> {
-    if locator.source().provider() != CaptureProvider::Trae.as_str()
-        || locator.source().source_format() != TRAE_STATE_VSCDB_SOURCE_FORMAT
-        || locator.source().schema_variant() != TRAE_SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != 1
-    {
-        return Err(TraeSourceBackedErrorV0::InvalidLocator);
-    }
-    let NativeRecordCoordinate::ProviderNative {
-        namespace,
-        coordinate,
-    } = locator.coordinate()
-    else {
-        return Err(TraeSourceBackedErrorV0::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = coordinate else {
-        return Err(TraeSourceBackedErrorV0::InvalidLocator);
-    };
-    let [TypedKey::Utf8(relation), TypedKey::Utf8(chat_key), TypedKey::Bytes(value_digest), TypedKey::U64(session_index), TypedKey::U64(message_index), TypedKey::Utf8(provider_session_id)] =
-        parts.as_slice()
-    else {
-        return Err(TraeSourceBackedErrorV0::InvalidLocator);
-    };
-    if namespace != TRAE_LOCATOR_NAMESPACE
-        || relation != TRAE_LOCATOR_RELATION
-        || value_digest.len() != 32
-        || !TRAE_CHAT_KEYS.contains(&chat_key.as_str())
-    {
-        return Err(TraeSourceBackedErrorV0::InvalidLocator);
-    }
-    let mut value_digest_bytes = [0_u8; 32];
-    value_digest_bytes.copy_from_slice(value_digest);
-    Ok(DecodedLocator {
-        chat_key: chat_key.clone(),
-        value_digest: value_digest_bytes,
-        session_index: u32::try_from(*session_index)
-            .map_err(|_| TraeSourceBackedErrorV0::InvalidLocator)?,
-        message_index: u32::try_from(*message_index)
-            .map_err(|_| TraeSourceBackedErrorV0::InvalidLocator)?,
-        provider_session_id: provider_session_id.clone(),
-    })
 }
 
 #[cfg(test)]
@@ -443,22 +369,26 @@ mod tests {
         assert_eq!(documents[0].agent_type, AgentType::Primary.as_str());
         assert!(documents[0].is_primary);
 
-        let NativeRecordCoordinate::ProviderNative {
-            namespace,
-            coordinate,
+        let NativeRecordCoordinate::ProviderSqlite {
+            logical_relation,
+            primary_key,
+            row_version,
         } = documents[0].locator.coordinate()
         else {
-            panic!("expected provider-native locator");
+            panic!("expected provider SQLite locator");
         };
-        assert_eq!(namespace, TRAE_LOCATOR_NAMESPACE);
-        let TypedKey::Composite(parts) = coordinate else {
+        assert_eq!(logical_relation, TRAE_LOCATOR_RELATION);
+        assert!(matches!(
+            row_version,
+            Some(TypedKey::Bytes(digest)) if digest.len() == 32
+        ));
+        let TypedKey::Composite(parts) = primary_key else {
             panic!("expected composite locator");
         };
-        assert_eq!(parts.len(), 6);
-        assert_eq!(parts[0], TypedKey::Utf8("ItemTable".to_owned()));
-        assert_eq!(parts[1], TypedKey::Utf8(TRAE_CHAT_KEYS[0].to_owned()));
-        assert_eq!(parts[3], TypedKey::U64(0));
-        assert_eq!(parts[4], TypedKey::U64(0));
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], TypedKey::Utf8(TRAE_CHAT_KEYS[0].to_owned()));
+        assert_eq!(parts[1], TypedKey::U64(0));
+        assert_eq!(parts[2], TypedKey::U64(0));
 
         let hydrated = hydrate_trae_source_backed_locator_v0(&source, &documents[0].locator)
             .expect("exact hydration");

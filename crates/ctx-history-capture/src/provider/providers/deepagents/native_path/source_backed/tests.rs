@@ -250,14 +250,9 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     let mut scanner =
         DeepAgentsSourceBackedScannerV0::open(selection.clone(), DateTime::<Utc>::UNIX_EPOCH)
             .unwrap();
-    assert_eq!(
-        scanner.source_revision_digest().len(),
-        std::mem::size_of::<[u8; 32]>()
-    );
     let scanner_source = scanner.source().clone();
     let first_page = scanner.next_page().unwrap().unwrap();
-    assert!(scanner.sqlite_snapshot.is_none());
-    assert!(scanner.source_validated);
+    assert!(scanner.sqlite_snapshot.is_some());
     let mut page_lengths = vec![first_page.len()];
     let mut documents = first_page;
     while let Some(page) = scanner.next_page().unwrap() {
@@ -291,12 +286,12 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     assert!(documents[0].is_primary);
     assert_eq!(
         documents[0].locator.revision_policy(),
-        LocatorRevisionPolicy::ExactSourceRevision
+        LocatorRevisionPolicy::StableRecordEvidence
     );
     assert!(documents[0]
         .locator
         .certified_source_revision_digest()
-        .is_some());
+        .is_none());
     let NativeRecordCoordinate::ProviderSqlite {
         logical_relation,
         primary_key,
@@ -409,7 +404,7 @@ fn replacement_preserves_ids_and_invalidates_old_snapshot_evidence() {
 
     assert!(matches!(
         DeepAgentsLocatorResolverV0::explicit(&path).hydrate(&before_locator),
-        Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence)
+        Err(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)
     ));
 
     let (after, after_scan, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
@@ -421,7 +416,7 @@ fn replacement_preserves_ids_and_invalidates_old_snapshot_evidence() {
         after[0].locator.record_digest(),
         before_locator.record_digest()
     );
-    assert_ne!(
+    assert_eq!(
         after[0].locator.certified_source_revision_digest(),
         before_locator.certified_source_revision_digest()
     );

@@ -89,11 +89,7 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeSourceObservation 
 #[allow(clippy::large_enum_variant)]
 pub(in crate::provider::providers::forgecode) enum ForgeCodeDiscovery {
     Live(ForgeCodeSourceObservation),
-    Missing(ForgeCodeMissingSource),
-}
-
-pub(in crate::provider::providers::forgecode) struct ForgeCodeMissingSource {
-    pub(in crate::provider::providers::forgecode) preferred_path: PathBuf,
+    Missing,
 }
 
 pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
@@ -112,18 +108,16 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("db"));
             let preferred_path = if exact_is_preferred { exact } else { child };
-            return Ok(ForgeCodeDiscovery::Missing(ForgeCodeMissingSource {
-                preferred_path,
-            }));
+            let _ = preferred_path;
+            return Ok(ForgeCodeDiscovery::Missing);
         }
         Err(error) => return Err(error.into()),
     };
     match fs::symlink_metadata(&candidate) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let candidate = absolute_path(&candidate)?;
-            return Ok(ForgeCodeDiscovery::Missing(ForgeCodeMissingSource {
-                preferred_path: candidate,
-            }));
+            let _ = candidate;
+            return Ok(ForgeCodeDiscovery::Missing);
         }
         Err(error) => return Err(error.into()),
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
@@ -180,7 +174,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 #[derive(Debug)]
-pub(super) struct ForgeCodeSqliteDatabase {
+pub(in crate::provider::providers::forgecode) struct ForgeCodeSqliteDatabase {
     parent: ProviderSourceDirectory,
     authority: SqliteSourceDirectoryAuthority,
     database_name: OsString,
@@ -188,7 +182,10 @@ pub(super) struct ForgeCodeSqliteDatabase {
 }
 
 impl ForgeCodeSqliteDatabase {
-    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
+    pub(super) fn open<T>(
+        path: &Path,
+        query: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<(Self, T)> {
         let parent_path =
             path.parent()
                 .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
@@ -288,6 +285,8 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
     source_root: Option<String>,
     wants_outputs: bool,
     exhausted: bool,
+    active_decoded: Option<ForgeCodeDecodedRow>,
+    decoded_rows: u64,
 }
 
 #[derive(Debug)]
@@ -343,6 +342,7 @@ struct ForgeCodeHydratedRow {
     metrics: Option<Vec<u8>>,
 }
 
+#[derive(Clone)]
 struct ForgeCodeDecodedRow {
     rowid: i64,
     conversation_id: String,

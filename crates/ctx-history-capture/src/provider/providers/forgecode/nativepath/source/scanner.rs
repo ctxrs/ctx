@@ -20,9 +20,12 @@ impl ForgeCodeScanner {
             source_root,
             wants_outputs,
             exhausted: false,
+            active_decoded: None,
+            decoded_rows: 0,
         })
     }
 
+    #[cfg(test)]
     pub(in crate::provider::providers::forgecode) fn next_page(
         &mut self,
     ) -> Result<Option<ForgeCodePage>> {
@@ -31,11 +34,55 @@ impl ForgeCodeScanner {
         database.read(&path, |connection| self.next_page_guarded(connection))
     }
 
+    pub(in crate::provider::providers::forgecode) fn stream_pages(
+        &mut self,
+        mut emit: impl FnMut(ForgeCodePage) -> Result<()>,
+    ) -> Result<()> {
+        let database = Arc::clone(&self.source.database);
+        let path = self.source.canonical_path.clone();
+        database.read(&path, |connection| {
+            while let Some(page) = self.next_page_guarded(connection)? {
+                emit(page)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(in crate::provider::providers::forgecode) fn decoded_rows(&self) -> u64 {
+        self.decoded_rows
+    }
+
+    pub(in crate::provider::providers::forgecode) fn source_database(
+        &self,
+    ) -> &ForgeCodeSqliteDatabase {
+        &self.source.database
+    }
+
     fn next_page_guarded(&mut self, connection: &Connection) -> Result<Option<ForgeCodePage>> {
         if self.exhausted {
             return Ok(None);
         }
         let expected_frontier = self.frontier.clone();
+        if !expected_frontier.row_complete {
+            let active = self
+                .active_decoded
+                .clone()
+                .ok_or(CaptureError::SystemInvariant(
+                    "ForgeCode partial row lost its decoded row",
+                ))?;
+            if expected_frontier.rowid != Some(active.rowid) {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            let page = self.project_row(connection, expected_frontier, active)?;
+            self.frontier = page.next_frontier.clone();
+            if page.next_frontier.row_complete {
+                self.active_decoded = None;
+            }
+            if page.terminal {
+                self.exhausted = true;
+            }
+            return Ok(Some(page));
+        }
         let candidate = self.next_candidate(connection)?;
         let Some(candidate) = candidate else {
             self.exhausted = true;
@@ -55,6 +102,9 @@ impl ForgeCodeScanner {
         };
         let page = self.page_for_candidate(connection, expected_frontier, candidate)?;
         self.frontier = page.next_frontier.clone();
+        if page.next_frontier.row_complete {
+            self.active_decoded = None;
+        }
         if page.terminal {
             self.exhausted = true;
         }
@@ -122,7 +172,7 @@ impl ForgeCodeScanner {
     }
 
     fn page_for_candidate(
-        &self,
+        &mut self,
         connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         candidate: ForgeCodeRowCandidate,
@@ -173,17 +223,25 @@ impl ForgeCodeScanner {
                 )
             }
         };
+        self.decoded_rows =
+            self.decoded_rows
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "ForgeCode decoded-row counter overflowed",
+                ))?;
+        self.active_decoded = Some(decoded.clone());
         self.project_row(connection, expected_frontier, decoded)
     }
 
     fn rejected_row_page(
-        &self,
+        &mut self,
         connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         rowid: i64,
         line: usize,
         error: String,
     ) -> Result<ForgeCodePage> {
+        self.active_decoded = None;
         let next_frontier = ForgeCodeFrontier {
             rowid: Some(rowid),
             next_message: 0,
@@ -231,7 +289,7 @@ impl ForgeCodeScanner {
     }
 
     fn project_row(
-        &self,
+        &mut self,
         connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         hydrated: ForgeCodeDecodedRow,
