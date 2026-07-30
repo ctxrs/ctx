@@ -317,7 +317,7 @@ use identity::{
 #[cfg(test)]
 use ingestion::ingest_codex_source_backed_inner_v0;
 pub use ingestion::ingest_codex_source_backed_v0;
-pub(crate) use ingestion::ingest_codex_sources_serial_v0;
+pub(crate) use ingestion::{ingest_codex_sources_serial_v0, ingest_codex_sources_v0};
 
 #[cfg(test)]
 mod tests;
