@@ -14,7 +14,7 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CertifiedSource, EventIdentityInput,
     LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
     ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
@@ -25,7 +25,8 @@ use crate::{
     provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, OutputOutcome, ProviderAdapterContext, MAX_PROVIDER_SQLITE_VALUE_BYTES,
     SHELLEY_SQLITE_SOURCE_FORMAT,
@@ -52,8 +53,7 @@ use super::{
 const SHELLEY_SOURCE_ANCHOR_NAMESPACE: &str = "shelley.exact-cwd-slot";
 const SHELLEY_SOURCE_ANCHOR_KEY: &str = "shelley.db";
 const SHELLEY_SOURCE_SCHEMA_VARIANT: &str = "shelley-exact-cwd-sqlite-v1";
-const SHELLEY_SOURCE_REVISION_KIND: &str = "shelley-sqlite-snapshot-v1";
-const SHELLEY_SOURCE_PARSER_REVISION: &str = "shelley-source-backed-v1";
+pub(crate) const SHELLEY_SOURCE_PARSER_REVISION: &str = "shelley-source-backed-v1";
 const SHELLEY_LOGICAL_SESSION_KIND: &str = "shelley-conversation";
 const SHELLEY_NATIVE_SESSION_NAMESPACE: &str = "shelley.conversation";
 const SHELLEY_LOGICAL_EVENT_KIND: &str = "shelley-message";
@@ -110,8 +110,18 @@ impl ShelleySourceBackedAdapter {
         &self.source
     }
 
+    #[cfg(test)]
     pub(crate) fn start_scan(&self) -> ShelleySourceBackedResult<ShelleySourceBackedScan> {
         let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&self.database_path)?;
+        let scan = self.start_snapshot_scan(sqlite_snapshot)?;
+        source_root.revalidate()?;
+        Ok(scan)
+    }
+
+    pub(crate) fn start_snapshot_scan(
+        &self,
+        sqlite_snapshot: SqliteSourceReadSnapshot,
+    ) -> ShelleySourceBackedResult<ShelleySourceBackedScan> {
         let evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
 
@@ -126,12 +136,11 @@ impl ShelleySourceBackedAdapter {
         let conversation_select =
             shelley_conversation_select_expressions(&conversation_columns, "c");
         let message_select = shelley_message_select_expressions(&message_columns, "m");
-        let revision = shelley_source_revision(&evidence, sqlite_user_version, &schema_fingerprint);
-        let opening_observation = SourceObservation::new(
-            self.source.clone(),
-            SHELLEY_SOURCE_REVISION_KIND,
-            revision.into_bytes(),
-        )?;
+        let schema_evidence = format!(
+            "capture={SHELLEY_CAPTURE_REVISION}\0policy={SHELLEY_POLICY_REVISION}\0\
+             user_version={sqlite_user_version}\0schema={schema_fingerprint}"
+        )
+        .into_bytes();
         let context = ProviderAdapterContext {
             machine_id: "shelley-source-backed".to_owned(),
             source_path: Some(self.database_path.clone()),
@@ -144,9 +153,8 @@ impl ShelleySourceBackedAdapter {
         Ok(ShelleySourceBackedScan {
             source: self.source.clone(),
             evidence,
-            source_root: Some(source_root),
             sqlite_snapshot: Some(sqlite_snapshot),
-            opening_observation,
+            schema_evidence,
             conversation_select,
             message_select,
             has_message_sequence_id,
@@ -272,9 +280,8 @@ pub(crate) fn discover_shelley_source_backed_exact_cwd(
 pub(crate) struct ShelleySourceBackedScan {
     source: SourceKey,
     evidence: SqliteSourceEvidence,
-    source_root: Option<ProviderSourceRoot>,
     sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
-    opening_observation: SourceObservation,
+    schema_evidence: Vec<u8>,
     conversation_select: Vec<String>,
     message_select: Vec<String>,
     has_message_sequence_id: bool,
@@ -581,19 +588,15 @@ impl ShelleySourceBackedScan {
         if closing_evidence != self.evidence {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
-        self.source_root
-            .take()
-            .ok_or(ShelleySourceBackedError::ScanIncomplete)?
-            .revalidate()?;
         let mut content_digest = self.content_digest.clone();
         hash_counts(&mut content_digest, self.counts);
-        let certificate = CertifiedSource::certify(
-            self.opening_observation.clone(),
-            self.opening_observation.clone(),
+        let certificate = SqliteLogicalSnapshot::new(
             SHELLEY_SOURCE_PARSER_REVISION,
+            &self.schema_evidence,
             content_digest.finalize().into(),
             self.counts,
-        )?;
+        )
+        .certify(self.source.clone())?;
         self.receipt = Some(ShelleySourceBackedReceipt { certificate });
         Ok(())
     }
@@ -704,28 +707,6 @@ fn open_root_authorized_snapshot_with_hook(
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(CaptureError::from)?;
     Ok((source_root, sqlite_snapshot))
-}
-
-fn shelley_source_revision(
-    evidence: &SqliteSourceEvidence,
-    user_version: i64,
-    schema_fingerprint: &str,
-) -> String {
-    format!(
-        "shelley-sqlite-snapshot-v1:capture={SHELLEY_CAPTURE_REVISION};policy={SHELLEY_POLICY_REVISION};user_version={user_version};schema={schema_fingerprint};identity={};length={};revision={}",
-        hex_digest(evidence.identity()),
-        evidence.length(),
-        hex_digest(evidence.revision()),
-    )
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(value, "{byte:02x}");
-    }
-    value
 }
 
 fn shelley_lineage_label(provider_session_id: &str) -> String {

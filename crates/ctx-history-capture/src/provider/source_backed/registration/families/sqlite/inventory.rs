@@ -1,4 +1,340 @@
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use sha2::Digest;
+
+use crate::{
+    common::io::ProviderSourceRoot,
+    provider::source_backed::family::document::{
+        register_replacement_document_tree_route,
+        register_replacement_document_tree_route_with_authority, ChangedDocumentSink,
+        CompleteDocumentTree, DocumentLeafFingerprint, DocumentSourceTerminal,
+        ObservedDocumentLeaf, ReplacementDocumentTree,
+    },
+    provider_sources::{
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+    },
+    MAX_PROVIDER_SQLITE_VALUE_BYTES,
+};
+
 use super::*;
+
+struct SqliteInventoryCatalog<L> {
+    authority_fingerprint: [u8; 32],
+    leaves: Vec<SqliteInventoryCatalogLeaf<L>>,
+}
+
+struct SqliteInventoryCatalogLeaf<L> {
+    source: SourceKey,
+    path: PathBuf,
+    provider_leaf: L,
+}
+
+trait SqliteInventoryProvider: Send + Sync + 'static {
+    type Leaf: Send + Sync + 'static;
+
+    fn parser_revision(&self) -> &'static str;
+
+    fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>>;
+
+    fn scan(
+        &self,
+        leaf: &Self::Leaf,
+        snapshot: SqliteSourceReadSnapshot,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<CertifiedSource>;
+
+    fn hydrate(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure>;
+}
+
+struct SqliteInventoryDocumentAdapter<A> {
+    provider: CaptureProvider,
+    source_format: &'static str,
+    provider_adapter: A,
+}
+
+impl<A> SqliteInventoryDocumentAdapter<A> {
+    fn new(provider: CaptureProvider, source_format: &'static str, provider_adapter: A) -> Self {
+        Self {
+            provider,
+            source_format,
+            provider_adapter,
+        }
+    }
+}
+
+struct SqliteInventoryDocumentLeaf<L> {
+    index: usize,
+    source: SourceKey,
+    path: PathBuf,
+    evidence: SqliteSourceEvidence,
+    provider_leaf: L,
+}
+
+#[derive(Debug)]
+struct RetainedSqliteInventoryLeaf {
+    authority: SqliteSourceDirectoryAuthority,
+    database_name: OsString,
+}
+
+impl RetainedSqliteInventoryLeaf {
+    fn observe(path: &Path) -> SourceBackedRouteResult<(Self, SqliteSourceEvidence)> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let database_name = path.file_name().map(OsString::from).ok_or_else(|| {
+            SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::InvalidSource,
+                format!("SQLite inventory source {path:?} has no database leaf"),
+            )
+        })?;
+        let source_root = ProviderSourceRoot::open(parent).map_err(route_error)?;
+        let directory = source_root.directory().map_err(route_error)?;
+        let authority_handle = directory
+            .try_clone_authority_handle()
+            .map_err(route_error)?;
+        let authority = retain_sqlite_source_directory_authority(&authority_handle, parent)
+            .map_err(route_error)?;
+        let retained = Self {
+            authority,
+            database_name,
+        };
+        let evidence = retained.open()?.finish().map_err(route_error)?;
+        directory.revalidate().map_err(route_error)?;
+        source_root.revalidate().map_err(route_error)?;
+        Ok((retained, evidence))
+    }
+
+    fn open(&self) -> SourceBackedRouteResult<SqliteSourceReadSnapshot> {
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
+                .map_err(route_error)?;
+        let connection = snapshot.connection().map_err(route_error)?;
+        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(route_error)?;
+        connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(route_error)?;
+        Ok(snapshot)
+    }
+}
+
+#[derive(Debug)]
+struct SqliteInventoryTreeAuthority {
+    authority_fingerprint: [u8; 32],
+    catalog_leaves: Vec<[u8; 32]>,
+    leaves: Vec<RetainedSqliteInventoryLeaf>,
+}
+
+impl<A> ReplacementDocumentTree for SqliteInventoryDocumentAdapter<A>
+where
+    A: SqliteInventoryProvider,
+{
+    type Leaf = SqliteInventoryDocumentLeaf<A::Leaf>;
+    type TreeAuthority = SqliteInventoryTreeAuthority;
+
+    fn parser_revision(&self) -> &'static str {
+        self.provider_adapter.parser_revision()
+    }
+
+    fn owns_source(&self, source: &SourceKey) -> bool {
+        source.provider() == self.provider.as_str() && source.source_format() == self.source_format
+    }
+
+    fn discover_complete(
+        &self,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        let catalog = self.provider_adapter.discover()?;
+        let mut retained = Vec::with_capacity(catalog.leaves.len());
+        let mut catalog_leaves = Vec::with_capacity(catalog.leaves.len());
+        let mut fingerprints = Vec::with_capacity(catalog.leaves.len());
+        let mut observed = Vec::with_capacity(catalog.leaves.len());
+        for (index, leaf) in catalog.leaves.into_iter().enumerate() {
+            let catalog_leaf = sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path);
+            let (authority, evidence) = RetainedSqliteInventoryLeaf::observe(&leaf.path)?;
+            let fingerprint = sqlite_physical_leaf_fingerprint(catalog_leaf, &evidence);
+            retained.push(authority);
+            catalog_leaves.push(catalog_leaf);
+            fingerprints.push(fingerprint);
+            observed.push(ObservedDocumentLeaf::with_durable_replay(
+                DocumentLeafFingerprint::new(fingerprint),
+                SqliteInventoryDocumentLeaf {
+                    index,
+                    source: leaf.source,
+                    path: leaf.path,
+                    evidence,
+                    provider_leaf: leaf.provider_leaf,
+                },
+                false,
+            ));
+        }
+        let tree_fingerprint =
+            sqlite_inventory_tree_fingerprint(catalog.authority_fingerprint, &fingerprints);
+        Ok(CompleteDocumentTree::new(
+            tree_fingerprint,
+            observed,
+            SqliteInventoryTreeAuthority {
+                authority_fingerprint: catalog.authority_fingerprint,
+                catalog_leaves,
+                leaves: retained,
+            },
+        ))
+    }
+
+    fn scan_changed(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        let retained = authority.leaves.get(leaf.index).ok_or_else(|| {
+            sqlite_inventory_changed("observed leaf has no retained directory authority")
+        })?;
+        if authority.catalog_leaves.get(leaf.index)
+            != Some(&sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path))
+        {
+            return Err(sqlite_inventory_changed(
+                "observed leaf no longer matches its catalog slot",
+            ));
+        }
+        let snapshot = retained.open()?;
+        if snapshot.evidence() != &leaf.evidence {
+            return Err(sqlite_inventory_changed(
+                "SQLite source changed after complete physical discovery",
+            ));
+        }
+        sink.begin_source(leaf.source.clone())?;
+        let certificate = self
+            .provider_adapter
+            .scan(&leaf.provider_leaf, snapshot, sink)?;
+        if !certificate
+            .observation()
+            .source()
+            .exact_descriptor_eq(&leaf.source)
+            || certificate.parser_revision() != self.parser_revision()
+            || certificate.frontier().is_some()
+        {
+            return Err(sqlite_inventory_changed(
+                "logical scan returned an unexpected source certificate",
+            ));
+        }
+        let observation = certificate.observation().clone();
+        Ok(DocumentSourceTerminal {
+            source: observation.source().clone(),
+            opening: observation.clone(),
+            closing: observation,
+            parser_revision: self.parser_revision(),
+            content_digest: *certificate.content_digest(),
+            counts: certificate.counts(),
+        })
+    }
+
+    fn revalidate_complete(
+        &self,
+        tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        let current = self.provider_adapter.discover()?;
+        let current_catalog = current
+            .leaves
+            .iter()
+            .map(|leaf| sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path))
+            .collect::<Vec<_>>();
+        if current.authority_fingerprint != tree.authority.authority_fingerprint
+            || current_catalog != tree.authority.catalog_leaves
+            || tree.leaves.len() != tree.authority.leaves.len()
+        {
+            return Err(sqlite_inventory_changed(
+                "complete SQLite inventory changed during staging",
+            ));
+        }
+        let mut fingerprints = Vec::with_capacity(tree.leaves.len());
+        for (observed, retained) in tree.leaves.iter().zip(&tree.authority.leaves) {
+            let snapshot = retained.open()?;
+            let evidence = snapshot.finish().map_err(route_error)?;
+            fingerprints.push(sqlite_physical_leaf_fingerprint(
+                sqlite_catalog_leaf_fingerprint(
+                    &observed.provider_leaf.source,
+                    &observed.provider_leaf.path,
+                ),
+                &evidence,
+            ));
+        }
+        Ok(sqlite_inventory_tree_fingerprint(
+            current.authority_fingerprint,
+            &fingerprints,
+        ))
+    }
+
+    fn hydrate_group(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        self.provider_adapter.hydrate(request)
+    }
+}
+
+fn sqlite_catalog_leaf_fingerprint(source: &SourceKey, path: &Path) -> [u8; 32] {
+    let path = path.as_os_str().as_encoded_bytes();
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.sqlite-inventory-catalog-leaf-v1\0");
+    digest.update(source.exact_descriptor_digest());
+    digest.update((path.len() as u64).to_be_bytes());
+    digest.update(path);
+    digest.finalize().into()
+}
+
+fn sqlite_physical_leaf_fingerprint(
+    catalog_leaf: [u8; 32],
+    evidence: &SqliteSourceEvidence,
+) -> [u8; 32] {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.sqlite-inventory-physical-leaf-v1\0");
+    digest.update(catalog_leaf);
+    digest.update(evidence.identity());
+    digest.update(evidence.length().to_be_bytes());
+    digest.update(evidence.revision());
+    digest.finalize().into()
+}
+
+fn sqlite_inventory_tree_fingerprint(
+    authority_fingerprint: [u8; 32],
+    leaves: &[[u8; 32]],
+) -> [u8; 32] {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.sqlite-inventory-document-tree-v1\0");
+    digest.update(authority_fingerprint);
+    digest.update((leaves.len() as u64).to_be_bytes());
+    for leaf in leaves {
+        digest.update(leaf);
+    }
+    digest.finalize().into()
+}
+
+fn sqlite_inventory_authority_fingerprint(
+    observation: &ctx_history_core::SourceInventoryObservation,
+) -> SourceBackedRouteResult<[u8; 32]> {
+    let authority_key = serde_json::to_vec(observation.authority_key()).map_err(route_error)?;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.sqlite-inventory-provider-authority-v1\0");
+    digest.update(observation.provider().as_bytes());
+    digest.update(observation.authority_namespace().as_bytes());
+    digest.update(authority_key);
+    digest.update(observation.revision_kind().as_bytes());
+    digest.update(observation.revision());
+    Ok(digest.finalize().into())
+}
+
+fn sqlite_inventory_changed(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
+}
 
 /// Registers Crush's selector-owned finite project inventory. The coordinator
 /// consumes the adapter's existing scan helpers but remains the only owner of
@@ -267,59 +603,101 @@ pub fn register_astrbot_source_backed_route(
     selection: SourceBackedRouteSelection,
     discovery: DiscoveryContext,
 ) -> SourceBackedCoordinatorResult<()> {
-    let capture_discovery = discovery.clone();
-    let hydration_discovery = discovery.clone();
-    let batch_hydration_discovery = discovery;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let opening = AstrBotSourceBackedInventoryV0::discover(&capture_discovery)
-                .map_err(route_error)?;
-            for selected in opening.sources() {
-                sink.begin(selected.source_key().clone())?;
-                let certificate =
-                    scan_astrbot_source_backed_v0(selected, &mut |document| {
-                        sink.document(document).map_err(|error| {
-                            crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0::Capture(
-                                CaptureError::InvalidPayload(error.to_string()),
-                            )
-                        })
-                    })
-                    .map_err(route_error)?;
-                sink.certify(certificate)?;
-            }
-            let closing = AstrBotSourceBackedInventoryV0::discover(&capture_discovery)
-                .map_err(route_error)?;
-            let inventory = opening.certify(&closing).map_err(route_error)?;
-            sink.certify_complete_inventory(inventory)
-        },
-        provider_format_scope(CaptureProvider::AstrBot, "astrbot_data_v4_sqlite"),
-        move |request| {
-            let inventory = AstrBotSourceBackedInventoryV0::discover(&hydration_discovery)
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                })?;
-            AstrBotSourceBackedResolverV0::from_inventory(&inventory)
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
-                .hydrate_event(request)
-        },
+    register_replacement_document_tree_route(
+        registry,
+        source,
+        selection,
+        SqliteInventoryDocumentAdapter::new(
+            CaptureProvider::AstrBot,
+            "astrbot_data_v4_sqlite",
+            AstrBotInventoryProvider { discovery },
+        ),
     )
-    .with_batch_hydration(move |request| {
-        let inventory = AstrBotSourceBackedInventoryV0::discover(&batch_hydration_discovery)
-            .map_err(|error| {
+}
+
+struct AstrBotInventoryProvider {
+    discovery: DiscoveryContext,
+}
+
+impl SqliteInventoryProvider for AstrBotInventoryProvider {
+    type Leaf = AstrBotSourceBackedSourceV0;
+
+    fn parser_revision(&self) -> &'static str {
+        ASTRBOT_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
+        let inventory = AstrBotSourceBackedInventoryV0::discover(&self.discovery)
+            .map_err(astrbot_inventory_route_error)?;
+        let authority_fingerprint =
+            sqlite_inventory_authority_fingerprint(inventory.observation())?;
+        let leaves = inventory
+            .sources()
+            .iter()
+            .cloned()
+            .map(|leaf| SqliteInventoryCatalogLeaf {
+                source: leaf.source_key().clone(),
+                path: leaf.path().to_path_buf(),
+                provider_leaf: leaf,
+            })
+            .collect();
+        Ok(SqliteInventoryCatalog {
+            authority_fingerprint,
+            leaves,
+        })
+    }
+
+    fn scan(
+        &self,
+        leaf: &Self::Leaf,
+        snapshot: SqliteSourceReadSnapshot,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<CertifiedSource> {
+        let mut sink_failure = None;
+        let certificate = scan_astrbot_snapshot_v0(leaf, snapshot, &mut |document| {
+            if let Err(error) = sink.emit_document(document) {
+                let detail = error.to_string();
+                sink_failure = Some(error);
+                return Err(
+                    crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0::Capture(
+                        CaptureError::InvalidPayload(detail),
+                    ),
+                );
+            }
+            Ok(())
+        });
+        if let Some(error) = sink_failure {
+            return Err(error);
+        }
+        certificate.map_err(route_error)
+    }
+
+    fn hydrate(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let inventory =
+            AstrBotSourceBackedInventoryV0::discover(&self.discovery).map_err(|error| {
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?;
         AstrBotSourceBackedResolverV0::from_inventory(&inventory)
             .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
             .hydrate_batch_request(request)
-    });
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    }
+}
+
+fn astrbot_inventory_route_error(
+    error: crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0,
+) -> SourceBackedRouteError {
+    let kind = if matches!(
+        &error,
+        crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0::IncompleteInventory { .. }
+    ) {
+        SourceBackedRouteErrorKind::Unavailable
+    } else {
+        SourceBackedRouteErrorKind::InvalidSource
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }
 
 /// Registers Shelley only when the caller retains the exact CWD that selected
@@ -344,47 +722,115 @@ pub fn register_shelley_source_backed_route(
             "the Shelley source path does not belong to the supplied exact CWD",
         ));
     }
-    register_shelley_adapter(registry, source, adapter)
+    register_replacement_document_tree_route_with_authority(
+        registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+        SourceBackedSelectorAuthority::ExactCwd,
+        SqliteInventoryDocumentAdapter::new(
+            CaptureProvider::Shelley,
+            "shelley_sqlite",
+            ShelleyInventoryProvider { exact_cwd },
+        ),
+    )
 }
 
-fn register_shelley_adapter(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    adapter: ShelleySourceBackedAdapter,
-) -> SourceBackedCoordinatorResult<()> {
-    let capture_adapter = adapter.clone();
-    let hydration_adapter = adapter;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            sink.begin(capture_adapter.source().clone())?;
-            let mut scan = capture_adapter.start_scan().map_err(route_error)?;
-            while let Some(page) = scan.next_page().map_err(route_error)? {
-                for document in page.documents {
-                    sink.document(document)?;
-                }
-            }
-            sink.certify(scan.finish().map_err(route_error)?.certificate)
-        },
-        provider_format_scope(CaptureProvider::Shelley, "shelley_sqlite"),
-        move |request| {
-            let hydrated = hydration_adapter
-                .hydrate(request.locator())
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.text.into_bytes(),
+struct ShelleyInventoryProvider {
+    exact_cwd: PathBuf,
+}
+
+impl SqliteInventoryProvider for ShelleyInventoryProvider {
+    type Leaf = ShelleySourceBackedAdapter;
+
+    fn parser_revision(&self) -> &'static str {
+        SHELLEY_SOURCE_PARSER_REVISION
+    }
+
+    fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
+        let adapter = discover_shelley_source_backed_exact_cwd(&self.exact_cwd)
+            .map_err(shelley_inventory_route_error)?;
+        let mut authority = sha2::Sha256::new();
+        authority.update(b"ctx.shelley-exact-cwd-inventory-v1\0");
+        authority.update(self.exact_cwd.as_os_str().as_encoded_bytes());
+        let leaves = adapter
+            .into_iter()
+            .map(|leaf| SqliteInventoryCatalogLeaf {
+                source: leaf.source().clone(),
+                path: leaf.database_path().to_path_buf(),
+                provider_leaf: leaf,
             })
-        },
-    );
-    registry.register(SourceBackedRoute::automatic(
-        source,
-        SourceBackedSelectorAuthority::ExactCwd,
-        driver,
-    )?);
-    Ok(())
+            .collect();
+        Ok(SqliteInventoryCatalog {
+            authority_fingerprint: authority.finalize().into(),
+            leaves,
+        })
+    }
+
+    fn scan(
+        &self,
+        leaf: &Self::Leaf,
+        snapshot: SqliteSourceReadSnapshot,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<CertifiedSource> {
+        let mut scan = leaf.start_snapshot_scan(snapshot).map_err(route_error)?;
+        while let Some(page) = scan.next_page().map_err(route_error)? {
+            for document in page.documents {
+                sink.emit_document(document)?;
+            }
+        }
+        Ok(scan.finish().map_err(route_error)?.certificate)
+    }
+
+    fn hydrate(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let adapter = discover_shelley_source_backed_exact_cwd(&self.exact_cwd)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::ConfirmedDeleted,
+                    "Shelley database is absent from the exact CWD",
+                )
+            })?;
+        let records = request
+            .events()
+            .iter()
+            .map(|event| {
+                adapter
+                    .hydrate(event.locator())
+                    .map(|hydrated| HydratedProviderRecord {
+                        event_id: event.event_id(),
+                        provider_bytes: hydrated.text.into_bytes(),
+                    })
+                    .map_err(|error| {
+                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        BatchHydrationResult::new(records).map_err(|error| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                format!("invalid Shelley batch hydration result: {error}"),
+            )
+        })
+    }
+}
+
+fn shelley_inventory_route_error(
+    error: crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedError,
+) -> SourceBackedRouteError {
+    let kind = match &error {
+        crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedError::Capture(
+            CaptureError::Io(source),
+        ) if source.kind() == std::io::ErrorKind::NotFound => {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }
 
 /// Registers an inactive Hermes database only with a caller-owned persistent
@@ -465,39 +911,81 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
     selection: SourceBackedRouteSelection,
     inventory_source: Arc<dyn LingmaInventorySource>,
 ) -> SourceBackedCoordinatorResult<()> {
-    let capture_inventory = Arc::clone(&inventory_source);
-    let hydration_inventory = Arc::clone(&inventory_source);
-    let batch_hydration_inventory = inventory_source;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let opening = capture_inventory.observe().map_err(route_error)?;
-            let closing_inventory = Arc::clone(&capture_inventory);
-            let scan = scan_lingma_source_backed_v0(opening, move || closing_inventory.observe())
-                .map_err(route_error)?;
-            for database in scan.databases() {
-                sink.begin(database.certificate().observation().source().clone())?;
-                for record in database.records() {
-                    sink.document(record.document().clone())?;
-                }
-                sink.certify(database.certificate().clone())?;
+    register_replacement_document_tree_route(
+        registry,
+        source,
+        selection,
+        SqliteInventoryDocumentAdapter::new(
+            CaptureProvider::Lingma,
+            "lingma_sqlite",
+            LingmaInventoryProvider { inventory_source },
+        ),
+    )
+}
+
+struct LingmaInventoryProvider {
+    inventory_source: Arc<dyn LingmaInventorySource>,
+}
+
+impl SqliteInventoryProvider for LingmaInventoryProvider {
+    type Leaf = LingmaDatabaseSourceV0;
+
+    fn parser_revision(&self) -> &'static str {
+        LINGMA_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
+        let inventory = self.inventory_source.observe().map_err(route_error)?;
+        reject_duplicate_lingma_paths(&inventory).map_err(route_error)?;
+        let authority_fingerprint =
+            sqlite_inventory_authority_fingerprint(inventory.observation())?;
+        let leaves = inventory
+            .databases()
+            .iter()
+            .cloned()
+            .map(|leaf| {
+                Ok(SqliteInventoryCatalogLeaf {
+                    source: leaf.source_key()?,
+                    path: leaf.path().to_path_buf(),
+                    provider_leaf: leaf,
+                })
+            })
+            .collect::<LingmaSourceBackedResultV0<Vec<_>>>()
+            .map_err(route_error)?;
+        Ok(SqliteInventoryCatalog {
+            authority_fingerprint,
+            leaves,
+        })
+    }
+
+    fn scan(
+        &self,
+        leaf: &Self::Leaf,
+        snapshot: SqliteSourceReadSnapshot,
+        sink: &mut ChangedDocumentSink<'_, '_>,
+    ) -> SourceBackedRouteResult<CertifiedSource> {
+        let mut sink_failure = None;
+        let certificate = scan_lingma_snapshot_v0(leaf, snapshot, &mut |document| {
+            if let Err(error) = sink.emit_document(document) {
+                let detail = error.to_string();
+                sink_failure = Some(error);
+                return Err(LingmaSourceBackedErrorV0::Capture(
+                    CaptureError::InvalidPayload(detail),
+                ));
             }
             Ok(())
-        },
-        provider_format_scope(CaptureProvider::Lingma, "lingma_sqlite"),
-        move |request| {
-            let inventory = hydration_inventory.observe().map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            LingmaSourceBackedResolverV0::new(&inventory)
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                })?
-                .hydrate_event(request)
-        },
-    )
-    .with_batch_hydration(move |request| {
-        let inventory = batch_hydration_inventory.observe().map_err(|error| {
+        });
+        if let Some(error) = sink_failure {
+            return Err(error);
+        }
+        certificate.map_err(route_error)
+    }
+
+    fn hydrate(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let inventory = self.inventory_source.observe().map_err(|error| {
             hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
         })?;
         LingmaSourceBackedResolverV0::new(&inventory)
@@ -505,14 +993,7 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?
             .hydrate_batch_request(request)
-    });
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    }
 }
 
 pub(in crate::provider::source_backed) fn discovered_lingma_inventory_source(

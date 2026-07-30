@@ -4,8 +4,7 @@ use std::{
 };
 
 use ctx_history_core::{
-    CaptureProvider, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
-    TypedKey,
+    CaptureProvider, SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use sha2::{Digest, Sha256};
 
@@ -13,16 +12,15 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
     CaptureError, LINGMA_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
-use super::super::SqliteEncoding;
 use super::{
     LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, INVENTORY_AUTHORITY_NAMESPACE,
     INVENTORY_REVISION_DOMAIN, INVENTORY_REVISION_KIND, MAX_INVENTORY_DATABASES,
-    SOURCE_ANCHOR_NAMESPACE, SOURCE_REVISION_DOMAIN, SOURCE_REVISION_KIND, SOURCE_SCHEMA_VARIANT,
+    SOURCE_ANCHOR_NAMESPACE, SOURCE_SCHEMA_VARIANT,
 };
 
 pub(super) struct LingmaRootAuthorizedSource {
@@ -66,18 +64,6 @@ impl LingmaRootAuthorizedSource {
         self.source_root.revalidate()?;
         Ok(snapshot)
     }
-
-    pub(super) fn evidence_is_current(
-        &self,
-        expected: &SqliteSourceEvidence,
-    ) -> LingmaSourceBackedResultV0<bool> {
-        self.source_root.revalidate()?;
-        let snapshot = self.open_snapshot()?;
-        let current = snapshot.evidence().clone();
-        snapshot.finish()?;
-        self.source_root.revalidate()?;
-        Ok(&current == expected)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +96,10 @@ impl LingmaDatabaseSourceV0 {
             anchor,
         )?)
     }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// A complete, finite inventory supplied by the installed-client/profile/version discovery lane.
@@ -118,7 +108,6 @@ impl LingmaDatabaseSourceV0 {
 /// locations and never enter stable source, session, or event identity.
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceInventoryV0 {
-    authority_key: TypedKey,
     pub(super) databases: Vec<LingmaDatabaseSourceV0>,
     pub(super) observation: SourceInventoryObservation,
 }
@@ -156,12 +145,12 @@ impl LingmaSourceInventoryV0 {
             revision.to_vec(),
         )?;
         Ok(Self {
-            authority_key,
             databases,
             observation,
         })
     }
 
+    #[cfg(test)]
     pub(super) fn source_keys(&self) -> LingmaSourceBackedResultV0<Vec<SourceKey>> {
         self.databases
             .iter()
@@ -169,8 +158,17 @@ impl LingmaSourceInventoryV0 {
             .collect()
     }
 
+    pub(crate) fn observation(&self) -> &SourceInventoryObservation {
+        &self.observation
+    }
+
+    pub(crate) fn databases(&self) -> &[LingmaDatabaseSourceV0] {
+        &self.databases
+    }
+
+    #[cfg(test)]
     pub(super) fn exact_inventory_eq(&self, other: &Self) -> LingmaSourceBackedResultV0<bool> {
-        if self.authority_key != other.authority_key
+        if self.observation.authority_key() != other.observation.authority_key()
             || self.databases.len() != other.databases.len()
         {
             return Ok(false);
@@ -186,52 +184,6 @@ impl LingmaSourceInventoryV0 {
     }
 }
 
-pub(super) fn source_observation(
-    source: SourceKey,
-    evidence: &SqliteSourceEvidence,
-    user_version: i64,
-    schema_fingerprint: &str,
-    encoding: SqliteEncoding,
-) -> LingmaSourceBackedResultV0<SourceObservation> {
-    let mut revision = Sha256::new();
-    revision.update(SOURCE_REVISION_DOMAIN);
-    let revision_component = sqlite_evidence_revision_component(evidence);
-    hash_revision_field(&mut revision, revision_component.as_bytes());
-    revision.update(user_version.to_be_bytes());
-    hash_revision_field(&mut revision, schema_fingerprint.as_bytes());
-    revision.update([match encoding {
-        SqliteEncoding::Utf8 => 1,
-        SqliteEncoding::Utf16Le => 2,
-        SqliteEncoding::Utf16Be => 3,
-    }]);
-    Ok(SourceObservation::new(
-        source,
-        SOURCE_REVISION_KIND,
-        revision.finalize().to_vec(),
-    )?)
-}
-
-pub(super) fn source_revision_digest(observation: &SourceObservation) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-source-revision-evidence-v1\0");
-    hash_revision_field(&mut digest, observation.revision_kind().as_bytes());
-    hash_revision_field(&mut digest, observation.revision());
-    digest.finalize().into()
-}
-
-fn sqlite_evidence_revision_component(evidence: &SqliteSourceEvidence) -> String {
-    format!(
-        "identity={};length={};revision={}",
-        hex_bytes(evidence.identity()),
-        evidence.length(),
-        hex_bytes(evidence.revision()),
-    )
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn inventory_revision(sources: &[SourceKey]) -> [u8; 32] {
     let mut revision = Sha256::new();
     revision.update(INVENTORY_REVISION_DOMAIN);
@@ -241,9 +193,4 @@ fn inventory_revision(sources: &[SourceKey]) -> [u8; 32] {
         revision.update(source.exact_descriptor_digest());
     }
     revision.finalize().into()
-}
-
-fn hash_revision_field(digest: &mut Sha256, bytes: &[u8]) {
-    digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
-    digest.update(bytes);
 }

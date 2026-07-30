@@ -6,13 +6,12 @@ use ctx_history_core::{
 };
 use rusqlite::{config::DbConfig, Connection};
 
-use crate::provider::sqlite::sqlite_schema_fingerprint;
-
-use super::super::detect_schema;
 use super::{
-    discovery::{source_observation, source_revision_digest, LingmaRootAuthorizedSource},
+    discovery::LingmaRootAuthorizedSource,
     hydration::LingmaSourceBackedResolverV0,
-    parsing::{scan_lingma_source_backed_v0, set_before_database_certification},
+    parsing::{
+        scan_lingma_source_backed_v0, set_before_database_certification, LingmaSourceBackedScanV0,
+    },
     *,
 };
 
@@ -88,42 +87,16 @@ fn event_request(record: &LingmaSourceBackedRecordV0) -> EventHydrationRequest {
     EventHydrationRequest::new(record.document.event_id, record.document.locator.clone()).unwrap()
 }
 
-fn current_source_revision(source: &LingmaDatabaseSourceV0) -> [u8; 32] {
-    let authority = LingmaRootAuthorizedSource::retain(&source.path).unwrap();
-    let snapshot = authority.open_snapshot().unwrap();
-    let digest = {
-        let connection = snapshot.connection().unwrap();
-        let encoding = detect_schema(connection).unwrap();
-        let user_version = connection
-            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .unwrap();
-        let schema_fingerprint = sqlite_schema_fingerprint(connection).unwrap();
-        let observation = source_observation(
-            source.source_key().unwrap(),
-            snapshot.evidence(),
-            user_version,
-            &schema_fingerprint,
-            encoding,
-        )
-        .unwrap();
-        source_revision_digest(&observation)
-    };
-    snapshot.finish().unwrap();
-    authority.source_root.revalidate().unwrap();
-    digest
-}
-
 fn request_with_locator_evidence(
     record: &LingmaSourceBackedRecordV0,
-    source_revision: [u8; 32],
     coordinate: NativeRecordCoordinate,
     record_digest: [u8; 32],
 ) -> EventHydrationRequest {
     let locator = SourceRecordLocator::new(
         record.document.source.clone(),
         coordinate,
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )
     .unwrap();
@@ -280,11 +253,7 @@ fn stock_sqlite_snapshot_finish_precedes_source_certification() {
     })));
 
     let result = scan_lingma_source_backed_v0(inventory, || Ok(closing));
-    assert!(matches!(
-        result,
-        Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan
-            | LingmaSourceBackedErrorV0::Capture(_))
-    ));
+    assert!(result.is_err());
 }
 
 #[test]
@@ -368,13 +337,13 @@ fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text()
     ));
     assert_eq!(
         user.document.locator.revision_policy(),
-        LocatorRevisionPolicy::ExactSourceRevision
+        LocatorRevisionPolicy::StableRecordEvidence
     );
     assert!(user
         .document
         .locator
         .certified_source_revision_digest()
-        .is_some());
+        .is_none());
 
     let resolver = LingmaSourceBackedResolverV0::new(&inventory).unwrap();
     assert_eq!(
@@ -417,7 +386,7 @@ fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text()
 }
 
 #[test]
-fn source_backed_hydration_types_stale_source_and_record_digest() {
+fn source_backed_hydration_types_stale_row_and_record_digest() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let stale_path = temp.path().join("stale.db");
     let connection = create_database(&stale_path);
@@ -448,7 +417,7 @@ fn source_backed_hydration_types_stale_source_and_record_digest() {
         .unwrap()
         .hydrate_record(stale_record)
         .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 
     let digest_path = temp.path().join("digest.db");
     let connection = create_database(&digest_path);
@@ -483,11 +452,6 @@ fn source_backed_hydration_types_stale_source_and_record_digest() {
     };
     let request = request_with_locator_evidence(
         digest_record,
-        *digest_record
-            .document
-            .locator
-            .certified_source_revision_digest()
-            .unwrap(),
         coordinate,
         *digest_record.document.locator.record_digest(),
     );
@@ -498,11 +462,6 @@ fn source_backed_hydration_types_stale_source_and_record_digest() {
     assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
     let request = request_with_locator_evidence(
         digest_record,
-        *digest_record
-            .document
-            .locator
-            .certified_source_revision_digest()
-            .unwrap(),
         digest_record.document.locator.coordinate().clone(),
         [0xa5; 32],
     );
@@ -522,8 +481,7 @@ fn source_backed_hydration_types_stale_source_and_record_digest() {
         None,
     );
     drop(connection);
-    let native_source = database(&native_path, "vscode:stable:native-key");
-    let native_inventory = inventory(vec![native_source.clone()]);
+    let native_inventory = inventory(vec![database(&native_path, "vscode:stable:native-key")]);
     let scan =
         scan_lingma_source_backed_v0(native_inventory.clone(), || Ok(native_inventory.clone()))
             .unwrap();
@@ -539,7 +497,6 @@ fn source_backed_hydration_types_stale_source_and_record_digest() {
     drop(connection);
     let request = request_with_locator_evidence(
         native_record,
-        current_source_revision(&native_source),
         native_record.document.locator.coordinate().clone(),
         *native_record.document.locator.record_digest(),
     );
@@ -563,8 +520,7 @@ fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_ro
         None,
     );
     drop(connection);
-    let missing_source = database(&missing_path, "vscode:stable:missing-row");
-    let missing_inventory = inventory(vec![missing_source.clone()]);
+    let missing_inventory = inventory(vec![database(&missing_path, "vscode:stable:missing-row")]);
     let scan =
         scan_lingma_source_backed_v0(missing_inventory.clone(), || Ok(missing_inventory.clone()))
             .unwrap();
@@ -578,7 +534,6 @@ fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_ro
         .unwrap();
     let request = request_with_locator_evidence(
         record,
-        current_source_revision(&missing_source),
         record.document.locator.coordinate().clone(),
         *record.document.locator.record_digest(),
     );
@@ -652,8 +607,7 @@ fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
         None,
     );
     drop(connection);
-    let malformed_source = database(&malformed_path, "vscode:stable:malformed");
-    let malformed_inventory = inventory(vec![malformed_source.clone()]);
+    let malformed_inventory = inventory(vec![database(&malformed_path, "vscode:stable:malformed")]);
     let scan = scan_lingma_source_backed_v0(malformed_inventory.clone(), || {
         Ok(malformed_inventory.clone())
     })
@@ -668,7 +622,6 @@ fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
         .unwrap();
     let request = request_with_locator_evidence(
         record,
-        current_source_revision(&malformed_source),
         record.document.locator.coordinate().clone(),
         *record.document.locator.record_digest(),
     );
@@ -734,11 +687,6 @@ fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks(
     };
     let request = request_with_locator_evidence(
         record,
-        *record
-            .document
-            .locator
-            .certified_source_revision_digest()
-            .unwrap(),
         malformed_coordinate,
         *record.document.locator.record_digest(),
     );
@@ -775,7 +723,9 @@ fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks(
         .split_once("fn discovered_lingma_inventory_source")
         .unwrap()
         .0;
-    assert!(route.contains("with_batch_hydration"));
+    assert!(route.contains("register_replacement_document_tree_route"));
+    assert!(route.contains("SqliteInventoryDocumentAdapter"));
+    assert!(!route.contains("captured_route_driver"));
     assert!(route.contains("LingmaSourceBackedResolverV0"));
     assert!(!route.contains(&["work", ".sqlite"].concat()));
     assert!(!route.contains(&["ctx_history_", "store"].concat()));

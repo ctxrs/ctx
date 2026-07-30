@@ -131,7 +131,7 @@ fn astrbot_source_backed_conversation_hydrates_the_original_typed_item() {
             primary_key: TypedKey::Composite(parts),
             row_version: Some(TypedKey::Bytes(digest)),
             ..
-        } if parts == &vec![TypedKey::I64(1), TypedKey::U64(0)] && digest.len() == 32
+        } if parts.as_slice() == [TypedKey::I64(1), TypedKey::U64(0)] && digest.len() == 32
     ));
 
     let resolver =

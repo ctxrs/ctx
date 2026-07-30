@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use chrono::{DateTime, Duration, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, EventRole, EventType,
@@ -33,6 +31,7 @@ pub(crate) struct LingmaSourceBackedRecordV0 {
 }
 
 impl LingmaSourceBackedRecordV0 {
+    #[cfg(test)]
     pub(crate) fn document(&self) -> &LexicalDocument {
         &self.document
     }
@@ -42,14 +41,12 @@ pub(super) struct ParsedRow {
     pub(super) ordinal: u64,
     pub(super) row: LingmaRow,
     pub(super) record_digest: [u8; 32],
+    pub(super) request_identity_unique: bool,
 }
 
 pub(super) fn project_row(
     source: &SourceKey,
-    source_revision_digest: &[u8; 32],
-    revision_scope: &TypedKey,
     source_path: &str,
-    request_counts: &BTreeMap<(String, String), usize>,
     parsed: ParsedRow,
     records: &mut Vec<LingmaSourceBackedRecordV0>,
 ) -> LingmaSourceBackedResultV0<()> {
@@ -62,7 +59,7 @@ pub(super) fn project_row(
         logical_session_kind: LOGICAL_SESSION_KIND,
         native_session_key: &session_key,
     })?;
-    let native_identity = native_item_identity(&parsed, request_counts, revision_scope)?;
+    let native_identity = native_item_identity(&parsed)?;
     let user_sequence = parsed.ordinal.saturating_mul(2);
     let user_event = ProjectedEvent {
         role: EventRole::User,
@@ -74,7 +71,6 @@ pub(super) fn project_row(
         session_id,
         &parsed.row,
         &native_identity,
-        source_revision_digest,
         parsed.record_digest,
         user_sequence,
         USER_PROMPT_COORDINATE,
@@ -105,7 +101,6 @@ pub(super) fn project_row(
             session_id,
             &parsed.row,
             &native_identity,
-            source_revision_digest,
             parsed.record_digest,
             user_sequence.saturating_add(1),
             coordinate,
@@ -124,17 +119,13 @@ struct LingmaNativeItemIdentity {
 
 fn native_item_identity(
     parsed: &ParsedRow,
-    request_counts: &BTreeMap<(String, String), usize>,
-    revision_scope: &TypedKey,
 ) -> Result<LingmaNativeItemIdentity, ProjectionContractError> {
     if let Some(request_id) = parsed
         .row
         .request_id
         .as_ref()
         .filter(|request_id| !request_id.trim().is_empty())
-        .filter(|request_id| {
-            request_counts.get(&(parsed.row.session_id.clone(), (*request_id).clone())) == Some(&1)
-        })
+        .filter(|_| parsed.request_identity_unique)
     {
         let session = TypedKey::utf8(parsed.row.session_id.clone())?;
         let request = TypedKey::utf8(request_id.clone())?;
@@ -146,6 +137,7 @@ fn native_item_identity(
             coordinate: TypedKey::composite(vec![TypedKey::utf8("request")?, session, request])?,
         });
     }
+    let revision_scope = TypedKey::bytes(parsed.record_digest.to_vec())?;
     Ok(LingmaNativeItemIdentity {
         item_key: NativeItemKey::revision_scoped_position(
             NATIVE_POSITION_KIND,
@@ -166,7 +158,6 @@ fn project_event(
     session_id: StableEntityId,
     row: &LingmaRow,
     native_identity: &LingmaNativeItemIdentity,
-    source_revision_digest: &[u8; 32],
     record_digest: [u8; 32],
     event_sequence: u64,
     coordinate_kind: &'static str,
@@ -194,8 +185,8 @@ fn project_event(
             ])?,
             row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(*source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         Sha256::digest(logical_text.as_bytes()).into(),
     )?;
     if logical_text.is_empty() {

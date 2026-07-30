@@ -9,10 +9,7 @@ use ctx_history_core::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{
-    provider::sqlite::sqlite_schema_fingerprint, provider_sources::SqliteSourceAccessError,
-    CaptureError,
-};
+use crate::{provider_sources::SqliteSourceAccessError, CaptureError};
 
 use super::super::{
     detect_schema, load_raw_row,
@@ -24,10 +21,7 @@ use super::super::{
 #[cfg(test)]
 use super::identity::LingmaSourceBackedRecordV0;
 use super::{
-    discovery::{
-        source_observation, source_revision_digest, LingmaRootAuthorizedSource,
-        LingmaSourceInventoryV0,
-    },
+    discovery::{LingmaRootAuthorizedSource, LingmaSourceInventoryV0},
     LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, ASSISTANT_ERROR_COORDINATE,
     ASSISTANT_SUMMARY_COORDINATE, LOGICAL_EVENT_KIND, LOGICAL_RELATION, LOGICAL_SESSION_KIND,
     NATIVE_POSITION_KIND, NATIVE_REQUEST_NAMESPACE, NATIVE_SESSION_NAMESPACE,
@@ -94,7 +88,7 @@ impl LingmaNativeIdentityCoordinate {
         &self,
         connection: &rusqlite::Connection,
         row: &LingmaRow,
-        current_revision_scope: &TypedKey,
+        current_record_scope: &TypedKey,
     ) -> Result<NativeItemKey, HydrationFailure> {
         match self {
             Self::Request {
@@ -140,10 +134,10 @@ impl LingmaNativeIdentityCoordinate {
                 ordinal,
                 revision_scope,
             } => {
-                if revision_scope != current_revision_scope {
+                if revision_scope != current_record_scope {
                     return Err(hydration_failure(
                         HydrationFailureKind::InvalidLocator,
-                        "Lingma position-native key has the wrong source revision scope",
+                        "Lingma position-native key has the wrong row revision scope",
                     ));
                 }
                 let observed_ordinal: i64 = connection
@@ -182,10 +176,12 @@ struct LingmaCoordinate {
 fn decode_lingma_locator(
     locator: &SourceRecordLocator,
 ) -> Result<LingmaCoordinate, HydrationFailure> {
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision {
+    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
+    {
         return Err(hydration_failure(
             HydrationFailureKind::InvalidLocator,
-            "Lingma locator is not exact-revision scoped",
+            "Lingma locator is not stable-record scoped",
         ));
     }
     let NativeRecordCoordinate::ProviderSqlite {
@@ -449,33 +445,6 @@ impl LingmaSourceBackedResolverV0 {
         let hydration = (|| {
             let connection = sqlite_snapshot.connection().map_err(map_sqlite_hydration)?;
             let encoding = detect_schema(connection).map_err(map_parser_hydration)?;
-            let user_version = connection
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                .map_err(CaptureError::from)
-                .map_err(map_capture_hydration)?;
-            let schema_fingerprint =
-                sqlite_schema_fingerprint(connection).map_err(map_capture_hydration)?;
-            let observation = source_observation(
-                source.clone(),
-                sqlite_snapshot.evidence(),
-                user_version,
-                &schema_fingerprint,
-                encoding,
-            )
-            .map_err(invalid_locator)?;
-            let current_revision_digest = source_revision_digest(&observation);
-            if requests.iter().any(|request| {
-                request.locator().certified_source_revision_digest()
-                    != Some(&current_revision_digest)
-            }) {
-                return Err(hydration_failure(
-                    HydrationFailureKind::StaleSourceEvidence,
-                    "Lingma SQLite snapshot no longer matches the certified revision",
-                ));
-            }
-
-            let current_revision_scope =
-                TypedKey::bytes(observation.revision().to_vec()).map_err(invalid_locator)?;
             let mut values_by_row = BTreeMap::new();
             let mut hydrated = Vec::with_capacity(requests.len());
             for (request, coordinate) in requests.iter().zip(coordinates) {
@@ -506,10 +475,12 @@ impl LingmaSourceBackedResolverV0 {
                     ));
                 }
                 let row = row_from_native_values(values).map_err(map_capture_hydration)?;
+                let current_record_scope =
+                    TypedKey::bytes(coordinate.row_digest.to_vec()).map_err(invalid_locator)?;
                 let native_item_key = coordinate.native_identity.validate_and_build(
                     connection,
                     &row,
-                    &current_revision_scope,
+                    &current_record_scope,
                 )?;
                 let session_key = NativeSessionKey::native_id(
                     NATIVE_SESSION_NAMESPACE,

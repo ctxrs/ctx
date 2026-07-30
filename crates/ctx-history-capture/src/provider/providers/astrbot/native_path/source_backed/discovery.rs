@@ -4,9 +4,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(test)]
+use ctx_history_core::CertifiedSourceInventory;
 use ctx_history_core::{
-    CaptureProvider, CertifiedSourceInventory, SourceAnchor, SourceInventoryObservation, SourceKey,
-    SourceObservation, TypedKey,
+    CaptureProvider, SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -16,18 +17,19 @@ use crate::{
     discover_provider_sources_for_provider_with_context,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, DiscoveryContext, ProviderSourceStatus, ASTRBOT_SQLITE_SOURCE_FORMAT,
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
-use super::super::super::{ASTRBOT_CAPTURE_REVISION, ASTRBOT_POLICY_REVISION};
+#[cfg(test)]
+use super::INVENTORY_DISCOVERY_REVISION;
 use super::{
     AstrBotSourceBackedErrorV0, AstrBotSourceBackedResultV0, INVENTORY_AUTHORITY_KEY,
-    INVENTORY_AUTHORITY_NAMESPACE, INVENTORY_DISCOVERY_REVISION, INVENTORY_REVISION_KIND,
-    LAUNCHER_SOURCE_NAMESPACE, SELECTED_SOURCE_NAMESPACE, SOURCE_IDENTITY_VERSION,
-    SOURCE_REVISION_KIND, SOURCE_SCHEMA_VARIANT, SQLITE_SOURCE_INVALID_REASON,
+    INVENTORY_AUTHORITY_NAMESPACE, INVENTORY_REVISION_KIND, LAUNCHER_SOURCE_NAMESPACE,
+    SELECTED_SOURCE_NAMESPACE, SOURCE_IDENTITY_VERSION, SOURCE_SCHEMA_VARIANT,
+    SQLITE_SOURCE_INVALID_REASON,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,6 +48,10 @@ pub(crate) struct AstrBotSourceBackedSourceV0 {
 impl AstrBotSourceBackedSourceV0 {
     pub(crate) fn source_key(&self) -> &SourceKey {
         &self.source_key
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -117,6 +123,11 @@ impl AstrBotSourceBackedInventoryV0 {
         &self.sources
     }
 
+    pub(crate) fn observation(&self) -> &SourceInventoryObservation {
+        &self.observation
+    }
+
+    #[cfg(test)]
     pub(crate) fn certify(
         &self,
         closing: &Self,
@@ -236,40 +247,4 @@ fn inventory_observation(
         INVENTORY_REVISION_KIND,
         digest.finalize().to_vec(),
     )?)
-}
-
-pub(super) fn source_observation(
-    source: &SourceKey,
-    evidence: &SqliteSourceEvidence,
-    user_version: i64,
-    schema_fingerprint: &str,
-) -> AstrBotSourceBackedResultV0<SourceObservation> {
-    Ok(SourceObservation::new(
-        source.clone(),
-        SOURCE_REVISION_KIND,
-        format!(
-            "astrbot-sqlite-snapshot-v1:capture={ASTRBOT_CAPTURE_REVISION};policy={ASTRBOT_POLICY_REVISION};user_version={user_version};schema={schema_fingerprint};identity={};length={};revision={}",
-            hex(evidence.identity()),
-            evidence.length(),
-            hex(evidence.revision()),
-        )
-        .into_bytes(),
-    )?)
-}
-
-pub(super) fn revision_digest(observation: &SourceObservation) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-astrbot-source-revision-v0\0");
-    digest.update(observation.revision_kind().as_bytes());
-    digest.update(observation.revision());
-    digest.finalize().into()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(value, "{byte:02x}");
-    }
-    value
 }

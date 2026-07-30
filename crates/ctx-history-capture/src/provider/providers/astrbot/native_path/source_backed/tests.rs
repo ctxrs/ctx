@@ -14,16 +14,12 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use crate::{
-    provider::sqlite::sqlite_schema_fingerprint, provider_sources::SqliteSourceAccessError,
-    test_support_paths::tempdir, DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs,
+    provider_sources::SqliteSourceAccessError, test_support_paths::tempdir, DiscoveryContext,
+    DiscoveryPlatform, DiscoveryPlatformDirs,
 };
 
-use super::super::super::source::AstrBotSql;
 use super::{
-    discovery::{
-        open_root_authorized_snapshot, open_root_authorized_snapshot_with_hook, revision_digest,
-        source_key, source_observation,
-    },
+    discovery::{open_root_authorized_snapshot_with_hook, source_key},
     hydration::AstrBotSourceBackedResolverV0,
     parsing::scan_astrbot_source_backed_v0,
     *,
@@ -197,41 +193,16 @@ fn event_request(document: &LexicalDocument) -> EventHydrationRequest {
     EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
 }
 
-fn current_source_revision(source: &AstrBotSourceBackedSourceV0) -> [u8; 32] {
-    let (source_root, snapshot) = open_root_authorized_snapshot(&source.path).unwrap();
-    let digest = {
-        let connection = snapshot.connection().unwrap();
-        AstrBotSql::new(connection).unwrap();
-        let user_version = connection
-            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .unwrap();
-        let schema_fingerprint = sqlite_schema_fingerprint(connection).unwrap();
-        revision_digest(
-            &source_observation(
-                &source.source_key,
-                snapshot.evidence(),
-                user_version,
-                &schema_fingerprint,
-            )
-            .unwrap(),
-        )
-    };
-    snapshot.finish().unwrap();
-    source_root.revalidate().unwrap();
-    digest
-}
-
 fn request_with_locator_evidence(
     document: &LexicalDocument,
-    source_revision: [u8; 32],
     coordinate: NativeRecordCoordinate,
     record_digest: [u8; 32],
 ) -> EventHydrationRequest {
     let locator = SourceRecordLocator::new(
         document.source.clone(),
         coordinate,
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )
     .unwrap();
@@ -408,12 +379,12 @@ fn astrbot_source_backed_reopens_full_conversation_and_platform_text_exactly() {
     assert!(conversation.is_primary);
     assert_eq!(
         conversation.locator.revision_policy(),
-        LocatorRevisionPolicy::ExactSourceRevision
+        LocatorRevisionPolicy::StableRecordEvidence
     );
     assert!(conversation
         .locator
         .certified_source_revision_digest()
-        .is_some());
+        .is_none());
     assert!(matches!(
         conversation.locator.coordinate(),
         NativeRecordCoordinate::ProviderSqlite {
@@ -485,7 +456,7 @@ fn astrbot_source_backed_reopens_full_conversation_and_platform_text_exactly() {
 }
 
 #[test]
-fn astrbot_hydration_types_stale_source_and_record_digest() {
+fn astrbot_hydration_types_stale_row_and_record_digest() {
     let temp = tempdir().unwrap();
     let stale_path = temp.path().join("stale.db");
     create_database(&stale_path, "stale-session", "original AstrBot body");
@@ -507,7 +478,7 @@ fn astrbot_hydration_types_stale_source_and_record_digest() {
     let failure = resolver_for(&stale_source)
         .hydrate_event(&event_request(document))
         .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 
     let digest_path = temp.path().join("digest.db");
     create_database(&digest_path, "digest-session", "digest AstrBot body");
@@ -527,22 +498,14 @@ fn astrbot_hydration_types_stale_source_and_record_digest() {
         primary_key: primary_key.clone(),
         row_version: Some(TypedKey::bytes(vec![0x6b; 32]).unwrap()),
     };
-    let request = request_with_locator_evidence(
-        document,
-        *document.locator.certified_source_revision_digest().unwrap(),
-        coordinate,
-        *document.locator.record_digest(),
-    );
+    let request =
+        request_with_locator_evidence(document, coordinate, *document.locator.record_digest());
     let failure = resolver_for(&digest_source)
         .hydrate_event(&request)
         .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
-    let request = request_with_locator_evidence(
-        document,
-        *document.locator.certified_source_revision_digest().unwrap(),
-        document.locator.coordinate().clone(),
-        [0xb6; 32],
-    );
+    let request =
+        request_with_locator_evidence(document, document.locator.coordinate().clone(), [0xb6; 32]);
     let failure = resolver_for(&digest_source)
         .hydrate_event(&request)
         .unwrap_err();
@@ -562,7 +525,6 @@ fn astrbot_hydration_distinguishes_missing_row_deletion_and_unavailable_root() {
         .unwrap();
     let request = request_with_locator_evidence(
         &documents[0],
-        current_source_revision(&missing_source),
         documents[0].locator.coordinate().clone(),
         *documents[0].locator.record_digest(),
     );
@@ -613,7 +575,6 @@ fn astrbot_hydration_types_malformed_rows_schema_and_locator_without_fallbacks()
         .unwrap();
     let request = request_with_locator_evidence(
         &documents[0],
-        current_source_revision(&malformed_source),
         documents[0].locator.coordinate().clone(),
         *documents[0].locator.record_digest(),
     );
@@ -653,10 +614,6 @@ fn astrbot_hydration_types_malformed_rows_schema_and_locator_without_fallbacks()
     };
     let request = request_with_locator_evidence(
         &documents[0],
-        *documents[0]
-            .locator
-            .certified_source_revision_digest()
-            .unwrap(),
         malformed_coordinate,
         *documents[0].locator.record_digest(),
     );
@@ -692,8 +649,10 @@ fn astrbot_hydration_types_malformed_rows_schema_and_locator_without_fallbacks()
         .split_once("/// Registers Shelley")
         .unwrap()
         .0;
-    assert!(route.contains("with_batch_hydration"));
+    assert!(route.contains("register_replacement_document_tree_route"));
+    assert!(route.contains("SqliteInventoryDocumentAdapter"));
     assert!(route.contains("AstrBotSourceBackedResolverV0"));
+    assert!(!route.contains("captured_route_driver"));
     assert!(!route.contains(&["work", ".sqlite"].concat()));
     assert!(!route.contains(&["ctx_history_", "store"].concat()));
 }
