@@ -124,6 +124,7 @@ CI_TESTS = [
     ":cargo_diagnostic_tests",
     ":check_force_rerun_tests",
     ":cli_build_cfg_parity_check",
+    ":cli_ux_observer_tests",
     ":dependency_advisory_gate_tests",
     ":docs_check",
     ":freebsd_ort_exit_contract",
