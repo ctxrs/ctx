@@ -150,14 +150,20 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
         }
 
         let compound_provider = matches!(
-            source.provider,
-            CaptureProvider::AstrBot | CaptureProvider::Crush | CaptureProvider::Lingma
+            format_route.constructor,
+            SourceBackedRouteConstructor::FiniteInventory
+                | SourceBackedRouteConstructor::DiscoveryContext
         );
         if compound_provider && compound_provider_registered.contains(&source.provider) {
             continue;
         }
 
-        match register_discovered_automatic_route(&mut registry, discovery, source.clone()) {
+        match register_discovered_automatic_route(
+            &mut registry,
+            discovery,
+            format_route.constructor,
+            source.clone(),
+        ) {
             Ok(()) => {
                 if compound_provider {
                     compound_provider_registered.insert(source.provider);
@@ -212,10 +218,11 @@ fn automatic_unavailable_detail(reason: &SourceBackedAutomaticUnavailableReason)
 fn register_discovered_automatic_route(
     registry: &mut SourceBackedProviderRegistry,
     discovery: &DiscoveryContext,
+    constructor: SourceBackedRouteConstructor,
     source: ProviderSource,
 ) -> Result<(), SourceBackedAutomaticUnavailableReason> {
-    let result = match source.provider {
-        CaptureProvider::Warp => {
+    let result = match (constructor, source.provider) {
+        (SourceBackedRouteConstructor::NamedSurface, CaptureProvider::Warp) => {
             let selected =
                 resolve_warp_discovery_authority(discovery, &source).map_err(|error| {
                     SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
@@ -229,7 +236,7 @@ fn register_discovered_automatic_route(
                 selected.surface_key().as_str(),
             )
         }
-        CaptureProvider::Goose => {
+        (SourceBackedRouteConstructor::SelectedWithRetainedRoutes, CaptureProvider::Goose) => {
             let platform_root = goose_platform_root(discovery, &source.path).ok_or(
                 SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
                     detail: "Goose discovery selected a database without its exact platform root",
@@ -243,7 +250,7 @@ fn register_discovered_automatic_route(
                 Vec::new(),
             )
         }
-        CaptureProvider::Crush => {
+        (SourceBackedRouteConstructor::FiniteInventory, CaptureProvider::Crush) => {
             let inventory_source = discovered_crush_inventory_source(discovery, &source)?;
             register_crush_source_backed_route(
                 registry,
@@ -252,7 +259,7 @@ fn register_discovered_automatic_route(
                 inventory_source,
             )
         }
-        CaptureProvider::Lingma => {
+        (SourceBackedRouteConstructor::FiniteInventory, CaptureProvider::Lingma) => {
             let inventory_source = discovered_lingma_inventory_source(discovery, &source)?;
             register_lingma_inventory_source(
                 registry,
@@ -261,13 +268,15 @@ fn register_discovered_automatic_route(
                 inventory_source,
             )
         }
-        CaptureProvider::AstrBot => register_astrbot_source_backed_route(
-            registry,
-            source,
-            SourceBackedRouteSelection::Automatic,
-            discovery.clone(),
-        ),
-        CaptureProvider::Shelley => {
+        (SourceBackedRouteConstructor::DiscoveryContext, CaptureProvider::AstrBot) => {
+            register_astrbot_source_backed_route(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                discovery.clone(),
+            )
+        }
+        (SourceBackedRouteConstructor::ExactCwd, CaptureProvider::Shelley) => {
             let exact_cwd = discovery.cwd().ok_or(
                 SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
                     detail: "Shelley automatic registration requires the exact discovery CWD",
@@ -275,11 +284,15 @@ fn register_discovered_automatic_route(
             )?;
             register_shelley_source_backed_route(registry, source, exact_cwd)
         }
-        _ => register_landed_source_backed_route(
+        (SourceBackedRouteConstructor::ProviderSource, _) => register_landed_source_backed_route(
             registry,
             source,
             SourceBackedRouteSelection::Automatic,
         ),
+        _ => Err(invalid_route(
+            source.provider,
+            "the landed route constructor does not match its provider registration callback",
+        )),
     };
     result.map_err(
         |error| SourceBackedAutomaticUnavailableReason::RegistrationRejected {

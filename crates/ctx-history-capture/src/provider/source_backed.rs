@@ -104,11 +104,10 @@ use super::providers::{
         hydrate_nanoclaw_source_backed_exact, nanoclaw_source_key, scan_nanoclaw_source_backed,
     },
     openclaw::openclaw_source_backed_adapter_v0,
-    opencode::native_path::source_backed::{
-        kilo_source_backed_registration, mimocode_source_backed_registration,
-        opencode_source_backed_registration, OpenCodeSourceBackedError,
+    openhands::nativepath::{
+        openhands_owns_source, openhands_route_error, OpenHandsEventFileAdapterV2,
+        OpenHandsEventFileSourcePlan,
     },
-    openhands::nativepath::{OpenHandsLocatorResolverV1, OpenHandsSourceBackedAdapterV1},
     pi::nativepath::{
         project_pi_source_backed_root_cold, PiSourceBackedResolver, PiSourceBackedRoot,
     },
