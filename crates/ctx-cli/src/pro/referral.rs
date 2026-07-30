@@ -175,12 +175,12 @@ fn parse_country_code(value: &str) -> Result<CountryCode, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReferralAuthMode {
+pub(super) enum ReferralAuthMode {
     Interactive { browser_enabled: bool },
     CachedOnly,
 }
 
-trait ReferralService {
+pub(super) trait ReferralService {
     fn create(
         &mut self,
         codename: &str,
@@ -255,24 +255,66 @@ impl ReferralService for CommercialLifecycleService {
 }
 
 pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
+    super::commercial_config::reject_test_control_outside_test_host()?;
+    #[cfg(ctx_pro_test_helper)]
+    super::test_control::prepare()?;
     args.validate_invocation()?;
     let json_output = args.json_output();
+    #[cfg(ctx_pro_test_helper)]
+    let test_control_active = super::test_control::is_active()?;
+    #[cfg(ctx_pro_test_helper)]
+    let _lifecycle_lock = if test_control_active {
+        None
+    } else {
+        prepare_referral_identity(&data_root, json_output)?;
+        let lifecycle_lock =
+            super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?;
+        Some(lifecycle_lock.ok_or_else(referral_lifecycle_lock_required)?)
+    };
+    #[cfg(not(ctx_pro_test_helper))]
     prepare_referral_identity(&data_root, json_output)?;
+    #[cfg(not(ctx_pro_test_helper))]
     let lifecycle_lock =
         super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?;
+    #[cfg(not(ctx_pro_test_helper))]
     let _lifecycle_lock = lifecycle_lock.ok_or_else(|| {
         anyhow::anyhow!(
             "authentication_required: rerun the referral command without --format=json to sign in"
         )
     })?;
-    let mut service = CommercialLifecycleService::production(&data_root)?;
-    run_with_service(
-        args,
-        &mut service,
-        &mut io::stdout().lock(),
-        ui,
-        &open_browser,
-    )
+    #[cfg(ctx_pro_test_helper)]
+    let result = if let Some(mut service) = super::test_control::referral_service()? {
+        run_with_service(
+            args,
+            &mut service,
+            &mut io::stdout().lock(),
+            ui,
+            &open_browser,
+        )
+    } else {
+        let mut service = CommercialLifecycleService::production(&data_root)?;
+        run_with_service(
+            args,
+            &mut service,
+            &mut io::stdout().lock(),
+            ui,
+            &open_browser,
+        )
+    };
+    #[cfg(not(ctx_pro_test_helper))]
+    let result = {
+        let mut service = CommercialLifecycleService::production(&data_root)?;
+        run_with_service(
+            args,
+            &mut service,
+            &mut io::stdout().lock(),
+            ui,
+            &open_browser,
+        )
+    };
+    #[cfg(ctx_pro_test_helper)]
+    let result = super::test_control::finish(result);
+    result
 }
 
 pub(crate) fn show_cta_once<D>(data_root: &Path, eligible: bool, output: &mut D) -> bool
@@ -400,6 +442,13 @@ fn prepare_referral_identity(data_root: &Path, json_output: bool) -> Result<()> 
             .context("key_store_unavailable: initialize local ctx identity")?;
     }
     Ok(())
+}
+
+#[cfg(ctx_pro_test_helper)]
+fn referral_lifecycle_lock_required() -> anyhow::Error {
+    anyhow::anyhow!(
+        "authentication_required: rerun the referral command without --format=json to sign in"
+    )
 }
 
 fn run_with_service(

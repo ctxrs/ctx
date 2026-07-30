@@ -502,6 +502,26 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "pro_test_control_tests",
+    src = "tests/pro_test_control.rs",
+    binary = ":ctx_pro_test_host",
+    extra_crates = [
+        "assert_cmd",
+        "serde_json",
+        "tempfile",
+    ],
+    extra_data = [":ctx"],
+    extra_env = {
+        "CTX_RELEASE_TEST_BINARY": "$(rootpath :ctx)",
+    },
+    tags = [
+        "protocol",
+        "security",
+    ],
+    test_support = [],
+)
+
+ctx_cli_integration_test(
     name = "pro_qualification_tests",
     src = "tests/pro_qualification.rs",
     binary = ":ctx_pro_qualification",

@@ -884,6 +884,11 @@ fn checkout_poll_ended(expired: bool) -> anyhow::Error {
 }
 
 pub(super) fn open_browser(url: &str) -> Result<()> {
+    #[cfg(ctx_pro_test_helper)]
+    if let Some(result) = crate::pro::test_control::browser_result_if_active(url) {
+        return result;
+    }
+
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
         command.arg(url);
@@ -931,6 +936,11 @@ fn entitlement_still_usable(entitlement: &SignedEntitlement, now: i64) -> Result
 }
 
 pub(super) fn unix_time() -> Result<i64> {
+    #[cfg(ctx_pro_test_helper)]
+    if let Some(result) = crate::pro::test_control::unix_time_if_active() {
+        return result;
+    }
+
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -938,6 +948,46 @@ pub(super) fn unix_time() -> Result<i64> {
             .as_secs(),
     )
     .context("invalid_request: system time is invalid")
+}
+
+#[cfg(ctx_pro_test_helper)]
+pub(super) fn test_device_sign_in(
+    context: &crate::ui::RenderContext,
+    verification_uri: &str,
+    user_code: &str,
+) -> crate::ui::Document {
+    render_device_sign_in(context, verification_uri, user_code)
+}
+
+#[cfg(ctx_pro_test_helper)]
+pub(super) fn test_paid_checkout_prompt(
+    context: &crate::ui::RenderContext,
+    url: &str,
+) -> crate::ui::Document {
+    render_paid_checkout_prompt(context, url)
+}
+
+#[cfg(ctx_pro_test_helper)]
+pub(super) fn test_trial_conversion(context: &crate::ui::RenderContext) -> crate::ui::Document {
+    render_trial_conversion(context)
+}
+
+#[cfg(ctx_pro_test_helper)]
+pub(super) fn test_checkout_progress(
+    context: &crate::ui::RenderContext,
+    label: &str,
+    detail: Option<&str>,
+) -> crate::ui::Document {
+    render_checkout_progress(context, label, detail)
+}
+
+#[cfg(ctx_pro_test_helper)]
+pub(super) fn test_browser_notice(
+    context: &crate::ui::RenderContext,
+    browser_opened: bool,
+    destination: &str,
+) -> crate::ui::Document {
+    render_browser_notice(context, browser_opened, destination)
 }
 
 #[cfg(test)]

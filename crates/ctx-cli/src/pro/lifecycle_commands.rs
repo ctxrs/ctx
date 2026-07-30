@@ -18,6 +18,8 @@ use serde_json::json;
 mod render;
 #[path = "lifecycle_commands/setup_replay.rs"]
 mod setup_replay;
+#[path = "lifecycle_commands/validation.rs"]
+mod validation;
 
 use super::{
     default_helper_path, install_marker_path, install_verified_bundle, previous_helper_path,
@@ -64,6 +66,7 @@ use render::{
 #[cfg(test)]
 use setup_replay::reusable_setup_access_state;
 use setup_replay::{record_helper_smoke, replay_completed_setup, write_setup_result};
+use validation::{validate_access_status, validate_portal_url};
 
 #[derive(Debug, Args)]
 pub(crate) struct ProArgs {
@@ -228,6 +231,8 @@ pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf, ui: &mut Ui) -> R
     let retry_command = render::human_retry_command(&args);
     let mut telemetry = ProLifecycleTelemetryV1::new(args.telemetry_operation());
     let result = run_lifecycle_inner(args, &data_root, &mut telemetry, ui);
+    #[cfg(ctx_pro_test_helper)]
+    let result = crate::pro::test_control::finish(result);
     if let Err(error) = &result {
         telemetry.fail(stable_error_code(error));
     }
@@ -250,6 +255,9 @@ fn run_lifecycle_inner(
     telemetry: &mut ProLifecycleTelemetryV1,
     ui: &mut Ui,
 ) -> Result<()> {
+    crate::pro::commercial_config::reject_test_control_outside_test_host()?;
+    #[cfg(ctx_pro_test_helper)]
+    crate::pro::test_control::prepare()?;
     args.validate_invocation()?;
     let json_output = args.json_output();
     let defer_materialization = matches!(
@@ -283,6 +291,19 @@ fn run_lifecycle_inner(
             )? {
                 return Ok(());
             }
+            #[cfg(ctx_pro_test_helper)]
+            if let Some(mut service) = crate::pro::test_control::lifecycle_service()? {
+                return run_setup(
+                    data_root,
+                    &mut service,
+                    json_output,
+                    defer_materialization,
+                    trial_only,
+                    referral.as_ref().map(ReferralCodename::as_str),
+                    telemetry,
+                    ui,
+                );
+            }
             let mut service = CommercialLifecycleService::production(data_root)?;
             run_setup(
                 data_root,
@@ -296,6 +317,17 @@ fn run_lifecycle_inner(
             )
         }
         Some(ProCommand::Manage(args)) => {
+            #[cfg(ctx_pro_test_helper)]
+            if let Some(mut service) = crate::pro::test_control::lifecycle_service()? {
+                return run_manage(
+                    data_root,
+                    &mut service,
+                    args.no_open,
+                    json_output,
+                    telemetry,
+                    ui,
+                );
+            }
             let mut service = CommercialLifecycleService::production(data_root)?;
             run_manage(
                 data_root,
@@ -495,6 +527,14 @@ fn run_setup(
                 validate_staged_helper(&smoke)?;
                 false
             }
+            #[cfg(ctx_pro_test_helper)]
+            SetupArtifactBundle::TestControl(bundle) => {
+                let helper = bundle.verified_path()?;
+                let smoke =
+                    record_helper_smoke(smoke_helper_at_path(data_root, &helper), telemetry)?;
+                validate_staged_helper(&smoke)?;
+                false
+            }
         }
     } else {
         false
@@ -634,55 +674,12 @@ fn manage_payload(plan: &ProManagePlan, browser_opened: bool) -> serde_json::Val
     })
 }
 
-fn validate_portal_url(value: &str) -> Result<()> {
-    if value.len() > 4096 {
-        bail!("invalid_response: Pro management URL exceeds the maximum length");
-    }
-    let parsed = url::Url::parse(value).context("invalid_response: invalid Pro management URL")?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() || parsed.username() != "" {
-        bail!("invalid_response: Pro management URL must be an HTTPS origin");
-    }
-    Ok(())
-}
-
-fn validate_access_status(
-    state: &str,
-    refresh_after_unix: Option<i64>,
-    access_deadline_unix: Option<i64>,
-    grace_deadline_unix: Option<i64>,
-) -> Result<()> {
-    if !matches!(
-        state,
-        "trial" | "active" | "canceling_paid" | "offline_grace" | "locked"
-    ) {
-        bail!("invalid_response: Pro access state is invalid");
-    }
-    if [
-        refresh_after_unix,
-        access_deadline_unix,
-        grace_deadline_unix,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| value <= 0)
-    {
-        bail!("invalid_response: Pro access deadline is invalid");
-    }
-    if matches!((access_deadline_unix, grace_deadline_unix), (Some(access), Some(grace)) if access > grace)
-    {
-        bail!("invalid_response: Pro access deadlines are inconsistent");
-    }
-    if matches!(state, "trial" | "active" | "canceling_paid") && access_deadline_unix.is_none() {
-        bail!("invalid_response: Pro access deadline is missing");
-    }
-    if state == "offline_grace" && (access_deadline_unix.is_none() || grace_deadline_unix.is_none())
-    {
-        bail!("invalid_response: Pro offline-grace deadlines are missing");
-    }
-    Ok(())
-}
-
 fn open_browser(url: &str) -> Result<()> {
+    #[cfg(ctx_pro_test_helper)]
+    if let Some(result) = crate::pro::test_control::browser_result_if_active(url) {
+        return result;
+    }
+
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
         command.arg(url);

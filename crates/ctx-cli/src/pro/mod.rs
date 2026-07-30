@@ -20,6 +20,8 @@ mod referral;
 mod render;
 mod request_identity;
 mod setup_validation;
+#[cfg(ctx_pro_test_helper)]
+mod test_control;
 mod verified_executable;
 mod workos_device;
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
