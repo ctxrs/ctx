@@ -253,7 +253,7 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
 }
 
 #[test]
-fn active_wal_physical_replay_is_bounded_and_opens_no_sqlite_snapshot() {
+fn active_wal_physical_replay_hashes_exact_components_and_opens_no_sqlite_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let _writer = create_persistent_wal(&database);
@@ -264,6 +264,10 @@ fn active_wal_physical_replay_is_bounded_and_opens_no_sqlite_snapshot() {
     cold.finish().unwrap();
 
     let before = directory_file_bytes(temp.path());
+    let database_length = fs::metadata(&database).unwrap().len();
+    let wal_length = fs::metadata(database.with_file_name("provider.sqlite-wal"))
+        .unwrap()
+        .len();
     let replay_parent = retain_parent(temp.path());
     let replay = open_root_handle_sqlite_source_physical_revision(
         &replay_parent,
@@ -278,8 +282,8 @@ fn active_wal_physical_replay_is_bounded_and_opens_no_sqlite_snapshot() {
     let counters = replay_parent.snapshot_counters();
     assert_eq!(counters.physical_revision_captures(), 1);
     assert_eq!(counters.physical_replay_hits(), 1);
-    assert!(counters.physical_database_bytes_read() <= 384);
-    assert!(counters.physical_wal_bytes_read() <= 384);
+    assert_eq!(counters.physical_database_bytes_read(), database_length * 3);
+    assert_eq!(counters.physical_wal_bytes_read(), wal_length * 3);
     assert_eq!(counters.immutable_snapshot_opens(), 0);
     assert_eq!(counters.copied_snapshot_opens(), 0);
     assert_eq!(counters.source_bytes_copied(), 0);
@@ -295,6 +299,10 @@ fn physical_replay_ignores_shared_memory_churn() {
     let database = temp.path().join("provider.sqlite");
     let _writer = create_persistent_wal(&database);
     let shared_memory = database.with_file_name("provider.sqlite-shm");
+    let database_length = fs::metadata(&database).unwrap().len();
+    let wal_length = fs::metadata(database.with_file_name("provider.sqlite-wal"))
+        .unwrap()
+        .len();
     let parent = retain_parent(temp.path());
     let before =
         open_root_handle_sqlite_source_physical_revision(&parent, OsStr::new("provider.sqlite"))
@@ -316,7 +324,8 @@ fn physical_replay_ignores_shared_memory_churn() {
     let counters = parent.snapshot_counters();
     assert_eq!(counters.physical_revision_captures(), 2);
     assert_eq!(counters.physical_replay_hits(), 1);
-    assert!(counters.physical_wal_bytes_read() <= 768);
+    assert_eq!(counters.physical_database_bytes_read(), database_length * 6);
+    assert_eq!(counters.physical_wal_bytes_read(), wal_length * 6);
     assert_eq!(counters.copied_snapshot_opens(), 0);
     assert_eq!(counters.logical_rows_scanned(), 0);
 }

@@ -16,7 +16,8 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    provider::source_backed::family::document::DocumentLeafExecutionPolicy, ProviderCatalogSupport,
+    provider::source_backed::family::document::DocumentLeafExecutionPolicy,
+    provider_sources::SQLITE_PHYSICAL_REVISION_MAX_COMPONENT_BYTES, ProviderCatalogSupport,
 };
 
 use super::{
@@ -1047,10 +1048,7 @@ fn assert_copied_snapshot(
         expected_physical_captures
     );
     assert_eq!(counters.physical_replay_hits, 0);
-    assert!(
-        counters.physical_database_bytes_read <= expected_physical_captures.saturating_mul(128)
-    );
-    assert!(counters.physical_wal_bytes_read <= expected_physical_captures.saturating_mul(128));
+    assert_physical_component_work_is_bounded(counters, expected_physical_captures);
     assert!(counters.logical_rows_scanned > 0);
     assert_eq!(counters.terminal_fences, 1);
     assert!(counters.terminal_revalidations >= 2);
@@ -1076,10 +1074,7 @@ fn assert_snapshot_fallback(
         expected_physical_captures
     );
     assert_eq!(counters.physical_replay_hits, 0);
-    assert!(
-        counters.physical_database_bytes_read <= expected_physical_captures.saturating_mul(128)
-    );
-    assert!(counters.physical_wal_bytes_read <= expected_physical_captures.saturating_mul(128));
+    assert_physical_component_work_is_bounded(counters, expected_physical_captures);
     assert!(counters.logical_rows_scanned > 0);
     assert_eq!(counters.terminal_fences, 1);
     assert!(counters.terminal_revalidations >= 2);
@@ -1093,13 +1088,23 @@ fn assert_physical_replay(counters: SqliteInventorySnapshotCounters) {
     assert_eq!(counters.source_bytes_copied, 0);
     assert_eq!(counters.physical_revision_captures, 1);
     assert_eq!(counters.physical_replay_hits, 1);
-    assert!(counters.physical_database_bytes_read <= 128);
-    assert!(counters.physical_wal_bytes_read <= 128);
+    assert_physical_component_work_is_bounded(counters, 1);
     assert_eq!(counters.logical_rows_scanned, 0);
     assert_eq!(counters.terminal_fences, 1);
     assert!(counters.terminal_revalidations >= 1);
     assert_eq!(counters.active_snapshots, 0);
     assert_eq!(counters.max_active_snapshots, 0);
+}
+
+fn assert_physical_component_work_is_bounded(
+    counters: SqliteInventorySnapshotCounters,
+    expected_physical_captures: u64,
+) {
+    let maximum = expected_physical_captures
+        .saturating_mul(SQLITE_PHYSICAL_REVISION_MAX_COMPONENT_BYTES)
+        .saturating_mul(3);
+    assert!(counters.physical_database_bytes_read <= maximum);
+    assert!(counters.physical_wal_bytes_read <= maximum);
 }
 
 fn assert_no_snapshot_temp_leak(data_root: &Path) {

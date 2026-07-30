@@ -84,10 +84,11 @@ impl SqliteSourceFamily {
     pub(super) fn capture_evidence(
         &self,
     ) -> SqliteSourceAccessResult<(SqliteFamilyEvidence, u64, u64)> {
-        let (database_token, database_bytes_read) = self.database.bounded_token_with_bytes()?;
+        let (database_token, database_bytes_read) =
+            self.database.exact_content_digest_with_bytes()?;
         let (wal_token, wal_bytes_read) = match self.wal.as_ref() {
             Some(wal) => {
-                let (token, bytes_read) = wal.bounded_token_with_bytes()?;
+                let (token, bytes_read) = wal.exact_content_digest_with_bytes()?;
                 (Some(token), bytes_read)
             }
             None => (None, 0),
@@ -149,14 +150,22 @@ impl SqliteSourceFamily {
             &self.shared_memory_name,
             &self.shared_memory_path,
         )?;
-        if self.database.bounded_token()? != expected.database_token {
+        let (database_token, database_bytes_read) =
+            self.database.exact_content_digest_with_bytes()?;
+        if database_token != expected.database_token {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        match (self.wal.as_ref(), expected.wal_token.as_ref()) {
-            (Some(wal), Some(expected_token)) if wal.bounded_token()? == *expected_token => {}
-            (None, None) => {}
+        let wal_bytes_read = match (self.wal.as_ref(), expected.wal_token.as_ref()) {
+            (Some(wal), Some(expected_token)) => {
+                let (token, bytes_read) = wal.exact_content_digest_with_bytes()?;
+                if token != *expected_token {
+                    return Err(SqliteSourceAccessError::SourceChanged);
+                }
+                bytes_read
+            }
+            (None, None) => 0,
             _ => return Err(SqliteSourceAccessError::SourceChanged),
-        }
+        };
         match (
             self.shared_memory.as_ref(),
             expected.shared_memory_token.as_ref(),
@@ -176,6 +185,9 @@ impl SqliteSourceFamily {
         {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
+        self.authority
+            .snapshot_context
+            .record_physical_revision_bytes(database_bytes_read, wal_bytes_read)?;
         Ok(())
     }
 
@@ -264,68 +276,24 @@ impl SqliteFamilyMember {
         }
     }
 
-    fn bounded_token(&self) -> SqliteSourceAccessResult<[u8; 32]> {
-        self.bounded_token_with_bytes().map(|(token, _)| token)
-    }
-
-    pub(super) fn bounded_token_with_bytes(&self) -> SqliteSourceAccessResult<([u8; 32], u64)> {
-        let state = self.capture_state()?;
-        let mut file =
-            self.opened
-                .file()
-                .try_clone()
-                .map_err(|source| SqliteSourceAccessError::Io {
-                    operation: "retaining a SQLite component for bounded revision evidence",
-                    path: self.path.clone(),
-                    source,
-                })?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "seeking a SQLite component for bounded revision evidence",
-                path: self.path.clone(),
-                source,
-            })?;
-        let prefix_len = usize::try_from(state.length.min(SQLITE_WAL_TOKEN_BYTES as u64))
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        let mut prefix = vec![0_u8; prefix_len];
-        file.read_exact(&mut prefix)
-            .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "reading a SQLite component prefix for bounded revision evidence",
-                path: self.path.clone(),
-                source,
-            })?;
-        let suffix_len = prefix_len;
-        let mut suffix = vec![0_u8; suffix_len];
-        if suffix_len > 0 {
-            file.seek(SeekFrom::Start(state.length - suffix_len as u64))
-                .map_err(|source| SqliteSourceAccessError::Io {
-                    operation: "seeking a SQLite component suffix for bounded revision evidence",
-                    path: self.path.clone(),
-                    source,
-                })?;
-            file.read_exact(&mut suffix)
-                .map_err(|source| SqliteSourceAccessError::Io {
-                    operation: "reading a SQLite component suffix for bounded revision evidence",
-                    path: self.path.clone(),
-                    source,
-                })?;
-        }
-        let mut digest = Sha256::new();
-        digest.update(state.length.to_le_bytes());
-        digest.update(prefix);
-        digest.update(suffix);
-        let bytes_read = u64::try_from(prefix_len.saturating_add(suffix_len))
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        Ok((digest.finalize().into(), bytes_read))
+    pub(super) fn exact_content_digest_with_bytes(
+        &self,
+    ) -> SqliteSourceAccessResult<([u8; 32], u64)> {
+        self.content_digest_with_bytes(SQLITE_PHYSICAL_REVISION_MAX_COMPONENT_BYTES)
     }
 
     fn content_digest(&self) -> SqliteSourceAccessResult<[u8; 32]> {
+        self.content_digest_with_bytes(SQLITE_SHM_MAX_BYTES)
+            .map(|(digest, _)| digest)
+    }
+
+    fn content_digest_with_bytes(&self, maximum: u64) -> SqliteSourceAccessResult<([u8; 32], u64)> {
         let state = self.capture_state()?;
-        if state.length > SQLITE_SHM_MAX_BYTES {
+        if state.length > maximum {
             return Err(SqliteSourceAccessError::SnapshotTooLarge {
                 path: self.path.clone(),
                 length: state.length,
-                maximum: SQLITE_SHM_MAX_BYTES,
+                maximum,
             });
         }
         let mut file =
@@ -359,7 +327,7 @@ impl SqliteFamilyMember {
             digest.update(&buffer[..requested]);
             remaining -= requested as u64;
         }
-        Ok(digest.finalize().into())
+        Ok((digest.finalize().into(), state.length))
     }
 }
 
