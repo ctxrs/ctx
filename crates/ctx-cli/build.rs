@@ -5,6 +5,9 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(ctx_semantic_fastembed)");
     println!("cargo:rustc-check-cfg=cfg(ctx_pro_qualification)");
     println!("cargo:rustc-check-cfg=cfg(ctx_pro_test_helper)");
+    println!("cargo:rustc-check-cfg=cfg(ctx_cli_test_support_fixtures)");
+    println!("cargo:rustc-check-cfg=cfg(ctx_cli_test_support_pro)");
+    println!("cargo:rustc-check-cfg=cfg(ctx_cli_test_support_upgrade)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();

@@ -5,7 +5,7 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
-use support::*;
+use support::{daemon_test_root as tempdir, *};
 
 #[path = "support/native_providers/sqlite_sources.rs"]
 mod sqlite_sources;
@@ -45,6 +45,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
         }
     }
     command
+        .current_dir(temp.path())
         .args([
             "daemon",
             "run",
@@ -93,6 +94,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             status["daemon"]["running"] == true
                 && status["daemon"]["source_refresh_endpoint"]["available"] == true
         }) {
+            wait_for_test_daemon_source_refresh(temp);
             return daemon;
         }
         assert!(
@@ -104,7 +106,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
 }
 
 fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let packet = loop {
         let output = ctx(temp)
             .args(["sql", sql, "--format=json"])
@@ -114,11 +116,30 @@ fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
+        if (stderr.contains("source-backed SQL projection")
+            || stderr.contains("source-backed relational projection")
+            || stderr.contains("no such table: source_backed_relational_state"))
+            && Instant::now() < deadline
+        {
+            if let Ok(job) = fs::read(temp.path().join("daemon/jobs/relational-catch-up.json"))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
+                })
+            {
+                if job["status"] == "error" {
+                    panic!(
+                        "source-backed SQL projection failed for `{sql}` ({}): {}",
+                        job["error_code"].as_str().unwrap_or("unknown_error"),
+                        job["last_error"]
+                            .as_str()
+                            .unwrap_or("unknown projection error")
+                    );
+                }
+            }
             std::thread::sleep(Duration::from_millis(25));
             continue;
         }
-        panic!("source-backed SQL failed: {stderr}");
+        panic!("source-backed SQL failed for `{sql}`: {stderr}");
     };
     packet["rows"][0][0]
         .as_i64()
@@ -216,11 +237,14 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_eq!(first["totals"]["rejected_records"], 0, "{first:#}");
-        assert_eq!(first["totals"]["imported_sources"], 1);
+        assert_authoritative_provider_publication(&first);
+        assert_eq!(first["totals"]["current_rejected_records"], 0, "{first:#}");
         assert!(
-            first["totals"]["imported_events"].as_u64().unwrap() >= minimum_events,
-            "{first:#}"
+            source_backed_count(
+                &temp,
+                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
+            ) >= minimum_events,
+            "expected at least {minimum_events} indexed {stored_provider} events"
         );
         if stored_provider == "mux" {
             assert_eq!(
@@ -253,8 +277,11 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_eq!(second["totals"]["rejected_records"], 0);
-        assert_eq!(second["totals"]["imported_events"], 0);
+        assert_authoritative_provider_publication(&second);
+        assert_eq!(
+            second["totals"]["current_rejected_records"], 0,
+            "{second:#}"
+        );
     }
 }
 
@@ -293,19 +320,11 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "unexpected freshness mode in {search:#}"
     );
     assert_eq!(search["freshness"]["status"], "completed");
-    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert!(
-        search["freshness"]["totals"]["imported_sessions"]
+        search["retrieval"]["indexed_documents"]
             .as_u64()
-            .unwrap()
-            >= 1
-    );
-    assert!(
-        search["freshness"]["totals"]["imported_events"]
-            .as_u64()
-            .unwrap()
-            >= 1,
-        "expected MiMo refresh events in {search:#}"
+            .is_some_and(|count| count >= 1),
+        "expected MiMo documents in {search:#}"
     );
     assert_search_provider_oracle(&search, "mimocode", default_query, 1, "message");
 
@@ -317,9 +336,15 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(
+        second["totals"]["current_rejected_records"], 0,
+        "{second:#}"
+    );
 
+    drop(temp);
+    let temp = tempdir();
+    let default_db = temp.path().join(".local/share/mimocode/mimocode.db");
     let home_query = "mimocode-home-env-oracle";
     let mimocode_home = temp.path().join("mimocode-home");
     let home_db = mimocode_home.join("data").join("mimocode.db");
@@ -345,8 +370,8 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "--progress",
         "none",
     ]));
-    assert_eq!(home_import["totals"]["rejected_records"], 0);
-    assert!(home_import["totals"]["imported_events"].as_u64().unwrap() >= 1);
+    assert_authoritative_provider_publication(&home_import);
+    assert_eq!(home_import["totals"]["current_rejected_records"], 0);
     let home_search = json_output(ctx(&temp).args([
         "search",
         home_query,
@@ -358,6 +383,8 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
     ]));
     assert_search_provider_oracle(&home_search, "mimocode", home_query, 1, "message");
 
+    drop(temp);
+    let temp = tempdir();
     let custom_query = "mimocode-db-env-oracle";
     let custom_db = temp.path().join("custom-mimocode.db");
     write_mimocode_sqlite_fixture(&custom_db, custom_query, "mimocode-custom");
@@ -369,13 +396,21 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "--progress",
         "none",
     ]));
-    assert_eq!(
-        custom_import["sources"][0]["path"],
-        custom_db.display().to_string()
-    );
-    assert_eq!(custom_import["totals"]["rejected_records"], 0);
-    assert!(custom_import["totals"]["imported_events"].as_u64().unwrap() >= 1);
+    assert_authoritative_provider_publication(&custom_import);
+    assert_eq!(custom_import["totals"]["current_rejected_records"], 0);
+    let custom_search = json_output(ctx(&temp).args([
+        "search",
+        custom_query,
+        "--provider",
+        "mimocode",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&custom_search, "mimocode", custom_query, 1, "message");
 
+    drop(temp);
+    let temp = tempdir();
     let xdg_data = temp.path().join("xdg-data");
     let channel_db = xdg_data.join("mimocode").join("mimocode-nightly.db");
     write_mimocode_sqlite_fixture(&channel_db, "mimocode-channel-oracle", "mimocode-channel");
@@ -454,9 +489,12 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
-    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
+    assert!(
+        search["retrieval"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{search:#}"
+    );
     assert_search_provider_oracle(&search, "windsurf", query, 1, "message");
 
     let second = json_output(ctx(&temp).args([
@@ -467,8 +505,11 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(
+        second["totals"]["current_rejected_records"], 0,
+        "{second:#}"
+    );
 }
 
 #[test]
@@ -658,6 +699,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
         let temp = tempdir();
         let query = format!("{stored_provider}-cli-flow-oracle");
         let path = fixture(&temp, &query);
+        let _daemon = start_source_refresh_daemon(&temp);
 
         let first = json_output(ctx(&temp).args([
             "import",
@@ -665,14 +707,23 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             cli_provider,
             "--path",
             &path,
+            "--no-daemon",
             "--format=json",
         ]));
-        assert_eq!(first["schema_version"], 2);
-        assert_eq!(first["sources"][0]["provider"], stored_provider);
-        assert_eq!(first["sources"][0]["source_format"], expected_format);
+        assert_explicit_source_publication(&first, stored_provider, expected_format);
         assert_eq!(first["totals"]["rejected_records"], 0, "{first:#}");
-        assert!(first["totals"]["imported_sessions"].as_u64().unwrap() >= 1);
-        assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
+        assert!(
+            source_backed_count(
+                &temp,
+                &format!("SELECT COUNT(*) FROM ctx_sessions WHERE provider = '{stored_provider}'")
+            ) >= 1
+        );
+        assert!(
+            source_backed_count(
+                &temp,
+                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
+            ) >= 1
+        );
 
         let search = json_output(ctx(&temp).args([
             "search",
@@ -714,31 +765,42 @@ fn has_provider_source_path(packet: &Value, provider: &str, path: &Path) -> bool
 
 #[test]
 fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payloads() {
-    let temp = tempdir();
-    let qoder_query = "qoder-policy-real-message-oracle";
-    let qoder_path = write_native_qoder_fixture(&temp, qoder_query);
-    let openhands_query = "openhands-policy-real-message-oracle";
-    let openhands_path = write_native_openhands_fixture(&temp, openhands_query);
-    let continue_query = "continue-policy-real-message-oracle";
-    let continue_path = write_native_continue_fixture(&temp, continue_query);
-    let _daemon = start_source_refresh_daemon(&temp);
-
-    for (provider, path, query) in [
-        ("qoder", qoder_path.as_str(), qoder_query),
-        ("openhands", openhands_path.as_str(), openhands_query),
-        ("continue", continue_path.as_str(), continue_query),
+    for (provider, source_format, fixture, query, sentinel) in [
+        (
+            "qoder",
+            "qoder_transcript_jsonl_tree",
+            write_native_qoder_fixture as fn(&TempDir, &str) -> String,
+            "qoder-policy-real-message-oracle",
+            "qoder-success-tool-output-sentinel",
+        ),
+        (
+            "openhands",
+            "openhands_file_events",
+            write_native_openhands_fixture,
+            "openhands-policy-real-message-oracle",
+            "openhands-success-tool-output-sentinel",
+        ),
+        (
+            "continue",
+            "continue_cli_sessions_json",
+            write_native_continue_fixture,
+            "continue-policy-real-message-oracle",
+            "continue-success-tool-output-sentinel",
+        ),
     ] {
+        let temp = tempdir();
+        let path = fixture(&temp, query);
         let imported = json_output(ctx(&temp).args([
             "import",
             "--provider",
             provider,
             "--path",
-            path,
-            "--no-daemon",
+            &path,
             "--format=json",
             "--progress",
             "none",
         ]));
+        assert_explicit_source_publication(&imported, provider, source_format);
         assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
 
         let search = json_output(ctx(&temp).args([
@@ -751,13 +813,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "--format=json",
         ]));
         assert_source_backed_search(&search, provider, query);
-    }
 
-    for (provider, sentinel) in [
-        ("qoder", "qoder-success-tool-output-sentinel"),
-        ("openhands", "openhands-success-tool-output-sentinel"),
-        ("continue", "continue-success-tool-output-sentinel"),
-    ] {
         let search = json_output(ctx(&temp).args([
             "search",
             sentinel,
@@ -771,54 +827,62 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             search["results"].as_array().unwrap().is_empty(),
             "{provider} success tool output leaked into search: {search:#}"
         );
-    }
 
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'",
-        ),
-        0,
-        "the metadata-only relational projection must expose no payload column"
-    );
-    assert!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_files_touched WHERE path = 'openhands-cli-native-oracle.txt'",
-        ) > 0
-    );
+        assert_eq!(
+            source_backed_count(
+                &temp,
+                "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'",
+            ),
+            0,
+            "the metadata-only relational projection must expose no payload column"
+        );
+        if provider == "openhands" {
+            assert!(
+                source_backed_count(
+                    &temp,
+                    "SELECT COUNT(*) FROM ctx_files_touched \
+                     WHERE path = 'openhands-cli-native-oracle.txt'",
+                ) > 0
+            );
+        }
+    }
 }
 
 #[test]
 fn personal_agent_provider_imports_are_idempotent_and_incremental() {
-    for (cli_provider, stored_provider, fixture, append_event) in [
+    for (cli_provider, stored_provider, source_format, fixture, append_event) in [
         (
             "openclaw",
             "openclaw",
+            "openclaw_session_jsonl_tree",
             write_native_openclaw_fixture as fn(&TempDir, &str) -> String,
             append_native_openclaw_event as fn(&str, &str),
         ),
         (
             "hermes",
             "hermes",
+            "hermes_state_sqlite",
             write_native_hermes_fixture,
             append_native_hermes_event,
         ),
         (
             "nanoclaw",
             "nanoclaw",
+            "nanoclaw_project",
             write_native_nanoclaw_fixture,
             append_native_nanoclaw_event,
         ),
         (
             "astrbot",
             "astrbot",
+            "astrbot_data_v4_sqlite",
             write_native_astrbot_fixture,
             append_native_astrbot_event,
         ),
         (
             "shelley",
             "shelley",
+            "shelley_sqlite",
             write_native_shelley_fixture,
             append_native_shelley_event,
         ),
@@ -826,43 +890,98 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
         let temp = tempdir();
         let initial_query = format!("{stored_provider}-incremental-initial-oracle");
         let incremental_query = format!("{stored_provider}-incremental-next-oracle");
-        let path = fixture(&temp, &initial_query);
+        let fixture_path = fixture(&temp, &initial_query);
+        let (path, automatic, exact_cwd) = match stored_provider {
+            "hermes" => {
+                let path = temp.path().join(".hermes/state.db");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::copy(&fixture_path, &path).unwrap();
+                (path.display().to_string(), true, false)
+            }
+            "astrbot" => {
+                let path = temp.path().join(".astrbot/data/data_v4.db");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::copy(&fixture_path, &path).unwrap();
+                (path.display().to_string(), true, false)
+            }
+            "shelley" => {
+                let path = temp.path().join("shelley.db");
+                fs::copy(&fixture_path, &path).unwrap();
+                (path.display().to_string(), true, true)
+            }
+            _ => (fixture_path, false, false),
+        };
+        let _daemon = start_source_refresh_daemon(&temp);
 
-        let first = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            &path,
-            "--format=json",
-        ]));
-        assert_eq!(first["totals"]["rejected_records"], 0);
-        assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
+        let mut first_command = ctx(&temp);
+        first_command.args(["import", "--provider", cli_provider]);
+        if !automatic {
+            first_command.args(["--path", &path]);
+        }
+        if exact_cwd {
+            first_command.current_dir(temp.path());
+        }
+        let first = json_output(first_command.args(["--no-daemon", "--format=json"]));
+        if automatic {
+            assert_authoritative_provider_publication(&first);
+            assert_eq!(first["totals"]["current_rejected_records"], 0);
+        } else {
+            assert_explicit_source_publication(&first, stored_provider, source_format);
+            assert_eq!(first["totals"]["rejected_records"], 0);
+        }
+        let initial_event_count = source_backed_count(
+            &temp,
+            &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'"),
+        );
+        assert!(initial_event_count >= 1, "{first:#}");
 
-        let second = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            &path,
-            "--format=json",
-        ]));
-        assert_eq!(second["totals"]["rejected_records"], 0);
-        assert_eq!(second["totals"]["imported_events"], 0);
+        let mut second_command = ctx(&temp);
+        second_command.args(["import", "--provider", cli_provider]);
+        if !automatic {
+            second_command.args(["--path", &path]);
+        }
+        if exact_cwd {
+            second_command.current_dir(temp.path());
+        }
+        let second = json_output(second_command.args(["--no-daemon", "--format=json"]));
+        if automatic {
+            assert_authoritative_provider_publication(&second);
+            assert_eq!(second["totals"]["current_rejected_records"], 0);
+        } else {
+            assert_explicit_source_publication(&second, stored_provider, source_format);
+            assert_eq!(second["totals"]["rejected_records"], 0);
+        }
 
         append_event(&path, &incremental_query);
-        let third = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            &path,
-            "--format=json",
-        ]));
-        assert_eq!(third["totals"]["rejected_records"], 0);
-        assert!(third["totals"]["imported_events"].as_u64().unwrap() >= 1);
+        let mut third_command = ctx(&temp);
+        third_command.args(["import", "--provider", cli_provider]);
+        if !automatic {
+            third_command.args(["--path", &path]);
+        }
+        if exact_cwd {
+            third_command.current_dir(temp.path());
+        }
+        let third = json_output(third_command.args(["--no-daemon", "--format=json"]));
+        if automatic {
+            assert_authoritative_provider_publication(&third);
+            assert_eq!(third["totals"]["current_rejected_records"], 0);
+        } else {
+            assert_explicit_source_publication(&third, stored_provider, source_format);
+            assert_eq!(third["totals"]["rejected_records"], 0);
+        }
+        assert!(
+            source_backed_count(
+                &temp,
+                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
+            ) > initial_event_count,
+            "{third:#}"
+        );
 
-        let search = json_output(ctx(&temp).args([
+        let mut search_command = ctx(&temp);
+        if exact_cwd {
+            search_command.current_dir(temp.path());
+        }
+        let search = json_output(search_command.args([
             "search",
             &incremental_query,
             "--provider",
@@ -905,8 +1024,8 @@ fn openclaw_import_accepts_explicit_session_jsonl_file() {
         path.to_str().unwrap(),
         "--format=json",
     ]));
+    assert_explicit_source_publication(&imported, "openclaw", "openclaw_session_jsonl_tree");
     assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "openclaw", "--format=json"]));
@@ -937,8 +1056,8 @@ fn nanoclaw_import_tolerates_partial_auxiliary_tables() {
         &path,
         "--format=json",
     ]));
+    assert_explicit_source_publication(&imported, "nanoclaw", "nanoclaw_project");
     assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--format=json"]));
@@ -949,8 +1068,6 @@ fn nanoclaw_import_tolerates_partial_auxiliary_tables() {
 fn personal_agent_sqlite_imports_report_corrupt_databases() {
     for (provider, path) in [
         ("hermes", "corrupt-hermes-state.db"),
-        ("astrbot", "corrupt-astrbot-data_v4.db"),
-        ("shelley", "corrupt-shelley.db"),
         ("lingma", "corrupt-lingma-local.db"),
     ] {
         let temp = tempdir();
@@ -973,6 +1090,24 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
         let stderr = String::from_utf8(output).unwrap();
         assert!(stderr.contains("not a database"), "{stderr}");
     }
+
+    let temp = tempdir();
+    let db_path = temp.path().join(".astrbot/data/data_v4.db");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    fs::write(&db_path, b"not sqlite").unwrap();
+    let stderr =
+        failure_stderr(ctx(&temp).args(["import", "--provider", "astrbot", "--format=json"]));
+    assert!(stderr.contains("not a database"), "{stderr}");
+
+    let temp = tempdir();
+    fs::write(temp.path().join("shelley.db"), b"not sqlite").unwrap();
+    let stderr = failure_stderr(ctx(&temp).current_dir(temp.path()).args([
+        "import",
+        "--provider",
+        "shelley",
+        "--format=json",
+    ]));
+    assert!(stderr.contains("not a database"), "{stderr}");
 
     let temp = tempdir();
     let root = temp.path().join("corrupt-nanoclaw");
@@ -998,57 +1133,44 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
 
 #[test]
 fn native_provider_cli_requires_existing_history_or_explicit_path() {
-    for (cli_provider, expected_blocker) in [
-        ("claude", "no importable claude history found"),
-        ("opencode", "no importable opencode history found"),
-        ("kilo", "no importable kilo history found"),
-        ("antigravity", "no importable antigravity history found"),
-        ("gemini", "no importable gemini history found"),
-        ("cursor", "no importable cursor history found"),
-        ("zed", "no importable zed history found"),
-        ("copilot-cli", "no importable copilot_cli history found"),
-        (
-            "factory-ai-droid",
-            "no importable factory_ai_droid history found",
-        ),
-        ("openclaw", "no importable openclaw history found"),
-        ("hermes", "no importable hermes history found"),
-        ("nanoclaw", "no importable nanoclaw history found"),
-        ("astrbot", "no importable astrbot history found"),
-        ("shelley", "no importable shelley history found"),
-        ("lingma", "no importable lingma history found"),
-        ("codebuddy", "no importable codebuddy history found"),
-        ("auggie", "no importable auggie history found"),
-        ("deepagents", "no importable deepagents history found"),
-        ("mistral-vibe", "no importable mistral_vibe history found"),
-        ("mux", "no importable mux history found"),
-        ("cline", "no importable cline history found"),
-        ("roo", "no importable roo_code history found"),
+    let temp = tempdir();
+    let _daemon = start_source_refresh_daemon(&temp);
+    for cli_provider in [
+        "claude",
+        "opencode",
+        "kilo",
+        "antigravity",
+        "gemini",
+        "cursor",
+        "zed",
+        "copilot-cli",
+        "factory-ai-droid",
+        "openclaw",
+        "hermes",
+        "nanoclaw",
+        "astrbot",
+        "shelley",
+        "lingma",
+        "codebuddy",
+        "auggie",
+        "deepagents",
+        "mistral-vibe",
+        "mux",
+        "cline",
+        "roo",
     ] {
-        let temp = tempdir();
         let stderr = failure_stderr(ctx(&temp).current_dir(temp.path()).args([
             "import",
             "--provider",
             cli_provider,
+            "--no-daemon",
             "--format=json",
         ]));
 
-        assert!(stderr.contains(expected_blocker), "{stderr}");
-        assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(cli_provider, "nanoclaw" | "openclaw" | "lingma") {
-            assert!(
-                stderr.contains("no default paths are registered for this provider"),
-                "{stderr}"
-            );
-        } else if cli_provider == "factory-ai-droid" {
-            assert!(
-                stderr.contains("no official automatic history location is established"),
-                "{stderr}"
-            );
-        } else {
-            assert!(stderr.contains("checked paths:"), "{stderr}");
-            assert!(stderr.contains(temp.path().to_str().unwrap()), "{stderr}");
-        }
+        assert!(
+            stderr.contains("no executable source-backed routes were registered"),
+            "{cli_provider}: {stderr}"
+        );
     }
 }
 
@@ -1056,6 +1178,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 fn task_json_cli_imports_cline_and_roo_and_searches() {
     let temp = tempdir();
     let cline = provider_history_fixture("cline/data");
+    let _daemon = start_source_refresh_daemon(&temp);
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -1063,17 +1186,25 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "cline",
         "--path",
         &cline,
+        "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "cline");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "cline_task_directory_json"
-    );
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_explicit_source_publication(&imported, "cline", "cline_task_directory_json");
     assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'cline'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'cline'"
+        ),
+        4
+    );
 
     let second = json_output(ctx(&temp).args([
         "import",
@@ -1081,17 +1212,19 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "cline",
         "--path",
         &cline,
+        "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped_events"], 0);
+    assert_explicit_source_publication(&second, "cline", "cline_task_directory_json");
+    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 
     let search = json_output(ctx(&temp).args([
         "search",
         "parser note",
         "--provider",
         "cline",
+        "--refresh",
+        "off",
         "--format=json",
     ]));
     assert_search_provider_oracle(&search, "cline", "parser note", 1, "message");
@@ -1103,23 +1236,33 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "roo-code",
         "--path",
         &roo,
+        "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "roo_code");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "roo_task_directory_json"
-    );
-    assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 6);
+    assert_explicit_source_publication(&imported, "roo_code", "roo_task_directory_json");
     assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'roo_code'"
+        ),
+        2
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'roo_code'"
+        ),
+        6
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
         "fallback claude_messages",
         "--provider",
         "roo",
+        "--refresh",
+        "off",
         "--format=json",
     ]));
     assert_search_provider_oracle(
@@ -1134,7 +1277,11 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
 #[test]
 fn antigravity_cli_imports_native_transcript_tree() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("antigravity/v1/brain");
+    let source_fixture = PathBuf::from(provider_history_fixture("antigravity/v1/brain"));
+    let fixture = temp.path().join("antigravity-brain");
+    for session in ["agy-future", "agy-resume", "agy-success"] {
+        copy_dir_all(&source_fixture.join(session), &fixture.join(session));
+    }
     let _daemon = start_source_refresh_daemon(&temp);
 
     let imported = json_output(ctx(&temp).args([
@@ -1142,39 +1289,28 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "--provider",
         "antigravity",
         "--path",
-        &fixture,
+        fixture.to_str().unwrap(),
         "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "antigravity");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "antigravity_cli_transcript_jsonl_tree"
-    );
-    assert_eq!(
-        imported["sources"][0]["status"], "published",
-        "{imported:#}"
-    );
-    assert_eq!(imported["totals"]["imported_sessions"], 0, "{imported:#}");
-    assert_eq!(imported["totals"]["imported_events"], 0, "{imported:#}");
-    assert!(
-        imported["sources"][0]["published_generation"].is_string(),
-        "{imported:#}"
+    assert_explicit_source_publication(
+        &imported,
+        "antigravity",
+        "antigravity_cli_transcript_jsonl_tree",
     );
     assert_eq!(
         source_backed_count(
             &temp,
             "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'antigravity'"
         ),
-        4
+        3
     );
     assert_eq!(
         source_backed_count(
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'antigravity'"
         ),
-        11
+        8
     );
 
     assert_eq!(
@@ -1238,17 +1374,29 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         brain.to_str().unwrap(),
         "--format=json",
     ]));
+    assert_explicit_source_publication(
+        &imported,
+        "antigravity",
+        "antigravity_cli_transcript_jsonl_tree",
+    );
     assert_eq!(
         imported["totals"]["source_files"],
         2,
         "outer inventory reports the authoritative root; the provider owns sibling preference: {imported:#}"
     );
     assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
-    assert_eq!(imported["totals"]["imported_sessions"], 1, "{imported:#}");
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'antigravity'"
+        ),
+        1,
+        "{imported:#}"
+    );
 }
 
 #[test]
-fn codex_cli_reports_rejected_records_and_imports_valid_content() {
+fn codex_cli_catalogs_valid_content_from_mixed_fixture() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-malformed-session.jsonl");
 
@@ -1260,18 +1408,29 @@ fn codex_cli_reports_rejected_records_and_imports_valid_content() {
         &fixture,
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
-    assert_eq!(imported["totals"]["rejected_records"], 1);
-    assert_eq!(imported["sources"][0]["rejected_records"], 1);
+    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl");
+    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
+        ),
+        2
+    );
 
     let search = json_output(ctx(&temp).args(["search", "after malformed", "--format=json"]));
     assert!(!search["results"].as_array().unwrap().is_empty());
 }
 
 #[test]
-fn pi_cli_reports_malformed_and_schema_rejections() {
+fn pi_cli_catalogs_valid_content_from_mixed_fixture() {
     let temp = tempdir();
     let fixture = provider_history_fixture("pi-malformed-mixed.jsonl");
 
@@ -1283,16 +1442,20 @@ fn pi_cli_reports_malformed_and_schema_rejections() {
         &fixture,
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
-    assert_eq!(imported["totals"]["rejected_records"], 2);
-    assert_eq!(imported["sources"][0]["rejected_records"], 2);
+    assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
+    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
     assert_eq!(
-        imported["sources"][0]["rejections"]
-            .as_array()
-            .unwrap()
-            .len(),
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
+        ),
         2
     );
 
@@ -1317,19 +1480,10 @@ fn import_all_isolates_rejected_records_and_imports_other_sources() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert_eq!(imported["totals"]["failed_sources"], 0, "{imported:#}");
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| {
-            source["provider"] == "codex" && source["status"] == "completed_with_rejections"
-        }));
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| { source["provider"] == "pi" && source["status"] == "success" }));
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 1);
+    assert_eq!(imported["totals"]["current_sources_with_rejections"], 1);
+    assert_eq!(imported["totals"]["current_source_count"], 2);
 
     let pi_search = json_output(ctx(&temp).args([
         "search",

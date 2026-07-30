@@ -58,13 +58,18 @@ _CTX_CLI_TEST_SUPPORT = {
         ],
     ),
     "fixtures": struct(
-        crates = ["rusqlite"],
+        crates = [
+            "libc",
+            "rusqlite",
+            "windows-sys",
+        ],
         deps = [
             "//crates/ctx-history-index:lib",
             "//crates/ctx-history-relational:lib",
         ],
         rustc_flags = ["--cfg=ctx_cli_test_support_fixtures"],
         srcs = [
+            "tests/support/daemon.rs",
             "tests/support/fixtures.rs",
             "tests/support/native_fixtures.rs",
             "tests/support/native_fixtures/appends.rs",

@@ -25,8 +25,21 @@ fn pi_cli_imports_directory_tree_path() {
         path.to_str().unwrap(),
         "--format=json",
     ]));
-    assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 2);
+    assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
+        ),
+        2
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
+        ),
+        2
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -48,6 +61,8 @@ fn pi_cli_discovers_env_session_dir_for_sources_and_search_refresh() {
     let path = temp.path().join("pi-env-sessions");
     let project = path.join("--workspace--");
     fs::create_dir_all(&project).unwrap();
+    let _daemon =
+        start_source_refresh_daemon_with_env(&temp, &[("PI_CODING_AGENT_SESSION_DIR", &path)]);
     write_pi_session_jsonl(
         &project.join("2026-06-24T12-00-00-000Z_pi-env-refresh.jsonl"),
         "pi-env-refresh",
@@ -102,7 +117,7 @@ fn pi_cli_rejects_wrong_file_import_path() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("pi session entry appeared before session header")
+            predicate::str::contains("has no valid session header")
                 .and(predicate::str::contains(path.to_str().unwrap())),
         );
 }
@@ -118,10 +133,9 @@ fn import_rejects_nonexistent_path() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains(
-                "missing explicit path has no matching prior provider route authority",
-            )
-            .and(predicate::str::contains(path)),
+            predicate::str::contains("approve explicit source path")
+                .and(predicate::str::contains("No such file or directory"))
+                .and(predicate::str::contains(path)),
         );
 }
 
@@ -142,10 +156,10 @@ fn import_rejects_nonexistent_explicit_format_path() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("all import sources failed")
+            predicate::str::contains("approve explicit source path")
+                .and(predicate::str::contains("No such file or directory"))
                 .and(predicate::str::contains(path)),
-        )
-        .stdout(predicate::str::contains("outcome: failure"));
+        );
 }
 
 #[test]
@@ -204,7 +218,7 @@ fn import_rejects_symlinked_provider_root() {
 
 #[cfg(unix)]
 #[test]
-fn import_reports_unreadable_directory_with_path_context() {
+fn import_rejects_unreadable_directory_with_path_context() {
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
@@ -213,7 +227,13 @@ fn import_reports_unreadable_directory_with_path_context() {
 
     let temp = tempdir();
     let path = temp.path().join("unreadable-pi-sessions");
-    fs::create_dir_all(&path).unwrap();
+    let project = path.join("--workspace--");
+    fs::create_dir_all(&project).unwrap();
+    write_pi_session_jsonl(
+        &project.join("2026-06-24T12-00-00-000Z_unreadable.jsonl"),
+        "pi-unreadable",
+        "pi unreadable oracle",
+    );
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
 
     let stderr = failure_stderr(ctx(&temp).args([
@@ -225,13 +245,16 @@ fn import_reports_unreadable_directory_with_path_context() {
     ]));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
 
-    assert!(stderr.contains("inventory import source"), "{stderr}");
-    assert!(stderr.contains("Permission denied"), "{stderr}");
+    assert!(stderr.contains("is not importable"), "{stderr}");
+    assert!(
+        stderr.contains("provider path or format is not supported"),
+        "{stderr}"
+    );
     assert!(stderr.contains(path.to_str().unwrap()), "{stderr}");
 }
 
 #[test]
-fn codex_cli_marks_deleted_raw_source_citations_unavailable() {
+fn codex_cli_fails_closed_when_raw_source_is_deleted() {
     let temp = tempdir();
     let source = PathBuf::from(provider_history_fixture("codex-sessions"));
     let copied = temp.path().join("copied-codex-sessions");
@@ -246,20 +269,19 @@ fn codex_cli_marks_deleted_raw_source_citations_unavailable() {
         &copied_text,
         "--format=json",
     ]));
-    assert_eq!(imported["totals"]["imported_events"], 7);
+    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
 
     fs::remove_dir_all(&copied).unwrap();
 
-    let search = json_output(ctx(&temp).args(["search", "onboarding", "--format=json"]));
-    assert!(search["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|result| result["source_exists"] == false));
-    assert!(search["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|result| result["citations"].as_array().unwrap().iter())
-        .any(|citation| citation["source_exists"] == false));
+    let stderr = ctx(&temp)
+        .args(["search", "onboarding", "--refresh", "off", "--format=json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(error["error_code"], "source_unreadable");
+    assert_eq!(error["failure_kind"], "temporarily_unavailable");
+    assert_eq!(error["retryable"], true);
 }

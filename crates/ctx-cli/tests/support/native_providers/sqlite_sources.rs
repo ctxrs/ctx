@@ -1,25 +1,33 @@
 use super::*;
 
 #[test]
-fn warp_cli_imports_explicit_sqlite() {
+fn warp_cli_imports_default_sqlite() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("warp/v1/warp.sqlite");
+    install_default_warp_fixture(&temp);
     let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "warp",
-        "--path",
-        &fixture,
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "warp");
-    assert_eq!(imported["sources"][0]["source_format"], "warp_sqlite");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'warp'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'warp'"
+        ),
+        3
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -36,15 +44,12 @@ fn warp_cli_imports_explicit_sqlite() {
         "import",
         "--provider",
         "warp",
-        "--path",
-        &fixture,
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
 }
 
 #[test]
@@ -77,9 +82,12 @@ fn warp_native_default_discovery_auto_imports_for_search() {
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
-    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
+    assert!(
+        search["retrieval"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{search:#}"
+    );
     assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
 }
 
@@ -90,16 +98,22 @@ fn warp_native_default_discovery_is_included_in_import_all() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| {
-            source["provider"] == "warp" && source["source_format"] == "warp_sqlite"
-        }));
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'warp'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'warp'"
+        ),
+        3
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -132,11 +146,22 @@ fn lingma_cli_default_source_imports_home_local_db() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--provider", "lingma", "--format=json"]));
-    assert_eq!(imported["sources"][0]["provider"], "lingma");
-    assert_eq!(imported["sources"][0]["source_format"], "lingma_sqlite");
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'lingma'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'lingma'"
+        ),
+        2
+    );
 
     let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "lingma", "--format=json"]));
@@ -147,34 +172,40 @@ fn lingma_cli_default_source_imports_home_local_db() {
     assert_search_provider_oracle(&alias_search, "lingma", query, 1, "message");
 
     let second = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--format=json"]));
-    assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
 }
 
 #[test]
-fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
+fn tabnine_cli_imports_default_agent_home_searches_and_reimports() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("tabnine-cli/.tabnine/agent");
+    let fixture = PathBuf::from(provider_history_fixture("tabnine-cli/.tabnine/agent"));
+    copy_dir_all(&fixture, &temp.path().join(".tabnine/agent"));
 
     let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "tabnine",
-        "--path",
-        &fixture,
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "tabnine");
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
-        imported["sources"][0]["source_format"],
-        "tabnine_cli_chat_recording_jsonl"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'tabnine'"
+        ),
+        2
     );
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 6);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'tabnine'"
+        ),
+        6
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -197,15 +228,12 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
         "import",
         "--provider",
         "tabnine",
-        "--path",
-        &fixture,
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
 }
 
 #[test]
@@ -241,14 +269,22 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["sources"][0]["provider"], "deepagents");
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
-        imported["sources"][0]["source_format"],
-        "deepagents_sessions_sqlite"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'deepagents'"
+        ),
+        1
     );
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'deepagents'"
+        ),
+        2
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -265,13 +301,11 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "import",
         "--provider",
         "deepagents",
-        "--path",
-        default_db.to_str().unwrap(),
         "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_eq!(
         source_backed_count(
             &temp,
@@ -333,30 +367,37 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         let temp = tempdir();
         let fixture = PathBuf::from(provider_history_fixture(fixture));
         let explicit = if stored_provider == "crush" {
-            let default = temp.path().join(".local/share/crush/crush.db");
+            let default = temp.path().join(".crush/crush.db");
+            fs::create_dir_all(default.parent().unwrap()).unwrap();
+            fs::copy(&fixture, &default).unwrap();
+            None
+        } else if stored_provider == "zed" {
+            let default = temp.path().join(".local/share/zed/threads/threads.db");
             fs::create_dir_all(default.parent().unwrap()).unwrap();
             fs::copy(&fixture, &default).unwrap();
             None
         } else {
-            Some(fixture.as_path())
+            Some(fixture)
         };
-        let _daemon = start_source_refresh_daemon(&temp);
+        let _daemon = (stored_provider != "crush").then(|| start_source_refresh_daemon(&temp));
 
         let mut first_command = ctx(&temp);
+        if stored_provider == "crush" {
+            first_command.current_dir(temp.path());
+        }
         first_command.args(["import", "--provider", cli_provider]);
-        if let Some(explicit) = explicit {
+        if let Some(explicit) = explicit.as_ref() {
             first_command.args(["--path", explicit.to_str().unwrap()]);
         }
         first_command.args(["--no-daemon", "--format=json", "--progress", "none"]);
         let imported = json_output(&mut first_command);
-        assert_eq!(imported["schema_version"], 2);
-        assert_eq!(imported["sources"][0]["provider"], stored_provider);
-        assert_eq!(imported["sources"][0]["source_format"], source_format);
-        assert_eq!(imported["totals"]["rejected_records"], 0);
-        assert!(
-            imported["sources"][0]["published_generation"].is_string(),
-            "{imported:#}"
-        );
+        if explicit.is_some() {
+            assert_explicit_source_publication(&imported, stored_provider, source_format);
+            assert_eq!(imported["totals"]["rejected_records"], 0);
+        } else {
+            assert_authoritative_provider_publication(&imported);
+            assert_eq!(imported["totals"]["current_rejected_records"], 0);
+        }
         assert_eq!(
             source_backed_count(
                 &temp,
@@ -402,7 +443,11 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             );
         }
 
-        let search = json_output(ctx(&temp).args([
+        let mut search_command = ctx(&temp);
+        if stored_provider == "crush" {
+            search_command.current_dir(temp.path());
+        }
+        let search = json_output(search_command.args([
             "search",
             query,
             "--provider",
@@ -424,14 +469,22 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             .is_some_and(|path| path.ends_with(".db") || path.ends_with(".sqlite3")));
 
         let mut second_command = ctx(&temp);
+        if stored_provider == "crush" {
+            second_command.current_dir(temp.path());
+        }
         second_command.args(["import", "--provider", cli_provider]);
-        if let Some(explicit) = explicit {
+        if let Some(explicit) = explicit.as_ref() {
             second_command.args(["--path", explicit.to_str().unwrap()]);
         }
         second_command.args(["--no-daemon", "--format=json", "--progress", "none"]);
         let second = json_output(&mut second_command);
-        assert_eq!(second["totals"]["rejected_records"], 0);
-        assert_eq!(second["totals"]["imported_sessions"], 0);
-        assert_eq!(second["totals"]["imported_events"], 0);
+        if explicit.is_some() {
+            assert_explicit_source_publication(&second, stored_provider, source_format);
+            assert_eq!(second["totals"]["rejected_records"], 0);
+            assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
+        } else {
+            assert_authoritative_provider_publication(&second);
+            assert_eq!(second["totals"]["current_rejected_records"], 0);
+        }
     }
 }
