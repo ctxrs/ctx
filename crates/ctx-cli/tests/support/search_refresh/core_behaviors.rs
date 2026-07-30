@@ -452,11 +452,17 @@ fn interrupted_prepare_uninstall_is_retry_safe() {
     let temp = tempdir();
     let mut daemon = start_source_refresh_daemon(&temp);
 
-    ctx(&temp)
+    let mut interrupted = ctx(&temp);
+    interrupted
         .args(["daemon", "disable", "--prepare-uninstall", "--format=json"])
-        .env("CTX_DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_FOR_TESTS", "1")
-        .assert()
-        .code(89);
+        .env("CTX_DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_FOR_TESTS", "1");
+    if cfg!(debug_assertions) {
+        interrupted.assert().code(89);
+    } else {
+        let report = json_output(&mut interrupted);
+        assert_eq!(report["ok"], true, "{report:#}");
+        assert_eq!(report["retry_safe"], true, "{report:#}");
+    }
     let config_after_interrupt =
         fs::read_to_string(search_refresh_data_root(&temp).join("config.toml")).unwrap();
     assert!(
