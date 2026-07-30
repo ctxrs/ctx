@@ -312,43 +312,60 @@ mod native {
             &append_generation,
         );
 
-        let retained_meta_path = harness.root().join("search/lexical/meta.json");
-        let retained_manifest_path = generation_manifest_path(harness.root(), &append_generation);
-        let retained_meta = snapshot_file(&retained_meta_path);
-        let retained_manifest = snapshot_file(&retained_manifest_path);
-        let invalid_source = source
-            .parent()
-            .expect("Codex source parent")
-            .join("rollout-empty-session.jsonl");
-        fs::write(&invalid_source, "").unwrap();
-        let failed_job = wait_for_job(&harness, "failed refresh with retained generation", |job| {
-            (job["request_state"] == "failed"
-                && (job["published_generation"] == append_generation
-                    || job["previous_generation"] == append_generation))
-                .then_some(job)
-        });
-        assert!(
-            failed_job["last_error"]
-                .as_str()
-                .is_some_and(|error| error.contains("source-backed scan failed for codex")),
-            "{failed_job:#}"
-        );
-        assert_eq!(
-            snapshot_file(&retained_meta_path),
-            retained_meta,
-            "failed refresh rewrote the verified Tantivy generation metadata"
-        );
-        assert_eq!(
-            snapshot_file(&retained_manifest_path),
-            retained_manifest,
-            "failed refresh rewrote the verified generation manifest"
-        );
-        let retained = harness.search("persistent daemon passive append oracle", "off");
-        assert_search_result(
-            &retained,
-            "persistent daemon passive append oracle",
-            &append_generation,
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let retained_meta_path = harness.root().join("search/lexical/meta.json");
+            let retained_manifest_path =
+                generation_manifest_path(harness.root(), &append_generation);
+            let retained_meta = snapshot_file(&retained_meta_path);
+            let retained_manifest = snapshot_file(&retained_manifest_path);
+            let sessions_root = harness.root().join(".codex/sessions");
+            let original_mode = fs::metadata(&sessions_root).unwrap().permissions().mode();
+            fs::set_permissions(&sessions_root, fs::Permissions::from_mode(0)).unwrap();
+            let failed_job =
+                wait_for_job(&harness, "failed refresh with retained generation", |job| {
+                    (job["request_state"] == "failed"
+                        && (job["published_generation"] == append_generation
+                            || job["previous_generation"] == append_generation))
+                        .then_some(job)
+                });
+            fs::set_permissions(
+                &sessions_root,
+                fs::Permissions::from_mode(original_mode),
+            )
+            .unwrap();
+            assert_eq!(
+                failed_job["error_code"],
+                "all_provider_terminal_coverage_unavailable",
+                "{failed_job:#}"
+            );
+            assert!(
+                failed_job["last_error"]
+                    .as_str()
+                    .is_some_and(|error| {
+                        error.contains("no current resolver-owning route family for codex")
+                    }),
+                "{failed_job:#}"
+            );
+            assert_eq!(
+                snapshot_file(&retained_meta_path),
+                retained_meta,
+                "failed refresh rewrote the verified Tantivy generation metadata"
+            );
+            assert_eq!(
+                snapshot_file(&retained_manifest_path),
+                retained_manifest,
+                "failed refresh rewrote the verified generation manifest"
+            );
+            let retained = harness.search("persistent daemon passive append oracle", "off");
+            assert_search_result(
+                &retained,
+                "persistent daemon passive append oracle",
+                &append_generation,
+            );
+        }
 
         let disabled = harness.json(&["daemon", "disable", "--format=json"]);
         assert_eq!(disabled["daemon_enabled"], false, "{disabled:#}");
@@ -389,7 +406,6 @@ mod native {
             "MCP must not undo durable daemon disable"
         );
 
-        fs::remove_file(&invalid_source).unwrap();
         let enabled = harness.json(&["daemon", "enable", "--format=json"]);
         assert_eq!(enabled["daemon_enabled"], true, "{enabled:#}");
         assert_eq!(enabled["running"], true, "{enabled:#}");
