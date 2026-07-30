@@ -853,7 +853,7 @@ fn progress_json_setup_attempts_enabled_daemon_startup() {
 }
 
 #[test]
-fn human_setup_without_sources_starts_daemon_without_claiming_background_indexing() {
+fn human_setup_without_sources_starts_daemon_and_reports_observed_refresh_state() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
 
@@ -869,14 +869,24 @@ fn human_setup_without_sources_starts_daemon_without_claiming_background_indexin
         .get_output()
         .clone();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("History is ready to search"), "{stdout}");
-    assert!(
-        stdout.contains("Sources     0 sources")
-            && stdout.contains("Events      0 searchable events"),
-        "{stdout}"
-    );
+    let reports_ready = stdout.contains("History is ready to search");
+    let reports_queued = stdout.contains("History indexing is queued");
+    assert_ne!(reports_ready, reports_queued, "{stdout}");
+    if reports_ready {
+        assert!(
+            stdout.contains("Sources     0 sources")
+                && stdout.contains("Events      0 searchable events"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("  ctx search \"test failure\""), "{stdout}");
+    } else {
+        assert!(
+            stdout.contains("Background indexing will publish the first searchable index."),
+            "{stdout}"
+        );
+        assert!(stdout.contains("  ctx index watch"), "{stdout}");
+    }
     assert!(stdout.contains("Refresh     in progress"), "{stdout}");
-    assert!(stdout.contains("  ctx search \"test failure\""), "{stdout}");
 
     let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(running["daemon"]["status"], "running", "{running:#}");
