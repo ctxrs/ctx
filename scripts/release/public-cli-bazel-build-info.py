@@ -427,7 +427,7 @@ def run_container_gates(
         "no-new-privileges",
         "--read-only",
         "--tmpfs",
-        "/tmp:rw,nosuid,nodev",
+        "/tmp:rw,nosuid,nodev,exec",
     ]
     with staged_container_gate_source(source_repo) as gate_source:
         run_checked(
