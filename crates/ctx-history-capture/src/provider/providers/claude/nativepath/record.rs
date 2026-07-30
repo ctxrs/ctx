@@ -609,11 +609,6 @@ fn order(identity: ClaudeEventIdentity) -> ClaudeNativeOrder {
 
 #[derive(Debug)]
 pub(super) struct ParsedClaudeRecord {
-    pub(super) result: ResultClassification,
-    /// True only when Core classified the record before the body-bearing
-    /// retention DTO could be deserialized.
-    pub(super) preallocation_exclusion: bool,
-    pub(super) native_record_id: Option<String>,
     pub(super) session_id: Option<String>,
     pub(super) timestamp: Option<String>,
     pub(super) cwd: Option<String>,
@@ -643,14 +638,6 @@ struct MetadataOnlyRecord {
     version: Option<String>,
     #[serde(rename = "gitBranch", default)]
     git_branch: Option<String>,
-    #[serde(default)]
-    message: Option<MetadataOnlyMessage>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct MetadataOnlyMessage {
-    #[serde(default)]
-    id: Option<String>,
 }
 
 /// Performs exactly one semantic JSON deserialization for a complete record.
@@ -679,11 +666,6 @@ pub(super) fn parse_native_record(
             &outputs,
         );
         return Ok(ParsedClaudeRecord {
-            result,
-            preallocation_exclusion: true,
-            native_record_id: metadata
-                .uuid
-                .or_else(|| metadata.message.and_then(|message| message.id)),
             session_id: metadata.session_id,
             timestamp: metadata.timestamp,
             cwd: metadata.cwd,
@@ -694,12 +676,6 @@ pub(super) fn parse_native_record(
     }
 
     let record: SafeRecord = serde_json::from_slice(bytes)?;
-    let native_record_id = record.uuid.clone().or_else(|| {
-        record
-            .message
-            .as_ref()
-            .and_then(|message| message.id.clone())
-    });
     let session_id = record.session_id.clone();
     let timestamp = record.timestamp.clone();
     let cwd = record.cwd.clone();
@@ -707,9 +683,6 @@ pub(super) fn parse_native_record(
     let git_branch = record.git_branch.clone();
     let rows = retain_safe_record(record, raw_ordinal, locator, result.is_result());
     Ok(ParsedClaudeRecord {
-        result,
-        preallocation_exclusion: false,
-        native_record_id,
         session_id,
         timestamp,
         cwd,

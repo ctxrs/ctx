@@ -1,29 +1,259 @@
 use std::{
-    fs::{self, File},
-    io::{BufWriter, Write},
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
 };
 
+use ctx_history_core::{
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
+    LocatorRevisionPolicy,
+};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
-use super::*;
-use crate::test_support_paths::tempdir;
+use crate::{
+    provider::source_backed::{
+        family::jsonl::{jsonl_family_work, reset_jsonl_family_work, JsonlFamilyWork},
+        refresh_source_backed_generation, register_landed_source_backed_route,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+    },
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
+};
 
-fn projects_root(root: &Path) -> PathBuf {
-    root.join(".claude/projects")
+fn registry(root: &Path) -> SourceBackedProviderRegistry {
+    let source = ProviderSource {
+        provider: CaptureProvider::Claude,
+        path: root.to_path_buf(),
+        exists: true,
+        source_format: "claude_projects_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+fn writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+#[test]
+fn shared_family_claude_noop_replacement_lineage_and_hydration_oracle() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join(".claude/projects");
+    let primary = session_path(&projects, "-project", "session-1");
+    let subagent = projects.join("-project/session-1/subagents/agent-review.jsonl");
+    write_lines(
+        &primary,
+        &[
+            message("session-1", "message-1", "claude exact"),
+            message("session-1", "message-2", "claude response"),
+        ],
+    );
+    write_lines(
+        &subagent,
+        &[message("session-1", "subagent-message", "subagent body")],
+    );
+    let registry = registry(&projects);
+    let index_root = temp.path().join("index");
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.sources.len(), 2);
+    assert_eq!(
+        cold.sources
+            .iter()
+            .map(|source| source.counts().indexed_documents)
+            .sum::<u64>(),
+        3
+    );
+
+    reset_jsonl_family_work();
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(jsonl_family_work().provider_projections, 0);
+    assert_eq!(unchanged.sources, cold.sources);
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+
+    let primary_source = cold
+        .sources
+        .iter()
+        .find(|source| source.counts().indexed_documents == 2)
+        .unwrap()
+        .observation()
+        .source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let mut events = index
+        .source_event_page(primary_source, None, 10)
+        .unwrap()
+        .items;
+    events.sort_by_key(|event| event.event_sequence);
+    assert!(events.iter().all(|event| {
+        event.parent_session_id.is_none()
+            && event.root_session_id == event.session_id
+            && event.agent_type == "primary"
+            && event.is_primary
+            && event.branch.as_deref() == Some("main")
+            && event.cwd.as_deref() == Some("/workspace/project")
+            && event.locator.revision_policy() == LocatorRevisionPolicy::StableRecordEvidence
+    }));
+    let requests = events
+        .iter()
+        .rev()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    reset_jsonl_family_work();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests.clone()).unwrap())
+        .unwrap()
+        .into_records();
+    assert_eq!(
+        hydrated
+            .iter()
+            .map(|record| record.provider_bytes.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"claude response".as_slice(), b"claude exact".as_slice()]
+    );
+    assert_eq!(
+        jsonl_family_work(),
+        JsonlFamilyWork {
+            discoveries: 0,
+            leaf_opens: 1,
+            provider_projections: 0,
+        }
+    );
+    let mut digest = Sha256::new();
+    for (request, record) in requests.iter().zip(hydrated) {
+        digest.update(request.event_id().digest());
+        digest.update((record.provider_bytes.len() as u64).to_be_bytes());
+        digest.update(record.provider_bytes);
+    }
+    assert_eq!(
+        format!("{:x}", digest.finalize()),
+        "c454f0ccd49ec9598691b60c969a1c6f77b7aa685de2a40289e5dac8ab32394a"
+    );
+
+    let before = fs::read_to_string(&primary).unwrap();
+    let rewritten = before.replace("claude exact", "claude other");
+    assert_eq!(rewritten.len(), before.len());
+    fs::write(&primary, rewritten).unwrap();
+    reset_jsonl_family_work();
+    let rewrite =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(
+        jsonl_family_work().provider_projections,
+        2,
+        "same-length Claude rewrite is one replacement pass"
+    );
+    assert_ne!(rewrite.commit.generation_id, cold.commit.generation_id);
+
+    append_record(
+        &primary,
+        &message("session-1", "message-3", "claude growth"),
+    );
+    reset_jsonl_family_work();
+    let growth =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(
+        jsonl_family_work().provider_projections,
+        3,
+        "Claude growth is one full replacement"
+    );
+    assert_eq!(
+        growth
+            .sources
+            .iter()
+            .map(|source| source.counts().indexed_documents)
+            .sum::<u64>(),
+        4
+    );
+
+    let subagent_event = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(
+            growth
+                .sources
+                .iter()
+                .find(|source| source.counts().indexed_documents == 1)
+                .unwrap()
+                .observation()
+                .source(),
+            None,
+            4,
+        )
+        .unwrap()
+        .items
+        .remove(0);
+    assert_eq!(subagent_event.agent_type, "subagent");
+    assert!(!subagent_event.is_primary);
+    assert!(subagent_event.parent_session_id.is_some());
+    assert_eq!(
+        subagent_event.root_session_id,
+        subagent_event.parent_session_id.unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_family_claude_accepts_hardlinked_leaves_without_resident_file_handles() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join(".claude/projects");
+    let first = session_path(&projects, "-project", "session-1");
+    write_lines(
+        &first,
+        &[message("session-1", "message-1", "hardlink body")],
+    );
+    fs::hard_link(&first, session_path(&projects, "-project", "session-2")).unwrap();
+    let result = refresh_source_backed_generation(
+        temp.path().join("index"),
+        &registry(&projects),
+        writer_options(),
+    )
+    .unwrap();
+    assert_eq!(result.sources.len(), 2);
+}
+
+#[test]
+fn shared_family_claude_complete_deletion_and_missing_root_are_distinct() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join(".claude/projects");
+    let path = session_path(&projects, "-project", "session-1");
+    write_lines(&path, &[message("session-1", "message-1", "delete body")]);
+    let registry = registry(&projects);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.sources.len(), 1);
+
+    fs::remove_file(&path).unwrap();
+    let deleted =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert!(deleted.sources.is_empty());
+
+    fs::remove_dir_all(&projects).unwrap();
+    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        deleted.commit.generation_id
+    );
 }
 
 fn session_path(projects: &Path, project: &str, session: &str) -> PathBuf {
     projects.join(project).join(format!("{session}.jsonl"))
-}
-
-fn write_lines(path: &Path, lines: &[Value]) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut writer = BufWriter::new(File::create(path).unwrap());
-    for line in lines {
-        writeln!(writer, "{line}").unwrap();
-    }
-    writer.flush().unwrap();
 }
 
 fn message(session: &str, uuid: &str, text: &str) -> Value {
@@ -42,164 +272,18 @@ fn message(session: &str, uuid: &str, text: &str) -> Value {
     })
 }
 
-fn scan(
-    leaf: ClaudeSourceBackedLeaf,
-    previous: Option<&CertifiedSource>,
-) -> (ClaudeSourceBackedScan, Vec<LexicalDocument>) {
-    let mut scanner = ClaudeSourceBackedScanner::new(leaf, previous).unwrap();
-    let mut documents = Vec::new();
-    while let Some(page) = scanner.next_page().unwrap() {
-        documents.extend(page.documents);
+fn write_lines(path: &Path, lines: &[Value]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    for line in lines {
+        serde_json::to_writer(&mut bytes, line).unwrap();
+        bytes.push(b'\n');
     }
-    (scanner.finish().unwrap(), documents)
+    fs::write(path, bytes).unwrap();
 }
 
-#[test]
-fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() {
-    let temp = tempdir().unwrap();
-    let projects = projects_root(temp.path());
-    let primary = session_path(&projects, "-project", "session-1");
-    let subagent = projects.join("-project/session-1/subagents/agent-review.jsonl");
-    let full_body = format!("claude-full-{}-claude-tail-sentinel", "c".repeat(8_192));
-    write_lines(
-        &primary,
-        &[
-            message("session-1", "message-1", &full_body),
-            json!({
-                "sessionId": "session-1",
-                "type": "assistant",
-                "uuid": "tool-1",
-                "message": {
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": "call-1",
-                        "name": "Read",
-                        "input": {"file_path": "src/lib.rs"}
-                    }]
-                }
-            }),
-        ],
-    );
-    write_lines(
-        &subagent,
-        &[message("session-1", "subagent-message", "subagent body")],
-    );
-
-    let inventory = discover_claude_source_backed(&projects).unwrap();
-    assert_eq!(inventory.leaves().len(), 2);
-    let certified_inventory = inventory.certify().unwrap();
-    assert_eq!(certified_inventory.observed_sources(), 2);
-
-    let leaf = inventory
-        .leaves()
-        .iter()
-        .find(|leaf| leaf.source.key.provider_session_id() == "session-1")
-        .unwrap()
-        .clone();
-    let (cold, cold_documents) = scan(leaf.clone(), None);
-    assert_eq!(cold_documents.len(), 2);
-    assert_eq!(cold_documents[0].body, full_body);
-    assert!(cold_documents[0].body.ends_with("claude-tail-sentinel"));
-    assert_eq!(cold_documents[0].session_id, leaf.session_id);
-    assert_eq!(cold_documents[0].parent_session_id, None);
-    assert_eq!(cold_documents[0].root_session_id, leaf.session_id);
-    assert_eq!(&cold_documents[0].source, leaf.source_key());
-    assert_eq!(
-        cold_documents[0].provider_session_id.as_deref(),
-        Some("session-1")
-    );
-    assert_eq!(cold_documents[0].branch.as_deref(), Some("main"));
-    assert_eq!(cold_documents[0].source_path.as_deref(), primary.to_str());
-    assert_eq!(cold_documents[0].agent_type, "primary");
-    assert!(cold_documents[0].is_primary);
-    assert_eq!(cold_documents[0].cwd.as_deref(), Some("/workspace/project"));
-    assert_eq!(cold_documents[1].touched_files, ["src/lib.rs"]);
-    let unsupported =
-        hydrate_claude_source_record(&projects, &cold_documents[1].locator).unwrap_err();
-    assert!(matches!(
-        unsupported,
-        ClaudeSourceBackedError::ExactDisplayUnavailable
-    ));
-    assert!(cold
-        .source
-        .frontier()
-        .is_some_and(|frontier| frontier.certified_prefix_bytes() > 0));
-
-    let (noop, noop_documents) = scan(leaf.clone(), Some(&cold.source));
-    assert!(noop_documents.is_empty());
-    assert_eq!(noop.source, cold.source);
-
-    let subagent_leaf = inventory
-        .leaves()
-        .iter()
-        .find(|leaf| {
-            leaf.source
-                .key
-                .provider_session_id()
-                .contains("/subagents/")
-        })
-        .unwrap()
-        .clone();
-    let (_, subagent_documents) = scan(subagent_leaf, None);
-    assert_eq!(subagent_documents.len(), 1);
-    assert_eq!(
-        subagent_documents[0].parent_session_id,
-        Some(leaf.session_id)
-    );
-    assert_eq!(subagent_documents[0].root_session_id, leaf.session_id);
-    assert_eq!(subagent_documents[0].agent_type, "subagent");
-    assert!(!subagent_documents[0].is_primary);
-}
-
-#[test]
-fn exact_jsonl_locator_reopens_full_message_and_fails_closed_after_rewrite() {
-    let temp = tempdir().unwrap();
-    let projects = projects_root(temp.path());
-    let path = session_path(&projects, "-project", "session-1");
-    let full_text = format!("exact locator {} claude-exact-tail", "content ".repeat(700));
-    write_lines(&path, &[message("session-1", "message-1", &full_text)]);
-
-    let inventory = discover_claude_source_backed(&projects).unwrap();
-    let leaf = inventory.leaves()[0].clone();
-    let (_, documents) = scan(leaf, None);
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].body, full_text);
-    assert!(documents[0].body.ends_with("claude-exact-tail"));
-    let hydrated = hydrate_claude_source_record(&projects, &documents[0].locator).unwrap();
-    assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some(full_text.as_str())
-    );
-    assert_eq!(hydrated.provider_bytes, documents[0].body.as_bytes());
-
-    let replacement = full_text.replace("exact locator", "stale locator");
-    assert_eq!(replacement.len(), full_text.len());
-    write_lines(&path, &[message("session-1", "message-1", &replacement)]);
-    let error = hydrate_claude_source_record(&projects, &documents[0].locator).unwrap_err();
-    assert!(matches!(
-        error,
-        ClaudeSourceBackedError::LocatorRecordChanged
-    ));
-}
-
-#[test]
-fn source_backed_claude_adapter_has_no_preview_or_store_body_fallback() {
-    let source = include_str!("../source_backed.rs");
-    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
-    assert!(!source.contains("ctx_history_store"));
-}
-
-#[test]
-fn explicit_leaf_cannot_claim_authoritative_tree_deletions() {
-    let temp = tempdir().unwrap();
-    let projects = projects_root(temp.path());
-    let path = session_path(&projects, "-project", "session-1");
-    write_lines(&path, &[message("session-1", "message-1", "body")]);
-
-    let error = discover_claude_source_backed(&path).unwrap_err();
-    assert!(matches!(
-        error,
-        ClaudeSourceBackedError::NonAuthoritativeRoot
-    ));
+fn append_record(path: &Path, record: &Value) {
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    serde_json::to_writer(&mut file, record).unwrap();
+    file.write_all(b"\n").unwrap();
 }

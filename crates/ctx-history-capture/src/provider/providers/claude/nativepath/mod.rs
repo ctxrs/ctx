@@ -1,17 +1,8 @@
 //! Provider-owned Claude Code discovery, parsing, and source-backed hydration.
 
-mod checkpoint;
 mod privacy;
-mod reader;
 mod record;
 mod rows;
 mod source;
 pub(crate) mod source_backed;
 pub(crate) use source_backed::registration::register as register_source_backed_route;
-
-pub(crate) use checkpoint::ParseCheckpoint;
-pub(crate) use reader::ClaudeNativeScanner;
-pub(crate) use rows::{ClaudeEventKind, ClaudeRetainedRow, ClaudeSessionMetadata};
-pub(crate) use source::{
-    discover_projects, ClaudeNativePathError, DiscoveredClaudeSession, SessionLayout,
-};
