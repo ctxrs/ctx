@@ -1,30 +1,25 @@
 #[test]
 fn pi_cli_import_search_flow() {
     let temp = tempdir();
+    let fixture = temp
+        .path()
+        .join(".pi/agent/sessions/--workspace--/pi-session.jsonl");
+    fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+    fs::copy(provider_history_fixture("pi-session.jsonl"), &fixture).unwrap();
     let _daemon = start_source_refresh_daemon(&temp);
-    let fixture = provider_history_fixture("pi-session.jsonl");
 
     let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "pi",
-        "--path",
-        &fixture,
         "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(
-        imported["sources"][0]["status"], "published",
-        "{imported:#}"
-    );
-    assert_eq!(imported["sources"][0]["provider"], "pi");
-    assert_eq!(imported["sources"][0]["source_format"], "pi_session_jsonl");
-    assert_eq!(imported["totals"]["imported_sessions"], 0);
-    assert_eq!(imported["totals"]["imported_events"], 0);
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
     let first_generation = imported["sources"][0]["published_generation"]
         .as_str()
-        .expect("Pi explicit import must publish a source-backed generation");
+        .expect("Pi provider import must publish a source-backed generation");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -41,18 +36,14 @@ fn pi_cli_import_search_flow() {
         "import",
         "--provider",
         "pi",
-        "--path",
-        &fixture,
         "--resume",
         "--no-daemon",
         "--format=json",
     ]));
     assert_eq!(second["resume"], true);
     assert_eq!(second["resume_mode"], "idempotent_rescan");
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped"], 0);
-    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
+    assert_authoritative_provider_publication(&second);
+    assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_eq!(
         second["sources"][0]["published_generation"], first_generation,
         "{second:#}"

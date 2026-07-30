@@ -71,6 +71,7 @@ fn mcp_command(temp: &tempfile::TempDir) -> StdCommand {
     }
     command
         .args(["mcp", "serve"])
+        .env("CTX_DAEMON_AUTOSTART_OFF", "1")
         .env("CTX_LOCAL_USAGE_ENABLED", "true");
     command
 }
@@ -327,6 +328,7 @@ fn protocol_control_and_invalid_input_create_no_usage_store() {
     .concat();
     ctx(&temp)
         .args(["mcp", "serve"])
+        .env("CTX_DAEMON_AUTOSTART_OFF", "1")
         .env("CTX_LOCAL_USAGE_ENABLED", "true")
         .write_stdin(messages)
         .assert()

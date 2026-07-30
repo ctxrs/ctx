@@ -7,8 +7,6 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[cfg(ctx_cli_test_support_fixtures)]
-use super::custom_history_fixture;
 use super::{copied_ctx_binary, ctx, ctx_from_binary, json_output};
 
 pub(crate) struct McpSourceRefreshDaemon {
@@ -37,7 +35,7 @@ impl Drop for McpSourceRefreshDaemon {
 pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefreshDaemon {
     std::fs::write(
         temp.path().join("config.toml"),
-        "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
+        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
     let binary = copied_ctx_binary(temp);
@@ -54,6 +52,7 @@ pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefres
         }
     }
     command
+        .current_dir(temp.path())
         .args([
             "daemon",
             "run",
@@ -63,7 +62,7 @@ pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefres
             "--loop-interval-seconds",
             "600",
         ])
-        .env("CTX_DAEMON_MODE", "source-refresh-only")
+        .env("CTX_DAEMON_MODE", "full")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let spawn_deadline = Instant::now() + Duration::from_secs(1);
@@ -145,14 +144,16 @@ pub(crate) fn import_codex_fixture_through_daemon(
     (daemon, imported)
 }
 
-#[cfg(ctx_cli_test_support_fixtures)]
 pub(crate) fn import_custom_history_fixture_source_backed(
     temp: &TempDir,
     fixture_name: &str,
 ) -> (McpSourceRefreshDaemon, Value) {
     let daemon = start_mcp_source_refresh_daemon(temp);
     let source = temp.path().join(fixture_name);
-    std::fs::copy(custom_history_fixture(fixture_name), &source).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/custom-history-jsonl")
+        .join(fixture_name);
+    std::fs::copy(fixture, &source).unwrap();
     let imported = json_output(ctx(temp).args([
         "import",
         "--input-format",

@@ -13,23 +13,34 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "Trae workspace storage is explicit-path-only: {empty_sources:#}"
     );
 
-    let fixture = provider_history_fixture("trae/User/workspaceStorage");
+    let fixture = PathBuf::from(provider_history_fixture("trae/User/workspaceStorage"))
+        .join("trae-workspace-1/state.vscdb");
     let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "trae-cn",
         "--path",
-        &fixture,
+        fixture.to_str().unwrap(),
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["schema_version"], 2);
-    assert_eq!(imported["sources"][0]["provider"], "trae");
-    assert_eq!(imported["sources"][0]["source_format"], "trae_state_vscdb");
+    assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
     assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'trae'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'trae'"
+        ),
+        2
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -55,14 +66,14 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
         "--provider",
         "trae",
         "--path",
-        &fixture,
+        fixture.to_str().unwrap(),
         "--format=json",
         "--progress",
         "none",
     ]));
+    assert_explicit_source_publication(&second, "trae", "trae_state_vscdb");
     assert_eq!(second["totals"]["rejected_records"], 0);
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 }
 
 #[test]
@@ -72,7 +83,8 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
     install_default_trae_cn_fixture(&temp, query);
     let workspace_storage = temp
         .path()
-        .join("Library/Application Support/Trae CN/User/workspaceStorage");
+        .join("Library/Application Support/Trae CN/User/workspaceStorage")
+        .join("cn-workspace/state.vscdb");
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert!(
@@ -93,7 +105,10 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "wait",
         "--format=json",
     ]));
-    assert!(stderr.contains("found no supported discovered native provider"));
+    assert!(
+        stderr.contains("no executable source-backed routes were registered"),
+        "{stderr}"
+    );
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -105,9 +120,8 @@ fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
         "--progress",
         "none",
     ]));
+    assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
     assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -136,7 +150,8 @@ fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
     install_default_trae_fixture(&temp, query);
     let workspace_storage = temp
         .path()
-        .join("Library/Application Support/Trae/User/workspaceStorage");
+        .join("Library/Application Support/Trae/User/workspaceStorage")
+        .join("standard-workspace/state.vscdb");
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert!(
@@ -158,9 +173,8 @@ fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
         "--progress",
         "none",
     ]));
+    assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
     assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 2);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -190,7 +204,10 @@ fn trae_cn_workspace_storage_is_excluded_from_import_all() {
 
     let stderr =
         failure_stderr(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert!(stderr.contains("no importable provider history sources found"));
+    assert!(
+        stderr.contains("no executable source-backed routes were registered"),
+        "{stderr}"
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
     assert!(sources["sources"]
@@ -208,18 +225,22 @@ fn astrbot_native_default_discovery_is_included_in_import_all() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| {
-            source["provider"] == "astrbot"
-                && source["source_format"] == "astrbot_data_v4_sqlite"
-                && source["import_support"] == "native"
-        }));
-    assert_eq!(imported["totals"]["rejected_records"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_authoritative_provider_publication(&imported);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'astrbot'"
+        ),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'astrbot'"
+        ),
+        3
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",

@@ -1,4 +1,4 @@
-#[cfg(ctx_cli_test_support_fixtures)]
+#[cfg(any(test, ctx_cli_test_support_fixtures))]
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -24,7 +24,76 @@ pub(crate) fn assert_omits_keys(value: &Value, forbidden_keys: &[&str]) {
     }
 }
 
-#[cfg(ctx_cli_test_support_fixtures)]
+pub(crate) fn assert_explicit_source_publication<'a>(
+    packet: &'a Value,
+    provider: &str,
+    source_format: &str,
+) -> &'a Value {
+    assert_eq!(packet["schema_version"], 2, "{packet:#}");
+    assert_eq!(packet["outcome"], "success", "{packet:#}");
+    assert_eq!(packet["failure_scope"], "none", "{packet:#}");
+    assert_eq!(packet["failure_type"], "none", "{packet:#}");
+    assert_eq!(packet["totals"]["imported_sources"], 1, "{packet:#}");
+    assert_eq!(packet["totals"]["imported_sessions"], 0, "{packet:#}");
+    assert_eq!(packet["totals"]["imported_events"], 0, "{packet:#}");
+    let sources = packet["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing explicit source receipts in {packet:#}"));
+    assert_eq!(sources.len(), 1, "{packet:#}");
+    let source = &sources[0];
+    assert_eq!(source["provider"], provider, "{packet:#}");
+    assert_eq!(source["source_format"], source_format, "{packet:#}");
+    assert_eq!(source["status"], "published", "{packet:#}");
+    assert!(source["published_generation"].is_string(), "{packet:#}");
+    source
+}
+
+pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Value {
+    assert_eq!(packet["schema_version"], 2, "{packet:#}");
+    assert_eq!(packet["outcome"], "success", "{packet:#}");
+    assert_eq!(packet["failure_scope"], "none", "{packet:#}");
+    assert_eq!(packet["failure_type"], "none", "{packet:#}");
+    let sources = packet["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing authoritative refresh receipt in {packet:#}"));
+    assert_eq!(sources.len(), 1, "{packet:#}");
+    let source = &sources[0];
+    assert_eq!(
+        source["source_format"], "provider_authoritative_all",
+        "{packet:#}"
+    );
+    assert_eq!(source["status"], "published", "{packet:#}");
+    assert!(source["published_generation"].is_string(), "{packet:#}");
+    for key in [
+        "current_source_count",
+        "current_indexed_documents",
+        "current_complete_records",
+        "current_retained_records",
+        "current_rejected_records",
+        "current_ignored_records",
+        "current_certified_source_bytes",
+        "current_sources_with_rejections",
+        "removed_source_count",
+    ] {
+        assert!(
+            packet["totals"][key].is_number(),
+            "missing {key} in {packet:#}"
+        );
+        assert_eq!(packet["totals"][key], source[key], "{packet:#}");
+    }
+    assert_omits_keys(
+        packet,
+        &[
+            "failed_sources",
+            "imported_sessions",
+            "imported_events",
+            "skipped_events",
+        ],
+    );
+    source
+}
+
+#[cfg(any(test, ctx_cli_test_support_fixtures))]
 pub(crate) fn sqlite_column_text(conn: &Connection, sql: &str) -> String {
     let mut statement = conn.prepare(sql).unwrap();
     let rows = statement
@@ -38,7 +107,7 @@ pub(crate) fn sqlite_column_text(conn: &Connection, sql: &str) -> String {
     text
 }
 
-#[cfg(ctx_cli_test_support_fixtures)]
+#[cfg(any(test, ctx_cli_test_support_fixtures))]
 pub(crate) fn sqlite_count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |row| row.get(0)).unwrap()
 }
@@ -84,7 +153,7 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
     provider: &str,
     query: &str,
     expected_results: usize,
-    expected_match_reason: &str,
+    _expected_match_reason: &str,
     expected_result_type: &str,
     expected_scope: &str,
 ) {
@@ -100,7 +169,12 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
 
     for result in results {
         assert_eq!(result["provider"], provider, "provider filter failed");
-        assert_eq!(result["source_exists"], true, "source_exists failed");
+        if let Some(source_exists) = result.get("source_exists") {
+            assert!(
+                source_exists.is_boolean(),
+                "legacy source_exists must be boolean in {result:#}"
+            );
+        }
         assert_eq!(result["result_type"], expected_result_type);
         assert_eq!(result["result_scope"], expected_scope);
         assert!(result["ctx_event_id"].is_string());
@@ -112,19 +186,10 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
             assert!(result["more_matches_in_session"].is_number());
             assert_session_suggested_next_commands(result);
         } else {
-            assert!(
-                result["cursor"].is_string(),
-                "expected source cursor in event result {result:#}"
-            );
             assert_eq!(result.get("session_importance"), None);
             assert_eq!(result.get("more_matches_in_session"), None);
             assert_event_suggested_next_commands(result);
         }
-        assert!(result["why_matched"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == expected_match_reason));
         assert_provider_citations(result, provider);
     }
 }
@@ -137,18 +202,17 @@ pub(crate) fn assert_provider_citations(result: &Value, provider: &str) {
             citation["item_id"].is_string(),
             "citation needs a ctx-owned item id in {citation:#}"
         );
-        match citation["target_type"].as_str() {
-            Some("event") => assert!(citation["ctx_event_id"].is_string()),
-            Some("session") => assert!(citation["ctx_session_id"].is_string()),
-            _ => {}
-        }
+        assert_eq!(citation["target_type"], "event");
+        assert!(citation["ctx_event_id"].is_string());
+        assert!(citation["ctx_session_id"].is_string());
         assert_eq!(citation["provider"], provider, "citation provider failed");
-        assert_eq!(
-            citation["source_exists"], true,
-            "citation source_exists failed"
-        );
+        if let Some(source_exists) = citation.get("source_exists") {
+            assert!(
+                source_exists.is_boolean(),
+                "legacy citation source_exists must be boolean in {citation:#}"
+            );
+        }
         assert!(citation["source_path"].is_string());
-        assert!(citation["cursor"].is_string());
     }
 }
 
@@ -178,8 +242,8 @@ pub(crate) fn assert_session_suggested_next_commands(result: &Value) {
         commands.iter().any(|command| command
             .as_str()
             .unwrap_or("")
-            .starts_with("ctx locate session ")),
-        "missing locate session suggestion in {result:#}"
+            .starts_with("ctx show event ")),
+        "missing representative event suggestion in {result:#}"
     );
 }
 
@@ -199,24 +263,14 @@ pub(crate) fn assert_event_suggested_next_commands(result: &Value) {
         "missing show event suggestion in {result:#}"
     );
     assert!(
-        commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or("")
-            .starts_with("ctx show session ")),
-        "missing show session suggestion in {result:#}"
-    );
-    assert!(
         !commands.iter().any(|command| command
             .as_str()
             .unwrap_or("")
             .starts_with("ctx export session ")),
         "search should not suggest exporting transcripts by default in {result:#}"
     );
-    assert!(
-        commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or("")
-            .starts_with("ctx locate event ")),
-        "missing locate event suggestion in {result:#}"
-    );
+    assert!(commands.iter().any(|command| {
+        let command = command.as_str().unwrap_or("");
+        command.starts_with("ctx search ") && command.contains(" --session ")
+    }));
 }

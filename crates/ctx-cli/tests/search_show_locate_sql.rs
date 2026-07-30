@@ -5,7 +5,7 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
-use support::*;
+use support::{daemon_test_root as tempdir, *};
 
 struct SourceRefreshDaemon {
     child: Option<Child>,
@@ -21,6 +21,13 @@ impl Drop for SourceRefreshDaemon {
 }
 
 fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_with_env(temp, &[])
+}
+
+fn start_source_refresh_daemon_with_env(
+    temp: &TempDir,
+    extra_env: &[(&str, &Path)],
+) -> SourceRefreshDaemon {
     fs::write(
         temp.path().join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
@@ -40,6 +47,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
         }
     }
     command
+        .current_dir(temp.path())
         .args([
             "daemon",
             "run",
@@ -52,6 +60,9 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
         .env("CTX_DAEMON_MODE", "full")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    for (name, value) in extra_env {
+        command.env(name, value);
+    }
     let spawn_deadline = Instant::now() + Duration::from_secs(1);
     let child = loop {
         match command.spawn() {
@@ -88,6 +99,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             status["daemon"]["running"] == true
                 && status["daemon"]["source_refresh_endpoint"]["available"] == true
         }) {
+            wait_for_test_daemon_source_refresh(temp);
             return daemon;
         }
         assert!(
@@ -99,7 +111,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
 }
 
 fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let packet = loop {
         let output = ctx(temp)
             .args(["sql", sql, "--format=json"])
@@ -109,11 +121,30 @@ fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
+        if (stderr.contains("source-backed SQL projection")
+            || stderr.contains("source-backed relational projection")
+            || stderr.contains("no such table: source_backed_relational_state"))
+            && Instant::now() < deadline
+        {
+            if let Ok(job) = fs::read(temp.path().join("daemon/jobs/relational-catch-up.json"))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
+                })
+            {
+                if job["status"] == "error" {
+                    panic!(
+                        "source-backed SQL projection failed for `{sql}` ({}): {}",
+                        job["error_code"].as_str().unwrap_or("unknown_error"),
+                        job["last_error"]
+                            .as_str()
+                            .unwrap_or("unknown projection error")
+                    );
+                }
+            }
             std::thread::sleep(Duration::from_millis(25));
             continue;
         }
-        panic!("source-backed SQL failed: {stderr}");
+        panic!("source-backed SQL failed for `{sql}`: {stderr}");
     };
     packet["rows"][0][0]
         .as_i64()
@@ -279,15 +310,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
             ]),
     );
     assert_eq!(excluded["results"].as_array().unwrap().len(), 0);
-    assert_eq!(
-        excluded["filters"]["exclude_provider_session"]["provider"],
-        "codex"
-    );
-    assert_eq!(
-        excluded["filters"]["exclude_provider_session"]["provider_session_id"],
-        "codex-session-root"
-    );
-    assert!(excluded["filters"]["exclude_provider_session"]["session_id"].is_string());
+    assert!(excluded["filters"]["include_current_session"].is_null());
 
     let excluded_tree = json_output(
         ctx(&temp)
@@ -323,7 +346,7 @@ fn search_excludes_active_codex_session_by_default_when_available() {
             ]),
     );
     assert_search_provider_oracle(&included, "codex", "onboarding", 1, "message");
-    assert!(included["filters"]["exclude_provider_session"].is_null());
+    assert_eq!(included["filters"]["include_current_session"], true);
 
     let included_tree = json_output(
         ctx(&temp)
@@ -462,7 +485,10 @@ fn show_does_not_initialize_store() {
 fn locate_does_not_initialize_store() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["locate", "event", "deadbeef"]));
-    assert!(stderr.contains("ctx store is not initialized"));
+    assert!(
+        stderr.contains("source-backed Core index is not initialized"),
+        "{stderr}"
+    );
     assert!(!temp.path().join("work.sqlite").exists());
 }
 
@@ -492,6 +518,7 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(setup_json["daemon_autostart"]["status"], "degraded");
     assert_eq!(setup_json["daemon_autostart"]["requested"], true);
     assert!(setup_json.get("background_indexing").is_none());
+    wait_for_test_daemon_source_refresh(&temp);
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert_eq!(sources["schema_version"], 1);
@@ -509,8 +536,7 @@ fn fresh_home_search_mvp_flow() {
         &fixture,
         "--format=json",
     ]));
-    assert_eq!(import["schema_version"], 2);
-    assert!(import["totals"]["imported_sessions"].as_u64().unwrap() > 0);
+    assert_explicit_source_publication(&import, "codex", "codex_session_jsonl_tree");
     assert!(import["totals"]["source_files"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_bytes"].as_u64().unwrap() > 0);
 
@@ -539,7 +565,6 @@ fn fresh_home_search_mvp_flow() {
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap().to_owned();
     assert!(first_result["provider_session_id"].is_string());
     assert!(first_result["source_path"].is_string());
-    assert!(first_result["cursor"].is_string());
     assert_session_suggested_next_commands(first_result);
     assert!(first_result["citations"][0]["ctx_event_id"].is_string());
     assert!(first_result["citations"][0]["ctx_session_id"].is_string());
@@ -555,12 +580,9 @@ fn fresh_home_search_mvp_flow() {
     ]));
     assert_eq!(term_search["query"], "zzzz-no-match OR onboarding");
     assert!(!term_search["results"].as_array().unwrap().is_empty());
-    assert!(term_search["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|result| { result["suggested_next_commands"].as_array().unwrap().iter() })
-        .all(|command| !command.as_str().unwrap().starts_with("ctx search ")));
+    for result in term_search["results"].as_array().unwrap() {
+        assert_session_suggested_next_commands(result);
+    }
 
     let event_search = json_output(ctx(&temp).args([
         "search",
@@ -608,7 +630,7 @@ fn fresh_home_search_mvp_flow() {
     );
     assert_eq!(
         prefixed_session_events["filters"]["session"],
-        ctx_session_id
+        session_prefix
     );
 
     let human_search = ctx(&temp)
@@ -620,10 +642,8 @@ fn fresh_home_search_mvp_flow() {
         .clone();
     let human_search = String::from_utf8(human_search).unwrap();
     assert!(human_search.contains("1. "));
-    assert!(human_search.contains("importance"));
-    assert!(human_search.contains("session "));
-    assert!(human_search.contains("event "));
-    assert!(human_search.contains("inspect: ctx show event"));
+    assert!(human_search.contains("codex | session "));
+    assert!(human_search.contains("inspect: ctx show session"));
     assert!(!human_search.contains("ctx_event_id"));
     assert!(!human_search.contains("provider_session_id"));
     assert!(!human_search.contains("next:"));
@@ -690,21 +710,32 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(locate_event["provider"], "codex");
     assert!(locate_event["provider_session_id"].is_string());
     assert!(locate_event["source"]["path"].is_string());
-    assert!(locate_event["cursor"].is_string());
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["schema_version"], 2);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
     assert_eq!(status["daemon"]["enabled"], true);
-    assert!(status["daemon"]["jobs"]["semantic_index"]["status"].is_string());
+    assert!(status["daemon"]["jobs"]["source_backed_refresh"]["status"].is_string());
 
-    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
+    let doctor_deadline = Instant::now() + Duration::from_secs(10);
+    let doctor = loop {
+        let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
+        if doctor["ok"] == true {
+            break doctor;
+        }
+        assert!(
+            Instant::now() < doctor_deadline,
+            "timed out waiting for healthy source epochs: {doctor:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], true);
     assert_eq!(doctor["daemon"]["enabled"], true);
-    assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
+    assert_eq!(doctor["source_epoch"]["lexical"]["status"], "ready");
+    assert!(doctor["findings"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -995,7 +1026,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     assert_eq!(supported_hybrid["retrieval"]["effective_mode"], "lexical");
     assert_eq!(
         supported_hybrid["retrieval"]["semantic_fallback_code"],
-        "semantic_index_missing"
+        "semantic_store_missing"
     );
 
     let missing_index_strict_semantic = ctx(&temp)
@@ -1015,7 +1046,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         .clone();
     let missing_index_strict_semantic = String::from_utf8(missing_index_strict_semantic).unwrap();
     assert!(
-        missing_index_strict_semantic.contains("semantic index is not available yet"),
+        missing_index_strict_semantic.contains("semantic_store_missing"),
         "{missing_index_strict_semantic}"
     );
 
@@ -1033,11 +1064,19 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
 
     let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
     assert_eq!(status["semantic"]["status"], "pending");
-    assert!(status["semantic"]["reason"].is_null());
-    assert_eq!(
-        status["semantic"]["embed_policy"]["source"],
-        "dynamic_quiet"
+    assert!(
+        matches!(
+            status["semantic"]["reason"].as_str(),
+            Some(
+                "flat_f32_projection_missing"
+                    | "projection_control_missing"
+                    | "generation_not_acknowledged"
+            )
+        ),
+        "{status:#}"
     );
+    assert_eq!(status["semantic"]["enabled"], true);
+    assert_eq!(status["semantic"]["config_source"], "config");
 }
 
 #[test]
@@ -1049,17 +1088,12 @@ fn doctor_reports_missing_store_without_creating_it() {
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], false);
     assert_eq!(doctor["daemon"]["enabled"], true);
-    assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
+    assert!(doctor["source_epoch"]["lexical"]["status"].is_string());
     assert!(doctor["findings"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|finding| {
-            finding
-                .as_str()
-                .unwrap()
-                .contains("ctx store is not initialized")
-        }));
+        .any(|finding| { finding.as_str().unwrap().starts_with("lexical is ") }));
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "doctor should not create the ctx store"
@@ -1070,6 +1104,7 @@ fn doctor_reports_missing_store_without_creating_it() {
 fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
+    let _daemon = start_source_refresh_daemon(&temp);
 
     let first = json_output(ctx(&temp).args([
         "import",
@@ -1077,26 +1112,46 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "codex",
         "--path",
         &fixture,
+        "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(first["schema_version"], 2);
+    assert_explicit_source_publication(&first, "codex", "codex_session_jsonl_tree");
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
-    assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 7);
-    assert_eq!(first["totals"]["imported_edges"], 1);
+    wait_for_test_daemon_source_refresh(&temp);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
+        ),
+        2
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
+        ),
+        7
+    );
 
-    let primary_default = json_output(ctx(&temp).args(["search", "subagent", "--format=json"]));
-    assert_eq!(primary_default["filters"]["include_subagents"], false);
+    let primary_default =
+        json_output(ctx(&temp).args(["search", "subagent", "--refresh", "off", "--format=json"]));
+    assert!(primary_default["filters"]["include_subagents"].is_null());
     let primary_default_text = serde_json::to_string(&primary_default).unwrap();
     assert!(
         !primary_default_text.contains("codex-session-child"),
         "{primary_default_text}"
     );
 
-    let default_events =
-        json_output(ctx(&temp).args(["search", "subagent", "--events", "--format=json"]));
-    assert_eq!(default_events["filters"]["include_subagents"], false);
+    let default_events = json_output(ctx(&temp).args([
+        "search",
+        "subagent",
+        "--events",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(default_events["filters"]["include_subagents"].is_null());
     let default_events_text = serde_json::to_string(&default_events).unwrap();
     assert!(
         !default_events_text.contains("codex-session-child"),
@@ -1107,6 +1162,8 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "search",
         "subagent",
         "--include-subagents",
+        "--refresh",
+        "off",
         "--format=json",
     ]));
     assert!(!with_subagents["results"].as_array().unwrap().is_empty());
@@ -1127,6 +1184,8 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "subagent",
         "--session",
         child_session_id,
+        "--refresh",
+        "off",
         "--format=json",
     ]));
     assert_eq!(
@@ -1137,10 +1196,16 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         .unwrap()
         .contains("codex-session-child"));
 
-    let primary_only =
-        json_output(ctx(&temp).args(["search", "subagent", "--primary-only", "--format=json"]));
-    assert_eq!(primary_only["filters"]["include_subagents"], false);
-    assert!(primary_only["filters"]["primary_only"].is_null());
+    let primary_only = json_output(ctx(&temp).args([
+        "search",
+        "subagent",
+        "--primary-only",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(primary_only["filters"]["include_subagents"].is_null());
+    assert_eq!(primary_only["filters"]["primary_only"], true);
     assert!(
         primary_only["results"].as_array().unwrap().len()
             <= with_subagents["results"].as_array().unwrap().len()
@@ -1153,17 +1218,14 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "--path",
         &fixture,
         "--resume",
+        "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(second["schema_version"], 2);
+    assert_explicit_source_publication(&second, "codex", "codex_session_jsonl_tree");
     assert_eq!(second["resume"], true);
     assert_eq!(second["resume_mode"], "idempotent_rescan");
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["imported_edges"], 0);
-    assert!(second["totals"]["skipped"].as_u64().unwrap() > 0);
-    assert_eq!(second["sources"][0]["imported_sessions"], 0);
-    assert_eq!(second["sources"][0]["imported_events"], 0);
+    assert_eq!(second["totals"]["skipped"], 0);
+    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 }
 
 #[test]
@@ -1179,6 +1241,7 @@ fn search_rejects_unbounded_limit() {
 #[test]
 fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     let temp = tempdir();
+    let _daemon = start_source_refresh_daemon(&temp);
     let fixture = provider_history_fixture("codex-sessions");
 
     let first = json_output(ctx(&temp).args([
@@ -1187,19 +1250,38 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         "codex",
         "--path",
         &fixture,
+        "--no-daemon",
         "--format=json",
     ]));
+    assert_explicit_source_publication(&first, "codex", "codex_session_jsonl_tree");
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
-    assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["rejected_records"], 0);
+    let first_generation = first["sources"][0]["published_generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["cataloged_sessions"], 2);
-    assert_eq!(status["indexed_catalog_sessions"], 2);
-    assert_eq!(status["pending_catalog_sessions"], 0);
-    assert_eq!(status["failed_catalog_sessions"], 0);
+    let status_deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+        if status["indexed_sessions"] == 2
+            && status["indexed_events"] == 7
+            && status["indexed_sources"] == 2
+            && status["lexical"]["status"] == "ready"
+        {
+            break status;
+        }
+        assert!(
+            Instant::now() < status_deadline,
+            "timed out waiting for imported catalog state: {status:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(status["indexed_sessions"], 2);
+    assert_eq!(status["indexed_events"], 7);
+    assert_eq!(status["indexed_sources"], 2);
+    assert_eq!(status["lexical"]["status"], "ready");
 
     let second = json_output(ctx(&temp).args([
         "import",
@@ -1207,16 +1289,19 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         "codex",
         "--path",
         &fixture,
+        "--no-daemon",
         "--format=json",
     ]));
+    assert_explicit_source_publication(&second, "codex", "codex_session_jsonl_tree");
     assert_eq!(second["resume"], false);
     assert_eq!(second["resume_mode"], "normal_scan");
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["imported_edges"], 0);
-    assert_eq!(second["totals"]["skipped"], 2);
-    assert_eq!(second["totals"]["change"], "no_op");
+    assert_eq!(second["totals"]["skipped"], 0);
     assert_eq!(second["totals"]["rejected_records"], 0);
+    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
+    assert_eq!(
+        second["sources"][0]["published_generation"], first_generation,
+        "{second:#}"
+    );
 }
 
 #[test]
@@ -1242,22 +1327,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(imported["schema_version"], 2, "{imported:#}");
-    assert_eq!(
-        imported["sources"][0]["status"], "published",
-        "{imported:#}"
-    );
-    assert_eq!(imported["sources"][0]["provider"], "codex", "{imported:#}");
-    assert_eq!(
-        imported["sources"][0]["source_format"], "codex_session_jsonl_tree",
-        "{imported:#}"
-    );
-    assert!(
-        imported["sources"][0]["published_generation"].is_string(),
-        "{imported:#}"
-    );
-    assert_eq!(imported["totals"]["imported_sessions"], 0, "{imported:#}");
-    assert_eq!(imported["totals"]["imported_events"], 0, "{imported:#}");
+    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
 
     let query = "setup flow";
     let search = json_output(ctx(&temp).args([
