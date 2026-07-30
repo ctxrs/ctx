@@ -160,6 +160,69 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
 }
 
 #[test]
+fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
+    let temp = tempdir().unwrap();
+    let source = source("logical.sqlite");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_document(document(&source, 1, "logical snapshot"))
+        .unwrap();
+    let certificate = certificate(&source, 1, 1);
+    initial.certify_source(certificate.clone()).unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+
+    let root_files_before = fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| {
+            let path = entry.path();
+            (entry.file_name(), fs::read(path).unwrap())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let managed_metadata_before = fs::metadata(temp.path().join(".managed.json")).unwrap();
+
+    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let constructions = Arc::clone(&retained.index_writer_constructions);
+    let inventory = complete_inventory(&source, 1, vec![source.clone()]);
+    retained
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    retained.retain_source(certificate.clone()).unwrap();
+    let receipt = retained
+        .commit_with_complete_inventory_revalidation(
+            |target| {
+                matches!(
+                    target,
+                    RevalidationTarget::Source(current) if current == &certificate
+                )
+            },
+            |current| current == &inventory,
+        )
+        .unwrap();
+
+    let root_files_after = fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| {
+            let path = entry.path();
+            (entry.file_name(), fs::read(path).unwrap())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let managed_metadata_after = fs::metadata(temp.path().join(".managed.json")).unwrap();
+    assert_eq!(constructions.load(Ordering::SeqCst), 0);
+    assert_eq!(receipt.generation_id, initial_receipt.generation_id);
+    assert_eq!(receipt.opstamp, initial_receipt.opstamp);
+    assert_eq!(root_files_after, root_files_before);
+    assert_eq!(
+        managed_metadata_after.modified().unwrap(),
+        managed_metadata_before.modified().unwrap()
+    );
+}
+
+#[test]
 fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
     let temp = tempdir().unwrap();
     let source = source("logical-snapshot.sqlite");

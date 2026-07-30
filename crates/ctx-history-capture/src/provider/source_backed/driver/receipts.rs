@@ -132,6 +132,15 @@ impl SourceBackedGenerationSink<'_> {
         Ok(())
     }
 
+    pub fn retain_source(
+        &mut self,
+        certificate: CertifiedSource,
+    ) -> SourceBackedCoordinatorResult<()> {
+        self.claim(certificate.observation().source())?;
+        self.writer.retain_source(certificate)?;
+        Ok(())
+    }
+
     pub fn certify_complete_inventory(
         &mut self,
         inventory: CertifiedSourceInventory,

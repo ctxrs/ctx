@@ -165,7 +165,7 @@ impl SyntheticAdapter {
     fn use_independent_leaf_scans(&self, barrier_participants: usize) {
         let mut state = self.state.lock().unwrap();
         state.leaf_execution_policy =
-            DocumentLeafExecutionPolicy::IndependentWithWorkers(barrier_participants);
+            DocumentLeafExecutionPolicy::IndependentCapped(barrier_participants);
         state.scan_barrier = Some(Arc::new(Barrier::new(barrier_participants)));
     }
 
