@@ -21,7 +21,9 @@ pub(super) fn register_route(
             )
         }
         CaptureProvider::Firebender => {
-            logical::register_firebender_route(registry, source, selection)
+            crate::provider::providers::firebender::native_path::register_source_backed_route(
+                registry, source, selection,
+            )
         }
         CaptureProvider::DeepAgents => {
             logical::register_deepagents_route(registry, source, selection)

@@ -66,60 +66,6 @@ pub(super) fn register_forgecode_route(
     )?);
     Ok(())
 }
-pub(super) fn register_firebender_route(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    let path = source.path.clone();
-    let capture_path = path.clone();
-    let hydration_path = path;
-    let driver = captured_route_driver(
-        &source,
-        move |sink| {
-            let FirebenderSourceBackedPlan::Replacement(mut scanner) =
-                prepare_firebender_source_backed(&capture_path, None).map_err(route_error)?
-            else {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "cold Firebender scan unexpectedly returned an unchanged certificate",
-                ));
-            };
-            sink.begin(scanner.source().clone())?;
-            while let Some(page) = scanner.next_page().map_err(route_error)? {
-                for document in page.into_documents() {
-                    sink.document(document)?;
-                }
-            }
-            sink.certify(scanner.finish().map_err(route_error)?)
-        },
-        provider_format_scope(
-            CaptureProvider::Firebender,
-            "firebender_chat_history_sqlite",
-        ),
-        move |request| {
-            let hydrated = hydrate_firebender_source_backed_row(&hydration_path, request.locator())
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: firebender_display_bytes(
-                    hydrated.messages_json(),
-                    hydrated.message_index(),
-                )?,
-            })
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
 pub(super) fn register_deepagents_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
