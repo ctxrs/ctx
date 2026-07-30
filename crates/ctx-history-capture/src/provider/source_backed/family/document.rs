@@ -352,7 +352,6 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
 /// mutable state shared with another leaf. The family deliberately cannot
 /// infer that promise from `Send + Sync`, so existing adapters remain serial.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum DocumentLeafExecutionPolicy {
     #[default]
     Serial,
