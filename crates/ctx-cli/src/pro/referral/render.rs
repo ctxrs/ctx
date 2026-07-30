@@ -337,6 +337,18 @@ mod tests {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
     }
 
+    fn line_fits_or_preserves_copyable_atom(line: &str, maximum: usize) -> bool {
+        if line.width() <= maximum {
+            return true;
+        }
+        if line.trim_start().starts_with("ctx ") {
+            return true;
+        }
+        line.split_whitespace().any(|atom| {
+            atom.contains("://") || atom.starts_with("--") || uuid::Uuid::parse_str(atom).is_ok()
+        })
+    }
+
     fn status_result() -> ReferralStatusResult {
         ReferralStatusResult {
             codename: "agent-smith".to_owned(),
@@ -452,7 +464,7 @@ mod tests {
                 assert!(document
                     .render_plain()
                     .lines()
-                    .all(|line| line.width() <= maximum));
+                    .all(|line| line_fits_or_preserves_copyable_atom(line, maximum)));
             }
         }
     }

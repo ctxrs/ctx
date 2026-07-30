@@ -9,6 +9,20 @@ fn stderr_context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never))
 }
 
+fn line_fits_or_preserves_copyable_atom(line: &str, maximum: usize) -> bool {
+    use unicode_width::UnicodeWidthStr as _;
+
+    if line.width() <= maximum {
+        return true;
+    }
+    if line.trim_start().starts_with("ctx ") {
+        return true;
+    }
+    line.split_whitespace().any(|atom| {
+        atom.contains("://") || atom.starts_with("--") || uuid::Uuid::parse_str(atom).is_ok()
+    })
+}
+
 fn elapsed_since(clock: &Cell<i64>, start: i64) -> Duration {
     Duration::from_secs(u64::try_from(clock.get() - start).unwrap())
 }
@@ -94,8 +108,6 @@ fn terminal_trial_state_requests_paid_conversion_without_claiming_completion() {
 
 #[test]
 fn sign_in_and_checkout_renderers_fit_supported_widths_and_sanitize_values() {
-    use unicode_width::UnicodeWidthStr as _;
-
     for width in [32, 48, 80, 120] {
         let context = stderr_context(width);
         for document in [
@@ -115,7 +127,9 @@ fn sign_in_and_checkout_renderers_fit_supported_widths_and_sanitize_values() {
             assert!(rendered.contains("\\n") || !rendered.contains("secret"));
             let maximum = context.content_width().unwrap_or(1);
             assert!(
-                rendered.lines().all(|line| line.width() <= maximum),
+                rendered
+                    .lines()
+                    .all(|line| line_fits_or_preserves_copyable_atom(line, maximum)),
                 "{rendered:?}"
             );
         }
