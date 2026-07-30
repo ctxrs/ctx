@@ -710,15 +710,11 @@ fn setup_import_isolates_empty_codex_session_file() {
         "{setup:#}"
     );
     assert_eq!(
-        setup["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
-            ["current_rejected_records"],
-        0,
+        setup["refresh_request"]["receipt"]["current"]["current_rejected_records"], 0,
         "{setup:#}"
     );
     assert_eq!(
-        setup["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
-            ["current_ignored_records"],
-        1,
+        setup["refresh_request"]["receipt"]["current"]["current_ignored_records"], 1,
         "{setup:#}"
     );
 
@@ -1177,9 +1173,9 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
             .is_some_and(|count| count >= 2),
         "{setup:#}"
     );
-    assert_eq!(setup["relational"]["session_count"], 1, "{setup:#}");
-
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+    let generation = setup["lexical"]["generation_id"].as_str().unwrap();
+    let status = wait_for_relational_projection(&temp, generation);
+    assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
     assert_eq!(status["relational"]["status"], "ready", "{status:#}");
 }
@@ -1200,7 +1196,8 @@ fn setup_inventories_whole_source_sqlite_providers() {
         "{setup:#}"
     );
 
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+    let generation = setup["lexical"]["generation_id"].as_str().unwrap();
+    let status = wait_for_relational_projection(&temp, generation);
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
     assert_eq!(status["relational"]["status"], "ready", "{status:#}");
 }

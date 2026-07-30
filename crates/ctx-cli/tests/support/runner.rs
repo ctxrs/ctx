@@ -12,6 +12,7 @@ use tempfile::{Builder, TempDir, TempPath};
 
 pub(super) const PERSISTENT_DAEMON_TEST_ROOT_MARKER: &str = ".ctx-test-owned-daemon";
 const BOUND_CTX_BINARY_TEST_ROOT_MARKER: &str = ".ctx-test-bound-binary";
+const READY_CTX_BINARY_TEST_ROOT_MARKER: &str = ".ctx-test-copy-ready";
 const FINITE_DAEMON_TEST_ROOT_MARKER: &str = ".ctx-test-daemon-idle-seconds";
 const FINITE_DAEMON_IDLE_EXIT_SECONDS: &str = "600";
 const FINITE_DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -309,11 +310,46 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
 
 pub(crate) fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
     let target = test_binary_copy_path(temp);
-    if target.exists() {
-        return target;
+    if !target.exists() {
+        let source = ctx_binary();
+        copied_binary(temp, &source);
     }
-    let source = ctx_binary();
-    copied_binary(temp, &source)
+    ensure_copied_ctx_binary_is_executable(temp, &target);
+    target
+}
+
+fn ensure_copied_ctx_binary_is_executable(temp: &TempDir, target: &Path) {
+    let ready = temp.path().join(READY_CTX_BINARY_TEST_ROOT_MARKER);
+    if ready.is_file() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match std::process::Command::new(target).arg("--version").output() {
+            Ok(output) if output.status.success() => {
+                fs::write(&ready, b"test-owned copied ctx binary is executable\n").unwrap();
+                return;
+            }
+            Ok(output) => {
+                panic!(
+                    "copied ctx binary {} failed its readiness probe: {}",
+                    target.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(error)
+                if cfg!(unix) && error.raw_os_error() == Some(26) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                panic!(
+                    "copied ctx binary {} failed its readiness probe: {error}",
+                    target.display()
+                );
+            }
+        }
+    }
 }
 
 pub(super) fn test_binary_copy_path(temp: &TempDir) -> PathBuf {

@@ -46,7 +46,9 @@ health-check and recover the persistent daemon before returning.
 `--no-daemon` opt-out reports `status: "not_requested"` and reason
 `explicit_opt_out`; a durable disabled configuration uses reason
 `daemon_disabled`. `refresh_request` separately reports whether setup queued
-or waited for a daemon-owned source publication.
+or waited for a daemon-owned source publication. A completed `--wait` request
+also includes its request-bound terminal `receipt`; callers should use that
+receipt rather than a later periodic daemon job when reporting the setup run.
 
 Setup does not perform a foreground provider import. `--wait` waits for the
 daemon-owned source refresh; without it, setup requests background refresh.

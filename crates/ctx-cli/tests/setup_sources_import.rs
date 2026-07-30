@@ -4,7 +4,8 @@ use support::{fs, json, json_output, Command, Duration, Instant, TempDir, Value}
 
 fn ctx(temp: &TempDir) -> Command {
     let binary = support::copied_ctx_binary(temp);
-    let mut command = support::ctx_with_enabled_daemon(temp);
+    let mut command = support::ctx_from_binary(temp, &binary);
+    command.env_remove("CTX_DAEMON_AUTOSTART_OFF");
     command.env("CTX_DAEMON_AUTOSTART_EXE", binary);
     command
 }

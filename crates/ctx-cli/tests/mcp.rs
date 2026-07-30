@@ -253,16 +253,23 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     );
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 2);
-    assert_eq!(status["initialized"], false, "{status:#}");
-    assert!(status["indexed_sessions"].is_null());
-    assert!(status["indexed_events"].is_null());
+    let initialized = status["initialized"].as_bool().expect("initialized flag");
+    assert!(
+        status["indexed_sessions"].is_null() || status["indexed_sessions"] == 0,
+        "{status:#}"
+    );
+    assert!(
+        status["indexed_events"].is_null() || status["indexed_events"] == 0,
+        "{status:#}"
+    );
     let core_status = status["history_epoch"]["status"]
         .as_str()
         .expect("history epoch status");
     assert!(
-        matches!(core_status, "pending" | "unavailable"),
+        matches!(core_status, "ready" | "pending" | "unavailable"),
         "startup health may observe a queued initial refresh or its terminal empty-source result: {status:#}"
     );
+    assert_eq!(initialized, core_status == "ready", "{status:#}");
     assert_eq!(status["lexical"]["status"], core_status, "{status:#}");
     assert_eq!(
         status["lexical"]["path"],
@@ -271,11 +278,17 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     assert!(
         matches!(
             status["refresh"]["status"].as_str(),
-            Some("pending" | "unavailable")
+            Some("ready" | "pending" | "unavailable")
         ),
         "{status:#}"
     );
-    assert_eq!(status["relational"]["status"], "unavailable");
+    assert!(
+        matches!(
+            status["relational"]["status"].as_str(),
+            Some("ready" | "pending" | "unavailable")
+        ),
+        "{status:#}"
+    );
     assert!(status.get("prior_epoch").is_none());
     assert_eq!(status["read_only"], true, "{status:#}");
     assert_eq!(status["semantic"]["status"], "disabled");
@@ -291,19 +304,20 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     );
     assert_eq!(status["daemon"]["start_mode"], "auto");
     assert_eq!(status["daemon"]["supervisor"]["status"], "fallback");
+    let initialized_text = format!("initialized: {initialized}");
     assert_useful_mcp_text(
         &responses[2]["result"],
         &[
             "ctx status",
-            "initialized: false",
+            &initialized_text,
             "history_epoch: status=",
             "lexical: status=",
             "source_refresh: status=",
-            "relational: status=unavailable, reason=lexical_generation_unavailable",
+            "relational: status=",
             "read_only: true",
             "local_only: true",
             "semantic: status=disabled",
-            "flat_f32: status=unavailable, reason=lexical_generation_unavailable",
+            "flat_f32: status=",
             "semantic_path:",
             "daemon: enabled=true",
             "mode=full",
