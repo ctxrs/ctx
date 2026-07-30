@@ -5,7 +5,6 @@ param(
     [string]$RuntimeMode = "onnxruntime",
     [string]$RuntimePlatform = "",
     [string]$DataRoot = "",
-    [string]$ProofOutput = "",
     [int]$TimeoutSeconds = 900,
     [switch]$SignedProvisioned,
     [switch]$RequireAuthoritative,
@@ -59,9 +58,6 @@ if ($TimeoutSeconds -lt 30) {
 }
 if ([string]::IsNullOrWhiteSpace($Ctx)) {
     throw "Ctx cannot be empty"
-}
-if (-not [string]::IsNullOrEmpty($ProofOutput) -and [string]::IsNullOrWhiteSpace($ProofOutput)) {
-    throw "ProofOutput cannot be whitespace-only"
 }
 if ([string]::IsNullOrWhiteSpace($RuntimeArchive)) {
     throw "RuntimeArchive is required"
@@ -534,11 +530,11 @@ try {
     }
     $ctxVersion = $Matches[1]
     $binarySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $ctxSource).Hash.ToLowerInvariant()
-    $buildInfoSha = Get-BoundWindowsBuildInfoSha256 `
+    [void](Get-BoundWindowsBuildInfoSha256 `
         -ArtifactPath $ctxSource `
         -ExpectedArtifactSha256 $binarySha `
         -BuildInfoPath $ctxBuildInfoPath `
-        -MatrixPath $releaseTargetMatrix
+        -MatrixPath $releaseTargetMatrix)
     if (-not $signedWindowsMl) {
         $releaseArtifactDir = Join-Path $runRoot "release-artifacts"
         $installBinDir = Join-Path $runRoot "installed\bin"
@@ -583,7 +579,7 @@ try {
         -not (Test-Path -LiteralPath $Ctx -PathType Leaf) -or
         -not (Test-Path -LiteralPath $runtimeDylib -PathType Leaf)
     ) {
-        throw "Semantic proof input does not contain the expected binary/runtime layout"
+        throw "Semantic smoke input does not contain the expected binary/runtime layout"
     }
     $runtimeDylib = [System.IO.Path]::GetFullPath($runtimeDylib)
     $binaryMarker = Get-Content -LiteralPath "$Ctx.install.json" -Raw | ConvertFrom-Json
@@ -640,7 +636,6 @@ try {
     Set-ProcessEnvironmentVariable -Name "CTX_RUNTIME_DIR" -Value $runtimeRoot
     Set-ProcessEnvironmentVariable -Name "PATH" -Value $savedEnvironment["PATH"]
 
-    $runtimeProof = Join-Path $DataRoot "packaged-runtime-proof.txt"
     $hostArch = $env:PROCESSOR_ARCHITECTURE
     $machineProbe = [CtxWindowsNativeArchitecture]::Probe()
     $hostNativeArch = if ($machineProbe.EndsWith(":8664", [System.StringComparison]::Ordinal)) {
@@ -655,34 +650,6 @@ try {
     if ($RequireAuthoritative -and $runtimeAuthority -cne "authoritative") {
         throw "Windows semantic smoke requires native AMD64 execution; probe was $machineProbe"
     }
-    $installerProof = if ($RuntimeMode -ceq "onnxruntime") {
-        "explicit-metadata"
-    } else {
-        "signed-hosted-provisioning"
-    }
-    $runtimeProofLines = @(
-        "runtime=$($runtimeContract.Mode)",
-        "version=$runtimeVersion",
-        "embedding_backend=$($runtimeContract.EmbeddingBackend)",
-        "platform=$RuntimePlatform",
-        "host_system=Windows_NT",
-        "host_arch=$hostArch",
-        "host_native_arch=$hostNativeArch",
-        "process_translated=$processTranslated",
-        "native_arch_probe=iswow64process2",
-        "runtime_authority=$runtimeAuthority",
-        "artifact=$Ctx",
-        "artifact_sha256=$binarySha",
-        "build_info_sha256=$buildInfoSha",
-        "archive=$runtimeArchivePath",
-        "runtime_archive_sha256=$actualRuntimeSha",
-        "CTX_RUNTIME_DIR=$runtimeRoot",
-        "runtime_dylib=$runtimeDylib",
-        "loader_overrides=unset",
-        "CTX_SEMANTIC_CACHE_DIR=$semanticCache",
-        "installer=$installerProof"
-    )
-
     $marker = "ctx-release-semantic-smoke-" + [System.Guid]::NewGuid().ToString("n")
     $query = "synthetic release retrieval cobalt willow transit"
     $embeddingModel = "intfloat/multilingual-e5-small"
@@ -867,18 +834,14 @@ try {
                                     if (-not $actualDependency.Equals($expectedDependency, [System.StringComparison]::OrdinalIgnoreCase)) {
                                         throw "Loaded $dependencyName from $actualDependency instead of $expectedDependency"
                                     }
-                                    $proofName = [System.IO.Path]::GetFileNameWithoutExtension($dependencyName)
-                                    $runtimeProofLines += "runtime_dependency_$proofName=$actualDependency"
                                 }
                             } else {
                                 foreach ($moduleContract in @(
                                     [PSCustomObject]@{
                                         Name = "Microsoft.Windows.AI.MachineLearning.dll"
-                                        Proof = "runtime_module_windows_ml"
                                     },
                                     [PSCustomObject]@{
                                         Name = "DirectML.dll"
-                                        Proof = "runtime_module_directml"
                                     }
                                 )) {
                                     $matchingModules = @(
@@ -894,29 +857,7 @@ try {
                                     if (-not $actualModule.Equals($expectedModule, [System.StringComparison]::OrdinalIgnoreCase)) {
                                         throw "Loaded $($moduleContract.Name) from $actualModule instead of $expectedModule"
                                     }
-                                    $runtimeProofLines += "$($moduleContract.Proof)=$actualModule"
                                 }
-                                $runtimeProofLines += "runtime_artifact_identity=$runtimeArtifactIdentity"
-                                $runtimeProofLines += "semantic_contract_canary=passed"
-                            }
-                            $runtimeProofLines += @(
-                                "daemon_status=running",
-                                "daemon_pid=$($daemon.Id)",
-                                "embedding_model=$embeddingModel",
-                                "marker=$marker",
-                                "semantic_search=passed"
-                            )
-                            [System.IO.File]::WriteAllText(
-                                $runtimeProof,
-                                (($runtimeProofLines -join "`n") + "`n"),
-                                [System.Text.UTF8Encoding]::new($false)
-                            )
-                            if (-not [string]::IsNullOrWhiteSpace($ProofOutput)) {
-                                $proofParent = Split-Path -Parent $ProofOutput
-                                if (-not [string]::IsNullOrWhiteSpace($proofParent)) {
-                                    New-Item -ItemType Directory -Path $proofParent -Force | Out-Null
-                                }
-                                Copy-Item -LiteralPath $runtimeProof -Destination $ProofOutput -Force
                             }
                             Write-Host "ctx semantic smoke ok: strict semantic search found $marker with $embeddingModel"
                             exit 0
