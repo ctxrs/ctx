@@ -38,7 +38,7 @@ use crate::{
     integrations, local_usage, mcp,
     output::{JsonOutputFormat, OutputFormat, SqlFormat},
     pro, semantic,
-    ui::Ui,
+    ui::{outcome, Outcome, OutcomeState, Ui},
     upgrade,
 };
 
@@ -112,6 +112,7 @@ pub(crate) fn run_cli() -> Result<()> {
         }
     }
     let json_output = command_json_output(&cli.command);
+    let machine_output = command_machine_readable_output(&cli.command, json_output);
     let usage_control_action = matches!(
         &cli.command,
         CommandRoot::Status(args) if args.usage.is_some()
@@ -149,7 +150,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 return malformed_config_failure(json_output);
             }
             Err(_) if matches!(&cli.command, CommandRoot::Stats(_)) => {
-                return malformed_stats_config_failure(json_output);
+                return malformed_stats_config_failure(json_output, &mut ui);
             }
             Err(_) if command_can_report_malformed_config(&cli.command) => {
                 // Daemon status reads retained lifecycle/config-reload state. Keep
@@ -190,7 +191,9 @@ pub(crate) fn run_cli() -> Result<()> {
                 .status_mut(),
             &mut ui,
         ),
-        CommandRoot::Stats(args) => run_stats(args, data_root.clone(), config.local_usage.enabled),
+        CommandRoot::Stats(args) => {
+            run_stats(args, data_root.clone(), config.local_usage.enabled, &mut ui)
+        }
         CommandRoot::Index(args) => run_index(
             args,
             data_root.clone(),
@@ -209,6 +212,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .expect("sources has a telemetry draft")
                 .sources_mut(),
             &mut local_usage_draft,
+            &mut ui,
         ),
         CommandRoot::Import(args) => run_import(
             args,
@@ -228,6 +232,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .expect("show has a telemetry draft")
                 .show_mut(),
             &mut local_usage_draft,
+            &mut ui,
         ),
         CommandRoot::Locate(args) => run_locate(
             args,
@@ -237,6 +242,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .expect("locate has a telemetry draft")
                 .locate_mut(),
             &mut local_usage_draft,
+            &mut ui,
         ),
         CommandRoot::Search(args) => run_search(
             args,
@@ -248,6 +254,7 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut provider_refreshes,
             &config,
             &mut local_usage_draft,
+            &mut ui,
         ),
         CommandRoot::Pro(args) => {
             let validation = args.validate_invocation();
@@ -271,6 +278,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .expect("sql has a telemetry draft")
                 .sql_mut(),
             &mut local_usage_draft,
+            &mut ui,
         ),
         CommandRoot::Docs(args) => docs::run(
             args,
@@ -279,6 +287,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .expect("docs has a telemetry draft")
                 .docs_mut(),
             &mut local_usage_draft,
+            &mut ui,
         ),
         CommandRoot::Integrations(args) => integrations::run(
             args,
@@ -286,9 +295,12 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("integrations has a telemetry draft")
                 .integration_mut(),
+            &mut ui,
         ),
         CommandRoot::Mcp(args) => mcp::run(args, data_root.clone()),
-        CommandRoot::Daemon(args) => semantic::run_daemon_command(args, data_root.clone(), &config),
+        CommandRoot::Daemon(args) => {
+            semantic::run_daemon_command(args, data_root.clone(), &config, &mut ui)
+        }
         CommandRoot::Upgrade(args) => upgrade::run(
             args,
             data_root.clone(),
@@ -330,7 +342,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 Some(RenderedCliError.into())
             }
         } else {
-            eprintln!("Error: {error:?}");
+            render_generic_command_error(error, machine_output, &mut ui, &mut io::stderr().lock())?;
             Some(RenderedCliError.into())
         }
     } else {
@@ -361,6 +373,29 @@ pub(crate) fn run_cli() -> Result<()> {
         return Err(error);
     }
     result
+}
+
+fn render_generic_command_error(
+    error: &anyhow::Error,
+    machine_output: bool,
+    ui: &mut Ui,
+    machine_stderr: &mut impl Write,
+) -> Result<()> {
+    if machine_output {
+        writeln!(machine_stderr, "Error: {error:?}")?;
+        return Ok(());
+    }
+    let message = error.to_string();
+    let document = outcome(
+        ui.stderr_context(),
+        Outcome {
+            state: OutcomeState::Error,
+            title: &message,
+            detail: None,
+        },
+    );
+    ui.write_stderr(&document)?;
+    Ok(())
 }
 
 fn command_json_output(command: &CommandRoot) -> bool {
@@ -489,9 +524,14 @@ fn env_truthy(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc};
+    use std::{
+        cell::Cell,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
+    use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
 
     fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
         let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
@@ -541,6 +581,95 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedBytes(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBytes {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().map(|bytes| bytes.clone()).unwrap_or_default()
+        }
+    }
+
+    impl Write for SharedBytes {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| io::Error::other("shared test writer was poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn forced_color_test_ui(stderr: SharedBytes) -> Ui {
+        Ui::with_writers(
+            SharedBytes::default(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
+            stderr,
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
+        )
+    }
+
+    #[test]
+    fn forced_color_never_decorates_generic_machine_mode_errors() {
+        for args in [
+            &["show", "session", "bad", "--format", "jsonl"][..],
+            &["sql", "SELECT 1", "--format", "csv"][..],
+            &["sql", "SELECT 1", "--format", "raw"][..],
+            &["setup", "--progress", "json"][..],
+            &["import", "--progress", "json"][..],
+            &["mcp", "serve"][..],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert!(
+                command_machine_readable_output(&cli.command, json_output),
+                "{args:?}"
+            );
+
+            let styled_stderr = SharedBytes::default();
+            let styled_stderr_copy = styled_stderr.clone();
+            let mut ui = forced_color_test_ui(styled_stderr);
+            let mut machine_stderr = Vec::new();
+            render_generic_command_error(
+                &anyhow::anyhow!("representative command failure"),
+                true,
+                &mut ui,
+                &mut machine_stderr,
+            )
+            .unwrap();
+
+            assert!(!machine_stderr.contains(&0x1b), "{args:?}");
+            assert!(String::from_utf8_lossy(&machine_stderr)
+                .starts_with("Error: representative command failure"));
+            assert!(styled_stderr_copy.bytes().is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn forced_color_still_styles_generic_human_mode_errors() {
+        let styled_stderr = SharedBytes::default();
+        let styled_stderr_copy = styled_stderr.clone();
+        let mut ui = forced_color_test_ui(styled_stderr);
+        let mut machine_stderr = Vec::new();
+
+        render_generic_command_error(
+            &anyhow::anyhow!("human command failure"),
+            false,
+            &mut ui,
+            &mut machine_stderr,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        assert!(machine_stderr.is_empty());
+        assert!(styled_stderr_copy.bytes().contains(&0x1b));
     }
 
     struct FlushWriter {

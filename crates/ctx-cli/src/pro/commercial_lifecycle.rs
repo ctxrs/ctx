@@ -12,6 +12,8 @@ use ctx_pro_host_protocol::{
 };
 use zeroize::Zeroize as _;
 
+mod render;
+
 use super::{
     anonymous_trial,
     artifact_delivery::{acquire_latest, ArtifactDeliveryConfig},
@@ -28,7 +30,12 @@ use super::{
     },
     lifecycle::{ProLifecycleService, ProManagePlan, ProSetupPlan},
     workos_device::{WorkOsDeviceClient, WorkOsTokens},
-    PRO_MONTHLY_PRICE_DISPLAY,
+};
+use crate::ui::Ui;
+use render::{
+    browser_notice as render_browser_notice, checkout_progress as render_checkout_progress,
+    device_sign_in as render_device_sign_in, paid_checkout_prompt as render_paid_checkout_prompt,
+    trial_conversion as render_trial_conversion,
 };
 
 pub(super) struct CommercialLifecycleService {
@@ -105,22 +112,37 @@ impl CommercialLifecycleService {
         }
     }
 
-    pub(super) fn access_token(&self) -> Result<String> {
+    pub(super) fn access_token(
+        &self,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
+    ) -> Result<String> {
         match self.vault.load(CredentialRecordKind::WorkOsSession) {
-            Ok(CredentialRecord::WorkOsSession(session)) => self.resume_session(session),
+            Ok(CredentialRecord::WorkOsSession(session)) => {
+                self.resume_session(session, ui, human_output, browser_enabled)
+            }
             Ok(_) => Err(anyhow!(
                 "key_store_unavailable: WorkOS session record mismatch"
             )),
-            Err(CredentialVaultError::NotFound) => self.device_sign_in(),
+            Err(CredentialVaultError::NotFound) => {
+                self.device_sign_in(ui, human_output, browser_enabled)
+            }
             Err(CredentialVaultError::Corrupt) => {
                 self.delete_if_present(CredentialRecordKind::WorkOsSession)?;
-                self.device_sign_in()
+                self.device_sign_in(ui, human_output, browser_enabled)
             }
             Err(error) => Err(vault_error(error)),
         }
     }
 
-    fn resume_session(&self, session: WorkOsSessionMaterial) -> Result<String> {
+    fn resume_session(
+        &self,
+        session: WorkOsSessionMaterial,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
+    ) -> Result<String> {
         if session.access_expires_at_unix() > unix_time()?
             && self
                 .workos
@@ -130,12 +152,12 @@ impl CommercialLifecycleService {
             return Ok(session.access_token().to_owned());
         }
         let Some(refresh_token) = session.refresh_token() else {
-            return self.device_sign_in();
+            return self.device_sign_in(ui, human_output, browser_enabled);
         };
         match self.workos.refresh(refresh_token) {
             Ok(tokens) => self.persist_tokens(tokens),
             Err(error) if error.to_string().starts_with("authentication_failed:") => {
-                self.device_sign_in()
+                self.device_sign_in(ui, human_output, browser_enabled)
             }
             Err(error) => Err(error),
         }
@@ -191,13 +213,28 @@ impl CommercialLifecycleService {
         self.persist_tokens(self.workos.refresh(refresh_token)?)
     }
 
-    fn device_sign_in(&self) -> Result<String> {
+    fn device_sign_in(
+        &self,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
+    ) -> Result<String> {
         let authorization = self.workos.begin()?;
-        eprintln!("Sign in to ctx Pro at:");
-        eprintln!("  {}", authorization.verification_uri);
-        eprintln!("Enter code: {}", authorization.user_code);
-        if open_browser(&authorization.verification_uri_complete).is_err() {
-            eprintln!("A browser could not be opened; use the URL and code above.");
+        if human_output {
+            let document = render_device_sign_in(
+                ui.stderr_context(),
+                &authorization.verification_uri,
+                &authorization.user_code,
+            );
+            ui.write_stderr(&document)?;
+        }
+        if browser_enabled {
+            let browser_opened = open_browser(&authorization.verification_uri_complete).is_ok();
+            ui.write_stderr(&render_browser_notice(
+                ui.stderr_context(),
+                browser_opened,
+                "ctx Pro sign-in",
+            ))?;
         }
         self.complete_device_sign_in(self.workos.poll(&authorization)?)
     }
@@ -234,13 +271,23 @@ impl CommercialLifecycleService {
         &self,
         access_token: &mut String,
         referral_claim_token: Option<&str>,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
     ) -> Result<CommercialState> {
         resolve_active_state(
             access_token,
             |access_token| self.api.account(access_token),
             |access_token| self.api.checkout(access_token, referral_claim_token),
             |access_token, state, checkout| {
-                self.await_checkout_access(access_token, state, checkout)
+                self.await_checkout_access(
+                    access_token,
+                    state,
+                    checkout,
+                    ui,
+                    human_output,
+                    browser_enabled,
+                )
             },
         )
     }
@@ -250,19 +297,39 @@ impl CommercialLifecycleService {
         access_token: &mut String,
         initial_state: &CommercialState,
         checkout: CheckoutResult,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
     ) -> Result<CommercialState> {
         let expires_at_unix = checkout
             .expires_at_unix
             .ok_or_else(|| anyhow!("invalid_response: Checkout result has no expiry"))?;
         if let Some(url) = checkout.url {
             validate_https_url(&url, "Checkout")?;
-            eprintln!("{}", render_paid_checkout_prompt(&url));
-            if open_browser(&url).is_err() {
-                eprintln!("A browser could not be opened; use the URL above.");
+            if human_output {
+                ui.write_stderr(&render_paid_checkout_prompt(ui.stderr_context(), &url))?;
             }
-            eprintln!("Waiting for Checkout to complete...");
-        } else {
-            eprintln!("Checkout completed. Waiting for subscription state...");
+            if browser_enabled {
+                let browser_opened = open_browser(&url).is_ok();
+                ui.write_stderr(&render_browser_notice(
+                    ui.stderr_context(),
+                    browser_opened,
+                    "ctx Pro checkout",
+                ))?;
+            }
+            if human_output {
+                ui.write_stderr(&render_checkout_progress(
+                    ui.stderr_context(),
+                    "Waiting for checkout",
+                    None,
+                ))?;
+            }
+        } else if human_output {
+            ui.write_stderr(&render_checkout_progress(
+                ui.stderr_context(),
+                "Waiting for subscription access",
+                Some("Checkout is complete."),
+            ))?;
         }
         let poll_started = Instant::now();
         let state = poll_checkout_access(
@@ -281,13 +348,24 @@ impl CommercialLifecycleService {
                 )
             },
             |elapsed_seconds| {
-                eprintln!(
-                    "Still waiting for Checkout... {} minute(s) elapsed.",
-                    elapsed_seconds / 60
-                );
+                if human_output {
+                    let elapsed_minutes = format!("{} minute(s) elapsed", elapsed_seconds / 60);
+                    let document = render_checkout_progress(
+                        ui.stderr_context(),
+                        "Waiting for subscription access",
+                        Some(&elapsed_minutes),
+                    );
+                    let _ = ui.write_stderr(&document);
+                }
             },
         )?;
-        eprintln!("Checkout complete. Finishing ctx Pro...");
+        if human_output {
+            ui.write_stderr(&render_checkout_progress(
+                ui.stderr_context(),
+                "Subscription access is active",
+                Some("Finishing ctx Pro setup."),
+            ))?;
+        }
         Ok(state)
     }
 
@@ -422,6 +500,9 @@ impl ProLifecycleService for CommercialLifecycleService {
         installed_version: Option<&str>,
         trial_only: bool,
         referral_codename: Option<&str>,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
     ) -> Result<ProSetupPlan> {
         // A WorkOS session proves identity for referral management; it does not
         // prove that this installation already consumed or converted its Pro
@@ -434,17 +515,36 @@ impl ProLifecycleService for CommercialLifecycleService {
             Err(CredentialVaultError::NotFound) => None,
             Err(error) => return Err(vault_error(error)),
         };
-        setup_with_access_policy(
+        match setup_with_access_policy(
             trial_only,
             referral_codename.is_some(),
             stored_access_kind,
             || anonymous_trial::setup(self, data_root, installed_version, referral_codename),
-            || self.setup_with_paid_access(data_root, installed_version),
-        )
+        )? {
+            SetupAccessPolicy::Complete(plan) => Ok(plan),
+            SetupAccessPolicy::PaidRequired { trial_unavailable } => {
+                if trial_unavailable && human_output {
+                    ui.write_stderr(&render_trial_conversion(ui.stderr_context()))?;
+                }
+                self.setup_with_paid_access(
+                    data_root,
+                    installed_version,
+                    ui,
+                    human_output,
+                    browser_enabled,
+                )
+            }
+        }
     }
 
-    fn manage(&mut self, _data_root: &Path) -> Result<ProManagePlan> {
-        let mut access_token = self.access_token()?;
+    fn manage(
+        &mut self,
+        _data_root: &Path,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
+    ) -> Result<ProManagePlan> {
+        let mut access_token = self.access_token(ui, human_output, browser_enabled)?;
         let result = (|| {
             let state = self.api.account(&access_token)?;
             let portal = self.api.portal(&access_token)?;
@@ -470,33 +570,40 @@ impl ProLifecycleService for CommercialLifecycleService {
     }
 }
 
+#[derive(Debug)]
+enum SetupAccessPolicy<T> {
+    Complete(T),
+    PaidRequired { trial_unavailable: bool },
+}
+
 fn setup_with_access_policy<T>(
     trial_only: bool,
     referral_requested: bool,
     stored_access_kind: Option<EntitlementAccessKind>,
     anonymous_setup: impl FnOnce() -> Result<T>,
-    paid_setup: impl FnOnce() -> Result<T>,
-) -> Result<T> {
+) -> Result<SetupAccessPolicy<T>> {
     let anonymous_precedes_paid = anonymous_trial_precedes_paid_conversion(stored_access_kind);
     if referral_requested && !anonymous_precedes_paid {
         bail!("invalid_request: a referral can only start a new anonymous Pro trial");
     }
     if trial_only || referral_requested || anonymous_precedes_paid {
         match anonymous_setup() {
-            Ok(plan) => return Ok(plan),
+            Ok(plan) => return Ok(SetupAccessPolicy::Complete(plan)),
             Err(error)
                 if !trial_only
                     && !referral_requested
                     && anonymous_trial_requires_conversion(&error) =>
             {
-                eprintln!(
-                    "The free Pro trial is unavailable for this device; sign in to continue with paid Pro."
-                );
+                return Ok(SetupAccessPolicy::PaidRequired {
+                    trial_unavailable: true,
+                });
             }
             Err(error) => return Err(error),
         }
     }
-    paid_setup()
+    Ok(SetupAccessPolicy::PaidRequired {
+        trial_unavailable: false,
+    })
 }
 
 impl CommercialLifecycleService {
@@ -504,11 +611,20 @@ impl CommercialLifecycleService {
         &self,
         data_root: &Path,
         installed_version: Option<&str>,
+        ui: &mut Ui,
+        human_output: bool,
+        browser_enabled: bool,
     ) -> Result<ProSetupPlan> {
-        let mut access_token = self.access_token()?;
+        let mut access_token = self.access_token(ui, human_output, browser_enabled)?;
         let mut referral_claim_token = self.checkout_referral_claim_token()?;
         let result = (|| {
-            let state = self.active_state(&mut access_token, referral_claim_token.as_deref())?;
+            let state = self.active_state(
+                &mut access_token,
+                referral_claim_token.as_deref(),
+                ui,
+                human_output,
+                browser_enabled,
+            )?;
             let public_key = self.installation_public_key()?;
             let entitlement = self
                 .api
@@ -822,10 +938,6 @@ pub(super) fn unix_time() -> Result<i64> {
             .as_secs(),
     )
     .context("invalid_request: system time is invalid")
-}
-
-fn render_paid_checkout_prompt(url: &str) -> String {
-    format!("Start ctx Pro for {PRO_MONTHLY_PRICE_DISPLAY} at:\n  {url}")
 }
 
 #[cfg(test)]

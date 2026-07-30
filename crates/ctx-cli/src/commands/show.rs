@@ -9,6 +9,7 @@ use crate::local_usage::CliUsage;
 use crate::output::OutputFormat;
 use crate::provider_args::ProviderArg;
 use crate::transcript::TranscriptMode;
+use crate::ui::Ui;
 use crate::{parse_event_window_limit, parse_provider_arg, ShowArgs};
 
 #[derive(Debug, Args)]
@@ -60,6 +61,7 @@ pub(crate) fn run_show(
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
-    crate::commands::source_index::run_show(args, data_root, telemetry, local_usage)
+    crate::commands::source_index::run_show(args, data_root, telemetry, local_usage, ui)
 }

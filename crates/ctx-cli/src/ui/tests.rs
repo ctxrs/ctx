@@ -9,10 +9,11 @@ use clap::Parser as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
-    bootstrap::scan_color_mode, diagnostic, empty_state, evidence_list, fields, hint, outcome,
-    progress, section, table, Action, ColorMode, Diagnostic, DiagnosticLevel, Document, EmptyState,
-    Evidence, Field, Hint, Line, Outcome, OutcomeState, Progress, RenderContext, Span, StreamKind,
-    Table, TestContext, Token, Ui,
+    bootstrap::{scan_color_mode, scan_machine_output_hint},
+    diagnostic, empty_state, evidence_list, fields, hint, outcome, progress, section, table,
+    Action, ColorMode, Diagnostic, DiagnosticLevel, Document, EmptyState, Evidence, Field, Hint,
+    Line, Outcome, OutcomeState, Progress, RenderContext, Span, StreamKind, Table, TestContext,
+    Token, Ui,
 };
 
 fn tty(width: usize) -> RenderContext {
@@ -127,6 +128,37 @@ fn bootstrap_scans_only_supported_global_color_spellings() {
 }
 
 #[test]
+fn bootstrap_conservatively_recognizes_explicit_machine_output() {
+    let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+
+    assert!(scan_machine_output_hint(&args(&[
+        "ctx", "show", "event", "bad", "--format", "jsonl"
+    ])));
+    assert!(scan_machine_output_hint(&args(&[
+        "ctx",
+        "sql",
+        "SELECT 1",
+        "--format=csv"
+    ])));
+    assert!(scan_machine_output_hint(&args(&[
+        "ctx",
+        "setup",
+        "--progress",
+        "json"
+    ])));
+    assert!(scan_machine_output_hint(&args(&["ctx", "mcp", "serve"])));
+    assert!(!scan_machine_output_hint(&args(&[
+        "ctx", "search", "failure"
+    ])));
+    assert!(!scan_machine_output_hint(&args(&[
+        "ctx",
+        "search",
+        "--",
+        "--format=json"
+    ])));
+}
+
+#[test]
 fn clap_global_color_option_parses_before_or_after_subcommands() {
     let before = crate::Cli::try_parse_from(["ctx", "--color", "always", "status"]).unwrap();
     assert_eq!(before.color, ColorMode::Always);
@@ -178,6 +210,40 @@ fn bootstrap_colors_clap_help_and_parse_errors_before_dispatch() {
         .unwrap();
     assert!(auto_pipe.status.success());
     assert!(!auto_pipe.stdout.contains(&0x1b));
+
+    for args in [
+        &[
+            "--color=always",
+            "show",
+            "event",
+            "bad",
+            "--format=jsonl",
+            "--not-a-real-option",
+        ][..],
+        &[
+            "--color=always",
+            "sql",
+            "SELECT 1",
+            "--format",
+            "csv",
+            "--not-a-real-option",
+        ][..],
+        &[
+            "--color=always",
+            "setup",
+            "--progress=json",
+            "--not-a-real-option",
+        ][..],
+        &["--color=always", "mcp", "serve", "--not-a-real-option"][..],
+    ] {
+        let machine_error = std::process::Command::cargo_bin("ctx")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!machine_error.status.success(), "{args:?}");
+        assert!(!machine_error.stderr.contains(&0x1b), "{args:?}");
+    }
 }
 
 #[test]
@@ -420,6 +486,7 @@ fn component_values_cannot_inject_ansi_or_terminal_controls() {
     assert!(plain.contains("\\u{0000}"));
     assert!(plain.contains("\\u{0085}"));
     assert!(plain.contains("\\u{009b}2J"));
+    assert!(plain.contains("\\nnext\\tcell"));
 
     let direct = Document::from_line(
         Line::new()

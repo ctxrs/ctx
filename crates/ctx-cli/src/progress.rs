@@ -7,6 +7,13 @@ use std::{
 use clap::ValueEnum;
 use serde_json::json;
 
+#[allow(dead_code)]
+mod render;
+#[allow(unused_imports)]
+pub(crate) use render::{
+    render_progress_snapshot, ProgressFrame, ProgressFrameKind, ProgressSnapshot,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressArg {
     Auto,
@@ -283,5 +290,33 @@ mod tests {
         assert_eq!(value["percent"], 100.0);
         assert_eq!(value["eta_seconds"], serde_json::Value::Null);
         assert_eq!(value["done"], true);
+    }
+
+    #[test]
+    fn progress_json_remains_exact_and_ansi_free() {
+        let line = ProgressLine {
+            phase: "cataloging",
+            message: "cataloging".to_owned(),
+            completed_bytes: 1024,
+            total_bytes: 4096,
+            completed_files: Some(1),
+            total_files: Some(2),
+            imported_events: Some(7),
+            done: false,
+        };
+
+        let rendered = progress_json("import", &line, StdDuration::from_secs(2));
+
+        assert_eq!(
+            rendered,
+            concat!(
+                r#"{"completed_bytes":1024,"completed_files":1,"done":false,"#,
+                r#""elapsed_seconds":2.0,"eta_seconds":6.0,"imported_events":7,"#,
+                r#""message":"cataloging","operation":"import","percent":25.0,"#,
+                r#""phase":"cataloging","total_bytes":4096,"total_files":2,"#,
+                r#""type":"ctx_progress"}"#,
+            )
+        );
+        assert!(!rendered.contains('\u{1b}'));
     }
 }

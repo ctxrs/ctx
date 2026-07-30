@@ -7,13 +7,17 @@ use crate::analytics::{count_bucket, DoctorTelemetry};
 use crate::config::AppConfig;
 use crate::output::print_json;
 use crate::semantic::source_epoch_status_report;
+use crate::ui::{
+    evidence_list, fields, hint, outcome, section, Action, Document, Evidence, Field, Hint,
+    Outcome, OutcomeState, RenderContext, Ui,
+};
 use crate::DoctorArgs;
 
 pub(crate) fn run_doctor(
     args: DoctorArgs,
     data_root: PathBuf,
     telemetry: &mut DoctorTelemetry,
-    _ui: &mut crate::ui::Ui,
+    ui: &mut Ui,
 ) -> Result<()> {
     let json_output = args.format.is_json();
     let mut findings = Vec::new();
@@ -88,14 +92,116 @@ pub(crate) fn run_doctor(
             "pro": pro,
         }))?;
     } else {
-        println!("upgrade_auto: {}", config.auto_upgrade_mode().as_str());
-        if findings.is_empty() {
-            println!("ok");
-        } else {
-            for finding in findings {
-                println!("{finding}");
-            }
-        }
+        let document = render_doctor_human(
+            ui.stdout_context(),
+            config.auto_upgrade_mode().as_str(),
+            &findings,
+        );
+        ui.write_stdout(&document)?;
     }
     Ok(())
+}
+
+fn render_doctor_human(
+    context: &RenderContext,
+    automatic_upgrades: &str,
+    findings: &[String],
+) -> Document {
+    let title = match findings.len() {
+        0 => "No problems found".to_owned(),
+        1 => "ctx found 1 issue".to_owned(),
+        count => format!("ctx found {count} issues"),
+    };
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if findings.is_empty() {
+                OutcomeState::Success
+            } else {
+                OutcomeState::Warning
+            },
+            title: &title,
+            detail: None,
+        },
+    );
+    document.push_blank();
+    document.append(section(
+        "Configuration",
+        fields(
+            context,
+            &[Field::new("Automatic upgrades", automatic_upgrades)],
+        ),
+    ));
+    if findings.is_empty() {
+        return document;
+    }
+
+    let references = (1..=findings.len())
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>();
+    let evidence = references
+        .iter()
+        .zip(findings)
+        .map(|(reference, finding)| Evidence {
+            reference,
+            summary: finding,
+            detail: None,
+        })
+        .collect::<Vec<_>>();
+    document.push_blank();
+    document.append(section("Issues", evidence_list(context, &evidence)));
+    document.push_blank();
+    document.append(hint(
+        context,
+        Hint {
+            text: "Resolve the issues above, then check again.",
+        },
+        Some(Action {
+            command: "ctx doctor",
+        }),
+    ));
+    document
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use unicode_width::UnicodeWidthStr as _;
+
+    use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    fn context(width: usize) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
+    }
+
+    fn assert_fits(document: &Document, context: &RenderContext) {
+        let width = context.content_width().unwrap_or(1);
+        for line in document.render_plain().lines() {
+            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+        }
+    }
+
+    #[test]
+    fn healthy_doctor_is_concise_and_outcome_first() {
+        let context = context(80);
+        let rendered = render_doctor_human(&context, "apply", &[]).render_plain();
+        assert_eq!(
+            rendered,
+            "✓ No problems found\n\nConfiguration\nAutomatic upgrades  apply\n"
+        );
+    }
+
+    #[test]
+    fn findings_are_numbered_wrapped_and_actionable() {
+        let finding = "ctx Pro key store is unavailable; unlock or repair the already selected secure key store, then run `ctx pro`".to_owned();
+        for width in [32, 48, 80, 120] {
+            let context = context(width);
+            let document = render_doctor_human(&context, "off", &[finding.clone()]);
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("! ctx found 1 issue\n"));
+            assert!(rendered.contains("Issues\n[1]"));
+            assert!(rendered.contains("ctx doctor\n"));
+            assert_fits(&document, &context);
+        }
+    }
 }

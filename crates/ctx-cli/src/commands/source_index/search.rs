@@ -23,11 +23,13 @@ use crate::{
         PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
         SourceBackedSemanticNotReady,
     },
-    transcript::write_output,
+    ui::Ui,
     RefreshArg, SearchArgs, SearchBackendArg,
 };
 
-use super::render::{pretty_json_stdout_bytes, render_search_text, search_json, stdout_body_bytes};
+use super::render::{
+    canonical_human_output_bytes, pretty_json_stdout_bytes, render_search_document, search_json,
+};
 
 pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{index_search_filters, NormalizedSearchQuery};
@@ -82,6 +84,7 @@ pub(crate) fn run_search(
     data_root: PathBuf,
     telemetry: &mut SearchTelemetry,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
     let config = config::AppConfig::load(&data_root)?;
     let mut request = SourceSearchRequest::from(&args);
@@ -151,9 +154,9 @@ pub(crate) fn run_search(
         print_json(value)?;
         output_bytes
     } else {
-        let body = render_search_text(&value, args.verbose);
-        let output_bytes = stdout_body_bytes(&body);
-        write_output(body, None)?;
+        let document = render_search_document(&value, args.verbose, ui.stdout_context());
+        let output_bytes = canonical_human_output_bytes(&document);
+        ui.write_stdout(&document)?;
         output_bytes
     };
     telemetry.render_duration = Some(duration_bucket(render_started.elapsed()));

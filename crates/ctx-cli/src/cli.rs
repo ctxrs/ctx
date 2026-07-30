@@ -31,7 +31,12 @@ pub(crate) const MAX_SEARCH_LIMIT: usize = 200;
 pub(crate) const MAX_EVENT_WINDOW: usize = 50;
 
 #[derive(Debug, Parser)]
-#[command(name = "ctx", version, about = "Search local agent history")]
+#[command(
+    name = "ctx",
+    version,
+    about = "Search local agent history",
+    styles = crate::ui::CLAP_STYLES
+)]
 pub(crate) struct Cli {
     #[arg(long, env = "CTX_DATA_ROOT", global = true)]
     pub(crate) data_root: Option<PathBuf>,

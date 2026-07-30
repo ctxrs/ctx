@@ -1,15 +1,21 @@
-PR          ctxrs/ctx#42
-repository  ctxrs/ctx
+Pull request  ctxrs/ctx#42
+Repository    ctxrs/ctx
+Selector      42
 
 Code produced
   No associated commits on this page.
 
 PR activity
-  reviewed   session reviewer  [1]
-    confidence explicit  state asserted
+  reviewed
+    session reviewer
+      confidence    explicit
+      state         asserted
+      evidence      [1]
+
+More results
+  1 matches shown; more matches are available.
+  Continue
+    ctx blame pr 42 --repository ctxrs/ctx --cursor commit-page
 
 Evidence
-  [1] ctx show event 00000000-0000-0000-0000-000000000001
-
-1 matches shown; more matches are available.
-continue  ctx blame pr 42 --repository ctxrs/ctx --cursor commit-page
+  [1]  ctx show event 00000000-0000-0000-0000-000000000001

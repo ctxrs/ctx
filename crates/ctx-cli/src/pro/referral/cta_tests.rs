@@ -1,10 +1,36 @@
 use std::{
     fs, io,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, Mutex},
 };
 
-use super::{cta_marker, show_cta_once_for_channel, REFERRAL_CTA};
+use super::{cta_marker, render, show_cta_once_for_channel};
 use crate::pro::lifecycle::lifecycle_manifest::ReleaseChannel;
+use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
+
+fn expected_cta() -> Vec<u8> {
+    let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    render::cta(&context).render_plain().into_bytes()
+}
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[test]
 fn cta_marker_is_private_atomic_and_shown_once() {
@@ -24,10 +50,7 @@ fn cta_marker_is_private_atomic_and_shown_once() {
         ReleaseChannel::Stable,
         &mut second
     ));
-    assert_eq!(
-        String::from_utf8(first).unwrap(),
-        format!("\n{REFERRAL_CTA}\n")
-    );
+    assert_eq!(first, expected_cta());
     assert!(second.is_empty());
     let marker = cta_marker(root.path(), ReleaseChannel::Stable);
     assert_eq!(fs::read(&marker).unwrap(), b"shown\n");
@@ -74,10 +97,7 @@ fn cta_output_failure_rolls_back_the_marker_for_a_later_retry() {
         ReleaseChannel::Stable,
         &mut retry
     ));
-    assert_eq!(
-        String::from_utf8(retry).unwrap(),
-        format!("\n{REFERRAL_CTA}\n")
-    );
+    assert_eq!(retry, expected_cta());
 }
 
 #[test]
@@ -112,9 +132,10 @@ fn concurrent_cta_attempts_publish_exactly_once() {
             .count(),
         1
     );
-    assert!(results.iter().all(|(shown, output)| {
-        *shown == (output.as_slice() == format!("\n{REFERRAL_CTA}\n").as_bytes())
-    }));
+    let expected = expected_cta();
+    assert!(results
+        .iter()
+        .all(|(shown, output)| *shown == (output.as_slice() == expected)));
 }
 
 #[test]
@@ -157,4 +178,30 @@ fn cta_marker_is_namespaced_by_commercial_channel() {
         cta_marker(root.path(), ReleaseChannel::Stable),
         cta_marker(root.path(), ReleaseChannel::Staging)
     );
+}
+
+#[test]
+fn cta_uses_ui_stderr_capabilities_without_touching_stdout() {
+    let root = tempfile::tempdir().unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
+    let stdout = SharedWriter::default();
+    let stdout_copy = stdout.clone();
+    let stderr = SharedWriter::default();
+    let stderr_copy = stderr.clone();
+    let stdout_context = RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 48));
+    let stderr_context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stderr, 48).color(ColorMode::Always));
+    let mut ui = Ui::with_writers(stdout, stdout_context, stderr, stderr_context);
+
+    assert!(show_cta_once_for_channel(
+        root.path(),
+        true,
+        ReleaseChannel::Stable,
+        &mut ui,
+    ));
+    assert!(stdout_copy.bytes().is_empty());
+    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    assert!(rendered.contains("\u{1b}["));
+    assert!(rendered.contains("Refer a new ctx Pro customer"));
+    assert!(rendered.contains("ctx referral create <codename>"));
 }

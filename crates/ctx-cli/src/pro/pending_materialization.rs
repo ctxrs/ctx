@@ -13,6 +13,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::lifecycle::{lifecycle_status_json, sync_parent_directory};
+use crate::{
+    pro::PRO_MONTHLY_PRICE_DISPLAY,
+    ui::{
+        fields, hint, outcome, section, Document, Field, Hint, Outcome as UiOutcome, OutcomeState,
+        RenderContext, Ui,
+    },
+};
 
 const MARKER_FILE_NAME: &str = ".ctx-pro.materialization-pending";
 const MARKER_CONTENT: &[u8] = b"ctx-pro-materialization-pending-v1\n";
@@ -53,26 +60,82 @@ pub(super) fn defer_setup(
     account_state: &str,
     helper_updated: bool,
     json_output: bool,
+    ui: &mut Ui,
 ) -> Result<()> {
     request(data_root)?;
     if json_output {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({
-                "schema_version": 1,
-                "payload_type": "pro_setup",
-                "ok": true,
-                "account_state": account_state,
-                "helper_updated": helper_updated,
-                "materialization_deferred": true,
-                "status": lifecycle_status_json(data_root),
-            }))?
+            serde_json::to_string_pretty(&deferred_setup_payload(
+                account_state,
+                helper_updated,
+                lifecycle_status_json(data_root),
+            ))?
         );
     } else {
-        println!("ctx Pro trial activated.");
-        println!("Pro indexing will run with the initial Core import.");
+        let document = render_deferred_setup_human(ui.stdout_context(), account_state);
+        ui.write_stdout(&document)?;
     }
     Ok(())
+}
+
+fn deferred_setup_payload(
+    account_state: &str,
+    helper_updated: bool,
+    status: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "payload_type": "pro_setup",
+        "ok": true,
+        "account_state": account_state,
+        "helper_updated": helper_updated,
+        "materialization_deferred": true,
+        "status": status,
+    })
+}
+
+fn render_deferred_setup_human(context: &RenderContext, account_state: &str) -> Document {
+    let product = if account_state == "trial" {
+        "Free ctx Pro trial"
+    } else {
+        PRO_MONTHLY_PRICE_DISPLAY
+    };
+    let access = match account_state {
+        "trial" => "Trial active",
+        "active" => "Active",
+        "canceling_paid" => "Active; cancellation scheduled",
+        _ => "Unavailable",
+    };
+    let mut document = outcome(
+        context,
+        UiOutcome {
+            state: OutcomeState::Success,
+            title: "ctx Pro access is ready",
+            detail: Some("The local Pro graph is not ready yet."),
+        },
+    );
+    document.push_blank();
+    document.append(section(
+        "Pro",
+        fields(
+            context,
+            &[
+                Field::new("Product", product),
+                Field::new("Access", access),
+                Field::new("Work graph", "Pending the initial Core import"),
+            ],
+        ),
+    ));
+    document.push_blank();
+    document.append(hint(
+        context,
+        Hint {
+            text: "Continue the initial Core import; Pro indexing will run with it.",
+        },
+        None,
+    ));
+    document
 }
 
 pub(super) fn pending(data_root: &Path) -> Result<bool> {
@@ -119,8 +182,10 @@ pub(super) fn marker_path(data_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use ctx_history_core::platform_security::restrict_private_directory;
+    use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
 
     #[test]
     fn marker_is_private_idempotent_and_strict() {
@@ -138,5 +203,54 @@ mod tests {
         fs::write(marker_path(root.path()), MARKER_CONTENT).unwrap();
         clear(root.path()).unwrap();
         assert!(!pending(root.path()).unwrap());
+    }
+
+    #[test]
+    fn deferred_setup_is_truthful_about_the_pending_graph() {
+        let context = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never),
+        );
+        assert_eq!(
+            render_deferred_setup_human(&context, "trial").render_plain(),
+            "✓ ctx Pro access is ready\n\
+             The local Pro graph is not ready yet.\n\n\
+             Pro\n\
+             Product     Free ctx Pro trial\n\
+             Access      Trial active\n\
+             Work graph  Pending the initial Core import\n\n\
+             Hint: Continue the initial Core import; Pro indexing will run with it.\n"
+        );
+    }
+
+    #[test]
+    fn deferred_setup_fits_supported_widths_and_json_stays_ansi_free() {
+        for width in [32, 48, 80, 120] {
+            let context = RenderContext::for_test(
+                TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never),
+            );
+            let rendered = render_deferred_setup_human(&context, "trial").render_plain();
+            let maximum = context.content_width().unwrap_or(1);
+            assert!(rendered.lines().all(|line| line.width() <= maximum));
+        }
+
+        let json = serde_json::to_string_pretty(&deferred_setup_payload(
+            "trial",
+            false,
+            json!({"state": "catch_up_required"}),
+        ))
+        .unwrap();
+        assert!(!json.contains('\u{1b}'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            json!({
+                "schema_version": 1,
+                "payload_type": "pro_setup",
+                "ok": true,
+                "account_state": "trial",
+                "helper_updated": false,
+                "materialization_deferred": true,
+                "status": {"state": "catch_up_required"},
+            })
+        );
     }
 }

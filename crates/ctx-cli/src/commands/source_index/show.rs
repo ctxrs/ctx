@@ -11,17 +11,24 @@ use uuid::Uuid;
 
 use crate::{
     analytics::{count_bucket, ShowTelemetry},
-    complete_content::{ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES},
+    complete_content::{
+        enforce_complete_content_output_limit, ContentPolicy,
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+    },
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, OutputFormat},
     provider_args::ProviderArg,
     semantic::PinnedSourceBackedGeneration,
     transcript::TranscriptMode,
+    ui::Ui,
     ShowArgs, ShowTarget,
 };
 
 use super::{
-    render::{enforce_json_output_limit, timestamp_json, write_show_value},
+    render::{
+        canonical_human_output_bytes, enforce_json_output_limit, render_show_document,
+        timestamp_json, write_show_value,
+    },
     shared::{
         event_source_json, open_index, resolve_event, resolve_session, session_source_json,
         source_path_exists, validate_ctx_id, validate_session_selector,
@@ -38,6 +45,7 @@ pub(crate) fn run_show(
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
     validate_show_target(&args.target)?;
     let index = open_index(&data_root)?;
@@ -58,8 +66,11 @@ pub(crate) fn run_show(
             let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let result_count = events.len();
             let content_bytes = serde_json::to_vec(&value["events"])?.len();
-            let output_bytes =
-                write_show_value(value, args.format, None, selected.event_id.as_uuid())?;
+            let output_bytes = if args.format == OutputFormat::Text {
+                write_show_document(&value, selected.event_id.as_uuid(), ui)?
+            } else {
+                write_show_value(value, args.format, None, selected.event_id.as_uuid())?
+            };
             local_usage.set_result_observation(
                 ResultObservationAction::OpenEvent,
                 result_count,
@@ -100,7 +111,11 @@ pub(crate) fn run_show(
             let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let result_count = events.len();
             let content_bytes = serde_json::to_vec(&value["events"])?.len();
-            let output_bytes = write_show_value(value, args.format, args.out, event_id)?;
+            let output_bytes = if args.format == OutputFormat::Text && args.out.is_none() {
+                write_show_document(&value, event_id, ui)?
+            } else {
+                write_show_value(value, args.format, args.out, event_id)?
+            };
             local_usage.set_result_observation(
                 ResultObservationAction::OpenSession,
                 result_count,
@@ -111,6 +126,19 @@ pub(crate) fn run_show(
             Ok(())
         }
     }
+}
+
+fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {
+    let document = render_show_document(value, ui.stdout_context());
+    let output_bytes = canonical_human_output_bytes(&document);
+    enforce_complete_content_output_limit(
+        ContentPolicy::Complete,
+        output_bytes,
+        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        event_id,
+    )?;
+    ui.write_stdout(&document)?;
+    Ok(output_bytes)
 }
 
 pub(super) fn validate_show_target(target: &ShowTarget) -> Result<()> {

@@ -16,6 +16,10 @@ use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
 use crate::local_usage::{CliUsage, ResultObservationAction};
 use crate::output::{compact_json, print_json, SqlFormat};
 use crate::source_sql::SqlCompatibility;
+use crate::ui::{
+    diagnostic, empty_state, outcome, section, table, Diagnostic, DiagnosticLevel, Document,
+    EmptyState, Field, Outcome, OutcomeState, RenderContext, Table, Ui,
+};
 use crate::SqlArgs;
 
 pub(crate) fn parse_sql_timeout(value: &str) -> std::result::Result<StdDuration, String> {
@@ -53,6 +57,7 @@ pub(crate) fn run_sql(
     data_root: PathBuf,
     telemetry: &mut SqlTelemetry,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
     let sql = read_sql_input(&args)?;
     let compatibility = SqlCompatibility::open_for_data_root(data_root)?;
@@ -79,7 +84,7 @@ pub(crate) fn run_sql(
         .collect::<Vec<_>>();
     let content_bytes = serde_json::to_vec(&rows)?.len();
     let output_bytes = match args.output_format() {
-        SqlFormat::Table => print_sql_table(&result),
+        SqlFormat::Table => print_sql_table(&result, ui),
         SqlFormat::Json => {
             let value = raw_sql_result_json(&result);
             let output_bytes = serde_json::to_string_pretty(&value)?
@@ -139,51 +144,72 @@ pub(crate) fn read_sql_limited(
     Ok(input)
 }
 
-pub(crate) fn print_sql_table(result: &RawSqlResult) -> Result<usize> {
-    let rows = result
-        .rows
-        .iter()
-        .map(|row| row.iter().map(sql_table_cell).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let mut widths = result
-        .columns
-        .iter()
-        .map(|column| column.name.chars().count())
-        .collect::<Vec<_>>();
-    for row in &rows {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
-        }
+pub(crate) fn print_sql_table(result: &RawSqlResult, ui: &mut Ui) -> Result<usize> {
+    let document = render_sql_table(ui.stdout_context(), result);
+    let output_bytes = document.render_plain().len();
+    ui.write_stdout(&document)?;
+    if let Some(warning) = render_sql_truncation(ui.stderr_context(), result) {
+        ui.write_stderr(&warning)?;
+    }
+    Ok(output_bytes)
+}
+
+fn render_sql_table(context: &RenderContext, result: &RawSqlResult) -> Document {
+    if result.rows.is_empty() {
+        return empty_state(
+            context,
+            EmptyState {
+                title: "No rows returned",
+                detail: "The read-only query completed successfully.",
+                action: None,
+            },
+        );
     }
 
-    let headers = result
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| pad_table_cell(&column.name, widths[index]))
-        .collect::<Vec<_>>();
-    let mut body = String::new();
-    body.push_str(&headers.join(" | "));
-    body.push('\n');
-    let separators = widths
-        .iter()
-        .map(|width| "-".repeat(*width))
-        .collect::<Vec<_>>();
-    body.push_str(&separators.join(" | "));
-    body.push('\n');
-    for row in &rows {
-        let cells = row
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| pad_table_cell(cell, widths[index]))
-            .collect::<Vec<_>>();
-        body.push_str(&cells.join(" | "));
-        body.push('\n');
+    let title = match result.returned_rows {
+        1 => "1 row returned".to_owned(),
+        count => format!("{count} rows returned"),
+    };
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Success,
+            title: &title,
+            detail: None,
+        },
+    );
+    let mut results = Table::new(result.columns.iter().map(|column| column.name.clone()));
+    for row in &result.rows {
+        results.push_row(row.iter().map(sql_table_cell));
     }
-    if result.rows.is_empty() {
-        body.push_str("(0 rows)\n");
+    document.push_blank();
+    document.append(section("Results", table(context, &results)));
+    document
+}
+
+fn render_sql_truncation(context: &RenderContext, result: &RawSqlResult) -> Option<Document> {
+    if !result.truncated.rows && !result.truncated.values {
+        return None;
     }
-    write_sql_stdout(body, result)
+    let rows = result.limits.max_rows.to_string();
+    let value_bytes = result.limits.max_value_bytes.to_string();
+    let mut values = Vec::new();
+    if result.truncated.rows {
+        values.push(Field::new("Row limit", rows.as_str()));
+    }
+    if result.truncated.values {
+        values.push(Field::new("Value-byte limit", value_bytes.as_str()));
+    }
+    Some(diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Warning,
+            summary: "SQL results were truncated",
+            detail: Some("Increase the relevant query limit to return more data."),
+            fields: &values,
+            action: None,
+        },
+    ))
 }
 
 pub(crate) fn print_sql_csv(result: &RawSqlResult, no_header: bool) -> Result<usize> {
@@ -363,19 +389,135 @@ pub(crate) fn truncate_table_cell(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-pub(crate) fn pad_table_cell(value: &str, width: usize) -> String {
-    let len = value.chars().count();
-    if len >= width {
-        value.to_owned()
-    } else {
-        format!("{value}{}", " ".repeat(width - len))
-    }
-}
-
 pub(crate) fn csv_escape(value: &str) -> String {
     if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use std::{io::Write as _, time::Duration};
+
+    use ctx_history_relational::{RawSqlColumn, RawSqlLimits, RawSqlTruncation, RawSqlValue};
+    use unicode_width::UnicodeWidthStr as _;
+
+    use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    fn context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn result(rows: Vec<Vec<RawSqlValue>>) -> RawSqlResult {
+        RawSqlResult {
+            columns: vec![
+                RawSqlColumn {
+                    name: "provider".to_owned(),
+                },
+                RawSqlColumn {
+                    name: "summary".to_owned(),
+                },
+            ],
+            returned_rows: rows.len(),
+            rows,
+            truncated: RawSqlTruncation {
+                rows: false,
+                values: false,
+            },
+            elapsed: Duration::from_millis(2),
+            limits: RawSqlLimits {
+                max_rows: 100,
+                max_columns: 32,
+                max_value_bytes: 16_384,
+                max_sql_bytes: 65_536,
+                timeout_ms: 10_000,
+            },
+        }
+    }
+
+    fn text(value: &str) -> RawSqlValue {
+        RawSqlValue::Text {
+            value: value.to_owned(),
+            bytes: value.len(),
+            truncated: false,
+        }
+    }
+
+    fn assert_fits(document: &Document, context: &RenderContext) {
+        let width = context.content_width().unwrap_or(1);
+        for line in document.render_plain().lines() {
+            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+        }
+    }
+
+    fn strip_ansi(rendered: &str) -> String {
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream.write_all(rendered.as_bytes()).unwrap();
+        String::from_utf8(stream.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn sql_table_is_outcome_first_responsive_and_control_safe() {
+        let result = result(vec![vec![
+            text("codex"),
+            text("a long user-controlled summary with \u{1b}[31m terminal controls"),
+        ]]);
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_sql_table(&context, &result);
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("✓ 1 row returned\n"));
+            assert!(rendered.contains("Results\n"));
+            assert!(rendered.contains("\\x1b[31m"));
+            assert!(!rendered.as_bytes().contains(&0x1b));
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn sql_empty_result_is_explicit() {
+        let context = context(48, ColorMode::Never);
+        assert_eq!(
+            render_sql_table(&context, &result(Vec::new())).render_plain(),
+            "No rows returned\nThe read-only query completed successfully.\n"
+        );
+    }
+
+    #[test]
+    fn sql_truncation_is_structured_and_actionable() {
+        let mut result = result(vec![vec![text("codex"), text("summary")]]);
+        result.truncated.rows = true;
+        result.truncated.values = true;
+        let context = context(48, ColorMode::Never);
+        let document = render_sql_truncation(&context, &result).unwrap();
+        let rendered = document.render_plain();
+        assert!(rendered.starts_with("! SQL results were truncated\n"));
+        assert!(rendered.contains("Row limit"));
+        assert!(rendered.contains("Value-byte limit"));
+        assert_fits(&document, &context);
+    }
+
+    #[test]
+    fn sql_plain_output_matches_ansi_stripped_output() {
+        let result = result(vec![vec![text("codex"), text("summary")]]);
+        let context = context(80, ColorMode::Always);
+        let document = render_sql_table(&context, &result);
+        assert_eq!(
+            strip_ansi(&document.render(&context)),
+            document.render_plain()
+        );
+    }
+
+    #[test]
+    fn csv_and_raw_cells_keep_their_machine_contracts() {
+        let value = text("line one\nline two,\"quoted\"");
+        assert_eq!(
+            csv_escape(&sql_csv_cell(&value)),
+            "\"line one\\nline two,\"\"quoted\"\"\""
+        );
+        assert_eq!(sql_raw_cell(&value), "line one\nline two,\"quoted\"");
     }
 }

@@ -1,0 +1,14 @@
+Commit      abcdef
+Repository  ctxrs/ctx
+
+Produced by
+  session session-producer
+    id
+      session:018f0f65-8b1f-7f30-9dc4-a81c7e36a1b2
+    confidence    explicit
+    state         asserted
+    evidence      [1]
+
+Evidence
+  [1]
+    ctx show event 00000000-0000-0000-0000-000000000001

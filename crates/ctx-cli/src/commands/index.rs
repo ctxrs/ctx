@@ -1,5 +1,5 @@
 use std::{
-    io::{self, IsTerminal as _},
+    io,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -13,8 +13,9 @@ use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry,
 use crate::config::{self, CONFIG_FILE};
 use crate::output::{compact_json, print_json, JsonOutputFormat};
 use crate::semantic::source_epoch_status_report;
+use crate::ui::{RenderContext, Ui};
 
-use super::index_dashboard::{color_enabled, terminal_width, IndexDashboard};
+use super::index_dashboard::IndexDashboard;
 
 #[derive(Debug, Args)]
 pub(crate) struct IndexArgs {
@@ -83,20 +84,20 @@ pub(crate) fn run_index(
     data_root: PathBuf,
     quiet: bool,
     telemetry: &mut IndexTelemetry,
-    _ui: &mut crate::ui::Ui,
+    ui: &mut Ui,
 ) -> Result<()> {
     match args.command {
         IndexCommand::Status(args) => {
             telemetry.operation = Some(IndexOperation::Status);
-            run_index_status(args, &data_root, quiet, telemetry)
+            run_index_status(args, &data_root, quiet, telemetry, ui)
         }
         IndexCommand::Watch(args) => {
             telemetry.operation = Some(IndexOperation::Watch);
-            run_index_watch(args, &data_root, quiet, telemetry)
+            run_index_watch(args, &data_root, quiet, telemetry, ui)
         }
         IndexCommand::Wait(args) => {
             telemetry.operation = Some(IndexOperation::Wait);
-            run_index_wait(args, &data_root, quiet, telemetry)
+            run_index_wait(args, &data_root, quiet, telemetry, ui)
         }
     }
 }
@@ -106,13 +107,15 @@ fn run_index_status(
     data_root: &Path,
     quiet: bool,
     telemetry: &mut IndexTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let status = index_status_snapshot(data_root)?;
     record_index_telemetry(telemetry, &status);
     if args.format.is_json() {
         print_json(status)?;
     } else if !quiet {
-        print_index_status_human(&status);
+        let mut dashboard = IndexDashboard::default();
+        write_index_status_human(ui, &mut dashboard, &status)?;
     }
     Ok(())
 }
@@ -122,12 +125,12 @@ fn run_index_watch(
     data_root: &Path,
     quiet: bool,
     telemetry: &mut IndexTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let interval = Duration::from_secs(args.interval_seconds);
     let stdout = io::stdout();
     let jsonl_output = args.format == IndexWatchFormat::Jsonl;
-    let interactive = !jsonl_output && stdout.is_terminal();
-    let mut output = IndexWatchOutput::new(stdout.lock(), interactive);
+    let mut output = IndexWatchOutput::new(stdout.lock(), *ui.stdout_context());
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = IndexSelection::default_for(&status);
@@ -150,35 +153,31 @@ fn run_index_watch(
 
 struct IndexWatchOutput<W> {
     writer: W,
+    context: RenderContext,
     interactive: bool,
-    styled: bool,
     rendered_lines: usize,
-    terminal_width_override: Option<usize>,
     dashboard: IndexDashboard,
 }
 
 impl<W: io::Write> IndexWatchOutput<W> {
-    fn new(writer: W, interactive: bool) -> Self {
+    fn new(writer: W, context: RenderContext) -> Self {
         Self {
             writer,
-            interactive,
-            styled: interactive && color_enabled(),
+            context,
+            interactive: context.is_terminal(),
             rendered_lines: 0,
-            terminal_width_override: None,
             dashboard: IndexDashboard::default(),
         }
     }
 
     #[cfg(test)]
     fn for_test(writer: W, interactive: bool, terminal_width: usize) -> Self {
-        Self {
-            writer,
-            interactive,
-            styled: false,
-            rendered_lines: 0,
-            terminal_width_override: Some(terminal_width),
-            dashboard: IndexDashboard::default(),
-        }
+        let test_context = if interactive {
+            crate::ui::TestContext::tty(crate::ui::StreamKind::Stdout, terminal_width)
+        } else {
+            crate::ui::TestContext::pipe(crate::ui::StreamKind::Stdout)
+        };
+        Self::new(writer, RenderContext::for_test(test_context))
     }
 
     fn print_json(&mut self, status: &Value) -> Result<()> {
@@ -188,17 +187,17 @@ impl<W: io::Write> IndexWatchOutput<W> {
     }
 
     fn print_human(&mut self, status: &Value) -> io::Result<()> {
-        let width = self.terminal_width_override.unwrap_or_else(terminal_width);
-        let frame = self.dashboard.render(status, width, self.styled);
+        let document = self.dashboard.render(status, &self.context);
+        let frame = document.render(&self.context);
         if !self.interactive {
-            writeln!(self.writer, "{frame}")?;
+            self.writer.write_all(frame.as_bytes())?;
             writeln!(self.writer)?;
             return self.writer.flush();
         }
 
         let lines = frame.lines().collect::<Vec<_>>();
         if self.rendered_lines == 0 {
-            writeln!(self.writer, "{frame}")?;
+            self.writer.write_all(frame.as_bytes())?;
             self.rendered_lines = lines.len();
             return self.writer.flush();
         }
@@ -229,10 +228,12 @@ fn run_index_wait(
     data_root: &Path,
     quiet: bool,
     telemetry: &mut IndexTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let explicit_selection = IndexSelection::from_wait_args(&args);
     let interval = Duration::from_secs(args.interval_seconds);
     let started = Instant::now();
+    let mut dashboard = IndexDashboard::default();
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = explicit_selection.unwrap_or_else(|| IndexSelection::default_for(&status));
@@ -244,7 +245,7 @@ fn run_index_wait(
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "ready"))?;
             } else if !quiet {
-                print_index_status_human(&status);
+                write_index_status_human(ui, &mut dashboard, &status)?;
             }
             return Ok(());
         }
@@ -252,6 +253,8 @@ fn run_index_wait(
             telemetry.wait_outcome = Some(WaitOutcome::Blocked);
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "blocked"))?;
+            } else if !quiet {
+                write_index_status_human(ui, &mut dashboard, &status)?;
             }
             return Err(anyhow!(message));
         }
@@ -262,14 +265,16 @@ fn run_index_wait(
             telemetry.wait_outcome = Some(WaitOutcome::Timeout);
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "timeout"))?;
+            } else if !quiet {
+                write_index_status_human(ui, &mut dashboard, &status)?;
             }
             return Err(anyhow!(
                 "ctx index wait timed out before indexing was ready"
             ));
         }
         if !quiet && !args.format.is_json() {
-            print_index_watch_human(&status);
-            println!();
+            write_index_status_human(ui, &mut dashboard, &status)?;
+            ui.write_stdout(&crate::ui::Document::from_line(crate::ui::Line::new()))?;
         }
         thread::sleep(interval);
     }
@@ -415,55 +420,15 @@ fn lexical_index_status(
     }
 }
 
-fn print_index_status_human(status: &Value) {
-    println!("data_root: {}", string_at(status, &["data_root"], ""));
-    println!("initialized: {}", bool_at(status, &["initialized"]));
-    println!(
-        "lexical_status: {}",
-        string_at(status, &["lexical", "status"], "unknown")
-    );
-    println!(
-        "lexical_indexed_items: {}",
-        usize_at(status, &["lexical", "indexed_items"])
-    );
-    println!(
-        "lexical_pending_units: {}",
-        usize_at(status, &["lexical", "pending_inventory_units"])
-    );
-    println!("semantic_status: {}", semantic_job_status(status));
-    println!(
-        "semantic_embedded_items: {}",
-        usize_at(status, &["semantic", "coverage", "embedded_items"])
-    );
-    println!(
-        "semantic_searchable_items: {}",
-        usize_at(status, &["semantic", "coverage", "searchable_items"])
-    );
-    println!(
-        "semantic_queued_items_estimate: {}",
-        usize_at(status, &["semantic", "coverage", "queued_items_estimate"])
-    );
-    println!(
-        "daemon_status: {}",
-        string_at(status, &["daemon", "status"], "unknown")
-    );
-    let daemon_reason = string_at(status, &["daemon", "reason"], "");
-    if !daemon_reason.is_empty() {
-        println!("daemon_reason: {daemon_reason}");
-    }
-    if bool_at(status, &["daemon", "recoverable"]) {
-        println!("daemon_recoverable: true");
-    }
-    println!(
-        "daemon_running: {}",
-        bool_at(status, &["daemon", "running"])
-    );
-    println!("read_only: true");
-}
-
-fn print_index_watch_human(status: &Value) {
-    let mut dashboard = IndexDashboard::default();
-    println!("{}", dashboard.render(status, 80, false));
+fn write_index_status_human(
+    ui: &mut Ui,
+    dashboard: &mut IndexDashboard,
+    status: &Value,
+) -> Result<()> {
+    let context = *ui.stdout_context();
+    let document = dashboard.render(status, &context);
+    ui.write_stdout(&document)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

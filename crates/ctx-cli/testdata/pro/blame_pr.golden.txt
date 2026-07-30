@@ -1,29 +1,42 @@
-PR          ctxrs/ctx#42
-repository  ctxrs/ctx
+Pull request  ctxrs/ctx#42
+Repository    ctxrs/ctx
+Selector      https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42
 
 Code produced
-  contains_commit  commit deadbeef
-    membership evidence  [1]
-    produced by
-    session       producer
-    confidence    explicit
-    state         asserted
-    evidence      [2]
-    possible producer
-    session       possible
-    confidence    ambiguous
-    state         ambiguous
-    evidence      [3]
+  contains_commit
+    commit deadbeef
+      evidence      [1]
+      Produced by
+        session producer
+          direct actor  agent codex
+          owning root   run root
+          confidence    explicit
+          state         asserted
+          evidence      [2]
+
+      Possible producers
+        session possible
+          confidence    ambiguous
+          state         ambiguous
+          evidence      [3]
 
 PR activity
-  reviewed   session reviewer  [4]
-    confidence explicit  state asserted
+  reviewed
+    session reviewer
+      direct actor  agent review-agent
+      owning root   run review-root
+      occurred      2024-07-14T23:33:20.000Z
+      confidence    explicit
+      state         asserted
+      evidence      [4]
+
+More results
+  2 matches shown; more matches are available.
+  Continue
+    ctx blame pr https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42 --repository ctxrs/ctx --cursor next-page
 
 Evidence
-  [1] ctx show event 00000000-0000-0000-0000-000000000001
-  [2] ctx show event 00000000-0000-0000-0000-000000000002
-  [3] ctx show event 00000000-0000-0000-0000-000000000003
-  [4] ctx show event 00000000-0000-0000-0000-000000000004
-
-2 matches shown; more matches are available.
-continue  ctx blame pr https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42 --repository ctxrs/ctx --cursor next-page
+  [1]  ctx show event 00000000-0000-0000-0000-000000000001
+  [2]  ctx show event 00000000-0000-0000-0000-000000000002
+  [3]  ctx show event 00000000-0000-0000-0000-000000000003
+  [4]  ctx show event 00000000-0000-0000-0000-000000000004

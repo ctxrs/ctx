@@ -643,12 +643,16 @@ fn fresh_home_search_mvp_flow() {
         .stdout
         .clone();
     let human_search = String::from_utf8(human_search).unwrap();
+    assert!(human_search.starts_with("1 result\n\n"), "{human_search}");
     assert!(human_search.contains("1. "));
-    assert!(human_search.contains("codex | session "));
-    assert!(human_search.contains("inspect: ctx show session"));
+    assert!(human_search.contains("Session  codex | "), "{human_search}");
+    assert!(
+        human_search.contains("Inspect\n     ctx show session"),
+        "{human_search}"
+    );
     assert!(!human_search.contains("ctx_event_id"));
     assert!(!human_search.contains("provider_session_id"));
-    assert!(!human_search.contains("next:"));
+    assert!(!human_search.contains("Next"));
     assert!(!human_search.contains("work_record"));
     assert!(!human_search.contains("history_record"));
 
@@ -660,13 +664,13 @@ fn fresh_home_search_mvp_flow() {
         .stdout
         .clone();
     let verbose_search = String::from_utf8(verbose_search).unwrap();
-    assert!(verbose_search.contains("ctx_event_id"));
-    assert!(verbose_search.contains("ctx_session_id"));
-    assert!(verbose_search.contains("provider_session_id"));
-    assert!(verbose_search.contains("session_importance"));
-    assert!(verbose_search.contains("next: ctx show session"));
-    assert!(verbose_search.contains("next: ctx show event"));
-    assert!(verbose_search.contains("next: ctx search onboarding --session"));
+    assert!(verbose_search.contains("Event"));
+    assert!(verbose_search.contains("Ctx session"));
+    assert!(verbose_search.contains("Provider session"));
+    assert!(verbose_search.contains("Importance"));
+    assert!(verbose_search.contains("ctx show session"));
+    assert!(verbose_search.contains("ctx show event"));
+    assert!(verbose_search.contains("ctx search onboarding --session"));
     assert!(!human_search.contains("work_record"));
     assert!(!human_search.contains("history_record"));
 

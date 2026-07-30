@@ -1,0 +1,13 @@
+Commit      abcdef
+Repository  ctxrs/ctx
+
+Possible producers
+  session possible
+    confidence    ambiguous
+    state         ambiguous
+    evidence      [1]
+
+! No producing session is asserted.
+
+Evidence
+  [1]  ctx show event 00000000-0000-0000-0000-000000000001

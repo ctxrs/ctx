@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Command, CommandFactory, Subcommand};
@@ -8,6 +8,10 @@ use crate::{
     analytics::{count_bucket, text_length_bucket, DocTopicId, DocsOperation, DocsTelemetry},
     local_usage::CliUsage,
     output::JsonOutputFormat,
+    ui::{
+        empty_state, fields, hint, outcome, section, table, Action, Document, EmptyState, Field,
+        Hint, Outcome, OutcomeState, RenderContext, Table, Ui,
+    },
     Cli,
 };
 
@@ -304,15 +308,22 @@ pub fn run(
     args: DocsArgs,
     telemetry: &mut DocsTelemetry,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
     let output_bytes = match args.command {
         Some(DocsCommand::List(args)) => {
             telemetry.operation = Some(DocsOperation::List);
-            list_docs(args.format.is_json(), telemetry)
+            list_docs(args.format.is_json(), telemetry, ui)
         }
         Some(DocsCommand::Search(args)) => {
             telemetry.operation = Some(DocsOperation::Search);
-            search_docs(&args.query, args.limit, args.format.is_json(), telemetry)
+            search_docs(
+                &args.query,
+                args.limit,
+                args.format.is_json(),
+                telemetry,
+                ui,
+            )
         }
         Some(DocsCommand::Show(args)) => {
             telemetry.operation = Some(DocsOperation::Show);
@@ -326,40 +337,38 @@ pub fn run(
                 DocsOperation::ManGenerate
             });
             telemetry.writes_output = args.out.is_some();
-            man_docs(args)
+            man_docs(args, ui)
         }
         None => {
             telemetry.operation = Some(DocsOperation::List);
             telemetry.implicit_list = true;
-            list_docs(false, telemetry)
+            list_docs(false, telemetry, ui)
         }
     }?;
     local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
 }
 
-fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry) -> Result<usize> {
+fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry, ui: &mut Ui) -> Result<usize> {
     telemetry.result_count = Some(count_bucket(TOPICS.len() as u64));
     telemetry.zero_result = Some(TOPICS.is_empty());
-    let output = if json_output {
+    if json_output {
         let topics: Vec<Value> = TOPICS.iter().map(topic_json).collect();
-        format!(
+        let output = format!(
             "{}\n",
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1,
                 "topics": topics
             }))?
-        )
+        );
+        print!("{output}");
+        Ok(output.len())
     } else {
-        let mut output = String::from("Embedded ctx docs:\n");
-        for topic in TOPICS {
-            writeln!(output, "  {:<20} {}", topic.id, topic.summary)?;
-        }
-        output.push_str("\nTry: ctx docs search \"file path\"\nTry: ctx docs show search\n");
-        output
-    };
-    print!("{output}");
-    Ok(output.len())
+        let document = render_docs_list(ui.stdout_context());
+        let output_bytes = document.render_plain().len();
+        ui.write_stdout(&document)?;
+        Ok(output_bytes)
+    }
 }
 
 fn search_docs(
@@ -367,6 +376,7 @@ fn search_docs(
     limit: usize,
     json_output: bool,
     telemetry: &mut DocsTelemetry,
+    ui: &mut Ui,
 ) -> Result<usize> {
     let terms = docs_query_terms(query);
     telemetry.query_length = Some(text_length_bucket(query.chars().count()));
@@ -382,7 +392,7 @@ fn search_docs(
     results.truncate(limit.max(1));
     telemetry.result_count = Some(count_bucket(results.len() as u64));
     telemetry.zero_result = Some(results.is_empty());
-    let output = if json_output {
+    if json_output {
         let rows: Vec<Value> = results
             .iter()
             .map(|(score, topic)| {
@@ -391,7 +401,7 @@ fn search_docs(
                 value
             })
             .collect();
-        format!(
+        let output = format!(
             "{}\n",
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1,
@@ -399,24 +409,109 @@ fn search_docs(
                 "results": rows,
                 "suggested_next_commands": docs_search_suggestions(query, rows.is_empty())
             }))?
-        )
-    } else if results.is_empty() {
-        let mut output = String::from("no docs matched\n");
-        for command in docs_search_suggestions(query, true) {
-            writeln!(output, "next: {command}")?;
-        }
-        output
+        );
+        print!("{output}");
+        Ok(output.len())
     } else {
-        let mut output = String::new();
-        for (index, (score, topic)) in results.iter().enumerate() {
-            writeln!(output, "{}. {} - {}", index + 1, topic.id, topic.title)?;
-            writeln!(output, "   score {score} | {}", topic.summary)?;
-            writeln!(output, "   inspect: ctx docs show {}", topic.id)?;
-        }
-        output
+        let document = render_docs_search(ui.stdout_context(), query, &results);
+        let output_bytes = document.render_plain().len();
+        ui.write_stdout(&document)?;
+        Ok(output_bytes)
+    }
+}
+
+fn render_docs_list(context: &RenderContext) -> Document {
+    if TOPICS.is_empty() {
+        return empty_state(
+            context,
+            EmptyState {
+                title: "No embedded documentation is available",
+                detail: "Use command help for the installed CLI surface.",
+                action: Some(Action {
+                    command: "ctx --help",
+                }),
+            },
+        );
+    }
+    let title = format!("{} embedded documentation topics", TOPICS.len());
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Neutral,
+            title: &title,
+            detail: Some("Search locally or open a topic by its ID."),
+        },
+    );
+    let mut topics = Table::new(["Topic", "Summary"]);
+    for topic in TOPICS {
+        topics.push_row([topic.id.to_owned(), topic.summary.to_owned()]);
+    }
+    document.push_blank();
+    document.append(section("Topics", table(context, &topics)));
+    document.push_blank();
+    document.append(hint(
+        context,
+        Hint {
+            text: "Search the embedded documentation.",
+        },
+        Some(Action {
+            command: "ctx docs search \"file path\"",
+        }),
+    ));
+    document
+}
+
+fn render_docs_search(
+    context: &RenderContext,
+    query: &str,
+    results: &[(usize, &DocTopic)],
+) -> Document {
+    if results.is_empty() {
+        let title = format!("No docs matched \"{query}\"");
+        return empty_state(
+            context,
+            EmptyState {
+                title: &title,
+                detail: "Try a broader term or list every embedded topic.",
+                action: Some(Action {
+                    command: "ctx docs list",
+                }),
+            },
+        );
+    }
+    let title = match results.len() {
+        1 => format!("1 doc matched \"{query}\""),
+        count => format!("{count} docs matched \"{query}\""),
     };
-    print!("{output}");
-    Ok(output.len())
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Success,
+            title: &title,
+            detail: None,
+        },
+    );
+    let mut matches = Table::new(["Topic", "Title", "Score", "Summary"]);
+    for (score, topic) in results {
+        matches.push_row([
+            topic.id.to_string(),
+            topic.title.to_string(),
+            score.to_string(),
+            topic.summary.to_string(),
+        ]);
+    }
+    document.push_blank();
+    document.append(section("Matches", table(context, &matches)));
+    let command = format!("ctx docs show {}", results[0].1.id);
+    document.push_blank();
+    document.append(hint(
+        context,
+        Hint {
+            text: "Open the top match.",
+        },
+        Some(Action { command: &command }),
+    ));
+    document
 }
 
 fn docs_query_terms(query: &str) -> Vec<String> {
@@ -521,7 +616,7 @@ fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<usize> 
     }
 }
 
-fn man_docs(args: DocsManArgs) -> Result<usize> {
+fn man_docs(args: DocsManArgs, ui: &mut Ui) -> Result<usize> {
     if let Some(page) = args.print {
         let (_, command) = man_page(&page)?;
         let mut out = Vec::new();
@@ -540,9 +635,23 @@ fn man_docs(args: DocsManArgs) -> Result<usize> {
         clap_mangen::Man::new(command).render(&mut out)?;
         fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
     }
-    let output = format!("wrote ctx man pages to {}\n", out_dir.display());
-    print!("{output}");
-    Ok(output.len())
+    let directory = out_dir.display().to_string();
+    let mut document = outcome(
+        ui.stdout_context(),
+        Outcome {
+            state: OutcomeState::Success,
+            title: "ctx man pages written",
+            detail: None,
+        },
+    );
+    document.push_blank();
+    document.append(fields(
+        ui.stdout_context(),
+        &[Field::new("Directory", &directory)],
+    ));
+    let output_bytes = document.render_plain().len();
+    ui.write_stdout(&document)?;
+    Ok(output_bytes)
 }
 
 fn man_page(name: &str) -> Result<(String, Command)> {
@@ -646,4 +755,80 @@ fn markdown_to_text(markdown: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use std::io::Write as _;
+
+    use unicode_width::UnicodeWidthStr as _;
+
+    use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    fn context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn assert_fits(document: &Document, context: &RenderContext) {
+        let width = context.content_width().unwrap_or(1);
+        for line in document.render_plain().lines() {
+            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+        }
+    }
+
+    fn strip_ansi(rendered: &str) -> String {
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream.write_all(rendered.as_bytes()).unwrap();
+        String::from_utf8(stream.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn docs_list_is_structured_and_responsive() {
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_docs_list(&context);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.starts_with(&format!("{} embedded documentation topics", TOPICS.len()))
+            );
+            assert!(rendered.contains("Topics\n"));
+            assert!(rendered.contains("ctx docs search \"file path\""));
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn docs_search_success_is_outcome_first_and_actionable() {
+        let topic = TOPICS.iter().find(|topic| topic.id == "sql").unwrap();
+        let context = context(48, ColorMode::Never);
+        let document = render_docs_search(&context, "sql", &[(1_000, topic)]);
+        let rendered = document.render_plain();
+        assert!(rendered.starts_with("✓ 1 doc matched \"sql\"\n"));
+        assert!(rendered.contains("Matches\n"));
+        assert!(rendered.contains("Next\n  ctx docs show sql\n"));
+        assert_fits(&document, &context);
+    }
+
+    #[test]
+    fn docs_search_empty_state_neutralizes_query_controls() {
+        let context = context(48, ColorMode::Never);
+        let document = render_docs_search(&context, "missing\u{1b}[31m", &[]);
+        let rendered = document.render_plain();
+        assert!(rendered.starts_with("No docs matched \"missing\\x1b[31m\"\n"));
+        assert!(rendered.contains("Next\n  ctx docs list\n"));
+        assert!(!rendered.as_bytes().contains(&0x1b));
+        assert_fits(&document, &context);
+    }
+
+    #[test]
+    fn docs_plain_output_matches_ansi_stripped_output() {
+        let context = context(80, ColorMode::Always);
+        let document = render_docs_list(&context);
+        assert_eq!(
+            strip_ansi(&document.render(&context)),
+            document.render_plain()
+        );
+    }
 }

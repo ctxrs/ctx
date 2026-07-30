@@ -37,7 +37,10 @@ use super::{
         daemon_retry_due, daemon_run_start_mode, restore_daemon_consumer_retries,
         restore_daemon_source_refresh_retry, run_daemon_once_with_activity,
     },
-    daemon_status::{daemon_report_failure_message, print_daemon_status_human},
+    daemon_status::{
+        daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
+        render_daemon_prepare_uninstall_receipt, render_daemon_status_human, DaemonStatusView,
+    },
     daemon_wakeup::{write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup},
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
     health_search::semantic_env_flag,
@@ -54,6 +57,7 @@ use super::{
     runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
     source_backed_refresh_coordinator::reconcile_verified_source_epoch,
 };
+use crate::ui::Ui;
 
 mod config_reload;
 mod telemetry;
@@ -169,15 +173,16 @@ pub(crate) fn run_daemon_command(
     args: DaemonArgs,
     data_root: PathBuf,
     config: &AppConfig,
+    ui: &mut Ui,
 ) -> Result<()> {
     let started = Instant::now();
     let operation = daemon_operation_for_command(&args.command);
     let telemetry_root = data_root.clone();
     let result = match args.command {
-        DaemonCommand::Run(args) => run_daemon(args, data_root, config),
-        DaemonCommand::Status(args) => run_daemon_status(args, data_root),
-        DaemonCommand::Enable(args) => run_daemon_enabled_update(args, data_root, true),
-        DaemonCommand::Disable(args) => run_daemon_disable(args, data_root),
+        DaemonCommand::Run(args) => run_daemon(args, data_root, config, ui),
+        DaemonCommand::Status(args) => run_daemon_status(args, data_root, ui),
+        DaemonCommand::Enable(args) => run_daemon_enabled_update(args, data_root, true, ui),
+        DaemonCommand::Disable(args) => run_daemon_disable(args, data_root, ui),
     };
     if let Some(operation) = operation {
         let event = PublicEventV1::OperationCompleted(OperationCompletedV1::for_daemon(
@@ -245,7 +250,7 @@ fn daemon_iteration_events(
     }
 }
 
-pub(super) fn run_daemon_status(args: FormatArgs, data_root: PathBuf) -> Result<()> {
+pub(super) fn run_daemon_status(args: FormatArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
     let daemon = daemon_report(&data_root);
     let pro = crate::pro::lifecycle_status_json(&data_root);
     if args.format.is_json() {
@@ -256,13 +261,11 @@ pub(super) fn run_daemon_status(args: FormatArgs, data_root: PathBuf) -> Result<
             "local_only": true,
         }))?;
     } else {
-        print_daemon_status_human(&daemon);
-        if pro["installed"].as_bool() == Some(true) {
-            println!(
-                "pro_status: {}",
-                pro["state"].as_str().unwrap_or("unavailable")
-            );
-        }
+        let document = render_daemon_status_human(
+            ui.stdout_context(),
+            DaemonStatusView::from_reports(&daemon, &pro),
+        );
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
@@ -271,6 +274,7 @@ pub(super) fn run_daemon_enabled_update(
     args: FormatArgs,
     data_root: PathBuf,
     enabled: bool,
+    ui: &mut Ui,
 ) -> Result<()> {
     config::set_daemon_enabled(&data_root, enabled)?;
     let handoff = if enabled {
@@ -295,26 +299,37 @@ pub(super) fn run_daemon_enabled_update(
             .get("live_owner_verified")
             .and_then(Value::as_bool)
             == Some(true);
+    let running = handoff.is_some();
+    let config_path = data_root.join(CONFIG_FILE);
     if args.format.is_json() {
         print_json(json!({
             "schema_version": 1,
             "daemon_enabled": enabled,
-            "running": handoff.is_some(),
+            "running": running,
             "pid": handoff.map(|handoff| handoff.pid),
             "persistent": enabled && persistent,
             "supervisor": supervisor,
-            "config_path": data_root.join(CONFIG_FILE),
+            "config_path": config_path,
             "local_only": true,
         }))?;
+    } else if enabled {
+        let document = render_daemon_enable_receipt(
+            ui.stdout_context(),
+            running,
+            persistent,
+            &supervisor,
+            &config_path,
+        );
+        ui.write_stdout(&document)?;
     } else {
-        println!("daemon_enabled: {enabled}");
-        println!("persistent: {}", enabled && persistent);
-        println!("config_path: {}", data_root.join(CONFIG_FILE).display());
+        let document =
+            render_daemon_disable_receipt(ui.stdout_context(), &supervisor, &config_path);
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
 
-fn run_daemon_disable(args: DaemonDisableArgs, data_root: PathBuf) -> Result<()> {
+fn run_daemon_disable(args: DaemonDisableArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
     if !args.prepare_uninstall {
         return run_daemon_enabled_update(
             FormatArgs {
@@ -322,15 +337,15 @@ fn run_daemon_disable(args: DaemonDisableArgs, data_root: PathBuf) -> Result<()>
             },
             data_root,
             false,
+            ui,
         );
     }
     let report = super::daemon_autostart::prepare_daemon_uninstall(&data_root)?;
     if args.format.is_json() {
         print_json(report)?;
     } else {
-        println!("daemon_enabled: false");
-        println!("daemon_running: false");
-        println!("supervisor_removed: true");
+        let document = render_daemon_prepare_uninstall_receipt(ui.stdout_context(), &report);
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
@@ -364,6 +379,7 @@ pub(super) fn run_daemon(
     args: DaemonRunArgs,
     data_root: PathBuf,
     config: &AppConfig,
+    ui: &mut Ui,
 ) -> Result<()> {
     if (args.start_mode.is_some() || args.trigger_command.is_some())
         && !semantic_env_flag(DAEMON_BACKGROUND_CHILD_ENV)
@@ -403,7 +419,9 @@ pub(super) fn run_daemon(
     if args.format.is_json() {
         print_json(report)?;
     } else {
-        print_daemon_status_human(&report);
+        let document =
+            render_daemon_status_human(ui.stdout_context(), DaemonStatusView::daemon_only(&report));
+        ui.write_stdout(&document)?;
     }
     if let Some(message) = failure {
         return Err(anyhow!(message));

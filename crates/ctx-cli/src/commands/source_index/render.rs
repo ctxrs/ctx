@@ -21,6 +21,32 @@ use super::{
     shared::source_path_exists,
 };
 
+#[allow(dead_code)]
+mod human;
+#[allow(dead_code)]
+mod locate;
+#[allow(dead_code)]
+mod search;
+#[allow(dead_code)]
+mod show;
+
+#[allow(unused_imports)]
+pub(super) use locate::render_locate_document;
+#[allow(unused_imports)]
+pub(super) use search::render_search_document;
+#[allow(unused_imports)]
+pub(super) use show::render_show_document;
+
+/// Returns the canonical byte count for structured human output.
+///
+/// Callers must measure the plain document before `Ui` applies terminal
+/// styling so color capability never changes usage accounting.
+#[must_use]
+#[allow(dead_code)]
+pub(super) fn canonical_human_output_bytes(document: &crate::ui::Document) -> usize {
+    document.render_plain().len()
+}
+
 pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
     Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
 }
@@ -592,3 +618,6 @@ fn phase_attribution(query: Duration) -> Value {
         "staged_documents": 0,
     })
 }
+
+#[cfg(test)]
+mod tests;

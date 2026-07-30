@@ -10,6 +10,11 @@ use crate::commands::import::{
 use crate::compact_json;
 use crate::output::print_json;
 
+#[allow(dead_code)]
+mod render;
+#[allow(unused_imports)]
+pub(crate) use render::{render_import_completion, ImportCompletion};
+
 pub(crate) fn print_import_report(report: &ImportReport, json_output: bool) -> Result<()> {
     if json_output {
         print_json(import_report_json(report))

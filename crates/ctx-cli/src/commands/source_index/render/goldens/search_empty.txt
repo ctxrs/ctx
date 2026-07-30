@@ -1,0 +1,4 @@
+No results for definitely-no-results-here
+
+Try broader terms
+  ctx search "<term>"

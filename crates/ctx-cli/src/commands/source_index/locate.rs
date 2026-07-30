@@ -9,16 +9,15 @@ use crate::{
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, print_json},
     provider_args::ProviderArg,
-    transcript::{
-        print_locate_event_text, print_locate_session_text, provider_resume_json, write_output,
-    },
+    transcript::provider_resume_json,
+    ui::Ui,
     LocateArgs, LocateTarget,
 };
 
 use super::{
     render::{
-        locate_event_text_output_bytes, locate_session_text_output_bytes, pretty_json_stdout_bytes,
-        render_locate_event_availability_text, timestamp_json,
+        canonical_human_output_bytes, pretty_json_stdout_bytes, render_locate_document,
+        timestamp_json,
     },
     shared::{
         event_source_json, open_index, resolve_event, resolve_session, session_source_json,
@@ -30,6 +29,7 @@ pub(crate) fn run_locate(
     args: LocateArgs,
     data_root: PathBuf,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
     validate_locate_target(&args.target)?;
     let index = open_index(&data_root)?;
@@ -98,17 +98,10 @@ pub(crate) fn run_locate(
         let output_bytes = pretty_json_stdout_bytes(&value)?;
         print_json(value)?;
         output_bytes
-    } else if value["target"] == "session" {
-        let output_bytes = locate_session_text_output_bytes(&value);
-        print_locate_session_text(&value)?;
-        output_bytes
     } else {
-        let output_bytes = locate_event_text_output_bytes(&value);
-        print_locate_event_text(&value)?;
-        let availability = render_locate_event_availability_text(&value);
-        if !availability.is_empty() {
-            write_output(availability, None)?;
-        }
+        let document = render_locate_document(&value, ui.stdout_context());
+        let output_bytes = canonical_human_output_bytes(&document);
+        ui.write_stdout(&document)?;
         output_bytes
     };
     local_usage.set_result_observation(ResultObservationAction::Locate, 1, 0, content_bytes);

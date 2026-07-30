@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, io::Write as _, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::json;
@@ -18,6 +18,10 @@ use crate::provider_sources::{
     discovery_report_issues_json, manual_path_guidance, plugin_manifest_failures_json,
     plugin_sources_json, provider_cli_name, sources_json, SourceInfo,
 };
+use crate::ui::{
+    diagnostic, empty_state, hint, outcome, section, table, Action, Diagnostic, DiagnosticLevel,
+    Document, EmptyState, Field, Hint, Outcome, OutcomeState, RenderContext, Table, Ui,
+};
 use crate::{SourcesArgs, DEFAULT_VISIBLE_SOURCE_PROVIDERS};
 
 pub(crate) fn run_sources(
@@ -25,6 +29,7 @@ pub(crate) fn run_sources(
     data_root: PathBuf,
     telemetry: &mut SourcesTelemetry,
     local_usage: &mut CliUsage,
+    ui: &mut Ui,
 ) -> Result<()> {
     let provider_filter = args.provider.map(ProviderArg::capture_provider);
     let discovery_report = match provider_filter {
@@ -89,54 +94,17 @@ pub(crate) fn run_sources(
         print_json(value)?;
         output_bytes
     } else {
-        let mut body = String::new();
-        for source in &visible_sources {
-            let _ = writeln!(
-                body,
-                "{} {} {} ({})",
-                source_provider_cli_name(source.provider),
-                source.path.display(),
-                source.status.as_str(),
-                source.source_format
-            );
-            if source.status == ProviderSourceStatus::Unsupported {
-                if let Some(reason) = &source.unsupported_reason {
-                    let _ = writeln!(body, "  {reason}");
-                }
-                let _ = writeln!(
-                    body,
-                    "  current ctx cannot import this path; for supported history, use `{}`",
-                    manual_path_guidance(source.provider)
-                );
-            }
-        }
-        for issue in &discovery_report.issues {
-            render_discovery_issue(&mut body, issue);
-        }
-        for failure in &plugin_failures {
-            let _ = writeln!(
-                body,
-                "custom history-source-plugin invalid: {}: {}",
-                failure.manifest_path.display(),
-                failure.error
-            );
-        }
-        for source in &plugin_sources {
-            let _ = writeln!(
-                body,
-                "custom {} available (history-source-plugin:{}; explicit source-backed import)",
-                source.label(),
-                source.source_format
-            );
-        }
-        if hidden_missing_sources > 0 {
-            let _ = writeln!(
-                body,
-                "{hidden_missing_sources} missing provider locations hidden. Run `ctx sources --all` to show every known provider location."
-            );
-        }
-        std::io::stdout().lock().write_all(body.as_bytes())?;
-        body.len()
+        let document = render_sources_human(
+            ui.stdout_context(),
+            &visible_sources,
+            &discovery_report.issues,
+            &plugin_sources,
+            &plugin_failures,
+            hidden_missing_sources,
+        );
+        let output_bytes = document.render_plain().len();
+        ui.write_stdout(&document)?;
+        output_bytes
     };
     local_usage.set_result_observation(
         ResultObservationAction::Sources,
@@ -148,37 +116,180 @@ pub(crate) fn run_sources(
     Ok(())
 }
 
-fn render_discovery_issue(body: &mut String, issue: &DiscoveryIssue) {
-    let provider = source_provider_cli_name(issue.provider);
-    match issue.kind {
-        DiscoveryIssueKind::NoDiskHistory => {
-            let _ = writeln!(
-                body,
-                "{provider}: no disk history is selected: {}",
-                issue.reason
-            );
-            let _ = writeln!(
-                body,
-                "  select a disk-backed history location, then use `{}`",
-                manual_path_guidance(issue.provider)
-            );
-        }
-        DiscoveryIssueKind::SelectorUnreconstructible => {
-            let _ = writeln!(
-                body,
-                "{provider}: the automatic history location cannot be safely reconstructed: {}",
-                issue.reason
-            );
-            let _ = writeln!(body, "  use `{}`", manual_path_guidance(issue.provider));
-        }
-        DiscoveryIssueKind::InsufficientOfficialEvidence => {
-            let _ = writeln!(
-                body,
-                "{provider}: no official automatic history location is established"
-            );
-            let _ = writeln!(body, "  use `{}`", manual_path_guidance(issue.provider));
-        }
+fn render_sources_human(
+    context: &RenderContext,
+    sources: &[SourceInfo],
+    issues: &[DiscoveryIssue],
+    plugin_sources: &[crate::history_source_plugins::HistorySourcePluginSource],
+    plugin_failures: &[crate::history_source_plugins::HistorySourcePluginManifestFailure],
+    hidden_missing_sources: usize,
+) -> Document {
+    if sources.is_empty()
+        && issues.is_empty()
+        && plugin_sources.is_empty()
+        && plugin_failures.is_empty()
+    {
+        return empty_state(
+            context,
+            EmptyState {
+                title: "No history sources found",
+                detail: "Select a provider or inspect every known provider location.",
+                action: Some(Action {
+                    command: "ctx sources --all",
+                }),
+            },
+        );
     }
+
+    let importable = sources
+        .iter()
+        .filter(|source| {
+            source.status == ProviderSourceStatus::Available
+                && source.import_support.is_importable()
+        })
+        .count()
+        .saturating_add(plugin_sources.len());
+    let title = match importable {
+        0 => "No importable history sources found".to_owned(),
+        1 => "1 history source is ready".to_owned(),
+        count => format!("{count} history sources are ready"),
+    };
+    let attention = sources
+        .iter()
+        .filter(|source| source.status == ProviderSourceStatus::Unsupported)
+        .count()
+        .saturating_add(issues.len())
+        .saturating_add(plugin_failures.len());
+    let detail = (attention > 0).then(|| match attention {
+        1 => "1 source needs attention.".to_owned(),
+        count => format!("{count} sources need attention."),
+    });
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if importable > 0 && attention == 0 {
+                OutcomeState::Success
+            } else {
+                OutcomeState::Warning
+            },
+            title: &title,
+            detail: detail.as_deref(),
+        },
+    );
+
+    if !sources.is_empty() || !plugin_sources.is_empty() {
+        let mut locations = Table::new(["Source", "Status", "Location", "Format"]);
+        for source in sources {
+            locations.push_row([
+                source_provider_cli_name(source.provider).to_owned(),
+                source.status.as_str().to_owned(),
+                source.path.display().to_string(),
+                source.source_format.to_owned(),
+            ]);
+        }
+        for source in plugin_sources {
+            locations.push_row([
+                format!("custom/{}", source.label()),
+                "available".to_owned(),
+                "history-source-plugin".to_owned(),
+                source.source_format.clone(),
+            ]);
+        }
+        document.push_blank();
+        document.append(section("Locations", table(context, &locations)));
+    }
+
+    for source in sources
+        .iter()
+        .filter(|source| source.status == ProviderSourceStatus::Unsupported)
+    {
+        let provider = source_provider_cli_name(source.provider);
+        let summary = format!("{provider} history cannot be imported automatically");
+        let location = source.path.display().to_string();
+        let reason = source
+            .unsupported_reason
+            .unwrap_or("this source format is unsupported");
+        let command = manual_path_guidance(source.provider);
+        document.push_blank();
+        document.append(diagnostic(
+            context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: &summary,
+                detail: Some("Choose a supported disk-backed history location."),
+                fields: &[
+                    Field::new("Location", &location),
+                    Field::new("Reason", reason),
+                ],
+                action: Some(Action { command: &command }),
+            },
+        ));
+    }
+    for issue in issues {
+        document.push_blank();
+        document.append(render_discovery_issue(context, issue));
+    }
+    for failure in plugin_failures {
+        let manifest = failure.manifest_path.display().to_string();
+        document.push_blank();
+        document.append(diagnostic(
+            context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: "A custom history source manifest is invalid",
+                detail: None,
+                fields: &[
+                    Field::new("Manifest", &manifest),
+                    Field::new("Error", &failure.error),
+                ],
+                action: None,
+            },
+        ));
+    }
+    if hidden_missing_sources > 0 {
+        let text = match hidden_missing_sources {
+            1 => "1 missing provider location is hidden.".to_owned(),
+            count => format!("{count} missing provider locations are hidden."),
+        };
+        document.push_blank();
+        document.append(hint(
+            context,
+            Hint { text: &text },
+            Some(Action {
+                command: "ctx sources --all",
+            }),
+        ));
+    }
+    document
+}
+
+fn render_discovery_issue(context: &RenderContext, issue: &DiscoveryIssue) -> Document {
+    let provider = source_provider_cli_name(issue.provider);
+    let (summary, detail) = match issue.kind {
+        DiscoveryIssueKind::NoDiskHistory => (
+            format!("{provider} has no disk history selected"),
+            issue.reason,
+        ),
+        DiscoveryIssueKind::SelectorUnreconstructible => (
+            format!("{provider} history location could not be selected safely"),
+            issue.reason,
+        ),
+        DiscoveryIssueKind::InsufficientOfficialEvidence => (
+            format!("{provider} has no established automatic history location"),
+            issue.reason,
+        ),
+    };
+    let command = manual_path_guidance(issue.provider);
+    diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Warning,
+            summary: &summary,
+            detail: Some(detail),
+            fields: &[],
+            action: Some(Action { command: &command }),
+        },
+    )
 }
 
 pub(crate) fn source_visible_by_default(source: &SourceInfo) -> bool {
@@ -189,4 +300,103 @@ pub(crate) fn source_visible_by_default(source: &SourceInfo) -> bool {
 
 pub(crate) fn source_provider_cli_name(provider: CaptureProvider) -> &'static str {
     provider_cli_name(provider)
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use std::{io::Write as _, path::PathBuf};
+
+    use ctx_history_capture::{
+        ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    };
+    use unicode_width::UnicodeWidthStr as _;
+
+    use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    fn context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn assert_fits(document: &Document, context: &RenderContext) {
+        let width = context.content_width().unwrap_or(1);
+        for line in document.render_plain().lines() {
+            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+        }
+    }
+
+    fn strip_ansi(rendered: &str) -> String {
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream.write_all(rendered.as_bytes()).unwrap();
+        String::from_utf8(stream.into_inner()).unwrap()
+    }
+
+    fn source(status: ProviderSourceStatus, path: &str) -> ProviderSource {
+        ProviderSource {
+            provider: CaptureProvider::Codex,
+            path: PathBuf::from(path),
+            exists: status != ProviderSourceStatus::Missing,
+            source_format: "codex_session_jsonl_tree",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::Native,
+            status,
+            unsupported_reason: None,
+        }
+    }
+
+    #[test]
+    fn sources_success_is_outcome_first_and_responsive() {
+        let sources = vec![source(
+            ProviderSourceStatus::Available,
+            "/tmp/history with spaces/and/a/long/location",
+        )];
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_sources_human(&context, &sources, &[], &[], &[], 2);
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("✓ 1 history source is ready\n"));
+            assert!(rendered.contains("Locations\n"));
+            assert!(rendered.contains("/tmp/history"));
+            assert!(rendered.contains("spaces/and/a/long/location"));
+            assert!(rendered.contains("ctx sources --all"));
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn sources_empty_state_is_actionable() {
+        let context = context(48, ColorMode::Never);
+        let rendered = render_sources_human(&context, &[], &[], &[], &[], 0).render_plain();
+        assert!(rendered.starts_with("No history sources found\n"));
+        assert!(rendered.contains("Next\n  ctx sources --all\n"));
+    }
+
+    #[test]
+    fn sources_issue_is_safe_and_actionable() {
+        let issue = DiscoveryIssue {
+            provider: CaptureProvider::Codex,
+            path: None,
+            kind: DiscoveryIssueKind::SelectorUnreconstructible,
+            reason: "selector contained \u{1b}[31mcontrol",
+        };
+        let context = context(48, ColorMode::Never);
+        let document = render_sources_human(&context, &[], &[issue], &[], &[], 0);
+        let rendered = document.render_plain();
+        assert!(rendered.contains("\\x1b[31mcontrol"));
+        assert!(rendered.contains("ctx import --provider codex --path <path>"));
+        assert!(!rendered.as_bytes().contains(&0x1b));
+        assert_fits(&document, &context);
+    }
+
+    #[test]
+    fn sources_plain_output_matches_ansi_stripped_output() {
+        let sources = vec![source(ProviderSourceStatus::Available, "/tmp/codex")];
+        let context = context(80, ColorMode::Always);
+        let document = render_sources_human(&context, &sources, &[], &[], &[], 0);
+        assert_eq!(
+            strip_ansi(&document.render(&context)),
+            document.render_plain()
+        );
+    }
 }

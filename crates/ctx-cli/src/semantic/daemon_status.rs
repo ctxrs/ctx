@@ -1,5 +1,13 @@
 use serde_json::Value;
 
+mod render;
+
+#[allow(unused_imports)]
+pub(super) use render::{
+    render_daemon_disable_receipt, render_daemon_enable_receipt,
+    render_daemon_prepare_uninstall_receipt, render_daemon_status_human, DaemonStatusView,
+};
+
 pub(super) fn print_daemon_status_human(daemon: &Value) {
     println!(
         "daemon_enabled: {}",
@@ -247,3 +255,7 @@ pub(super) fn daemon_report_failure_message(report: &Value) -> Option<String> {
     })
     .or_else(|| Some("one or more daemon jobs failed".to_owned()))
 }
+
+#[cfg(test)]
+#[path = "daemon_status/tests.rs"]
+mod tests;
