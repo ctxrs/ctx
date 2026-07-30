@@ -19,6 +19,10 @@ go_sdk.download(
             "go1.22.12.darwin-arm64.tar.gz",
             "416c35218edb9d20990b5d8fc87be655d8b39926f15524ea35c66ee70273050d",
         ],
+        "freebsd_amd64": [
+            "go1.22.12.freebsd-amd64.tar.gz",
+            "a8c77e76859db3e6f3322cbe11deea5faf779e374f45df7554d2cb484ffa492a",
+        ],
         "linux_amd64": [
             "go1.22.12.linux-amd64.tar.gz",
             "4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43",
