@@ -59,7 +59,7 @@ const OPENHANDS_SOURCE_SCHEMA_VARIANT: &str = "openhands-v1-conversation-tree-v1
 const OPENHANDS_SOURCE_REVISION_KIND: &str = "openhands-v1-conversation-leaves-v2";
 const OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE: &str = "openhands.v1-selected-tree";
 const OPENHANDS_INVENTORY_REVISION_KIND: &str = "openhands-v1-event-file-inventory-v2";
-const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v1";
+const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v2";
 const OPENHANDS_OBJECT_COORDINATE_KIND: &str = "openhands-event-object-v1";
 const OPENHANDS_LEAF_REVISION_DOMAIN: &[u8] = b"ctx.openhands.leaf-revision.v1\0";
 const OPENHANDS_CONVERSATION_CONTENT_DOMAIN: &[u8] = b"ctx.openhands.conversation-content.v1\0";
@@ -482,7 +482,9 @@ fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
     let event_type = decoded.event_type();
     let text = if matches!(
         event_type,
-        ctx_history_core::EventType::ToolOutput | ctx_history_core::EventType::CommandOutput
+        ctx_history_core::EventType::ToolOutput
+            | ctx_history_core::EventType::CommandOutput
+            | ctx_history_core::EventType::FileTouched
     ) {
         let outcome = openhands_output_outcome(decoded);
         if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
@@ -507,7 +509,14 @@ fn openhands_output_outcome(decoded: &OpenHandsDecodedEvent) -> OutputOutcome {
     if openhands_value_indicates_timeout(decoded.value()) {
         return OutputOutcome::Timeout;
     }
-    match provider_result_outcome_evidence(decoded.event_type(), decoded.value()).as_str() {
+    // File-editor observations are result records even though their structured
+    // path evidence gives them the more specific FileTouched event type.
+    let result_event_type = if decoded.event_type() == ctx_history_core::EventType::FileTouched {
+        ctx_history_core::EventType::ToolOutput
+    } else {
+        decoded.event_type()
+    };
+    match provider_result_outcome_evidence(result_event_type, decoded.value()).as_str() {
         Some("success") => OutputOutcome::Success,
         Some("failure") => OutputOutcome::Failure,
         _ => OutputOutcome::Unknown,
