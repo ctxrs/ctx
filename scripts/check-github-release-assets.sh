@@ -5,7 +5,7 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/check-github-release-assets.sh TAG [REPO]
 
-Checks that a published GitHub Release has the expected ctx binary assets and
+Checks that a published GitHub Release has the complete expected ctx assets and
 that SHA256SUMS verifies them. REPO defaults to ctxrs/ctx.
 USAGE
 }
@@ -41,10 +41,20 @@ sha256_check() {
 
 expected_assets=(
   ctx-freebsd-x64
+  ctx-freebsd-x64.cdx.json
+  ctx-freebsd-x64.third-party-notices.txt
   ctx-linux-aarch64
+  ctx-linux-aarch64.cdx.json
+  ctx-linux-aarch64.third-party-notices.txt
   ctx-linux-x64
+  ctx-linux-x64.cdx.json
+  ctx-linux-x64.third-party-notices.txt
   ctx-macos-arm64
+  ctx-macos-arm64.cdx.json
+  ctx-macos-arm64.third-party-notices.txt
   ctx-macos-x64
+  ctx-macos-x64.cdx.json
+  ctx-macos-x64.third-party-notices.txt
   ctx-onnxruntime-freebsd-x64.tar.gz
   ctx-onnxruntime-linux-aarch64.tar.gz
   ctx-onnxruntime-linux-x64.tar.gz
@@ -52,6 +62,8 @@ expected_assets=(
   ctx-onnxruntime-macos-x64.tar.gz
   ctx-onnxruntime-windows-x64.zip
   ctx-windows-x64.exe
+  ctx-windows-x64.exe.cdx.json
+  ctx-windows-x64.exe.third-party-notices.txt
   SHA256SUMS
 )
 
