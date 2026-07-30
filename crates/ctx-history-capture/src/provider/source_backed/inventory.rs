@@ -1,4 +1,58 @@
 use super::*;
+use ctx_history_core::SourceInventoryObservation;
+use sha2::{Digest, Sha256};
+use std::fmt;
+
+/// Certifies the complete source membership produced by one provider route.
+///
+/// The authority and revision labels are persisted generation identity. Keep
+/// them stable even though certification is no longer owned by the captured
+/// route observation layer.
+pub(crate) fn certify_source_inventory(
+    route: &ProviderSource,
+    certificates: &[CertifiedSource],
+) -> SourceBackedRouteResult<CertifiedSourceInventory> {
+    let path = route.path.as_os_str().as_encoded_bytes();
+    let mut authority = Sha256::new();
+    authority.update(b"ctx.captured-route-authority\0");
+    authority.update((route.provider.as_str().len() as u64).to_be_bytes());
+    authority.update(route.provider.as_str().as_bytes());
+    authority.update((route.source_format.len() as u64).to_be_bytes());
+    authority.update(route.source_format.as_bytes());
+    authority.update((path.len() as u64).to_be_bytes());
+    authority.update(path);
+
+    let mut sources = certificates
+        .iter()
+        .map(|certificate| certificate.observation().source().clone())
+        .collect::<Vec<_>>();
+    sources.sort_by_key(SourceKey::exact_descriptor_digest);
+    let mut revision = Sha256::new();
+    revision.update(b"ctx.captured-route-inventory\0");
+    revision.update((sources.len() as u64).to_be_bytes());
+    for source in &sources {
+        revision.update(source.exact_descriptor_digest());
+    }
+    let observation = SourceInventoryObservation::new(
+        route.provider.as_str(),
+        "ctx.captured-route",
+        TypedKey::bytes(authority.finalize().to_vec()).map_err(source_inventory_contract)?,
+        "ctx-captured-route-source-set-v1",
+        revision.finalize().to_vec(),
+    )
+    .map_err(source_inventory_contract)?;
+    CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        "ctx-captured-route-inventory-v1",
+        sources,
+    )
+    .map_err(source_inventory_contract)
+}
+
+fn source_inventory_contract(error: impl fmt::Display) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
+}
 
 /// Whether a route was selected by provider discovery or supplied manually.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -562,6 +616,8 @@ fn registry_inventory_oracle() -> String {
 #[cfg(test)]
 mod oracle_tests {
     use super::*;
+    use ctx_history_core::SourceObservation;
+    use std::path::PathBuf;
 
     const BASELINE_REGISTRY_INVENTORY: &str = "\
 Custom|ctx_history_jsonl_v1|ctx_history_jsonl_v1|false|true|CatalogLineage|Full|none|none|CatalogLineage
@@ -629,5 +685,86 @@ MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|Full|none|no
             41
         );
         assert_eq!(registry_inventory_oracle(), BASELINE_REGISTRY_INVENTORY);
+    }
+
+    #[test]
+    fn neutral_inventory_certification_preserves_route_inventory_identity() {
+        let route = fixture_inventory_route("/fixture/.codex/history.jsonl");
+        let first = fixture_inventory_certificate(1);
+        let second = fixture_inventory_certificate(2);
+
+        let forward = certify_source_inventory(&route, &[first.clone(), second.clone()]).unwrap();
+        let reversed = certify_source_inventory(&route, &[second.clone(), first.clone()]).unwrap();
+
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward.observation().provider(),
+            CaptureProvider::Codex.as_str()
+        );
+        assert_eq!(
+            forward.observation().authority_namespace(),
+            "ctx.captured-route"
+        );
+        assert_eq!(
+            forward.observation().revision_kind(),
+            "ctx-captured-route-source-set-v1"
+        );
+        assert_eq!(
+            forward.discovery_revision(),
+            "ctx-captured-route-inventory-v1"
+        );
+        assert_eq!(forward.observed_sources(), 2);
+        assert!(forward.contains(first.observation().source()));
+        assert!(forward.contains(second.observation().source()));
+
+        let other_route = fixture_inventory_route("/fixture/.codex/other-history.jsonl");
+        assert_ne!(
+            certify_source_inventory(&other_route, &[first.clone(), second]).unwrap(),
+            forward
+        );
+
+        let duplicate = certify_source_inventory(&route, &[first.clone(), first]).unwrap_err();
+        assert_eq!(duplicate.kind, SourceBackedRouteErrorKind::Internal);
+    }
+
+    fn fixture_inventory_route(path: &str) -> ProviderSource {
+        ProviderSource {
+            provider: CaptureProvider::Codex,
+            path: PathBuf::from(path),
+            exists: true,
+            source_format: "codex_history_jsonl",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: crate::ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        }
+    }
+
+    fn fixture_inventory_certificate(lineage: u8) -> CertifiedSource {
+        let source = SourceKey::derive(
+            CaptureProvider::Codex.as_str(),
+            "codex_history_jsonl",
+            "inventory-certification-test-v1",
+            1,
+            SourceAnchor::CatalogLineage([lineage; 32]),
+        )
+        .unwrap();
+        let observation =
+            SourceObservation::new(source, "fixture-revision", vec![lineage]).unwrap();
+        CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            "inventory-certification-test-v1",
+            [lineage; 32],
+            ScannedSourceCounts {
+                complete_records: 1,
+                retained_records: 1,
+                indexed_documents: 1,
+                certified_bytes: 1,
+                ..ScannedSourceCounts::default()
+            },
+        )
+        .unwrap()
     }
 }

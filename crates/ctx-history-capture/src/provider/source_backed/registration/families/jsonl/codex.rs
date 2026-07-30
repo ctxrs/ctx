@@ -353,10 +353,8 @@ pub fn register_codex_prompt_history_source_backed_route(
         let scan =
             scan_codex_prompt_history_source_backed_v0(terminal_source.clone(), None, |_| Ok(()))
                 .map_err(route_error)?;
-        let inventory = certify_captured_route_inventory(
-            &terminal_route,
-            std::slice::from_ref(&scan.certificate),
-        )?;
+        let inventory =
+            certify_source_inventory(&terminal_route, std::slice::from_ref(&scan.certificate))?;
         Ok((scan.certificate, inventory))
     });
     let source_terminal_capture = Arc::clone(&terminal_capture);
@@ -406,8 +404,7 @@ pub fn register_codex_prompt_history_source_backed_route(
                 }
                 sink.certify_source(scan.certificate.clone())
                     .map_err(route_coordinator_error)?;
-                let inventory =
-                    certify_captured_route_inventory(&capture_route, &[scan.certificate])?;
+                let inventory = certify_source_inventory(&capture_route, &[scan.certificate])?;
                 sink.certify_complete_inventory(inventory)
                     .map_err(route_coordinator_error)?;
                 return Ok(());
@@ -523,7 +520,7 @@ pub fn register_codex_prompt_history_source_backed_route(
                     ));
                 }
             };
-            let inventory = certify_captured_route_inventory(&capture_route, &[certificate])?;
+            let inventory = certify_source_inventory(&capture_route, &[certificate])?;
             sink.certify_complete_inventory(inventory)
                 .map_err(route_coordinator_error)
         },
