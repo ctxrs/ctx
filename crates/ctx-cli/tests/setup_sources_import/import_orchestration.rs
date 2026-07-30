@@ -1,6 +1,6 @@
 use super::{
-    assert_daemon_process_running, support::*, wait_for_daemon_status,
-    write_active_daemon_upgrade_handoff, write_codex_setup_session,
+    assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
+    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
 use rusqlite::OpenFlags;
 use std::{
@@ -124,7 +124,7 @@ fn published_generation(report: &Value) -> String {
 }
 
 #[test]
-fn import_accepts_deprecated_partial_as_a_compatibility_noop() {
+fn deprecated_partial_remains_a_noop_without_bypassing_daemon_only_writes() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
     let source_root = temp.path().join(".codex").join("sessions");
@@ -143,10 +143,14 @@ fn import_accepts_deprecated_partial_as_a_compatibility_noop() {
             "none",
         ])
         .assert()
-        .success()
+        .failure()
         .stderr(predicate::str::contains(
             "warning: --partial is deprecated and no longer changes import behavior; tolerant import is now unconditional",
+        ))
+        .stderr(predicate::str::contains(
+            "no foreground writer was started",
         ));
+    assert_no_daemon_autostart_mutation(&temp);
 }
 
 #[test]
@@ -440,8 +444,10 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
     let native_status = wait_for_relational_projection(&native, &native_generation);
     assert_eq!(native_status["lexical"]["indexed_documents"], 1);
     assert_eq!(native_status["relational"]["event_count"], 1);
-    assert!(native.path().join("search/lexical/meta.json").is_file());
-    assert!(native.path().join("relational.sqlite").is_file());
+    assert!(data_root(&native)
+        .join("search/lexical/meta.json")
+        .is_file());
+    assert!(data_root(&native).join("relational.sqlite").is_file());
     let native_search = json_output(ctx(&native).args([
         "search",
         "one event must publish",
@@ -530,8 +536,10 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
     let explicit_status = wait_for_relational_projection(&explicit, &explicit_generation);
     assert_eq!(explicit_status["lexical"]["indexed_documents"], 1);
     assert_eq!(explicit_status["relational"]["event_count"], 1);
-    assert!(explicit.path().join("search/lexical/meta.json").is_file());
-    assert!(explicit.path().join("relational.sqlite").is_file());
+    assert!(data_root(&explicit)
+        .join("search/lexical/meta.json")
+        .is_file());
+    assert!(data_root(&explicit).join("relational.sqlite").is_file());
     let explicit_search = json_output(ctx(&explicit).args([
         "search",
         "explicit one event",

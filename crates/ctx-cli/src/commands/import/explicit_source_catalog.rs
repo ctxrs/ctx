@@ -1,10 +1,9 @@
 mod storage;
 
 use std::{
-    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -15,7 +14,7 @@ use ctx_history_capture::{
     register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
     register_nanoclaw_source_backed_route, register_warp_source_backed_route,
     source_backed_route_constructor, source_backed_route_inventory,
-    validate_provider_source_roots_outside_data_root, ProviderCatalogSupport,
+    validate_provider_source_roots_outside_data_root, DiscoveryReport, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
     SourceBackedAutomaticRegistryBuild, SourceBackedHydrationSupport, SourceBackedProviderRegistry,
     SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
@@ -37,9 +36,9 @@ use uuid::Uuid;
 use crate::{provider_args::ImportFormatArg, ImportArgs};
 
 use storage::{
-    authority_for, catalog_root, decode_digest, encode_hex, load_catalog, load_catalog_unlocked,
-    open_catalog_lock, random_catalog_lineage, sort_and_validate_entries, validate_approved_path,
-    write_catalog_snapshot,
+    authority_for, catalog_root, decode_digest, encode_hex, load_catalog,
+    load_catalog_for_authority, load_catalog_unlocked, open_catalog_lock, random_catalog_lineage,
+    sort_and_validate_entries, validate_approved_path, write_catalog_snapshot,
 };
 
 #[cfg(test)]
@@ -87,6 +86,31 @@ impl ExplicitSourceCatalogAuthority {
                 "digest": self.integrity_hex(),
             },
         })
+    }
+
+    pub(crate) fn validate_source_roots(&self, data_root: &Path) -> Result<()> {
+        let snapshot = load_catalog_for_authority(data_root, self)?;
+        validate_explicit_source_catalog_snapshot_roots(data_root, &snapshot)
+    }
+
+    pub(crate) fn remove_shadowed_automatic_routes(
+        &self,
+        data_root: &Path,
+        report: &mut DiscoveryReport,
+    ) -> Result<()> {
+        let snapshot = load_catalog_for_authority(data_root, self)?;
+        remove_automatic_routes_shadowed_by_snapshot(report, &snapshot);
+        Ok(())
+    }
+
+    pub(crate) fn register_routes(
+        &self,
+        data_root: &Path,
+        index_root: &Path,
+        build: &mut SourceBackedAutomaticRegistryBuild,
+    ) -> Result<()> {
+        let snapshot = load_catalog_for_authority(data_root, self)?;
+        register_explicit_source_catalog_snapshot_routes(data_root, index_root, build, &snapshot)
     }
 
     pub(crate) fn from_json(value: &Value) -> Result<Self> {
@@ -246,7 +270,7 @@ pub(crate) fn upsert_explicit_source(
 ) -> Result<ExplicitSourceCatalogUpsert> {
     validate_enabled_source(source)?;
     validate_catalog_registration_support(source)?;
-    validate_provider_source_roots_outside_data_root(data_root, std::iter::once(source))?;
+    validate_explicit_source_root(data_root, source)?;
     establish_private_data_root(data_root).context("protect ctx data root for source catalog")?;
     let metadata = route_metadata(source.provider, source.source_format)?;
     let catalog_root = catalog_root(data_root);
@@ -408,11 +432,35 @@ pub(crate) fn load_explicit_source_catalog_sources(
 
 pub(crate) fn validate_explicit_source_catalog_roots(data_root: &Path) -> Result<()> {
     let snapshot = load_catalog(data_root)?;
+    validate_explicit_source_catalog_snapshot_roots(data_root, &snapshot)
+}
+
+fn validate_explicit_source_catalog_snapshot_roots(
+    data_root: &Path,
+    snapshot: &ExplicitSourceCatalogSnapshot,
+) -> Result<()> {
     for entry in snapshot.entries.iter().filter(|entry| entry.enabled) {
         let source = source_from_catalog_entry(entry, true)?;
-        validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))?;
+        validate_explicit_source_root(data_root, &source)?;
     }
     Ok(())
+}
+
+fn remove_automatic_routes_shadowed_by_snapshot(
+    report: &mut DiscoveryReport,
+    snapshot: &ExplicitSourceCatalogSnapshot,
+) {
+    report.sources.retain(|source| {
+        !snapshot.entries.iter().any(|entry| {
+            entry.enabled
+                && entry.provider().ok() == Some(source.provider)
+                && entry.path == source.path
+                && entry.certified_source_format().ok()
+                    == route_metadata(source.provider, source.source_format)
+                        .ok()
+                        .map(|metadata| metadata.certified_source_format)
+        })
+    });
 }
 
 pub(crate) fn register_explicit_source_catalog_routes(
@@ -421,42 +469,54 @@ pub(crate) fn register_explicit_source_catalog_routes(
     build: &mut SourceBackedAutomaticRegistryBuild,
 ) -> Result<ExplicitSourceCatalogAuthority> {
     let snapshot = load_catalog(data_root)?;
-    let automatic_authorities = build
-        .registry
-        .routes()
-        .filter(|route| route.selection == Some(SourceBackedRouteSelection::Automatic))
-        .map(|route| {
-            (
-                route.source.provider,
-                route.certified_source_format.to_owned(),
-            )
-        })
-        .collect::<HashSet<_>>();
+    register_explicit_source_catalog_snapshot_routes(data_root, index_root, build, &snapshot)?;
+    Ok(snapshot.authority)
+}
+
+fn register_explicit_source_catalog_snapshot_routes(
+    data_root: &Path,
+    index_root: &Path,
+    build: &mut SourceBackedAutomaticRegistryBuild,
+    snapshot: &ExplicitSourceCatalogSnapshot,
+) -> Result<()> {
     for entry in &snapshot.entries {
         let provider = entry.provider()?;
         let certified_format = entry.certified_source_format()?;
-        if automatic_authorities.contains(&(provider, certified_format.to_owned())) {
+        if build.registry.routes().any(|route| {
+            route.selection == Some(SourceBackedRouteSelection::Automatic)
+                && route.source.provider == provider
+                && route.source.path == entry.path
+                && route.certified_source_format == certified_format
+        }) {
             bail!(
-                "explicit source catalog authority {}/{} conflicts with automatic provider discovery; disable the catalog entry or remove the duplicate automatic authority",
+                "explicit source catalog authority {}/{} at {} was not removed from automatic discovery before registration",
                 provider.as_str(),
-                certified_format
+                certified_format,
+                entry.path.display()
             );
         }
     }
 
     let needs_base_sources = snapshot.entries.iter().any(|entry| !entry.enabled);
     let base_sources = if needs_base_sources && index_root.join("meta.json").is_file() {
-        VerifiedIndex::open(index_root)
-            .with_context(|| {
-                format!(
-                    "open source-backed generation for catalog reconciliation {}",
-                    index_root.display()
-                )
-            })?
+        let index = VerifiedIndex::open(index_root).with_context(|| {
+            format!(
+                "open source-backed generation for catalog reconciliation {}",
+                index_root.display()
+            )
+        })?;
+        index
             .manifest()
             .sources
             .iter()
             .map(|source| source.observation().source().clone())
+            .chain(
+                index
+                    .manifest()
+                    .removals
+                    .iter()
+                    .map(|removal| removal.source().clone()),
+            )
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -465,7 +525,7 @@ pub(crate) fn register_explicit_source_catalog_routes(
     for entry in &snapshot.entries {
         if entry.enabled {
             let source = source_from_catalog_entry(entry, true)?;
-            validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))?;
+            validate_explicit_source_root(data_root, &source)?;
             register_enabled_catalog_route(
                 data_root,
                 &mut build.registry,
@@ -489,7 +549,7 @@ pub(crate) fn register_explicit_source_catalog_routes(
             )?;
         }
     }
-    Ok(snapshot.authority)
+    Ok(())
 }
 
 fn register_enabled_catalog_route(
@@ -627,8 +687,13 @@ fn register_disabled_catalog_route(
     let revalidation_root = data_root.to_path_buf();
     let expected_authority = snapshot.authority.clone();
     let expected_lineage = lineage;
+    let inventory_revalidation_root = revalidation_root.clone();
+    let inventory_expected_authority = expected_authority.clone();
+    let inventory_expected_lineage = expected_lineage;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
+            sink.certify_complete_inventory(scan_inventory.clone())
+                .map_err(route_internal_error)?;
             for source in &scan_targets {
                 if sink.base_source(source).is_none() {
                     continue;
@@ -651,12 +716,10 @@ fn register_disabled_catalog_route(
             else {
                 return false;
             };
-            let Ok(current) = load_catalog(&revalidation_root) else {
+            let Ok(current) = load_catalog_for_authority(&revalidation_root, &expected_authority)
+            else {
                 return false;
             };
-            if current.authority != expected_authority {
-                return false;
-            }
             let Some(entry) = current
                 .entries
                 .iter()
@@ -676,7 +739,24 @@ fn register_disabled_catalog_route(
                 detail: "the explicit source was disabled by complete catalog authority".to_owned(),
             })
         },
-    );
+    )
+    .with_complete_inventory_revalidation(move |expected| {
+        let Ok(current) =
+            load_catalog_for_authority(&inventory_revalidation_root, &inventory_expected_authority)
+        else {
+            return false;
+        };
+        let Some(entry) = current
+            .entries
+            .iter()
+            .find(|entry| entry.lineage().ok() == Some(inventory_expected_lineage))
+        else {
+            return false;
+        };
+        !entry.enabled
+            && catalog_disabled_inventory(&current.authority, entry)
+                .is_ok_and(|inventory| &inventory == expected)
+    });
     let source = source_from_catalog_entry(entry, false)?;
     registry.register(SourceBackedRoute::explicit_manual(
         source,
@@ -784,6 +864,13 @@ fn validate_enabled_source(source: &ProviderSource) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_explicit_source_root(data_root: &Path, source: &ProviderSource) -> Result<()> {
+    Ok(validate_provider_source_roots_outside_data_root(
+        data_root,
+        std::iter::once(source),
+    )?)
 }
 
 fn route_metadata(

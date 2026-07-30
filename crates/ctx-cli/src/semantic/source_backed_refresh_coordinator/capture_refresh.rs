@@ -5,6 +5,7 @@ pub(super) fn execute_source_backed_refresh(
     data_root: &Path,
     request_id: &str,
     coordinator: &SourceBackedRefreshCoordinator,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
@@ -22,6 +23,7 @@ pub(super) fn execute_source_backed_refresh(
         data_root,
         index_root: &index_root,
         request_id,
+        explicit_source_catalog,
         report_progress: &report_progress,
     })
 }
@@ -45,6 +47,7 @@ where
         StdDuration,
         &Path,
         &Path,
+        Option<&ExplicitSourceCatalogAuthority>,
         &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
@@ -54,8 +57,16 @@ where
     let discovery_duration = discovery_started.elapsed();
     validate_provider_source_roots_outside_data_root(execution.data_root, report.sources.iter())
         .context("validate provider roots before source-refresh state writes")?;
-    validate_explicit_source_catalog_roots(execution.data_root)
-        .context("validate explicit provider roots before source-refresh state writes")?;
+    if let Some(authority) = execution.explicit_source_catalog {
+        authority
+            .validate_source_roots(execution.data_root)
+            .context(
+                "validate requested explicit provider roots before source-refresh state writes",
+            )?;
+    } else {
+        validate_explicit_source_catalog_roots(execution.data_root)
+            .context("validate explicit provider roots before source-refresh state writes")?;
+    }
     execution.report_progress("discovering", 0, 0, None)?;
     let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
         execution
@@ -78,30 +89,53 @@ where
         discovery_duration,
         execution.data_root,
         execution.index_root,
+        execution.explicit_source_catalog,
         &mut report_progress,
     )
 }
 
-fn refresh_all_provider_sources(
+pub(super) fn refresh_all_provider_sources(
     discovery: &DiscoveryContext,
-    report: DiscoveryReport,
+    mut report: DiscoveryReport,
     discovery_duration: StdDuration,
     data_root: &Path,
     index_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
+    if let Some(authority) = explicit_source_catalog {
+        authority.remove_shadowed_automatic_routes(data_root, &mut report)?;
+    } else {
+        load_explicit_source_catalog_authority(data_root)?
+            .remove_shadowed_automatic_routes(data_root, &mut report)?;
+    }
     let mut build =
         build_automatic_source_backed_registry_from_report(discovery, data_root, report);
     build.discovery_duration = discovery_duration;
-    register_explicit_source_catalog_routes(data_root, index_root, &mut build)?;
-    let (executor, issues) = build.into_refresh_executor(WriterOptions::default());
-    let retained_sources = open_published_generation(data_root)?
+    if let Some(authority) = explicit_source_catalog {
+        authority.register_routes(data_root, index_root, &mut build)?;
+    } else {
+        register_explicit_source_catalog_routes(data_root, index_root, &mut build)?;
+    }
+    let retained_generation = open_published_generation(data_root)?;
+    let retained_sources = retained_generation
+        .as_ref()
         .map(|index| index.manifest().sources.clone())
         .unwrap_or_default();
-    reject_blocking_automatic_registry_issues(&issues, &retained_sources)?;
-    reject_unowned_retained_source_families(executor.registry(), &retained_sources)?;
+    reject_blocking_automatic_registry_issues(&build.issues, &retained_sources)?;
+    reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
+    if build.registry.executable_route_count() == 0 {
+        return refresh_without_executable_routes(
+            &build.registry,
+            index_root,
+            retained_generation.as_ref(),
+            discovery_duration,
+            report_progress,
+        );
+    }
+    let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let resolver = Arc::new(executor.registry().resolver_registry());
     let receipt = executor
         .refresh(index_root, report_progress)
@@ -142,6 +176,72 @@ fn refresh_all_provider_sources(
             discovery_us: nonzero_duration_micros(receipt.discovery_duration),
             scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
             commit_us: nonzero_duration_micros(receipt.commit_duration),
+        },
+    })
+}
+
+fn refresh_without_executable_routes(
+    registry: &SourceBackedProviderRegistry,
+    index_root: &Path,
+    retained_generation: Option<&VerifiedIndex>,
+    discovery_duration: StdDuration,
+    report_progress: &mut dyn FnMut(
+        CaptureSourceBackedRefreshProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> Result<SourceBackedRefreshPublication> {
+    if let Some(retained) = retained_generation {
+        if !retained.manifest().sources.is_empty() || !retained.manifest().removals.is_empty() {
+            bail!(
+                "{TERMINAL_COVERAGE_ERROR_CODE}: no executable source-backed route can revalidate the retained source or removal authority"
+            );
+        }
+    }
+
+    let commit_started = StdInstant::now();
+    let generation = if let Some(retained) = retained_generation {
+        retained.generation_id().to_owned()
+    } else {
+        ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default())?
+            .commit(|_| false)?
+            .generation_id
+    };
+    let verified = VerifiedIndex::open(index_root)
+        .context("verify empty source-backed generation publication")?;
+    if verified.generation_id() != generation
+        || !verified.manifest().sources.is_empty()
+        || !verified.manifest().removals.is_empty()
+    {
+        bail!("empty source-backed publication did not verify as an empty generation");
+    }
+    let commit_duration = commit_started.elapsed();
+    report_progress(CaptureSourceBackedRefreshProgress {
+        phase: "committed",
+        completed_sources: 0,
+        total_sources: 0,
+        current_source: None,
+        stage_duration: commit_duration,
+        elapsed: discovery_duration.saturating_add(commit_duration),
+        certified_source_count: Some(0),
+        certified_source_bytes: Some(0),
+    })
+    .map_err(|error| anyhow!("report empty source-backed publication progress: {error}"))?;
+
+    let resolver = Arc::new(registry.resolver_registry());
+    let source_manifest = SourceManifest::new(generation.clone(), Vec::new(), Vec::new())
+        .map_err(|error| anyhow!("build empty Pro source manifest: {}", error.message))?;
+    Ok(SourceBackedRefreshPublication {
+        generation_id: generation,
+        source_manifest: Some(source_manifest),
+        resolver: Some(resolver),
+        scanned_routes: 0,
+        unsupported_routes: registry.unsupported_route_count(),
+        certified_source_count: 0,
+        certified_source_bytes: 0,
+        current: SourceBackedRefreshCurrent::default(),
+        timings: SourceBackedRefreshTimings {
+            discovery_us: nonzero_duration_micros(discovery_duration),
+            scan_stage_us: 1,
+            commit_us: nonzero_duration_micros(commit_duration),
         },
     })
 }

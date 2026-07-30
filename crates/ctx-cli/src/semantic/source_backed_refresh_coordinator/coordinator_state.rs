@@ -44,6 +44,7 @@ pub(crate) struct SourceBackedRefreshExecution<'a> {
     pub(crate) data_root: &'a Path,
     pub(crate) index_root: &'a Path,
     pub(crate) request_id: &'a str,
+    pub(crate) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     pub(super) report_progress: &'a dyn Fn(SourceBackedRefreshProgressUpdate) -> Result<()>,
 }
 
@@ -287,6 +288,7 @@ impl SourceBackedRefreshTimings {
 
 pub(super) struct SourceBackedRefreshCoordinatorState {
     active_request_id: Option<String>,
+    pending_request_ids: VecDeque<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
     published_resolvers: HashMap<String, RetainedGenerationResolver>,
     current_published_generation: Option<String>,
@@ -390,6 +392,7 @@ impl SourceBackedRefreshCoordinator {
         Self {
             state: Mutex::new(SourceBackedRefreshCoordinatorState {
                 active_request_id: None,
+                pending_request_ids: VecDeque::new(),
                 attempts: VecDeque::new(),
                 published_resolvers: HashMap::new(),
                 current_published_generation: None,
@@ -405,6 +408,9 @@ impl SourceBackedRefreshCoordinator {
             .as_deref()
             .and_then(|request_id| find_attempt(&state, request_id))
             .is_some_and(|attempt| attempt.state.is_active())
+            || state.pending_request_ids.iter().any(|request_id| {
+                find_attempt(&state, request_id).is_some_and(|attempt| attempt.state.is_active())
+            })
     }
 
     pub(in crate::semantic) fn retained_published_generation(
@@ -537,25 +543,14 @@ impl SourceBackedRefreshCoordinator {
         let executor = Arc::clone(&self.executor);
         self.run_next_with(
             |request_id, coordinator| {
-                let requested_catalog =
-                    coordinator.requested_explicit_source_catalog(request_id);
+                let requested_catalog = coordinator.requested_explicit_source_catalog(request_id);
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
                     data_root,
                     request_id,
                     coordinator,
+                    requested_catalog.as_ref(),
                 )?;
-                if let Some(expected) = requested_catalog {
-                    let published = load_explicit_source_catalog_authority(data_root)
-                        .context("verify published explicit source catalog authority")?;
-                    if published != expected {
-                        bail!(
-                            "source-backed refresh published for explicit source catalog {:?}, not the requested authority {:?}",
-                            published,
-                            expected
-                        );
-                    }
-                }
                 Ok(publication)
             },
             || published_generation_id(data_root),
@@ -606,27 +601,43 @@ impl SourceBackedRefreshCoordinator {
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
                 if active.state.is_active() {
-                    if let Some(requested_catalog) = requested_catalog {
-                        if active.requested_explicit_source_catalog.is_none()
-                            && active.state == SourceBackedRefreshState::Queued
-                        {
-                            active.requested_explicit_source_catalog = Some(requested_catalog);
-                        } else if active.requested_explicit_source_catalog.as_ref()
-                            != Some(&requested_catalog)
-                        {
-                            bail!(
-                                "daemon source refresh request {} is already active for a different explicit source catalog authority; retry after it publishes",
-                                active.request_id
-                            );
-                        }
-                        if metadata.trigger == "import" {
-                            active.trigger = metadata.trigger;
-                            active.trigger_provenance = metadata.trigger_provenance;
-                        }
+                    if requested_catalog.is_none() {
+                        return Ok(coalesce_attempt(active, metadata));
                     }
-                    active.coalesced_requests = active.coalesced_requests.saturating_add(1);
-                    return Ok(active.to_json());
+                    if let Some(requested_catalog) = requested_catalog.as_ref() {
+                        let upgrades_queued_automatic =
+                            active.requested_explicit_source_catalog.is_none()
+                                && active.state == SourceBackedRefreshState::Queued;
+                        if upgrades_queued_automatic {
+                            active.requested_explicit_source_catalog =
+                                Some(requested_catalog.clone());
+                        }
+                        if active.requested_explicit_source_catalog.as_ref()
+                            == Some(requested_catalog)
+                        {
+                            return Ok(coalesce_attempt(active, metadata));
+                        }
+                        // A running refresh is immutable. Preserve both catalog
+                        // authorities by serializing the newer one as a successor.
+                    }
                 }
+            }
+        }
+
+        if let Some(requested_catalog) = requested_catalog.as_ref() {
+            let coalesced_request_id = state.pending_request_ids.iter().find_map(|request_id| {
+                find_attempt(&state, request_id)
+                    .filter(|attempt| {
+                        attempt.state.is_active()
+                            && attempt.requested_explicit_source_catalog.as_ref()
+                                == Some(requested_catalog)
+                    })
+                    .map(|attempt| attempt.request_id.clone())
+            });
+            if let Some(coalesced_request_id) = coalesced_request_id {
+                let attempt = find_attempt_mut(&mut state, &coalesced_request_id)
+                    .expect("pending source refresh attempt");
+                return Ok(coalesce_attempt(attempt, metadata));
             }
         }
 
@@ -655,7 +666,18 @@ impl SourceBackedRefreshCoordinator {
             post_publication_error: None,
         };
         let response = attempt.to_json();
-        state.active_request_id = Some(attempt.request_id.clone());
+        if state
+            .active_request_id
+            .as_deref()
+            .and_then(|request_id| find_attempt(&state, request_id))
+            .is_some_and(|attempt| attempt.state.is_active())
+        {
+            state
+                .pending_request_ids
+                .push_back(attempt.request_id.clone());
+        } else {
+            state.active_request_id = Some(attempt.request_id.clone());
+        }
         state.attempts.push_back(attempt);
         trim_attempt_history(&mut state);
         Ok(response)
@@ -834,7 +856,15 @@ impl SourceBackedRefreshCoordinator {
             state.install_resolver(resolver);
         }
         if state.active_request_id.as_deref() == Some(request_id.as_str()) {
-            state.active_request_id = None;
+            state.active_request_id = state.pending_request_ids.pop_front();
+            if let Some(next_request_id) = state.active_request_id.clone() {
+                if let Some(next_attempt) = find_attempt_mut(&mut state, &next_request_id) {
+                    if observed_for_status.is_some() {
+                        next_attempt.previous_generation = observed_for_status.clone();
+                        next_attempt.published_generation = observed_for_status.clone();
+                    }
+                }
+            }
         }
         drop(state);
 
@@ -965,6 +995,18 @@ fn find_attempt_mut<'a>(
         .attempts
         .iter_mut()
         .find(|attempt| attempt.request_id == request_id)
+}
+
+fn coalesce_attempt(
+    attempt: &mut SourceBackedRefreshAttempt,
+    metadata: SourceRefreshRuntimeMetadata,
+) -> Value {
+    if metadata.trigger == "import" {
+        attempt.trigger = metadata.trigger;
+        attempt.trigger_provenance = metadata.trigger_provenance;
+    }
+    attempt.coalesced_requests = attempt.coalesced_requests.saturating_add(1);
+    attempt.to_json()
 }
 
 fn trim_attempt_history(state: &mut SourceBackedRefreshCoordinatorState) {

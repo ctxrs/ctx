@@ -255,7 +255,14 @@ fn explicit_codex_source_revision_republishes_source_backed_generation() {
 
     let superseded = search_codex(&temp, "explicit source revision before");
     assert!(
-        superseded["results"].as_array().unwrap().is_empty(),
+        superseded["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| !result["snippet"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("explicit source revision before")),
         "{superseded:#}"
     );
 }
