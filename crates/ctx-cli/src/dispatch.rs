@@ -38,7 +38,9 @@ use crate::{
     integrations, local_usage, mcp,
     output::{JsonOutputFormat, OutputFormat, SqlFormat},
     pro, semantic,
-    ui::{outcome, Outcome, OutcomeState, Ui},
+    ui::{
+        outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Outcome, OutcomeState, Ui,
+    },
     upgrade,
 };
 
@@ -92,10 +94,25 @@ pub(crate) fn run() -> ExitCode {
             ExitCode::FAILURE
         }
         Err(error) => {
-            eprintln!("Error: {error:?}");
+            if render_unhandled_command_error(&error).is_err() {
+                eprintln!("Error: {error:?}");
+            }
             ExitCode::FAILURE
         }
     }
+}
+
+fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let machine_output = scan_machine_output_hint(&arguments);
+    let mode = if machine_output {
+        ColorMode::Never
+    } else {
+        scan_color_mode(arguments).unwrap_or(ColorMode::Auto)
+    };
+    let mut ui = Ui::stdio(mode);
+    render_generic_command_error(error, machine_output, &mut ui, &mut io::stderr().lock())?;
+    ui.flush().context("flush pre-dispatch error")
 }
 
 pub(crate) fn run_cli() -> Result<()> {
@@ -386,12 +403,18 @@ fn render_generic_command_error(
         return Ok(());
     }
     let message = error.to_string();
+    let detail = error
+        .chain()
+        .skip(1)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
     let document = outcome(
         ui.stderr_context(),
         Outcome {
             state: OutcomeState::Error,
             title: &message,
-            detail: None,
+            detail: (!detail.is_empty()).then_some(detail.as_str()),
         },
     );
     ui.write_stderr(&document)?;
@@ -450,10 +473,12 @@ fn command_machine_readable_output(command: &CommandRoot, json_output: bool) -> 
         CommandRoot::Show(args) => {
             matches!(
                 &args.target,
-                ShowTarget::Session(args) if args.format == OutputFormat::Jsonl
+                ShowTarget::Session(args)
+                    if matches!(args.format, OutputFormat::Jsonl | OutputFormat::Markdown)
             ) || matches!(
                 &args.target,
-                ShowTarget::Event(args) if args.format == OutputFormat::Jsonl
+                ShowTarget::Event(args)
+                    if matches!(args.format, OutputFormat::Jsonl | OutputFormat::Markdown)
             )
         }
         CommandRoot::Sql(args) => args.output_format() != SqlFormat::Table,
@@ -619,11 +644,13 @@ mod tests {
     fn forced_color_never_decorates_generic_machine_mode_errors() {
         for args in [
             &["show", "session", "bad", "--format", "jsonl"][..],
+            &["show", "event", "bad", "--format", "markdown"][..],
             &["sql", "SELECT 1", "--format", "csv"][..],
             &["sql", "SELECT 1", "--format", "raw"][..],
             &["setup", "--progress", "json"][..],
             &["import", "--progress", "json"][..],
             &["mcp", "serve"][..],
+            &["mcp", "--quiet", "serve"][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -670,6 +697,28 @@ mod tests {
 
         assert!(machine_stderr.is_empty());
         assert!(styled_stderr_copy.bytes().contains(&0x1b));
+    }
+
+    #[test]
+    fn generic_human_errors_include_the_actionable_cause_chain() {
+        let stderr = SharedBytes::default();
+        let stderr_copy = stderr.clone();
+        let mut ui = Ui::with_writers(
+            SharedBytes::default(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never)),
+            stderr,
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never)),
+        );
+        let error = anyhow::anyhow!("No such file or directory")
+            .context("approve explicit source path /tmp/missing.jsonl");
+
+        render_generic_command_error(&error, false, &mut ui, &mut Vec::new()).unwrap();
+        ui.flush().unwrap();
+
+        let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+        assert!(rendered.contains("approve explicit source path /tmp/missing.jsonl"));
+        assert!(rendered.contains("No such file or directory"));
+        assert!(!rendered.contains("Stack backtrace"));
     }
 
     struct FlushWriter {

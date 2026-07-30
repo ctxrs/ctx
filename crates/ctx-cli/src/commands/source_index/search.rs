@@ -33,7 +33,7 @@ use super::render::{
 
 pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{index_search_filters, NormalizedSearchQuery};
-use query::{resolve_source_search_backend, validate_search_request};
+use query::{normalize_search_request, resolve_source_search_backend, validate_search_request};
 
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
@@ -88,6 +88,7 @@ pub(crate) fn run_search(
 ) -> Result<()> {
     let config = config::AppConfig::load(&data_root)?;
     let mut request = SourceSearchRequest::from(&args);
+    normalize_search_request(&mut request)?;
     let requested_backend = resolve_source_search_backend(&request, &config)?;
     request.backend = Some(requested_backend);
     request.semantic_enabled = config.semantic_search_enabled();
@@ -170,6 +171,7 @@ pub(crate) fn mcp_search(
     mut request: SourceSearchRequest,
     data_root: &Path,
 ) -> Result<(Value, SearchContextObservation)> {
+    normalize_search_request(&mut request)?;
     let config = config::AppConfig::load(data_root)?;
     request.backend = Some(resolve_source_search_backend(&request, &config)?);
     request.semantic_enabled = config.semantic_search_enabled();

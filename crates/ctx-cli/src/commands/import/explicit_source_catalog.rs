@@ -212,6 +212,14 @@ pub(crate) fn explicit_source_for_import(args: &ImportArgs) -> Result<Option<Pro
     let Some(path) = args.path.as_deref() else {
         return Ok(None);
     };
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("approve explicit source path {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "symlinked explicit provider source roots are rejected: {}",
+            path.display()
+        );
+    }
     let canonical = fs::canonicalize(path)
         .with_context(|| format!("approve explicit source path {}", path.display()))?;
     validate_approved_path(&canonical)?;

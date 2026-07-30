@@ -9,7 +9,7 @@ use std::{
 use tempfile::TempDir;
 
 use super::runner::{
-    ctx_from_binary, tempdir, test_binary_copy_path, PERSISTENT_DAEMON_TEST_ROOT_MARKER,
+    ctx_from_binary, data_root, tempdir, test_binary_copy_path, PERSISTENT_DAEMON_TEST_ROOT_MARKER,
 };
 
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,7 +69,7 @@ pub(crate) fn daemon_test_root() -> DaemonTestRoot {
 
 pub(crate) fn wait_for_test_daemon_source_refresh(temp: &TempDir) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let path = temp.path().join("daemon/jobs/core-refresh.json");
+    let path = data_root(temp).join("daemon/jobs/core-refresh.json");
     loop {
         if let Ok(bytes) = fs::read(&path) {
             let job: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
@@ -157,7 +157,7 @@ fn remove_released_test_daemon_artifacts(
     temp: &TempDir,
     expected_binary: &Path,
 ) -> Result<(), String> {
-    let path = temp.path().join("daemon/daemon.lock");
+    let path = data_root(temp).join("daemon/daemon.lock");
     if let Ok(bytes) = fs::read(&path) {
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| format!("parse released daemon lock {}: {error}", path.display()))?;
@@ -166,15 +166,15 @@ fn remove_released_test_daemon_artifacts(
                 "daemon lock is still active without an attributable live owner: {value:#}"
             ));
         }
-        let data_root = value["data_root"]
+        let recorded_data_root = value["data_root"]
             .as_str()
             .map(Path::new)
             .ok_or_else(|| format!("released daemon lock has no data root: {value:#}"))?;
-        if !same_path(data_root, temp.path()) {
+        if !same_path(recorded_data_root, &data_root(temp)) {
             return Err(format!(
                 "released daemon lock data root {} does not match test root {}",
-                data_root.display(),
-                temp.path().display()
+                recorded_data_root.display(),
+                data_root(temp).display()
             ));
         }
         let recorded_binary = value["binary"]
@@ -202,7 +202,7 @@ fn remove_released_test_daemon_artifacts(
 }
 
 fn read_daemon_identity(temp: &TempDir) -> Result<Option<DaemonIdentity>, String> {
-    let path = temp.path().join("daemon/daemon.lock");
+    let path = data_root(temp).join("daemon/daemon.lock");
     let Some(bytes) = fs::read(&path)
         .map(Some)
         .or_else(|error| {
@@ -230,15 +230,15 @@ fn read_daemon_identity(temp: &TempDir) -> Result<Option<DaemonIdentity>, String
         .filter(|owner| !owner.is_empty())
         .ok_or_else(|| format!("daemon lock has no owner identity: {value:#}"))?
         .to_owned();
-    let data_root = value["data_root"]
+    let recorded_data_root = value["data_root"]
         .as_str()
         .map(Path::new)
         .ok_or_else(|| format!("daemon lock has no data-root identity: {value:#}"))?;
-    if !same_path(data_root, temp.path()) {
+    if !same_path(recorded_data_root, &data_root(temp)) {
         return Err(format!(
             "daemon lock data root {} does not match test root {}",
-            data_root.display(),
-            temp.path().display()
+            recorded_data_root.display(),
+            data_root(temp).display()
         ));
     }
     let binary = value["binary"]
@@ -292,7 +292,7 @@ fn assert_daemon_released(temp: &TempDir, expected: &DaemonIdentity) -> Result<(
     if process_is_running(expected.pid) {
         return Err(format!("test daemon {} is still running", expected.pid));
     }
-    let path = temp.path().join("daemon/daemon.lock");
+    let path = data_root(temp).join("daemon/daemon.lock");
     if let Ok(bytes) = fs::read(&path) {
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| format!("parse released daemon lock {}: {error}", path.display()))?;
@@ -316,7 +316,7 @@ fn assert_no_endpoint_identity(temp: &TempDir) -> Result<(), String> {
         "query.sock",
         "source-refresh.sock",
     ] {
-        let path = temp.path().join("daemon").join(name);
+        let path = data_root(temp).join("daemon").join(name);
         if path.exists() {
             return Err(format!(
                 "test daemon artifact remained after teardown: {}",
@@ -336,7 +336,7 @@ fn remove_test_daemon_artifacts(temp: &TempDir) -> Result<(), String> {
         "daemon.lock",
         "daemon.guard",
     ] {
-        let path = temp.path().join("daemon").join(name);
+        let path = data_root(temp).join("daemon").join(name);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

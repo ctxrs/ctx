@@ -15,7 +15,9 @@ mod native {
 
     use serde_json::{json, Value};
 
-    use super::support::{copied_ctx_binary, ctx_from_binary, tempdir, Command, TempDir};
+    use super::support::{
+        copied_ctx_binary, ctx_from_binary, data_root, tempdir, Command, TempDir,
+    };
 
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
     const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(12);
@@ -30,14 +32,17 @@ mod native {
     struct Harness {
         temp: TempDir,
         binary: PathBuf,
+        data_root: PathBuf,
     }
 
     impl Harness {
         fn new() -> Self {
             let temp = tempdir();
             let binary = copied_ctx_binary(&temp);
+            let data_root = data_root(&temp);
+            fs::create_dir_all(&data_root).unwrap();
             fs::write(
-                temp.path().join("config.toml"),
+                data_root.join("config.toml"),
                 concat!(
                     "[analytics]\n",
                     "enabled = false\n\n",
@@ -48,10 +53,20 @@ mod native {
                 ),
             )
             .unwrap();
-            Self { temp, binary }
+            Self {
+                temp,
+                binary,
+                data_root,
+            }
         }
 
         fn root(&self) -> &Path {
+            // The daemon state root must be disjoint from provider-owned
+            // sources under the hermetic home.
+            &self.data_root
+        }
+
+        fn home(&self) -> &Path {
             self.temp.path()
         }
 
@@ -201,9 +216,7 @@ mod native {
             self.stdin.write_all(b"\n").expect("terminate MCP request");
             self.stdin.flush().expect("flush MCP request");
             let mut line = String::new();
-            self.stdout
-                .read_line(&mut line)
-                .expect("read MCP response");
+            self.stdout.read_line(&mut line).expect("read MCP response");
             assert!(!line.is_empty(), "MCP server exited without a response");
             serde_json::from_str(&line).expect("decode MCP response")
         }
@@ -236,7 +249,7 @@ mod native {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let harness = Harness::new();
         let source = write_codex_session(
-            harness.root(),
+            harness.home(),
             "persistent daemon initial generation oracle",
         );
 
@@ -321,7 +334,7 @@ mod native {
                 generation_manifest_path(harness.root(), &append_generation);
             let retained_meta = snapshot_file(&retained_meta_path);
             let retained_manifest = snapshot_file(&retained_manifest_path);
-            let sessions_root = harness.root().join(".codex/sessions");
+            let sessions_root = harness.home().join(".codex/sessions");
             let original_mode = fs::metadata(&sessions_root).unwrap().permissions().mode();
             fs::set_permissions(&sessions_root, fs::Permissions::from_mode(0)).unwrap();
             let failed_job =
@@ -331,22 +344,15 @@ mod native {
                             || job["previous_generation"] == append_generation))
                         .then_some(job)
                 });
-            fs::set_permissions(
-                &sessions_root,
-                fs::Permissions::from_mode(original_mode),
-            )
-            .unwrap();
+            fs::set_permissions(&sessions_root, fs::Permissions::from_mode(original_mode)).unwrap();
             assert_eq!(
-                failed_job["error_code"],
-                "all_provider_terminal_coverage_unavailable",
+                failed_job["error_code"], "all_provider_terminal_coverage_unavailable",
                 "{failed_job:#}"
             );
             assert!(
-                failed_job["last_error"]
-                    .as_str()
-                    .is_some_and(|error| {
-                        error.contains("no current resolver-owning route family for codex")
-                    }),
+                failed_job["last_error"].as_str().is_some_and(|error| {
+                    error.contains("no current resolver-owning route family for codex")
+                }),
                 "{failed_job:#}"
             );
             assert_eq!(
@@ -510,7 +516,7 @@ mod native {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let harness = Harness::new();
-        write_codex_session(harness.root(), "long lived mcp recovery oracle");
+        write_codex_session(harness.home(), "long lived mcp recovery oracle");
         let generation = harness.setup_wait();
         let daemon = wait_for_daemon(&harness, None);
         let daemon_pid = live_pid(&daemon);
@@ -564,15 +570,9 @@ mod native {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let harness = Harness::new();
-        write_codex_session(harness.root(), "finite idle orphan oracle");
+        write_codex_session(harness.home(), "finite idle orphan oracle");
         let child = harness.spawn(
-            &[
-                "daemon",
-                "run",
-                "--force",
-                "--idle-exit-seconds",
-                "1",
-            ],
+            &["daemon", "run", "--force", "--idle-exit-seconds", "1"],
             None,
         );
         let pid = child.id();
@@ -608,7 +608,7 @@ mod native {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let harness = Harness::new();
-        write_codex_session(harness.root(), "deleted socket shutdown oracle");
+        write_codex_session(harness.home(), "deleted socket shutdown oracle");
         let child = harness.spawn(
             &["daemon", "run", "--force", "--idle-exit-seconds", "1"],
             None,
@@ -648,7 +648,7 @@ mod native {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let harness = Harness::new();
-        write_codex_session(harness.root(), "concurrent dead daemon recovery oracle");
+        write_codex_session(harness.home(), "concurrent dead daemon recovery oracle");
         let generation = harness.setup_wait();
         let daemon = wait_for_daemon(&harness, None);
         let stale = force_unexpected_death(&harness, live_pid(&daemon));
@@ -750,7 +750,7 @@ mod native {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let harness = Harness::new();
-        write_codex_session(harness.root(), "linux daemon idle soak oracle");
+        write_codex_session(harness.home(), "linux daemon idle soak oracle");
         let generation = harness.setup_wait();
         wait_for_relational_generation(&harness, &generation);
         let daemon = wait_for_daemon(&harness, None);
