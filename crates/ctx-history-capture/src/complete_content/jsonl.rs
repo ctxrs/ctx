@@ -30,7 +30,6 @@ mod junie;
 mod mux;
 
 pub(crate) use junie::valid_junie_record_set_locator;
-pub(crate) use mux::{mux_record_locator, MUX_LOCATOR_KIND};
 
 pub const JSONL_COMPLETE_CONTENT_LOCATOR_KIND: &str = "jsonl-range-v1";
 /// Exact routes use a distinct kind because the legacy range locator deliberately

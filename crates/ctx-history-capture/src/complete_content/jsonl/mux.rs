@@ -29,6 +29,7 @@ enum MuxAddress {
 }
 
 impl MuxAddress {
+    #[cfg(test)]
     fn encode(self) -> [u8; MUX_LOCATOR_BYTES] {
         let (tag, range) = match self {
             Self::Chat(range) => (1, range),
@@ -60,24 +61,6 @@ impl MuxAddress {
             _ => None,
         }
     }
-}
-
-pub(crate) fn mux_record_locator(
-    is_partial: bool,
-    byte_start: u64,
-    byte_end_exclusive: u64,
-) -> Option<CompleteContentSourceLocator> {
-    let address = if is_partial {
-        (byte_start == 0).then_some(MuxAddress::Partial {
-            byte_len: byte_end_exclusive,
-        })?
-    } else {
-        MuxAddress::Chat(JsonlRange {
-            byte_start,
-            byte_end_exclusive,
-        })
-    };
-    CompleteContentSourceLocator::new(MUX_LOCATOR_KIND, address.encode().to_vec())
 }
 
 pub(crate) fn valid_mux_locator(value: &[u8]) -> bool {

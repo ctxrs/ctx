@@ -125,7 +125,6 @@ mod resolver;
 
 pub use discovery::*;
 pub use driver::*;
-const _: Option<&dyn driver::ProviderCaptureSink> = None;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;
