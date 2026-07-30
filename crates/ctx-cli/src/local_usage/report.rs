@@ -10,7 +10,7 @@ mod render;
 mod validation;
 
 use query::query_report;
-pub(crate) use render::{pro_conversion_action, render_human_summary};
+pub(crate) use render::pro_conversion_action;
 pub(super) use validation::{validate_rows, validate_rows_for_schema};
 
 #[derive(Debug, Clone, Serialize)]

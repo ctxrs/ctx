@@ -42,7 +42,6 @@ impl<'a> DaemonStatusView<'a> {
 
 /// Builds the human daemon status document without reading runtime state or
 /// writing to a terminal. JSON output deliberately bypasses this renderer.
-#[allow(dead_code)]
 pub(in crate::semantic) fn render_daemon_status_human(
     context: &RenderContext,
     view: DaemonStatusView<'_>,
@@ -331,7 +330,6 @@ pub(in crate::semantic) fn render_daemon_status_human(
 
 /// Builds the `ctx daemon enable` receipt from values the lifecycle operation
 /// has already established.
-#[allow(dead_code)]
 pub(in crate::semantic) fn render_daemon_enable_receipt(
     context: &RenderContext,
     running: bool,
@@ -344,7 +342,6 @@ pub(in crate::semantic) fn render_daemon_enable_receipt(
 
 /// Builds the ordinary `ctx daemon disable` receipt from the post-operation
 /// supervisor report.
-#[allow(dead_code)]
 pub(in crate::semantic) fn render_daemon_disable_receipt(
     context: &RenderContext,
     supervisor: &Value,
@@ -477,7 +474,6 @@ fn render_daemon_enabled_receipt(
 
 /// Builds the hosted-uninstaller handoff receipt without removing files or
 /// changing daemon state.
-#[allow(dead_code)]
 pub(in crate::semantic) fn render_daemon_prepare_uninstall_receipt(
     context: &RenderContext,
     report: &Value,

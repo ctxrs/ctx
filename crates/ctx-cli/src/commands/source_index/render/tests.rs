@@ -6,8 +6,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     canonical_human_output_bytes, render_locate_document, render_search_document,
-    render_search_text, render_show_document, render_show_jsonl, render_show_markdown,
-    render_show_text,
+    render_show_document, render_show_jsonl, render_show_markdown, render_show_text,
 };
 use crate::{
     cli::Cli,
@@ -425,16 +424,6 @@ fn styled_output_strips_to_plain_and_canonical_bytes_ignore_color() {
 
 #[test]
 fn compatibility_string_and_raw_format_renderers_keep_their_existing_bytes() {
-    assert_eq!(
-        render_search_text(&search_value(), false),
-        concat!(
-            "1. codex user message\n",
-            "   codex | session 0.86\n",
-            "   Fix the Unicode cache key regression in the parser.\n",
-            "   inspect: ctx show event 01900001-0000-7000-8000-000000000002 --window 10\n",
-        )
-    );
-
     let value = show_value();
     assert_eq!(
         render_show_text(&value),

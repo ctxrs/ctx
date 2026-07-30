@@ -28,15 +28,6 @@ pub(crate) use identity::{
     source_sort_key, source_token, validate_event_identity_against_base,
     validate_referenced_session_identity_against_base, validate_session_identity_against_base,
 };
-#[cfg(test)]
-pub(crate) use publication::manifest_path;
-pub(crate) use publication::{
-    classify_publication_failure, load_manifest_for_metas, meta_generation, payload_generation_id,
-    reconcile_commit_error, searcher_generation, sync_directory, verify_searcher, write_manifest,
-};
-pub(crate) use schema::{
-    fields_from_schema, lexical_schema, required_field, validate_schema, Fields,
-};
 pub use policy::{
     current_source_generation_policy, current_source_generation_policy_hash,
     EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
@@ -47,12 +38,21 @@ pub use policy::{
     SEMANTIC_EMBEDDING_CONTRACT_REVISION, SEMANTIC_EMBEDDING_DIMENSIONS, SEMANTIC_EMBEDDING_MODEL,
     SEMANTIC_EMBEDDING_MODEL_REVISION, SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
 };
+#[cfg(test)]
+pub(crate) use publication::manifest_path;
+pub(crate) use publication::{
+    classify_publication_failure, load_manifest_for_metas, meta_generation, payload_generation_id,
+    reconcile_commit_error, searcher_generation, sync_directory, verify_searcher, write_manifest,
+};
 pub use query::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
     SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor,
     SourceEventPage, MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
+pub(crate) use schema::{
+    fields_from_schema, lexical_schema, required_field, validate_schema, Fields,
+};
 
 use std::{
     collections::{HashMap, HashSet},

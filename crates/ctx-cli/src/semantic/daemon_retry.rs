@@ -156,9 +156,8 @@ impl DaemonRetryBackoff {
             .unwrap_or(1)
             .min(u64::from(u32::MAX)) as u32;
         self.retry_not_before = Some(Instant::now() + delay);
-        self.retry_not_before_at_ms = Some(
-            now_ms.saturating_add(delay.as_millis().min(i64::MAX as u128) as i64),
-        );
+        self.retry_not_before_at_ms =
+            Some(now_ms.saturating_add(delay.as_millis().min(i64::MAX as u128) as i64));
     }
 
     pub(super) fn reset(&mut self) {

@@ -35,7 +35,7 @@ mod tests {
     use super::*;
     use super::{
         locate::{locate_event_value, locate_session_value, validate_locate_target},
-        render::{render_locate_event_availability_text, render_search_text, search_json},
+        render::search_json,
         search::{
             search_context_observation_with_hydrator, NormalizedSearchQuery, SearchCollection,
             SearchHit, SearchResultWindow,
@@ -375,17 +375,6 @@ mod tests {
         let term_only = NormalizedSearchQuery::from_request(&source_request);
         assert_eq!(term_only.display(), "term-only");
         assert_eq!(term_only.shell_arguments(), "--term=term-only");
-        assert_eq!(
-            render_search_text(
-                &json!({
-                    "query": term_only.display(),
-                    "results": [],
-                }),
-                false,
-            ),
-            "no results for term-only\n"
-        );
-
         source_request.terms = vec!["--option-like".to_owned()];
         assert_eq!(
             NormalizedSearchQuery::from_request(&source_request).shell_arguments(),
@@ -699,16 +688,6 @@ mod tests {
         assert_eq!(deleted["source"]["exists"], false);
         assert_eq!(deleted["complete_content"]["locator_available"], true);
         assert_eq!(deleted["complete_content"]["available"], false);
-        let text = render_locate_event_availability_text(&deleted);
-        assert!(text.contains("source_exists: false\n"), "{text}");
-        assert!(
-            text.contains("complete_content_locator_available: true\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("complete_content_available: false\n"),
-            "{text}"
-        );
     }
 
     #[test]
@@ -1366,70 +1345,7 @@ mod tests {
 
     #[test]
     fn measured_output_byte_helpers_match_existing_renderers() {
-        let session = json!({
-            "target": "session",
-            "ctx_session_id": "session-1",
-            "provider": "codex",
-            "provider_session_id": "provider-1",
-            "source": {
-                "path": "/tmp/session.jsonl",
-                "source_format": "codex_session_jsonl",
-                "exists": true,
-            },
-            "resume": {
-                "command": "codex resume provider-1",
-            },
-        });
-        let session_text = "ctx_session_id: session-1\n\
-provider: codex\n\
-provider_session_id: provider-1\n\
-path: /tmp/session.jsonl\n\
-source_format: codex_session_jsonl\n\
-source_exists: true\n\
-resume_command: codex resume provider-1\n";
-        assert_eq!(
-            locate_session_text_output_bytes(&session),
-            session_text.len()
-        );
-
-        let event = json!({
-            "target": "event",
-            "ctx_event_id": "event-1",
-            "ctx_session_id": "session-1",
-            "provider": "codex",
-            "provider_session_id": "provider-1",
-            "event_type": "message",
-            "role": "assistant",
-            "cursor": "cursor-1",
-            "source": {
-                "path": "/tmp/session.jsonl",
-                "source_format": "codex_session_jsonl",
-                "exists": false,
-            },
-            "source_record": {
-                "ordinal": 4,
-                "subrecord_index": 2,
-            },
-            "complete_content": {
-                "locator_available": true,
-                "available": false,
-            },
-        });
-        let event_text = "ctx_event_id: event-1\n\
-ctx_session_id: session-1\n\
-provider: codex\n\
-provider_session_id: provider-1\n\
-event_type: message\n\
-role: assistant\n\
-cursor: cursor-1\n\
-path: /tmp/session.jsonl\n\
-source_record_ordinal: 4\n\
-source_record_subrecord_index: 2\n\
-source_format: codex_session_jsonl\n\
-source_exists: false\n\
-complete_content_locator_available: true\n\
-complete_content_available: false\n";
-        assert_eq!(locate_event_text_output_bytes(&event), event_text.len());
+        let event = json!({"ctx_event_id": "event-1"});
         assert_eq!(
             pretty_json_stdout_bytes(&event).unwrap(),
             serde_json::to_string_pretty(&event).unwrap().len() + 1
