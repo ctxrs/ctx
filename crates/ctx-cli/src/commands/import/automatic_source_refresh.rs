@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use ctx_history_capture::{
     discover_provider_sources, validate_provider_source_roots_outside_data_root,
-    ProviderImportWorkResult,
+    DiscoveryIssueKind, ProviderImportWorkResult, ProviderSourceStatus,
 };
 use ctx_history_core::platform_security::establish_private_data_root;
 use serde_json::json;
@@ -12,6 +12,7 @@ use crate::{
     analytics::ProviderRefreshTrigger,
     compact_json,
     progress::ProgressReporter,
+    provider_sources::{discovered_sources_for_provider_report, manual_path_guidance},
     semantic::{
         autostart_daemon_and_wait, coordinate_source_backed_refresh, SourceBackedRefreshMode,
     },
@@ -36,6 +37,7 @@ pub(super) fn run_automatic_source_refresh_import(
             "history-source plugins without a source-backed adapter are not supported in the v0.26 history epoch; import an approved provider source or explicit JSONL path"
         );
     }
+    validate_selected_provider(context.args)?;
 
     let progress = ProgressReporter::new(
         context.options.progress,
@@ -137,6 +139,47 @@ pub(super) fn run_automatic_source_refresh_import(
             },
         }))],
     })
+}
+
+fn validate_selected_provider(args: &ImportArgs) -> Result<()> {
+    let Some(provider) = args.provider.map(|provider| provider.capture_provider()) else {
+        return Ok(());
+    };
+    let report = discovered_sources_for_provider_report(provider);
+    if report.sources.iter().any(|source| {
+        source.status == ProviderSourceStatus::Available && source.import_support.is_importable()
+    }) {
+        return Ok(());
+    }
+    let provider_name = crate::provider_sources::provider_cli_name(provider);
+    let guidance = manual_path_guidance(provider);
+    if let Some(source) = report
+        .sources
+        .iter()
+        .find(|source| source.status == ProviderSourceStatus::Unsupported)
+    {
+        bail!(
+            "detected unsupported history at {}; current ctx cannot import that path for {provider_name}; use `{guidance}`",
+            source.path.display()
+        );
+    }
+    if let Some(issue) = report.issues.first() {
+        let summary = match issue.kind {
+            DiscoveryIssueKind::NoDiskHistory => {
+                format!("{provider_name} has no disk history selected")
+            }
+            DiscoveryIssueKind::SelectorUnreconstructible => {
+                format!("{provider_name} automatic history location cannot be safely reconstructed")
+            }
+            DiscoveryIssueKind::InsufficientOfficialEvidence => {
+                format!("{provider_name} has no official automatic history location established")
+            }
+        };
+        bail!("{summary}: {}; use `{guidance}`", issue.reason);
+    }
+    bail!(
+        "no importable {provider_name} history source was discovered; use `{guidance}` to select one"
+    )
 }
 
 #[cfg(test)]

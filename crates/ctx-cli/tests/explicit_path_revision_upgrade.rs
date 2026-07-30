@@ -150,10 +150,25 @@ fn explicit_import(temp: &TempDir, source: &Path) -> Value {
 fn assert_published_codex_source(report: &Value, source: &Path) -> String {
     assert_eq!(report["schema_version"], 2, "{report:#}");
     assert_eq!(report["outcome"], "success", "{report:#}");
-    assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
-    assert_eq!(report["totals"]["imported_sources"], 1, "{report:#}");
-    assert_eq!(report["totals"]["imported_sessions"], 0, "{report:#}");
-    assert_eq!(report["totals"]["imported_events"], 0, "{report:#}");
+    assert_eq!(
+        report["totals"]["current_rejected_records"], 0,
+        "{report:#}"
+    );
+    assert!(report["totals"]["current_indexed_documents"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    for unsupported_delta in [
+        "failed_sources",
+        "imported_sources",
+        "imported_sessions",
+        "imported_events",
+        "rejected_records",
+    ] {
+        assert!(
+            report["totals"].get(unsupported_delta).is_none(),
+            "unsupported per-run delta {unsupported_delta} appeared in {report:#}"
+        );
+    }
     assert_eq!(report["sources"][0]["status"], "published", "{report:#}");
     assert_eq!(report["sources"][0]["provider"], "codex", "{report:#}");
     assert_eq!(
