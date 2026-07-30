@@ -808,7 +808,7 @@ fn upgrade_analytics_reports_manual_apply_success() {
 
 #[cfg(unix)]
 #[test]
-fn upgrade_check_rejects_preexisting_insecure_data_root_without_repair() {
+fn upgrade_check_repairs_preexisting_insecure_data_root_before_analytics_write() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let temp = tempdir();
@@ -831,27 +831,20 @@ fn upgrade_check_rejects_preexisting_insecure_data_root_without_repair() {
         .env_remove("CTX_ANALYTICS_ENABLED")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off");
-    let stderr = failure_stderr(fake_release_env(&mut command, &release));
-
-    assert!(
-        stderr.contains("private state path is not owner-only"),
-        "{stderr}"
-    );
+    fake_release_env(&mut command, &release).assert().success();
     assert_eq!(
         fs::metadata(&data_root).unwrap().permissions().mode() & 0o777,
-        0o755,
-        "upgrade check must reject, not repair, an insecure existing root"
+        0o700,
+        "the first persistent write must establish an owner-private data root"
     );
-
-    assert!(
-        !events_path.exists(),
-        "analytics identity creation must not repair a rejected data root"
-    );
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 1);
+    assert_operation_event(&events[0], "upgrade", "success");
 }
 
 #[cfg(unix)]
 #[test]
-fn upgrade_status_rejects_preexisting_insecure_data_root_without_analytics_repair() {
+fn upgrade_status_repairs_preexisting_insecure_data_root_before_analytics_write() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let temp = tempdir();
@@ -863,31 +856,25 @@ fn upgrade_status_rejects_preexisting_insecure_data_root_without_analytics_repai
     fs::set_permissions(&data_root, fs::Permissions::from_mode(0o755)).unwrap();
     fs::create_dir_all(&home).unwrap();
 
-    let stderr = failure_stderr(
-        ctx(&temp)
-            .args(["upgrade", "status", "--format=json"])
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-            .env("CTX_UPGRADE_AUTO", "off"),
-    );
-
-    assert!(
-        stderr.contains("private state path is not owner-only"),
-        "{stderr}"
-    );
+    ctx(&temp)
+        .args(["upgrade", "status", "--format=json"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_ENABLED")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_AUTO", "off")
+        .assert()
+        .success();
     assert_eq!(
         fs::metadata(&data_root).unwrap().permissions().mode() & 0o777,
-        0o755,
-        "upgrade status must reject, not repair, an insecure existing root"
+        0o700,
+        "the first persistent write must establish an owner-private data root"
     );
-    assert!(
-        !events_path.exists(),
-        "rejected status analytics must not create identities or emit an event"
-    );
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 1);
+    assert_operation_event(&events[0], "upgrade", "success");
 }
 
 #[cfg(unix)]
@@ -1092,7 +1079,7 @@ fn setup_analytics_emits_one_terminal_event() {
         .success();
 
     let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 1, "{events:#?}");
     assert_operation_event(&events[0], "setup", "success");
     let properties = analytics_event_properties(&events[0]);
     assert_eq!(properties["catalog_only"], true);
