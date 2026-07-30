@@ -48,9 +48,8 @@ const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v2\0";
 const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
 const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const SQLITE_COPY_BUFFER_BYTES: usize = 64 * 1024;
+const SQLITE_WAL_TOKEN_BYTES: usize = 64;
 const SQLITE_SHM_MAX_BYTES: u64 = 8 * 1024 * 1024;
-pub(crate) const SQLITE_PHYSICAL_REVISION_MAX_COMPONENT_BYTES: u64 =
-    SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceComponent {
@@ -125,11 +124,11 @@ pub(crate) struct SqliteSourceSnapshotCounters {
     immutable_snapshot_opens: u64,
     copied_snapshot_opens: u64,
     source_bytes_copied: u64,
-    physical_revision_captures: u64,
-    physical_replay_hits: u64,
-    physical_database_bytes_read: u64,
-    physical_wal_bytes_read: u64,
-    logical_rows_scanned: u64,
+    logical_projection_passes: u64,
+    logical_rows_projected: u64,
+    documents_staged: u64,
+    logical_noops: u64,
+    logical_replacements: u64,
     terminal_fences: u64,
     terminal_revalidations: u64,
     active_snapshots: u64,
@@ -158,24 +157,24 @@ impl SqliteSourceSnapshotCounters {
         self.source_bytes_copied
     }
 
-    pub(crate) const fn physical_revision_captures(self) -> u64 {
-        self.physical_revision_captures
+    pub(crate) const fn logical_projection_passes(self) -> u64 {
+        self.logical_projection_passes
     }
 
-    pub(crate) const fn physical_replay_hits(self) -> u64 {
-        self.physical_replay_hits
+    pub(crate) const fn logical_rows_projected(self) -> u64 {
+        self.logical_rows_projected
     }
 
-    pub(crate) const fn physical_database_bytes_read(self) -> u64 {
-        self.physical_database_bytes_read
+    pub(crate) const fn documents_staged(self) -> u64 {
+        self.documents_staged
     }
 
-    pub(crate) const fn physical_wal_bytes_read(self) -> u64 {
-        self.physical_wal_bytes_read
+    pub(crate) const fn logical_noops(self) -> u64 {
+        self.logical_noops
     }
 
-    pub(crate) const fn logical_rows_scanned(self) -> u64 {
-        self.logical_rows_scanned
+    pub(crate) const fn logical_replacements(self) -> u64 {
+        self.logical_replacements
     }
 
     pub(crate) const fn terminal_fences(self) -> u64 {
@@ -228,66 +227,30 @@ impl SqliteSourceSnapshotContext {
         Ok(())
     }
 
-    fn record_physical_revision_capture(
+    fn record_logical_projection(
         &self,
-        database_bytes_read: u64,
-        wal_bytes_read: u64,
+        rows: u64,
+        documents: u64,
+        unchanged: bool,
     ) -> SqliteSourceAccessResult<()> {
         let mut counters = self.lock();
         let mut next = *counters;
-        next.physical_revision_captures = checked_counter_add(
-            next.physical_revision_captures,
+        next.logical_projection_passes = checked_counter_add(
+            next.logical_projection_passes,
             1,
-            "physical revision captures",
+            "logical projection passes",
         )?;
-        next.physical_database_bytes_read = checked_counter_add(
-            next.physical_database_bytes_read,
-            database_bytes_read,
-            "physical database bytes read",
-        )?;
-        next.physical_wal_bytes_read = checked_counter_add(
-            next.physical_wal_bytes_read,
-            wal_bytes_read,
-            "physical WAL bytes read",
-        )?;
+        next.logical_rows_projected =
+            checked_counter_add(next.logical_rows_projected, rows, "logical rows projected")?;
+        next.documents_staged =
+            checked_counter_add(next.documents_staged, documents, "SQLite documents staged")?;
+        if unchanged {
+            next.logical_noops = checked_counter_add(next.logical_noops, 1, "logical no-ops")?;
+        } else {
+            next.logical_replacements =
+                checked_counter_add(next.logical_replacements, 1, "logical replacements")?;
+        }
         *counters = next;
-        Ok(())
-    }
-
-    fn record_physical_replay_hit(&self) -> SqliteSourceAccessResult<()> {
-        let mut counters = self.lock();
-        counters.physical_replay_hits =
-            checked_counter_add(counters.physical_replay_hits, 1, "physical replay hits")?;
-        counters.terminal_fences =
-            checked_counter_add(counters.terminal_fences, 1, "terminal fences")?;
-        Ok(())
-    }
-
-    fn record_physical_revision_bytes(
-        &self,
-        database_bytes_read: u64,
-        wal_bytes_read: u64,
-    ) -> SqliteSourceAccessResult<()> {
-        let mut counters = self.lock();
-        let mut next = *counters;
-        next.physical_database_bytes_read = checked_counter_add(
-            next.physical_database_bytes_read,
-            database_bytes_read,
-            "physical database bytes read",
-        )?;
-        next.physical_wal_bytes_read = checked_counter_add(
-            next.physical_wal_bytes_read,
-            wal_bytes_read,
-            "physical WAL bytes read",
-        )?;
-        *counters = next;
-        Ok(())
-    }
-
-    fn record_logical_rows_scanned(&self, rows: u64) -> SqliteSourceAccessResult<()> {
-        let mut counters = self.lock();
-        counters.logical_rows_scanned =
-            checked_counter_add(counters.logical_rows_scanned, rows, "logical rows scanned")?;
         Ok(())
     }
 
@@ -388,7 +351,6 @@ pub(crate) struct SqliteSourceEvidence {
     shared_memory_length: Option<u64>,
     schema: SqliteSchemaEvidence,
     source: SqliteConnectionEvidence,
-    physical_revision: [u8; 32],
     revision: [u8; 32],
 }
 
@@ -403,10 +365,6 @@ impl SqliteSourceEvidence {
 
     pub(crate) fn revision(&self) -> &[u8; 32] {
         &self.revision
-    }
-
-    pub(crate) fn physical_revision(&self) -> &[u8; 32] {
-        &self.physical_revision
     }
 
     #[cfg(test)]
@@ -496,8 +454,14 @@ impl SqliteSourceDirectoryAuthority {
         self.snapshot_context.snapshot()
     }
 
-    pub(crate) fn record_logical_rows_scanned(&self, rows: u64) -> SqliteSourceAccessResult<()> {
-        self.snapshot_context.record_logical_rows_scanned(rows)
+    pub(crate) fn record_logical_projection(
+        &self,
+        rows: u64,
+        documents: u64,
+        unchanged: bool,
+    ) -> SqliteSourceAccessResult<()> {
+        self.snapshot_context
+            .record_logical_projection(rows, documents, unchanged)
     }
 
     pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
@@ -527,64 +491,6 @@ impl SqliteSourceDirectoryAuthority {
         } else {
             Err(SqliteSourceAccessError::SourceChanged)
         }
-    }
-}
-
-#[derive(Debug)]
-struct SqliteSourcePhysicalRevisionInner {
-    family: SqlitePhysicalRevisionFamily,
-    evidence: SqliteFamilyEvidence,
-    revision: [u8; 32],
-    snapshot_context: Arc<SqliteSourceSnapshotContext>,
-}
-
-/// Retained DB/WAL physical authority for a certified exact replay.
-///
-/// Opening this fence performs no SQLite call. It hashes each bounded retained
-/// DB/WAL component so same-size rewrites with restored timestamps cannot be
-/// mistaken for an exact replay. Terminal revalidation repeats those hashes
-/// and deliberately ignores volatile SHM state.
-#[derive(Clone, Debug)]
-pub(crate) struct SqliteSourcePhysicalRevision {
-    inner: Arc<SqliteSourcePhysicalRevisionInner>,
-}
-
-impl SqliteSourcePhysicalRevision {
-    fn open(
-        authority: &SqliteSourceDirectoryAuthority,
-        database_name: &OsStr,
-    ) -> SqliteSourceAccessResult<Self> {
-        let family = SqlitePhysicalRevisionFamily::open(authority, database_name)?;
-        let (evidence, database_bytes_read, wal_bytes_read) = family.capture_evidence()?;
-        authority
-            .snapshot_context
-            .record_physical_revision_capture(database_bytes_read, wal_bytes_read)?;
-        let revision = evidence.physical_revision();
-        Ok(Self {
-            inner: Arc::new(SqliteSourcePhysicalRevisionInner {
-                family,
-                evidence,
-                revision,
-                snapshot_context: Arc::clone(&authority.snapshot_context),
-            }),
-        })
-    }
-
-    pub(crate) fn revision(&self) -> &[u8; 32] {
-        &self.inner.revision
-    }
-
-    pub(crate) fn mark_replay_hit(&self) -> SqliteSourceAccessResult<()> {
-        self.inner.snapshot_context.record_physical_replay_hit()
-    }
-
-    pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
-        let (database_bytes_read, wal_bytes_read) =
-            self.inner.family.revalidate(&self.inner.evidence)?;
-        self.inner
-            .snapshot_context
-            .record_physical_revision_bytes(database_bytes_read, wal_bytes_read)?;
-        self.inner.snapshot_context.record_terminal_revalidation()
     }
 }
 
@@ -800,25 +706,19 @@ impl Drop for SqliteSourceReadSnapshot {
 
 mod family;
 mod logical;
-mod physical;
-mod replay;
 mod snapshot;
 
 use family::{
     capture_sqlite_evidence, clear_snapshot_authorizer, configure_and_pin_snapshot,
-    map_provider_source_error, map_revalidation_error, revalidate_optional_member, sqlite_error,
-    validate_approved_parent_path, validate_database_leaf, verify_connection_read_only,
-    verify_snapshot_active, with_suffix, ExpectedObjectKind, NativeFileIdentity, NativeFileState,
-    SqliteConnectionEvidence, SqliteFamilyEvidence, SqliteFamilyMember, SqliteSchemaEvidence,
-    SqliteSnapshotEvidence, SqliteSourceFamily,
+    map_provider_source_error, map_revalidation_error, sqlite_error, validate_approved_parent_path,
+    verify_connection_read_only, verify_snapshot_active, ExpectedObjectKind, NativeFileIdentity,
+    NativeFileState, SqliteConnectionEvidence, SqliteFamilyEvidence, SqliteFamilyMember,
+    SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
-use physical::SqlitePhysicalRevisionFamily;
-pub(crate) use replay::SqlitePhysicalReplayHint;
 pub(crate) use snapshot::{
-    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_physical_revision,
-    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-    CtxOwnedSqliteReadSnapshot,
+    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
+    retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot,
 };
 #[cfg(test)]
 use snapshot::{

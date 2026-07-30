@@ -55,10 +55,6 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
         ASTRBOT_SOURCE_BACKED_PARSER_REVISION
     }
 
-    fn logical_tables(&self) -> &'static [&'static str] {
-        &["conversations", "platform_message_history"]
-    }
-
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
         let inventory = AstrBotSourceBackedInventoryV0::discover(&self.discovery)
             .map_err(astrbot_inventory_route_error)?;
@@ -183,10 +179,6 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
 
     fn parser_revision(&self) -> &'static str {
         SHELLEY_SOURCE_PARSER_REVISION
-    }
-
-    fn logical_tables(&self) -> &'static [&'static str] {
-        &["conversations", "messages"]
     }
 
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
@@ -337,10 +329,6 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
 
     fn parser_revision(&self) -> &'static str {
         LINGMA_SOURCE_BACKED_PARSER_REVISION
-    }
-
-    fn logical_tables(&self) -> &'static [&'static str] {
-        &["chat_record"]
     }
 
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
