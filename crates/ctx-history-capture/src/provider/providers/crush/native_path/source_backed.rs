@@ -5,11 +5,14 @@
 //! and bounded lexical projection. Source lifecycle,
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+#[cfg(test)]
+use std::cell::Cell;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -19,14 +22,15 @@ use ctx_history_core::{
     SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, IndexError, LexicalDocument};
-use rusqlite::{limits::Limit, Connection, OptionalExtension};
+use ctx_history_index::{IndexError, LexicalDocument};
+use rusqlite::{limits::Limit, Connection};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
     query::{
-        hydrate_row_from_connection, next_candidate, row_decode_error_is_local, CrushCandidate,
+        hydrate_message_batch, load_session_parents, next_candidate_batch,
+        row_decode_error_is_local, CrushCandidate,
     },
     read_native_schema, CrushHydratedRow, CrushNativeFrontier, CrushNativePhase, CrushNativeSchema,
     CRUSH_NATIVE_MAX_EVENT_TOUCHES, CRUSH_NATIVE_MAX_ROW_BYTES,
@@ -37,10 +41,11 @@ use crate::{
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
     },
+    provider::source_backed::{family::document::ChangedDocumentSink, SourceBackedRouteError},
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-        SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
+        SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, OutputOutcome, ProviderAdapterContext, CRUSH_SQLITE_SOURCE_FORMAT,
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -57,7 +62,10 @@ use super::super::{
 
 #[path = "source_backed_identity.rs"]
 mod identity;
-use identity::{crush_source_key, crush_source_revision};
+use identity::{
+    crush_session_id, crush_source_key, crush_source_revision, session_lineage,
+    validate_message_locator, MessageAddress,
+};
 
 const CRUSH_SOURCE_ANCHOR_NAMESPACE: &str = "crush.project-database";
 const CRUSH_INVENTORY_AUTHORITY_NAMESPACE: &str = "crush.project-inventory";
@@ -75,6 +83,8 @@ const CRUSH_MESSAGE_RELATION: &str = "crush.messages-with-parent-session";
 const CRUSH_MESSAGE_DIGEST_DOMAIN: &[u8] = b"ctx-crush-source-backed-message-set-v0\0";
 const MAX_CRUSH_PROJECT_DATABASES: usize = 128;
 const MAX_CRUSH_SESSION_LINEAGE_DEPTH: usize = 256;
+const CRUSH_MESSAGE_QUERY_BATCH: usize = 256;
+const CRUSH_MESSAGE_QUERY_TARGET_BYTES: u64 = 6 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum CrushSourceBackedErrorV0 {
@@ -82,6 +92,8 @@ pub enum CrushSourceBackedErrorV0 {
     Capture(#[from] CaptureError),
     #[error(transparent)]
     Index(#[from] IndexError),
+    #[error(transparent)]
+    Route(#[from] SourceBackedRouteError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -219,6 +231,23 @@ impl CrushProjectInventoryObservationV0 {
 /// configuration and project registry used by provider discovery.
 pub trait CrushProjectInventorySourceV0 {
     fn observe(&self) -> CrushSourceBackedResultV0<CrushProjectInventoryObservationV0>;
+
+    #[cfg(test)]
+    fn record_projection_pass(&self) {}
+
+    #[cfg(test)]
+    fn record_snapshot_work(&self, _work: CrushSnapshotWorkV0) {}
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrushSnapshotWorkV0 {
+    pub(crate) immutable_snapshot_opens: u64,
+    pub(crate) copied_snapshot_opens: u64,
+    pub(crate) source_bytes_copied: u64,
+    pub(crate) terminal_fences: u64,
+    pub(crate) terminal_revalidations: u64,
+    pub(crate) max_active_snapshots: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,58 +269,15 @@ pub(crate) struct BoundDatabase {
 
 #[derive(Debug)]
 pub(crate) struct FrozenInventory {
-    data_root: PathBuf,
     pub(crate) observation: SourceInventoryObservation,
     pub(crate) databases: Vec<BoundDatabase>,
 }
 
-impl FrozenInventory {
-    pub(crate) fn source_keys(&self) -> Vec<SourceKey> {
-        self.databases
-            .iter()
-            .map(|database| database.source_key.clone())
-            .collect()
-    }
-
-    pub(crate) fn contains_exact_source(&self, source: &SourceKey) -> bool {
-        self.databases
-            .iter()
-            .any(|database| database.source_key.exact_descriptor_eq(source))
-    }
-
-    pub(crate) fn matches(
-        &self,
-        observation: CrushProjectInventoryObservationV0,
-    ) -> CrushSourceBackedResultV0<bool> {
-        let candidate = bind_inventory(&self.data_root, observation)?;
-        Ok(self.observation == candidate.observation
-            && self.databases.len() == candidate.databases.len()
-            && self
-                .databases
-                .iter()
-                .zip(candidate.databases)
-                .all(|(left, right)| {
-                    left.source_key.exact_descriptor_eq(&right.source_key)
-                        && left.canonical_path == right.canonical_path
-                }))
-    }
-}
-
-struct SourceRevalidation {
-    source_root: ProviderSourceRoot,
-    sqlite_authority: Arc<SqliteSourceDirectoryAuthority>,
-    database_name: OsString,
-    family_snapshot: SqliteSourceEvidence,
-    _root_evidence: SqliteSourceEvidence,
-}
-
 pub(crate) struct OpenedSource {
     pub(crate) database: BoundDatabase,
-    family_snapshot: SqliteSourceEvidence,
     read_snapshot: SqliteSourceReadSnapshot,
     schema: CrushNativeSchema,
     pub(crate) observation: SourceObservation,
-    revision_digest: [u8; 32],
 }
 
 impl OpenedSource {
@@ -304,14 +290,6 @@ impl OpenedSource {
 pub(crate) struct SourceScan {
     pub(crate) content_digest: [u8; 32],
     pub(crate) counts: ScannedSourceCounts,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MessageAddress {
-    rowid: i64,
-    native_record_id: String,
-    parent_rowid: i64,
-    provider_session_id: String,
 }
 
 #[cfg(test)]
@@ -343,6 +321,10 @@ fn before_source_publication_revalidation() {}
 /// One-invocation exact resolver for source-backed Crush locators.
 pub struct CrushLocatorResolverV0 {
     inventory: FrozenInventory,
+    #[cfg(test)]
+    snapshot_opens: Cell<u64>,
+    #[cfg(test)]
+    native_key_batches: Cell<u64>,
 }
 
 impl CrushLocatorResolverV0 {
@@ -352,98 +334,165 @@ impl CrushLocatorResolverV0 {
     ) -> CrushSourceBackedResultV0<Self> {
         Ok(Self {
             inventory: bind_inventory(data_root, inventory_source.observe()?)?,
+            #[cfg(test)]
+            snapshot_opens: Cell::new(0),
+            #[cfg(test)]
+            native_key_batches: Cell::new(0),
         })
     }
 
-    pub fn hydrate(
+    #[cfg(test)]
+    fn hydration_counters(&self) -> (u64, u64) {
+        (self.snapshot_opens.get(), self.native_key_batches.get())
+    }
+
+    pub(crate) fn hydrate_locators(
         &self,
-        locator: &SourceRecordLocator,
-    ) -> CrushSourceBackedResultV0<CrushHydratedRecordV0> {
-        locator.validate_contract()?;
-        let address = validate_message_locator(locator)?;
-        let database = self
-            .inventory
-            .databases
-            .iter()
-            .find(|database| database.source_key.exact_descriptor_eq(locator.source()))
-            .cloned()
-            .ok_or(CrushSourceBackedErrorV0::LocatorSourceNotFound)?;
-        let source = open_source(database)?;
-        if locator.certified_source_revision_digest() != Some(&source.revision_digest) {
-            return Err(CrushSourceBackedErrorV0::StaleSourceEvidence);
+        locators: &[&SourceRecordLocator],
+    ) -> CrushSourceBackedResultV0<Vec<CrushHydratedRecordV0>> {
+        if locators.is_empty() {
+            return Ok(Vec::new());
         }
-        let hydrated = hydrate_row_from_connection(
-            source.connection()?,
-            &source.schema,
-            CrushNativePhase::Messages,
-            address.rowid,
-            0,
-        );
-        let hydrated = match hydrated {
-            Ok(CrushHydratedRow::Message {
-                row,
-                session,
-                digest_values,
-                ..
-            }) => (row, session, digest_values),
-            Ok(_) => return Err(CrushSourceBackedErrorV0::UnexpectedNativeRow),
-            Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {
-                return Err(CrushSourceBackedErrorV0::MissingRecord);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let (row, session, digest_values) = hydrated;
-        let parent_rowid = parent_rowid(&digest_values)?;
-        let actual_digest = message_record_digest_bytes(&digest_values);
-        if row.rowid != address.rowid
-            || row.id != address.native_record_id
-            || row.session_id != address.provider_session_id
-            || parent_rowid != address.parent_rowid
-            || &actual_digest != locator.record_digest()
-        {
-            return Err(CrushSourceBackedErrorV0::StaleRecordEvidence);
+        let mut groups =
+            HashMap::<[u8; 32], (BoundDatabase, Vec<(usize, MessageAddress, [u8; 32])>)>::new();
+        for (index, locator) in locators.iter().enumerate() {
+            locator.validate_contract()?;
+            let address = validate_message_locator(locator)?;
+            let database = self
+                .inventory
+                .databases
+                .iter()
+                .find(|database| database.source_key.exact_descriptor_eq(locator.source()))
+                .cloned()
+                .ok_or(CrushSourceBackedErrorV0::LocatorSourceNotFound)?;
+            groups
+                .entry(database.source_key.identity().digest())
+                .or_insert_with(|| (database, Vec::new()))
+                .1
+                .push((index, address, *locator.record_digest()));
         }
 
-        let context = deterministic_context(&source.database.canonical_path);
-        let projection = match project_message(&row, session.as_ref(), &context)? {
-            CrushRecordProjection::Message(projection) => projection,
-            CrushRecordProjection::Rejection { .. } => {
+        let mut output = vec![None; locators.len()];
+        for (_, (database, requests)) in groups {
+            let source = open_source(database)?;
+            #[cfg(test)]
+            self.snapshot_opens
+                .set(self.snapshot_opens.get().saturating_add(1));
+            let resolved = (|| {
+                let mut rows = HashMap::new();
+                let mut unique = requests
+                    .iter()
+                    .map(|(_, address, _)| address.rowid)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                unique.sort_unstable();
+                for rowids in unique.chunks(CRUSH_MESSAGE_QUERY_BATCH) {
+                    let candidates = rowids
+                        .iter()
+                        .map(|rowid| CrushCandidate {
+                            rowid: *rowid,
+                            observed_bytes: 0,
+                        })
+                        .collect::<Vec<_>>();
+                    #[cfg(test)]
+                    self.native_key_batches
+                        .set(self.native_key_batches.get().saturating_add(1));
+                    for (rowid, hydrated) in
+                        hydrate_message_batch(source.connection()?, &source.schema, &candidates)?
+                    {
+                        rows.insert(
+                            rowid,
+                            resolve_hydrated_message(&source.database.canonical_path, hydrated?)?,
+                        );
+                    }
+                }
+                for (index, address, expected_digest) in &requests {
+                    let row = rows
+                        .get(&address.rowid)
+                        .ok_or(CrushSourceBackedErrorV0::MissingRecord)?;
+                    if row.native_record_id != address.native_record_id
+                        || row.provider_session_id != address.provider_session_id
+                        || row.parent_rowid != address.parent_rowid
+                        || row.record_digest != *expected_digest
+                    {
+                        return Err(CrushSourceBackedErrorV0::StaleRecordEvidence);
+                    }
+                    output[*index] = Some(CrushHydratedRecordV0 {
+                        provider_session_id: row.provider_session_id.clone(),
+                        native_record_id: row.native_record_id.clone(),
+                        normalized_payload_hash: Some(row.normalized_payload_hash.clone()),
+                        decoded_display_text: Some(row.decoded_display_text.clone()),
+                    });
+                }
+                Ok(())
+            })();
+            finish_source(source)?;
+            resolved?;
+        }
+        output
+            .into_iter()
+            .map(|record| record.ok_or(CrushSourceBackedErrorV0::MissingRecord))
+            .collect()
+    }
+}
+
+struct ResolvedCrushMessage {
+    provider_session_id: String,
+    native_record_id: String,
+    parent_rowid: i64,
+    record_digest: [u8; 32],
+    normalized_payload_hash: String,
+    decoded_display_text: String,
+}
+
+fn resolve_hydrated_message(
+    source_path: &Path,
+    hydrated: CrushHydratedRow,
+) -> CrushSourceBackedResultV0<ResolvedCrushMessage> {
+    let CrushHydratedRow::Message {
+        row,
+        session,
+        digest_values,
+        ..
+    } = hydrated
+    else {
+        return Err(CrushSourceBackedErrorV0::UnexpectedNativeRow);
+    };
+    let parent_rowid = parent_rowid(&digest_values)?;
+    let record_digest = message_record_digest_bytes(&digest_values);
+    let projection =
+        match project_message(&row, session.as_ref(), &deterministic_context(source_path))? {
+            CrushRecordProjection::Message(projection) if projection.event.is_some() => projection,
+            CrushRecordProjection::Message(_) | CrushRecordProjection::Rejection { .. } => {
                 return Err(CrushSourceBackedErrorV0::StaleRecordEvidence);
             }
         };
-        if projection.event.is_none() {
+    let (normalized_payload_hash, decoded_display_text) = if projection.output.is_none() {
+        let (provider_session_id, native_record_id, normalized_hash, text) =
+            crush_complete_message(&digest_values)?;
+        if provider_session_id != row.session_id || native_record_id != row.id {
             return Err(CrushSourceBackedErrorV0::StaleRecordEvidence);
         }
-        let (normalized_payload_hash, decoded_display_text) = if projection.output.is_none() {
-            let (provider_session_id, native_record_id, normalized_hash, text) =
-                crush_complete_message(&digest_values)?;
-            if provider_session_id != address.provider_session_id
-                || native_record_id != address.native_record_id
-            {
-                return Err(CrushSourceBackedErrorV0::StaleRecordEvidence);
-            }
-            (Some(normalized_hash), Some(text))
-        } else {
-            let event = projection
-                .event
-                .as_ref()
-                .ok_or(CrushSourceBackedErrorV0::StaleRecordEvidence)?;
-            (
-                Some(event.provider_event_hash.clone()),
-                Some(lexical_body(&projection, event)),
-            )
-        };
-        let finished = finish_source(source)?;
-        if !source_revalidation_is_current(&finished) {
-            return Err(CrushSourceBackedErrorV0::StaleSourceEvidence);
-        }
-        Ok(CrushHydratedRecordV0 {
-            provider_session_id: address.provider_session_id,
-            native_record_id: address.native_record_id,
-            normalized_payload_hash,
-            decoded_display_text,
-        })
-    }
+        (normalized_hash, text)
+    } else {
+        let event = projection
+            .event
+            .as_ref()
+            .ok_or(CrushSourceBackedErrorV0::StaleRecordEvidence)?;
+        (
+            event.provider_event_hash.clone(),
+            lexical_body(&projection, event),
+        )
+    };
+    Ok(ResolvedCrushMessage {
+        provider_session_id: row.session_id,
+        native_record_id: row.id,
+        parent_rowid,
+        record_digest,
+        normalized_payload_hash,
+        decoded_display_text,
+    })
 }
 
 pub(crate) fn bind_inventory(
@@ -486,7 +535,6 @@ pub(crate) fn bind_inventory(
     }
     databases.sort_by_key(|database| database.source_key.identity().digest());
     Ok(FrozenInventory {
-        data_root: data_root.to_path_buf(),
         observation: core_observation,
         databases,
     })
@@ -497,6 +545,13 @@ pub(crate) fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<
         &database.sqlite_authority,
         &database.database_name,
     )?;
+    open_source_snapshot(database, read_snapshot)
+}
+
+pub(crate) fn open_source_snapshot(
+    database: BoundDatabase,
+    read_snapshot: SqliteSourceReadSnapshot,
+) -> CrushSourceBackedResultV0<OpenedSource> {
     let family_snapshot = read_snapshot.evidence().clone();
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| CrushSourceBackedErrorV0::CountOverflow)?;
@@ -514,33 +569,24 @@ pub(crate) fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<
         CRUSH_SOURCE_REVISION_KIND,
         revision,
     )?;
-    let revision_digest = Sha256::digest(observation.revision()).into();
     Ok(OpenedSource {
         database,
-        family_snapshot,
         read_snapshot,
         schema,
         observation,
-        revision_digest,
     })
 }
 
-fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<SourceRevalidation> {
+fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<()> {
     let OpenedSource {
         database,
-        family_snapshot,
         read_snapshot,
         ..
     } = source;
-    let root_evidence = read_snapshot.finish()?;
+    read_snapshot.finish()?;
     before_source_publication_revalidation();
-    Ok(SourceRevalidation {
-        source_root: database.source_root,
-        sqlite_authority: database.sqlite_authority,
-        database_name: database.database_name,
-        family_snapshot,
-        _root_evidence: root_evidence,
-    })
+    database.source_root.revalidate()?;
+    Ok(())
 }
 
 /// Closes the guarded SQLite read transaction, validates its retained
@@ -550,25 +596,14 @@ fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<SourceRevali
 /// source so central publication cannot accidentally bypass the provider's
 /// root-bound closing proof.
 pub(crate) fn finish_opened_source(source: OpenedSource) -> CrushSourceBackedResultV0<bool> {
-    let evidence = finish_source(source)?;
-    Ok(source_revalidation_is_current(&evidence))
-}
-
-fn source_revalidation_is_current(evidence: &SourceRevalidation) -> bool {
-    if evidence.source_root.revalidate().is_err() {
-        return false;
+    match finish_source(source) {
+        Ok(()) => Ok(true),
+        Err(CrushSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture
+            | CaptureError::InvalidProviderTranscriptPath { .. },
+        )) => Ok(false),
+        Err(error) => Err(error),
     }
-    let Ok(current) = open_root_handle_sqlite_source_snapshot(
-        &evidence.sqlite_authority,
-        &evidence.database_name,
-    ) else {
-        return false;
-    };
-    let current_evidence = current.evidence().clone();
-    if current.finish().is_err() || evidence.source_root.revalidate().is_err() {
-        return false;
-    }
-    current_evidence == evidence.family_snapshot
 }
 
 fn retain_crush_sqlite_authority(
@@ -615,14 +650,21 @@ pub(crate) fn closing_observation(
 
 pub(crate) fn scan_source(
     source: &OpenedSource,
-    writer: &mut GenerationWriter,
-) -> CrushSourceBackedResultV0<SourceScan> {
-    scan_source_in_snapshot(source, writer)
+    sink: &mut ChangedDocumentSink<'_, '_>,
+) -> CrushSourceBackedResultV0<CertifiedSource> {
+    let scan = scan_source_in_snapshot(source, sink)?;
+    Ok(SqliteLogicalSnapshot::new(
+        CRUSH_PARSER_REVISION,
+        source.schema.schema_fingerprint.as_bytes(),
+        scan.content_digest,
+        scan.counts,
+    )
+    .certify(source.database.source_key.clone())?)
 }
 
 fn scan_source_in_snapshot(
     source: &OpenedSource,
-    writer: &mut GenerationWriter,
+    sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> CrushSourceBackedResultV0<SourceScan> {
     let context = deterministic_context(&source.database.canonical_path);
     let mut frontier = CrushNativeFrontier {
@@ -633,69 +675,99 @@ fn scan_source_in_snapshot(
     let mut digest = Sha256::new();
     digest.update(CRUSH_MESSAGE_DIGEST_DOMAIN);
     let mut counts = ScannedSourceCounts::default();
-    while let Some(candidate) = next_candidate(source.connection()?, &source.schema, &frontier)? {
-        frontier.after_rowid = Some(candidate.rowid);
-        frontier.next_ordinal = checked_add(frontier.next_ordinal, 1)?;
-        counts.complete_records = checked_add(counts.complete_records, 1)?;
-        counts.certified_bytes = checked_add(counts.certified_bytes, candidate.observed_bytes)?;
-        if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
-            counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-            hash_rejected_candidate(&mut digest, &candidate, b"oversized");
-            continue;
-        }
-
-        let row = hydrate_row_from_connection(
+    let session_parents =
+        load_session_parents(source.connection()?, &source.schema.session_columns)?;
+    loop {
+        let observed = next_candidate_batch(
             source.connection()?,
             &source.schema,
-            CrushNativePhase::Messages,
-            candidate.rowid,
-            candidate.observed_bytes,
-        );
-        let (row, session, digest_values) = match row {
-            Ok(CrushHydratedRow::Message {
-                row,
-                session,
-                digest_values,
-                ..
-            }) => (row, session, digest_values),
-            Ok(_) => {
-                return Err(CaptureError::SystemInvariant(
-                    "Crush message scan hydrated a non-message row",
-                )
-                .into())
+            &frontier,
+            CRUSH_MESSAGE_QUERY_BATCH,
+        )?;
+        if observed.is_empty() {
+            break;
+        }
+        let mut batch_len = 0;
+        let mut batch_bytes = 0_u64;
+        for candidate in &observed {
+            if batch_len > 0
+                && batch_bytes.saturating_add(candidate.observed_bytes)
+                    > CRUSH_MESSAGE_QUERY_TARGET_BYTES
+            {
+                break;
             }
-            Err(error) if row_decode_error_is_local(&error) => {
+            batch_len += 1;
+            batch_bytes = batch_bytes.saturating_add(candidate.observed_bytes);
+        }
+        let candidates = &observed[..batch_len];
+        let admissible = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.observed_bytes <= CRUSH_NATIVE_MAX_ROW_BYTES)
+            .collect::<Vec<_>>();
+        let mut hydrated =
+            hydrate_message_batch(source.connection()?, &source.schema, &admissible)?;
+
+        for candidate in candidates {
+            frontier.after_rowid = Some(candidate.rowid);
+            frontier.next_ordinal = checked_add(frontier.next_ordinal, 1)?;
+            counts.complete_records = checked_add(counts.complete_records, 1)?;
+            counts.certified_bytes = checked_add(counts.certified_bytes, candidate.observed_bytes)?;
+            if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
                 counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                hash_rejected_candidate(&mut digest, &candidate, error.to_string().as_bytes());
+                hash_rejected_candidate(&mut digest, candidate, b"oversized");
                 continue;
             }
-            Err(error) => return Err(error.into()),
-        };
-        let record_digest = message_record_digest_bytes(&digest_values);
-        super::hash_field(&mut digest, &candidate.rowid.to_be_bytes());
-        super::hash_field(&mut digest, &record_digest);
-
-        match project_message(&row, session.as_ref(), &context)? {
-            CrushRecordProjection::Rejection { .. } => {
-                counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-            }
-            CrushRecordProjection::Message(projection) if projection.event.is_some() => {
-                let session = session
-                    .as_ref()
-                    .ok_or(CrushSourceBackedErrorV0::UnexpectedNativeRow)?;
-                writer.add_document(lexical_document(
-                    source,
-                    &row,
+            let row = hydrated
+                .remove(&candidate.rowid)
+                .ok_or(CaptureError::SourceChangedDuringCapture)?;
+            let (row, session, digest_values) = match row {
+                Ok(CrushHydratedRow::Message {
+                    row,
                     session,
-                    &digest_values,
-                    record_digest,
-                    &projection,
-                )?)?;
-                counts.retained_records = checked_add(counts.retained_records, 1)?;
-                counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
-            }
-            CrushRecordProjection::Message(_) => {
-                counts.ignored_records = checked_add(counts.ignored_records, 1)?;
+                    digest_values,
+                    ..
+                }) => (row, session, digest_values),
+                Ok(_) => {
+                    return Err(CaptureError::SystemInvariant(
+                        "Crush message scan hydrated a non-message row",
+                    )
+                    .into())
+                }
+                Err(error) if row_decode_error_is_local(&error) => {
+                    counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                    hash_rejected_candidate(&mut digest, candidate, error.to_string().as_bytes());
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let record_digest = message_record_digest_bytes(&digest_values);
+            super::hash_field(&mut digest, &candidate.rowid.to_be_bytes());
+            super::hash_field(&mut digest, &record_digest);
+
+            match project_message(&row, session.as_ref(), &context)? {
+                CrushRecordProjection::Rejection { .. } => {
+                    counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                }
+                CrushRecordProjection::Message(projection) if projection.event.is_some() => {
+                    let session = session
+                        .as_ref()
+                        .ok_or(CrushSourceBackedErrorV0::UnexpectedNativeRow)?;
+                    sink.emit_document(lexical_document(
+                        source,
+                        &session_parents,
+                        &row,
+                        session,
+                        &digest_values,
+                        record_digest,
+                        &projection,
+                    )?)?;
+                    counts.retained_records = checked_add(counts.retained_records, 1)?;
+                    counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
+                }
+                CrushRecordProjection::Message(_) => {
+                    counts.ignored_records = checked_add(counts.ignored_records, 1)?;
+                }
             }
         }
     }
@@ -707,6 +779,7 @@ fn scan_source_in_snapshot(
 
 fn lexical_document(
     source: &OpenedSource,
+    session_parents: &HashMap<String, Option<String>>,
     row: &super::super::projection::CrushMessageRow,
     session: &CrushSessionRow,
     digest_values: &[NativeSqliteValue],
@@ -714,7 +787,7 @@ fn lexical_document(
     projection: &CrushMessageProjection,
 ) -> CrushSourceBackedResultV0<LexicalDocument> {
     let session_id = crush_session_id(&source.database.source_key, &row.session_id)?;
-    let lineage = session_lineage(source, session, session_id)?;
+    let lineage = session_lineage(source, session_parents, session, session_id)?;
     let item_key = NativeItemKey::native_id(
         CRUSH_NATIVE_MESSAGE_NAMESPACE,
         TypedKey::utf8(row.id.clone())?,
@@ -740,8 +813,8 @@ fn lexical_document(
             primary_key,
             row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source.revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )?;
     let event = projection
@@ -782,82 +855,6 @@ fn lexical_document(
         cwd: None,
         touched_files: touched_paths(projection)?,
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SessionLineage {
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
-    agent_type: AgentType,
-    is_primary: bool,
-}
-
-fn session_lineage(
-    source: &OpenedSource,
-    session: &CrushSessionRow,
-    session_id: StableEntityId,
-) -> CrushSourceBackedResultV0<SessionLineage> {
-    let Some(parent_provider_session_id) = session.parent_session_id.as_deref() else {
-        return Ok(SessionLineage {
-            parent_session_id: None,
-            root_session_id: session_id,
-            agent_type: AgentType::Primary,
-            is_primary: true,
-        });
-    };
-    let parent_session_id =
-        crush_session_id(&source.database.source_key, parent_provider_session_id)?;
-    let mut seen = HashSet::from([session.id.clone()]);
-    let mut root_provider_session_id = parent_provider_session_id.to_owned();
-    for depth in 0..MAX_CRUSH_SESSION_LINEAGE_DEPTH {
-        if !seen.insert(root_provider_session_id.clone()) {
-            return Err(CrushSourceBackedErrorV0::SessionLineageCycle(
-                root_provider_session_id,
-            ));
-        }
-        let next_parent = source
-            .connection()?
-            .query_row(
-                "select parent_session_id
-                   from sessions
-                  where typeof(id) = 'text'
-                    and id collate binary = ?1 collate binary",
-                [&root_provider_session_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten();
-        let Some(next_parent) = next_parent else {
-            let root_session_id =
-                crush_session_id(&source.database.source_key, &root_provider_session_id)?;
-            return Ok(SessionLineage {
-                parent_session_id: Some(parent_session_id),
-                root_session_id,
-                agent_type: AgentType::Subagent,
-                is_primary: false,
-            });
-        };
-        root_provider_session_id = next_parent;
-        if depth + 1 == MAX_CRUSH_SESSION_LINEAGE_DEPTH {
-            return Err(CrushSourceBackedErrorV0::SessionLineageTooDeep);
-        }
-    }
-    Err(CrushSourceBackedErrorV0::SessionLineageTooDeep)
-}
-
-fn crush_session_id(
-    source: &SourceKey,
-    provider_session_id: &str,
-) -> CrushSourceBackedResultV0<StableEntityId> {
-    let session_key = NativeSessionKey::native_id(
-        CRUSH_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(provider_session_id)?,
-    )?;
-    Ok(derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: CRUSH_LOGICAL_SESSION_KIND,
-        native_session_key: &session_key,
-    })?)
 }
 
 fn lexical_body(
@@ -935,59 +932,6 @@ fn hash_rejected_candidate(digest: &mut Sha256, candidate: &CrushCandidate, reas
     super::hash_field(digest, &candidate.rowid.to_be_bytes());
     super::hash_field(digest, &candidate.observed_bytes.to_be_bytes());
     super::hash_field(digest, reason);
-}
-
-fn validate_message_locator(
-    locator: &SourceRecordLocator,
-) -> CrushSourceBackedResultV0<MessageAddress> {
-    if locator.source().provider() != CaptureProvider::Crush.as_str()
-        || locator.source().source_format() != CRUSH_SQLITE_SOURCE_FORMAT
-        || locator.source().schema_variant() != CRUSH_SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-    {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    let SourceAnchor::ProviderNative { namespace, .. } = locator.source().anchor() else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    if namespace != CRUSH_SOURCE_ANCHOR_NAMESPACE {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    if logical_relation != CRUSH_MESSAGE_RELATION
-        || row_version.as_ref() != Some(&TypedKey::Bytes(locator.record_digest().to_vec()))
-    {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    let [TypedKey::I64(rowid), TypedKey::Utf8(native_record_id), TypedKey::I64(parent_rowid), TypedKey::Utf8(provider_session_id)] =
-        parts.as_slice()
-    else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    if *rowid <= 0
-        || *parent_rowid <= 0
-        || native_record_id.is_empty()
-        || provider_session_id.is_empty()
-    {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    Ok(MessageAddress {
-        rowid: *rowid,
-        native_record_id: native_record_id.clone(),
-        parent_rowid: *parent_rowid,
-        provider_session_id: provider_session_id.clone(),
-    })
 }
 
 fn checked_add(left: u64, right: u64) -> CrushSourceBackedResultV0<u64> {

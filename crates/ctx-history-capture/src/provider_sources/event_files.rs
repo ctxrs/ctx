@@ -30,16 +30,6 @@ use super::ordinary_file::{observe_opened_ordinary_file, OrdinaryFileObservation
 const GROUP_OBSERVATION_DOMAIN: &[u8] = b"ctx.event-files.group-observation.v1\0";
 const INVENTORY_OBSERVATION_DOMAIN: &[u8] = b"ctx.event-files.inventory-observation.v1\0";
 
-#[cfg(test)]
-std::thread_local! {
-    static INVENTORY_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static ACTIVE_LEAF_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static PEAK_LEAF_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static ACTIVE_DIRECTORY_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static PEAK_DIRECTORY_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EventFileLimits {
     pub max_depth: usize,
@@ -51,6 +41,7 @@ pub(crate) struct EventFileLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EventFileCoordinates {
     pub group_key: String,
+    pub group_instance_key: String,
     pub relative_file_key: String,
 }
 
@@ -105,6 +96,8 @@ pub(crate) enum EventFileInventoryError {
         group_key: String,
         relative_file_key: String,
     },
+    #[error("event-file group {group_key:?} is provided by more than one physical group instance")]
+    DuplicateGroupInstance { group_key: String },
     #[error("event-file group {0:?} is not present in the retained inventory")]
     MissingGroup(String),
 }
@@ -114,6 +107,8 @@ type EventFileClassifier = fn(&Path) -> Result<Option<EventFileCoordinates>>;
 
 #[derive(Debug)]
 pub(crate) struct EventFileLeaf {
+    group_ordinal: usize,
+    leaf_ordinal: usize,
     selected_relative_path: PathBuf,
     display_path: PathBuf,
     coordinates: EventFileCoordinates,
@@ -122,6 +117,14 @@ pub(crate) struct EventFileLeaf {
 }
 
 impl EventFileLeaf {
+    pub(crate) fn group_ordinal(&self) -> usize {
+        self.group_ordinal
+    }
+
+    pub(crate) fn leaf_ordinal(&self) -> usize {
+        self.leaf_ordinal
+    }
+
     pub(crate) fn selected_relative_path(&self) -> &Path {
         &self.selected_relative_path
     }
@@ -141,8 +144,11 @@ impl EventFileLeaf {
 
 #[derive(Debug)]
 struct OwnedEventFileGroup {
+    ordinal: usize,
     group_key: String,
     leaves: Vec<EventFileLeaf>,
+    leaf_ordinals: BTreeMap<String, usize>,
+    observation_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -160,20 +166,35 @@ impl<'inventory> EventFileGroup<'inventory> {
         &self.owned().group_key
     }
 
+    pub(crate) fn ordinal(&self) -> usize {
+        self.owned().ordinal
+    }
+
     pub(crate) fn leaves(&self) -> &'inventory [EventFileLeaf] {
         &self.owned().leaves
     }
 
+    pub(crate) fn leaf_at(&self, leaf_ordinal: usize) -> Option<&'inventory EventFileLeaf> {
+        self.owned().leaves.get(leaf_ordinal)
+    }
+
+    pub(crate) fn leaf_ordinal(&self, relative_file_key: &str) -> Option<usize> {
+        self.owned().leaf_ordinals.get(relative_file_key).copied()
+    }
+
     pub(crate) fn observation_digest(&self) -> [u8; 32] {
-        group_observation_digest(self.owned())
+        self.owned().observation_digest
     }
 
-    pub(crate) fn read_leaf(&self, leaf: &EventFileLeaf) -> EventFileInventoryResult<Vec<u8>> {
-        self.inventory.read_leaf(self.group_key(), leaf)
+    pub(crate) fn read_leaf_at(&self, leaf_ordinal: usize) -> EventFileInventoryResult<Vec<u8>> {
+        self.inventory.read_leaf_at(self.index, leaf_ordinal)
     }
 
-    pub(crate) fn revalidate(&self) -> EventFileInventoryResult<()> {
-        self.inventory.revalidate_group(self.group_key())
+    pub(crate) fn revalidate_leaves(
+        &self,
+        leaf_ordinals: impl IntoIterator<Item = usize>,
+    ) -> EventFileInventoryResult<()> {
+        self.inventory.revalidate_leaves(self.index, leaf_ordinals)
     }
 }
 
@@ -184,8 +205,12 @@ pub(crate) struct EventFileInventory {
     selected_file: bool,
     root: ProviderSourceRoot,
     groups: Vec<OwnedEventFileGroup>,
+    group_ordinals: BTreeMap<String, usize>,
+    observation_digest: [u8; 32],
     limits: EventFileLimits,
     classify: EventFileClassifier,
+    #[cfg(test)]
+    io_counter: Option<tests::EventFileIoCounter>,
 }
 
 impl EventFileInventory {
@@ -195,7 +220,9 @@ impl EventFileInventory {
         classify: EventFileClassifier,
     ) -> EventFileInventoryResult<Self> {
         #[cfg(test)]
-        INVENTORY_OPENS.with(|opens| opens.set(opens.get().saturating_add(1)));
+        tests::note_inventory_open();
+        #[cfg(test)]
+        let io_counter = tests::current_event_file_io_counter();
 
         let selected_path = normalized_absolute_path(selected)?;
         validate_path(&selected_path, limits.max_path_bytes)?;
@@ -256,14 +283,23 @@ impl EventFileInventory {
                 ));
             }
         }
+        let group_ordinals = groups
+            .iter()
+            .map(|group| (group.group_key.clone(), group.ordinal))
+            .collect();
+        let observation_digest = inventory_observation_digest(&groups);
         Ok(Self {
             selected_path,
             selected_relative_path,
             selected_file,
             root,
             groups,
+            group_ordinals,
+            observation_digest,
             limits,
             classify,
+            #[cfg(test)]
+            io_counter,
         })
     }
 
@@ -295,33 +331,45 @@ impl EventFileInventory {
     }
 
     pub(crate) fn group(&self, group_key: &str) -> Option<EventFileGroup<'_>> {
-        self.groups
-            .binary_search_by(|group| group.group_key.as_str().cmp(group_key))
-            .ok()
+        self.group_ordinals
+            .get(group_key)
+            .copied()
             .map(|index| EventFileGroup {
                 inventory: self,
                 index,
             })
     }
 
-    pub(crate) fn observation_digest(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(INVENTORY_OBSERVATION_DOMAIN);
-        digest.update((self.groups.len() as u64).to_be_bytes());
-        for group in &self.groups {
-            hash_text(&mut digest, &group.group_key);
-            digest.update(group_observation_digest(group));
-        }
-        digest.finalize().into()
+    pub(crate) fn group_at(&self, group_ordinal: usize) -> Option<EventFileGroup<'_>> {
+        self.groups.get(group_ordinal).map(|_| EventFileGroup {
+            inventory: self,
+            index: group_ordinal,
+        })
     }
 
-    pub(crate) fn revalidate_group(&self, group_key: &str) -> EventFileInventoryResult<()> {
+    pub(crate) fn observation_digest(&self) -> [u8; 32] {
+        self.observation_digest
+    }
+
+    fn revalidate_leaves(
+        &self,
+        group_ordinal: usize,
+        leaf_ordinals: impl IntoIterator<Item = usize>,
+    ) -> EventFileInventoryResult<()> {
         let group = self
             .groups
-            .iter()
-            .find(|group| group.group_key == group_key)
-            .ok_or_else(|| EventFileInventoryError::MissingGroup(group_key.to_owned()))?;
-        for leaf in &group.leaves {
+            .get(group_ordinal)
+            .ok_or_else(|| EventFileInventoryError::MissingGroup(group_ordinal.to_string()))?;
+        for leaf_ordinal in leaf_ordinals {
+            let leaf = group.leaves.get(leaf_ordinal).ok_or_else(|| {
+                invalid(
+                    self.selected_path(),
+                    format!(
+                        "event-file leaf ordinal {leaf_ordinal} is not present in group {:?}",
+                        group.group_key
+                    ),
+                )
+            })?;
             self.verify_leaf(leaf)?;
         }
         self.root
@@ -355,30 +403,30 @@ impl EventFileInventory {
         Ok(())
     }
 
-    fn read_leaf(
+    fn read_leaf_at(
         &self,
-        group_key: &str,
-        leaf: &EventFileLeaf,
+        group_ordinal: usize,
+        leaf_ordinal: usize,
     ) -> EventFileInventoryResult<Vec<u8>> {
+        #[cfg(test)]
+        tests::note_leaf_lookup(self.io_counter.as_ref());
         let group = self
             .groups
-            .iter()
-            .find(|group| group.group_key == group_key)
-            .ok_or_else(|| EventFileInventoryError::MissingGroup(group_key.to_owned()))?;
-        if !group
-            .leaves
-            .iter()
-            .any(|candidate| std::ptr::eq(candidate, leaf))
-        {
-            return Err(invalid(
-                leaf.display_path(),
-                "event-file leaf does not belong to the requested retained group",
-            ));
-        }
+            .get(group_ordinal)
+            .ok_or_else(|| EventFileInventoryError::MissingGroup(group_ordinal.to_string()))?;
+        let leaf = group.leaves.get(leaf_ordinal).ok_or_else(|| {
+            invalid(
+                self.selected_path(),
+                format!(
+                    "event-file leaf ordinal {leaf_ordinal} is not present in group {:?}",
+                    group.group_key
+                ),
+            )
+        })?;
         let opened = self.open_verified_leaf(leaf)?;
         let _handle = transient_handle(TransientHandleKind::Leaf);
         #[cfg(test)]
-        BODY_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
+        tests::note_body_read(self.io_counter.as_ref());
         let bytes = opened
             .read_all_bounded(self.limits.max_record_bytes)
             .map_err(|error| changed(leaf.display_path(), error))?;
@@ -440,6 +488,8 @@ fn discover_groups(
     classify: EventFileClassifier,
     error_mode: DiscoveryErrorMode,
 ) -> EventFileInventoryResult<Vec<OwnedEventFileGroup>> {
+    #[cfg(test)]
+    tests::note_inventory_walk();
     let mut state = DiscoveryState {
         leaves: Vec::new(),
         observed_entries: 0,
@@ -599,6 +649,8 @@ fn admit_leaf(
         .map_err(|error| changed(&display_path, error))?;
     let metadata = file.metadata().clone();
     Ok(EventFileLeaf {
+        group_ordinal: 0,
+        leaf_ordinal: 0,
         selected_relative_path,
         display_path,
         coordinates,
@@ -609,9 +661,17 @@ fn admit_leaf(
 
 fn build_groups(leaves: Vec<EventFileLeaf>) -> EventFileInventoryResult<Vec<OwnedEventFileGroup>> {
     let mut grouped = BTreeMap::<String, BTreeMap<String, EventFileLeaf>>::new();
+    let mut group_instances = BTreeMap::<String, String>::new();
     for leaf in leaves {
         let group_key = leaf.coordinates.group_key.clone();
+        let group_instance_key = leaf.coordinates.group_instance_key.clone();
         let relative_file_key = leaf.coordinates.relative_file_key.clone();
+        if group_instances
+            .insert(group_key.clone(), group_instance_key.clone())
+            .is_some_and(|existing| existing != group_instance_key)
+        {
+            return Err(EventFileInventoryError::DuplicateGroupInstance { group_key });
+        }
         if grouped
             .entry(group_key.clone())
             .or_default()
@@ -624,13 +684,31 @@ fn build_groups(leaves: Vec<EventFileLeaf>) -> EventFileInventoryResult<Vec<Owne
             });
         }
     }
-    Ok(grouped
+    grouped
         .into_iter()
-        .map(|(group_key, leaves)| OwnedEventFileGroup {
-            group_key,
-            leaves: leaves.into_values().collect(),
+        .enumerate()
+        .map(|(group_ordinal, (group_key, leaves))| {
+            let mut leaf_ordinals = BTreeMap::new();
+            let leaves = leaves
+                .into_iter()
+                .enumerate()
+                .map(|(leaf_ordinal, (relative_file_key, mut leaf))| {
+                    leaf.group_ordinal = group_ordinal;
+                    leaf.leaf_ordinal = leaf_ordinal;
+                    leaf_ordinals.insert(relative_file_key, leaf_ordinal);
+                    leaf
+                })
+                .collect::<Vec<_>>();
+            let observation_digest = group_observation_digest(&group_key, &leaves);
+            Ok(OwnedEventFileGroup {
+                ordinal: group_ordinal,
+                group_key,
+                leaves,
+                leaf_ordinals,
+                observation_digest,
+            })
         })
-        .collect())
+        .collect()
 }
 
 fn validate_coordinates(
@@ -638,10 +716,14 @@ fn validate_coordinates(
     coordinates: &EventFileCoordinates,
     maximum_path_bytes: usize,
 ) -> EventFileInventoryResult<()> {
-    if coordinates.group_key.is_empty() || coordinates.group_key.len() > maximum_path_bytes {
+    if coordinates.group_key.is_empty()
+        || coordinates.group_key.len() > maximum_path_bytes
+        || coordinates.group_instance_key.is_empty()
+        || coordinates.group_instance_key.len() > maximum_path_bytes
+    {
         return Err(invalid(
             display_path,
-            "event-file group keys must be nonempty and bounded",
+            "event-file group and instance keys must be nonempty and bounded",
         ));
     }
     let relative = Path::new(&coordinates.relative_file_key);
@@ -710,16 +792,31 @@ fn validate_path(path: &Path, maximum: usize) -> EventFileInventoryResult<()> {
     Ok(())
 }
 
-fn group_observation_digest(group: &OwnedEventFileGroup) -> [u8; 32] {
+fn group_observation_digest(group_key: &str, leaves: &[EventFileLeaf]) -> [u8; 32] {
+    #[cfg(test)]
+    tests::note_group_digest_build();
     let mut digest = Sha256::new();
     digest.update(GROUP_OBSERVATION_DOMAIN);
-    hash_text(&mut digest, &group.group_key);
-    digest.update((group.leaves.len() as u64).to_be_bytes());
-    for leaf in &group.leaves {
+    hash_text(&mut digest, group_key);
+    digest.update((leaves.len() as u64).to_be_bytes());
+    for leaf in leaves {
         hash_text(&mut digest, &leaf.coordinates.relative_file_key);
         digest.update(leaf.observation.len().to_be_bytes());
         hash_system_time(&mut digest, leaf.observation.modified_at());
         digest.update(leaf.observation.token());
+    }
+    digest.finalize().into()
+}
+
+fn inventory_observation_digest(groups: &[OwnedEventFileGroup]) -> [u8; 32] {
+    #[cfg(test)]
+    tests::note_inventory_digest_build();
+    let mut digest = Sha256::new();
+    digest.update(INVENTORY_OBSERVATION_DOMAIN);
+    digest.update((groups.len() as u64).to_be_bytes());
+    for group in groups {
+        hash_text(&mut digest, &group.group_key);
+        digest.update(group.observation_digest);
     }
     digest.finalize().into()
 }
@@ -827,70 +924,19 @@ struct TransientHandleGuard {
 
 #[cfg(test)]
 fn transient_handle(kind: TransientHandleKind) -> TransientHandleGuard {
-    let (active, peak) = match kind {
-        TransientHandleKind::Leaf => (&ACTIVE_LEAF_HANDLES, &PEAK_LEAF_HANDLES),
-        TransientHandleKind::Directory => (&ACTIVE_DIRECTORY_HANDLES, &PEAK_DIRECTORY_HANDLES),
-    };
-    active.with(|active| {
-        let next = active.get().saturating_add(1);
-        active.set(next);
-        peak.with(|peak| peak.set(peak.get().max(next)));
-    });
+    tests::note_handle_opened(kind);
     TransientHandleGuard { kind }
 }
 
 #[cfg(test)]
 impl Drop for TransientHandleGuard {
     fn drop(&mut self) {
-        let active = match self.kind {
-            TransientHandleKind::Leaf => &ACTIVE_LEAF_HANDLES,
-            TransientHandleKind::Directory => &ACTIVE_DIRECTORY_HANDLES,
-        };
-        active.with(|active| active.set(active.get().saturating_sub(1)));
+        tests::note_handle_closed(self.kind);
     }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct EventFileIoCounts {
-    pub inventory_opens: usize,
-    pub body_reads: usize,
-    pub peak_transient_leaf_handles: usize,
-    pub peak_transient_directory_handles: usize,
-    pub active_transient_leaf_handles: usize,
-    pub active_transient_directory_handles: usize,
-}
-
-#[cfg(test)]
-pub(crate) fn count_event_file_io<T>(operation: impl FnOnce() -> T) -> (T, EventFileIoCounts) {
-    INVENTORY_OPENS.with(|opens| opens.set(0));
-    BODY_READS.with(|reads| reads.set(0));
-    ACTIVE_LEAF_HANDLES.with(|handles| handles.set(0));
-    PEAK_LEAF_HANDLES.with(|handles| handles.set(0));
-    ACTIVE_DIRECTORY_HANDLES.with(|handles| handles.set(0));
-    PEAK_DIRECTORY_HANDLES.with(|handles| handles.set(0));
-    let output = operation();
-    let inventory_opens = INVENTORY_OPENS.with(|opens| opens.replace(0));
-    let body_reads = BODY_READS.with(|reads| reads.replace(0));
-    let peak_transient_leaf_handles = PEAK_LEAF_HANDLES.with(|handles| handles.replace(0));
-    let peak_transient_directory_handles =
-        PEAK_DIRECTORY_HANDLES.with(|handles| handles.replace(0));
-    let active_transient_leaf_handles = ACTIVE_LEAF_HANDLES.with(|handles| handles.replace(0));
-    let active_transient_directory_handles =
-        ACTIVE_DIRECTORY_HANDLES.with(|handles| handles.replace(0));
-    (
-        output,
-        EventFileIoCounts {
-            inventory_opens,
-            body_reads,
-            peak_transient_leaf_handles,
-            peak_transient_directory_handles,
-            active_transient_leaf_handles,
-            active_transient_directory_handles,
-        },
-    )
 }
 
 #[cfg(test)]
 #[path = "event_files/tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::count_event_file_io;

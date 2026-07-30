@@ -34,8 +34,9 @@ use crate::{
         normalization::provider_policy_event_text,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
-            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation, JsonlRecordRef,
+            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
+            JsonlRecordRef,
         },
     },
     CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
@@ -80,6 +81,10 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {

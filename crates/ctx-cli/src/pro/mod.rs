@@ -22,7 +22,10 @@ mod request_identity;
 mod setup_validation;
 mod verified_executable;
 mod workos_device;
-pub(crate) use client::{blame, stable_error_code, sync_source_manifest_materialization};
+pub(crate) use client::{
+    blame, preflight_source_manifest_materialization, stable_error_code,
+    sync_source_manifest_materialization,
+};
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
 pub(crate) use pricing::PRO_MONTHLY_PRICE_DISPLAY;
 #[cfg(test)]

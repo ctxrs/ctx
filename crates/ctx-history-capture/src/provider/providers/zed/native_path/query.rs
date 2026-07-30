@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
@@ -28,7 +28,8 @@ use crate::provider::providers::zed::thread::ZedThreadRow;
 
 const ZED_CANDIDATE_PAGE_ROWS: i64 = 256;
 pub(super) const ZED_THREAD_ID_MAX_BYTES: usize = 64 * 1024;
-const ZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-zed-source-integrity-v1\0";
+const ZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-zed-logical-rows-v2\0";
+const ZED_LOGICAL_REVISION_PREFIX: &str = "zed-logical-rows-v1:";
 const ZED_RELATIONSHIP_MAX_DEPTH: usize = 1_024;
 
 pub(crate) struct ZedNativeQueryResult {
@@ -41,22 +42,27 @@ pub(super) struct ZedThreadLineage {
     pub(super) root_thread_id: String,
 }
 
-pub(super) struct ZedThreadLineageResolver<'connection> {
-    connection: &'connection Connection,
-    parent_statement: rusqlite::Statement<'connection>,
+pub(super) struct ZedThreadLineageResolver {
+    parents: HashMap<String, Option<String>>,
 }
 
-impl<'connection> ZedThreadLineageResolver<'connection> {
-    pub(super) fn new(connection: &'connection Connection) -> ZedNativeResult<Self> {
+impl ZedThreadLineageResolver {
+    pub(super) fn new(connection: &Connection) -> ZedNativeResult<Self> {
         let schema = ZedNativeSchema::detect(connection)?;
-        let parent_statement = connection.prepare(&format!(
-            "select {} from threads where id = ?1 collate binary",
-            schema.parent_id
+        let mut statement = connection.prepare(&format!(
+            "select id, {} from threads \
+             where typeof(id) = 'text' and octet_length(id) <= {ZED_THREAD_ID_MAX_BYTES} \
+               and typeof({}) in ('null', 'text') \
+               and coalesce(octet_length({}), 0) <= ?1",
+            schema.parent_id, schema.parent_id, schema.parent_id
         ))?;
-        Ok(Self {
-            connection,
-            parent_statement,
-        })
+        let _guard = SqliteLengthPreflightGuard::new(connection);
+        let mut rows = statement.query([MAX_PROVIDER_SQLITE_VALUE_BYTES as i64])?;
+        let mut parents = HashMap::new();
+        while let Some(row) = rows.next()? {
+            parents.insert(row.get(0)?, row.get(1)?);
+        }
+        Ok(Self { parents })
     }
 
     pub(super) fn resolve(&mut self, thread_id: &str) -> ZedNativeResult<Option<ZedThreadLineage>> {
@@ -72,13 +78,7 @@ impl<'connection> ZedThreadLineageResolver<'connection> {
                     "Zed thread relationships contain a cycle".to_owned(),
                 ));
             }
-            let parent = {
-                let _guard = SqliteLengthPreflightGuard::new(self.connection);
-                self.parent_statement
-                    .query_row([current.as_str()], |row| row.get::<_, Option<String>>(0))
-                    .optional()?
-            };
-            let Some(parent) = parent else {
+            let Some(parent) = self.parents.get(&current).cloned() else {
                 return if depth == 0 {
                     Ok(None)
                 } else {
@@ -175,17 +175,26 @@ impl ZedNativeSchema {
         .join(" + ")
     }
 
-    fn invalid_identity_candidate_sql(&self, after_rowid: bool) -> String {
-        let continuation = if after_rowid { "and rowid > ?1" } else { "" };
+    fn invalid_identity_candidate_sql(&self, after_key: bool) -> String {
+        let storage_error = self.storage_error_expression();
+        let retained_bytes = self.retained_bytes_expression();
+        let data_bytes = "coalesce(octet_length(data), 0)";
+        let continuation = if after_key {
+            format!(
+                "and ({storage_error}, {retained_bytes}, {data_bytes}, rowid) \
+                 > (?1, ?2, ?3, ?4)"
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "select rowid, {}, {}, coalesce(octet_length(data), 0) \
+            "select rowid, {storage_error}, {retained_bytes}, {data_bytes} \
              from threads \
              where (typeof(id) != 'text' \
                     or octet_length(id) > {ZED_THREAD_ID_MAX_BYTES}) \
                {continuation} \
-             order by rowid limit {ZED_CANDIDATE_PAGE_ROWS}",
-            self.storage_error_expression(),
-            self.retained_bytes_expression(),
+             order by {storage_error}, {retained_bytes}, {data_bytes}, rowid \
+             limit {ZED_CANDIDATE_PAGE_ROWS}",
         )
     }
 
@@ -195,34 +204,91 @@ impl ZedNativeSchema {
         } else {
             ""
         };
+        let storage_error = self.storage_error_expression();
+        let retained_bytes = self.retained_bytes_expression();
+        let admissible = format!(
+            "{storage_error} = 0 \
+             and {retained_bytes} <= {MAX_PROVIDER_SQLITE_VALUE_BYTES} \
+             and coalesce(octet_length(data), 0) <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
+        );
         format!(
-            "select rowid, id, {}, {}, coalesce(octet_length(data), 0) \
+            "select rowid, id, {storage_error}, {retained_bytes}, \
+                    coalesce(octet_length(data), 0), \
+                    case when {admissible} then summary end, \
+                    case when {admissible} then updated_at end, \
+                    case when {admissible} then data_type end, \
+                    case when {admissible} then data end, \
+                    case when {admissible} then {} end, \
+                    case when {admissible} then {} end, \
+                    case when {admissible} then {} end, \
+                    case when {admissible} then {} end \
              from threads \
              where typeof(id) = 'text' \
                and octet_length(id) <= {ZED_THREAD_ID_MAX_BYTES} \
                {continuation} \
              order by id collate binary asc limit {ZED_CANDIDATE_PAGE_ROWS}",
-            self.storage_error_expression(),
-            self.retained_bytes_expression(),
-        )
-    }
-
-    fn hydration_sql(&self) -> String {
-        format!(
-            "select id, summary, updated_at, data_type, data, \
-                    {}, {}, {}, {} \
-             from threads where id = ?1 collate binary",
             self.parent_id, self.folder_paths, self.folder_paths_order, self.created_at,
         )
     }
 }
 
-pub(crate) fn scan_zed_native_snapshot(
+fn invalid_candidate_page(
     connection: &Connection,
-    _physical_locator: &str,
-    _snapshot_revision: &str,
-    sink: &mut dyn ZedNativeSink,
-) -> ZedNativeResult<ZedNativeQueryResult> {
+    statement: &mut rusqlite::Statement<'_>,
+    after: Option<ZedInvalidCandidateKey>,
+) -> ZedNativeResult<Vec<ZedCandidate>> {
+    let _guard = SqliteLengthPreflightGuard::new(connection);
+    let mut rows = match after {
+        Some(key) => statement.query(rusqlite::params![
+            key.storage_error,
+            key.retained_bytes,
+            key.data_bytes,
+            key.rowid,
+        ])?,
+        None => statement.query([])?,
+    };
+    let mut candidates = Vec::with_capacity(ZED_CANDIDATE_PAGE_ROWS as usize);
+    while let Some(row) = rows.next()? {
+        candidates.push(ZedCandidate {
+            rowid: row.get(0)?,
+            id: None,
+            storage_error: row.get(1)?,
+            retained_bytes: row.get(2)?,
+            data_bytes: row.get(3)?,
+            hydrated: None,
+        });
+    }
+    Ok(candidates)
+}
+
+fn candidate_page(
+    connection: &Connection,
+    statement: &mut rusqlite::Statement<'_>,
+    after_id: Option<&str>,
+) -> ZedNativeResult<Vec<ZedCandidate>> {
+    let _guard = SqliteLengthPreflightGuard::new(connection);
+    let mut rows = match after_id {
+        Some(id) => statement.query([id])?,
+        None => statement.query([])?,
+    };
+    let mut candidates = Vec::with_capacity(ZED_CANDIDATE_PAGE_ROWS as usize);
+    while let Some(row) = rows.next()? {
+        candidates.push(ZedCandidate {
+            rowid: row.get(0)?,
+            id: Some(row.get(1)?),
+            storage_error: row.get(2)?,
+            retained_bytes: row.get(3)?,
+            data_bytes: row.get(4)?,
+            hydrated: zed_candidate_hydrated_row(row)?,
+        });
+    }
+    Ok(candidates)
+}
+
+pub(crate) fn observe_zed_logical_snapshot(connection: &Connection) -> ZedNativeResult<String> {
+    #[cfg(test)]
+    super::record_zed_logical_observation();
+
     let schema = ZedNativeSchema::detect(connection)?;
     let mut first_invalid_identity_statement =
         connection.prepare(&schema.invalid_identity_candidate_sql(false))?;
@@ -230,39 +296,93 @@ pub(crate) fn scan_zed_native_snapshot(
         connection.prepare(&schema.invalid_identity_candidate_sql(true))?;
     let mut first_candidate_statement = connection.prepare(&schema.candidate_sql(false))?;
     let mut next_candidate_statement = connection.prepare(&schema.candidate_sql(true))?;
-    let mut hydration_statement = connection.prepare(&schema.hydration_sql())?;
+    let mut hasher = Sha256::new();
+    hasher.update(ZED_SOURCE_DIGEST_DOMAIN);
+
+    let mut last_invalid_key = None;
+    loop {
+        let candidates = match last_invalid_key {
+            Some(key) => {
+                invalid_candidate_page(connection, &mut next_invalid_identity_statement, Some(key))?
+            }
+            None => {
+                invalid_candidate_page(connection, &mut first_invalid_identity_statement, None)?
+            }
+        };
+        if candidates.is_empty() {
+            break;
+        }
+        for candidate in candidates {
+            last_invalid_key = Some(candidate.invalid_key());
+            hash_candidate(&mut hasher, &candidate);
+        }
+    }
+
+    let mut last_thread_id: Option<String> = None;
+    loop {
+        let candidates = match last_thread_id.as_deref() {
+            Some(id) => candidate_page(connection, &mut next_candidate_statement, Some(id))?,
+            None => candidate_page(connection, &mut first_candidate_statement, None)?,
+        };
+        if candidates.is_empty() {
+            break;
+        }
+        for candidate in candidates {
+            let id = candidate.id.as_deref().ok_or_else(|| {
+                ZedNativePathError::UnsupportedSchema(
+                    "bounded Zed thread candidate is missing its text identity".to_owned(),
+                )
+            })?;
+            last_thread_id = Some(id.to_owned());
+            hash_candidate(&mut hasher, &candidate);
+            if let Some(row) = candidate.hydrated.as_ref() {
+                hash_hydrated_row(&mut hasher, row);
+            }
+        }
+    }
+
+    let digest: [u8; 32] = hasher.finalize().into();
+    Ok(zed_logical_revision(digest))
+}
+
+pub(crate) fn scan_zed_native_snapshot(
+    connection: &Connection,
+    _physical_locator: &str,
+    snapshot_revision: &str,
+    sink: &mut dyn ZedNativeSink,
+) -> ZedNativeResult<ZedNativeQueryResult> {
+    #[cfg(test)]
+    super::record_zed_projection_pass();
+
+    let schema = ZedNativeSchema::detect(connection)?;
+    let mut first_invalid_identity_statement =
+        connection.prepare(&schema.invalid_identity_candidate_sql(false))?;
+    let mut next_invalid_identity_statement =
+        connection.prepare(&schema.invalid_identity_candidate_sql(true))?;
+    let mut first_candidate_statement = connection.prepare(&schema.candidate_sql(false))?;
+    let mut next_candidate_statement = connection.prepare(&schema.candidate_sql(true))?;
     let mut builder = ZedNativePageBuilder::new(sink);
     let mut source_hasher = Sha256::new();
     source_hasher.update(ZED_SOURCE_DIGEST_DOMAIN);
     let mut counters = ZedNativeCounters::default();
 
-    let mut last_invalid_rowid = None;
+    let mut last_invalid_key = None;
     loop {
         counters.candidate_page_queries = counters.candidate_page_queries.saturating_add(1);
-        let candidates = {
-            let _guard = SqliteLengthPreflightGuard::new(connection);
-            let mut rows = match last_invalid_rowid {
-                Some(rowid) => next_invalid_identity_statement.query([rowid])?,
-                None => first_invalid_identity_statement.query([])?,
-            };
-            let mut candidates = Vec::with_capacity(ZED_CANDIDATE_PAGE_ROWS as usize);
-            while let Some(row) = rows.next()? {
-                candidates.push(ZedCandidate {
-                    rowid: row.get(0)?,
-                    id: None,
-                    storage_error: row.get(1)?,
-                    retained_bytes: row.get(2)?,
-                    data_bytes: row.get(3)?,
-                });
+        let candidates = match last_invalid_key {
+            Some(key) => {
+                invalid_candidate_page(connection, &mut next_invalid_identity_statement, Some(key))?
             }
-            candidates
+            None => {
+                invalid_candidate_page(connection, &mut first_invalid_identity_statement, None)?
+            }
         };
         if candidates.is_empty() {
             break;
         }
 
         for candidate in candidates {
-            last_invalid_rowid = Some(candidate.rowid);
+            last_invalid_key = Some(candidate.invalid_key());
             counters.native_thread_rows = counters.native_thread_rows.saturating_add(1);
             counters.certified_logical_bytes = counters
                 .certified_logical_bytes
@@ -296,23 +416,9 @@ pub(crate) fn scan_zed_native_snapshot(
     let mut thread_ordinal = 0_u64;
     loop {
         counters.candidate_page_queries = counters.candidate_page_queries.saturating_add(1);
-        let candidates = {
-            let _guard = SqliteLengthPreflightGuard::new(connection);
-            let mut rows = match last_thread_id.as_deref() {
-                Some(id) => next_candidate_statement.query([id])?,
-                None => first_candidate_statement.query([])?,
-            };
-            let mut candidates = Vec::with_capacity(ZED_CANDIDATE_PAGE_ROWS as usize);
-            while let Some(row) = rows.next()? {
-                candidates.push(ZedCandidate {
-                    rowid: row.get(0)?,
-                    id: Some(row.get(1)?),
-                    storage_error: row.get(2)?,
-                    retained_bytes: row.get(3)?,
-                    data_bytes: row.get(4)?,
-                });
-            }
-            candidates
+        let candidates = match last_thread_id.as_deref() {
+            Some(id) => candidate_page(connection, &mut next_candidate_statement, Some(id))?,
+            None => candidate_page(connection, &mut first_candidate_statement, None)?,
         };
         if candidates.is_empty() {
             break;
@@ -358,16 +464,11 @@ pub(crate) fn scan_zed_native_snapshot(
                 continue;
             }
 
-            counters.hydration_queries = counters.hydration_queries.saturating_add(1);
-            let mut row = hydration_statement
-                .query_row([id], hydrate_zed_row)
-                .optional()?
-                .ok_or_else(|| {
-                    ZedNativePathError::UnsupportedSchema(format!(
-                        "Zed thread {id:?} disappeared from immutable snapshot"
-                    ))
-                })?;
-            row.rowid = candidate.rowid;
+            let row = candidate.hydrated.ok_or_else(|| {
+                ZedNativePathError::UnsupportedSchema(format!(
+                    "Zed thread {id:?} was not returned by its bounded set query"
+                ))
+            })?;
             counters.encoded_payload_bytes = counters
                 .encoded_payload_bytes
                 .saturating_add(u64::try_from(row.data.len()).unwrap_or(u64::MAX));
@@ -491,7 +592,13 @@ pub(crate) fn scan_zed_native_snapshot(
         }
     }
 
-    let source_integrity_digest = hex_digest(source_hasher.finalize().into());
+    let source_digest: [u8; 32] = source_hasher.finalize().into();
+    if zed_logical_revision(source_digest) != snapshot_revision {
+        return Err(ZedNativePathError::Capture(
+            crate::CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    let source_integrity_digest = hex_digest(source_digest);
     builder.finish()?;
     Ok(ZedNativeQueryResult {
         source_integrity_digest,
@@ -503,7 +610,6 @@ fn zed_logical_record_digest(
     row: &ZedHydratedRow,
 ) -> crate::complete_content::CompleteContentBodyDigest {
     sqlite_logical_record_digest(&[
-        NativeSqliteValue::Integer(row.rowid),
         NativeSqliteValue::Text(row.id.clone()),
         optional_native_text(row.parent_id.clone()),
         optional_native_text(row.folder_paths.clone()),
@@ -563,6 +669,64 @@ pub(super) fn hydrate_zed_thread_row(
     }))
 }
 
+pub(super) fn hydrate_zed_thread_rows(
+    connection: &Connection,
+    thread_ids: &[String],
+) -> ZedNativeResult<
+    HashMap<
+        String,
+        (
+            ZedThreadRow,
+            crate::complete_content::CompleteContentBodyDigest,
+        ),
+    >,
+> {
+    const BATCH: usize = 128;
+    let schema = ZedNativeSchema::detect(connection)?;
+    let mut hydrated = HashMap::new();
+    for chunk in thread_ids.chunks(BATCH) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "select rowid, id, summary, updated_at, data_type, data, \
+                    {}, {}, {}, {} \
+             from threads where id collate binary in ({placeholders})",
+            schema.parent_id, schema.folder_paths, schema.folder_paths_order, schema.created_at,
+        );
+        let _guard = SqliteLengthPreflightGuard::new(connection);
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(rusqlite::params_from_iter(chunk))?;
+        while let Some(row) = rows.next()? {
+            let row = ZedHydratedRow {
+                rowid: row.get(0)?,
+                id: row.get(1)?,
+                summary: row.get(2)?,
+                updated_at: row.get(3)?,
+                data_type: row.get(4)?,
+                data: row.get(5)?,
+                parent_id: row.get(6)?,
+                folder_paths: row.get(7)?,
+                folder_paths_order: row.get(8)?,
+                created_at: row.get(9)?,
+            };
+            let digest = zed_logical_record_digest(&row);
+            let thread = ZedThreadRow {
+                id: row.id.clone(),
+                updated_at: row.updated_at,
+                data_type: row.data_type,
+                data: row.data,
+            };
+            if hydrated.insert(row.id, (thread, digest)).is_some() {
+                return Err(ZedNativePathError::UnsupportedSchema(
+                    "Zed thread identity is not unique".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(hydrated)
+}
+
 fn optional_native_text(value: Option<String>) -> NativeSqliteValue {
     value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
 }
@@ -573,6 +737,26 @@ struct ZedCandidate {
     storage_error: i64,
     retained_bytes: i64,
     data_bytes: i64,
+    hydrated: Option<ZedHydratedRow>,
+}
+
+#[derive(Clone, Copy)]
+struct ZedInvalidCandidateKey {
+    storage_error: i64,
+    retained_bytes: i64,
+    data_bytes: i64,
+    rowid: i64,
+}
+
+impl ZedCandidate {
+    fn invalid_key(&self) -> ZedInvalidCandidateKey {
+        ZedInvalidCandidateKey {
+            storage_error: self.storage_error,
+            retained_bytes: self.retained_bytes,
+            data_bytes: self.data_bytes,
+            rowid: self.rowid,
+        }
+    }
 }
 
 struct ZedHydratedRow {
@@ -588,19 +772,31 @@ struct ZedHydratedRow {
     created_at: Option<String>,
 }
 
-fn hydrate_zed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ZedHydratedRow> {
-    Ok(ZedHydratedRow {
-        rowid: 0, // Set from the integer-only candidate after hydration succeeds.
-        id: row.get(0)?,
-        summary: row.get(1)?,
-        updated_at: row.get(2)?,
-        data_type: row.get(3)?,
-        data: row.get(4)?,
-        parent_id: row.get(5)?,
-        folder_paths: row.get(6)?,
-        folder_paths_order: row.get(7)?,
-        created_at: row.get(8)?,
-    })
+fn zed_candidate_hydrated_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<ZedHydratedRow>> {
+    let Some(summary) = row.get::<_, Option<String>>(5)? else {
+        return Ok(None);
+    };
+    let Some(updated_at) = row.get::<_, Option<String>>(6)? else {
+        return Ok(None);
+    };
+    let Some(data_type) = row.get::<_, Option<String>>(7)? else {
+        return Ok(None);
+    };
+    let Some(data) = row.get::<_, Option<Vec<u8>>>(8)? else {
+        return Ok(None);
+    };
+    Ok(Some(ZedHydratedRow {
+        rowid: row.get(0)?,
+        id: row.get(1)?,
+        summary,
+        updated_at,
+        data_type,
+        data,
+        parent_id: row.get(9)?,
+        folder_paths: row.get(10)?,
+        folder_paths_order: row.get(11)?,
+        created_at: row.get(12)?,
+    }))
 }
 
 fn require_native_thread_identity(connection: &Connection) -> ZedNativeResult<()> {
@@ -731,4 +927,8 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(value);
+}
+
+fn zed_logical_revision(digest: [u8; 32]) -> String {
+    format!("{ZED_LOGICAL_REVISION_PREFIX}{}", hex_digest(digest))
 }

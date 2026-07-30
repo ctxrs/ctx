@@ -5,8 +5,10 @@ use ctx_history_core::{
     NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput, SourceAnchor,
     SourceRecordLocator,
 };
+use ctx_history_index::{CommitReceipt, GenerationWriter, WriterOptions};
 use sha2::{Digest, Sha256};
 
+use super::super::JsonlReader;
 use super::*;
 
 const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
@@ -72,6 +74,10 @@ impl JsonlFamilyAdapter for TestAdapter {
 
     fn parser_revision(&self) -> &'static str {
         "terminal-witness-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -236,6 +242,233 @@ fn expected_source(resident: &FamilyResident) -> CertifiedSource {
         .clone()
 }
 
+struct ParallelTestAdapter;
+
+struct ParallelTestProjector;
+
+impl JsonlFamilyProjector for ParallelTestProjector {
+    fn project(
+        &mut self,
+        _record: JsonlRecordRef<'_>,
+        _emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl JsonlFamilyAdapter for ParallelTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "parallel-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Ok(Box::new(ParallelTestProjector))
+    }
+
+    fn hydrator(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
+        Err(hydration_error(
+            HydrationFailureKind::TemporarilyUnavailable,
+            "parallel tests never hydrate",
+        ))
+    }
+}
+
+fn capture_parallel_test_generation(
+    adapter: &ParallelTestAdapter,
+    root: &Path,
+    index_root: &Path,
+    workers: usize,
+) -> (CommitReceipt, JsonlFamilyScannerActivity) {
+    let resident = Mutex::new(FamilyResident::default());
+    let mut writer = GenerationWriter::open(
+        index_root,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let mut owners = HashMap::new();
+    let mut complete_inventories = Vec::new();
+    {
+        let mut sink = SourceBackedGenerationSink {
+            writer: &mut writer,
+            owners: &mut owners,
+            complete_inventories: &mut complete_inventories,
+            route_index: 0,
+            leaf_worker_budget: workers,
+        };
+        with_family_scanner_workers(workers, || {
+            capture(adapter, root, &resident, &mut sink).unwrap();
+        });
+    }
+    let activity = jsonl_family_scanner_activity();
+    let commit = writer
+        .commit_with_complete_inventory_revalidation(|_| true, |_| true)
+        .unwrap();
+    (commit, activity)
+}
+
+#[test]
+fn borrowed_jsonl_worker_policy_honors_default_and_requested_counts() {
+    assert_eq!(family_scanner_worker_count_policy(0, None), 0);
+    assert_eq!(family_scanner_worker_count_policy(8, None), 8);
+    assert_eq!(family_scanner_worker_count_policy(8, Some(4)), 4);
+    assert_eq!(family_scanner_worker_count_policy(3, Some(4)), 3);
+    assert_eq!(family_scanner_worker_count_policy(8, Some(0)), 1);
+    assert_eq!(family_scanner_worker_count_policy(8, Some(usize::MAX)), 8);
+}
+
+#[test]
+fn certified_append_generation_is_identical_with_one_and_eight_workers() {
+    use std::{fs::OpenOptions, io::Write};
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    for index in 0..8 {
+        fs::write(
+            root.join(format!("{index}.jsonl")),
+            format!("{{\"message\":\"cold-{index}\"}}\n"),
+        )
+        .unwrap();
+    }
+    let adapter = ParallelTestAdapter;
+
+    let (one_cold, one_cold_activity) =
+        capture_parallel_test_generation(&adapter, &root, &temp.path().join("one"), 1);
+    let (eight_cold, eight_cold_activity) =
+        capture_parallel_test_generation(&adapter, &root, &temp.path().join("eight"), 8);
+    assert_eq!(
+        one_cold_activity,
+        JsonlFamilyScannerActivity {
+            worker_count: 1,
+            sources_started: 8,
+            sources_completed: 8,
+            peak_active_scanners: 1,
+        }
+    );
+    assert_eq!(eight_cold_activity.worker_count, 8);
+    assert_eq!(eight_cold_activity.sources_started, 8);
+    assert_eq!(eight_cold_activity.sources_completed, 8);
+    assert!(eight_cold_activity.peak_active_scanners >= 4);
+    assert!(eight_cold_activity.peak_active_scanners <= 8);
+    assert_eq!(one_cold.generation_id, eight_cold.generation_id);
+    assert_eq!(
+        one_cold.manifest().sources,
+        eight_cold.manifest().sources,
+        "cold certification must be independent of worker count"
+    );
+
+    for index in 0..8 {
+        OpenOptions::new()
+            .append(true)
+            .open(root.join(format!("{index}.jsonl")))
+            .unwrap()
+            .write_all(format!("{{\"message\":\"append-{index}\"}}\n").as_bytes())
+            .unwrap();
+    }
+    let (one_append, one_append_activity) =
+        capture_parallel_test_generation(&adapter, &root, &temp.path().join("one"), 1);
+    let (eight_append, eight_append_activity) =
+        capture_parallel_test_generation(&adapter, &root, &temp.path().join("eight"), 8);
+    assert_eq!(one_append_activity.sources_started, 8);
+    assert_eq!(one_append_activity.sources_completed, 8);
+    assert_eq!(one_append_activity.peak_active_scanners, 1);
+    assert_eq!(eight_append_activity.sources_started, 8);
+    assert_eq!(eight_append_activity.sources_completed, 8);
+    assert!(eight_append_activity.peak_active_scanners >= 4);
+    assert_eq!(one_append.generation_id, eight_append.generation_id);
+    assert_eq!(
+        one_append.manifest().sources,
+        eight_append.manifest().sources,
+        "certified append must be independent of worker count"
+    );
+    assert!(one_append
+        .manifest()
+        .sources
+        .iter()
+        .all(|source| source.counts().complete_records == 2));
+}
+
+#[test]
+fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    for index in 0..8 {
+        fs::write(
+            root.join(format!("{index}.jsonl")),
+            b"{\"message\":\"parallel\"}\n",
+        )
+        .unwrap();
+    }
+    let adapter = ParallelTestAdapter;
+    let resident = Mutex::new(FamilyResident::default());
+    let mut writer = GenerationWriter::open(
+        temp.path().join("index"),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let mut owners = HashMap::new();
+    let mut complete_inventories = Vec::new();
+    let mut sink = SourceBackedGenerationSink {
+        writer: &mut writer,
+        owners: &mut owners,
+        complete_inventories: &mut complete_inventories,
+        route_index: 0,
+        leaf_worker_budget: 4,
+    };
+
+    with_family_scanner_workers(4, || {
+        capture(&adapter, &root, &resident, &mut sink).unwrap();
+    });
+
+    assert_eq!(
+        jsonl_family_scanner_activity(),
+        JsonlFamilyScannerActivity {
+            worker_count: 4,
+            sources_started: 8,
+            sources_completed: 8,
+            peak_active_scanners: 4,
+        },
+        "the production JSONL route must keep all four selected scanners active"
+    );
+    assert_eq!(resident.lock().unwrap().terminal_sources.len(), 8);
+}
+
 #[test]
 fn active_source_family_contract_jsonl_terminal_inventory_rediscovers_live_tree() {
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -324,7 +557,7 @@ fn active_source_family_contract_jsonl_hydration_rejects_same_length_rewrite() {
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
     let source_path = root.join("first.jsonl");
-    fs::write(&source_path, b"{\"message\":\"before\"}\n").unwrap();
+    fs::write(&source_path, TEST_RECORD).unwrap();
     let adapter = TestAdapter;
     let source = adapter
         .discover(&root)

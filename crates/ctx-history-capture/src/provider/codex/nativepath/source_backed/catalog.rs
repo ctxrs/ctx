@@ -8,13 +8,36 @@ const CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION: &str = "codex-session-tree-un
 pub(crate) struct CodexRootInventoryV0 {
     pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     pub(crate) certificate: CertifiedSourceInventory,
-    pub(super) root: ProviderSourceRoot,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct CodexSessionTreeInventoryV0 {
     pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     pub(crate) certificate: CertifiedSourceInventory,
+    pub(crate) work: CodexCatalogWorkV0,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CodexCatalogWorkV0 {
+    pub(crate) inventory_walks: u64,
+    pub(crate) source_observations: u64,
+    pub(crate) source_body_reads: u64,
+    pub(crate) session_meta_parses: u64,
+}
+
+impl CodexCatalogWorkV0 {
+    fn add_assign(&mut self, other: Self) {
+        self.inventory_walks = self.inventory_walks.saturating_add(other.inventory_walks);
+        self.source_observations = self
+            .source_observations
+            .saturating_add(other.source_observations);
+        self.source_body_reads = self
+            .source_body_reads
+            .saturating_add(other.source_body_reads);
+        self.session_meta_parses = self
+            .session_meta_parses
+            .saturating_add(other.session_meta_parses);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +291,17 @@ pub(super) fn bind_source_keys(
     Ok(bound)
 }
 
+pub(crate) fn discover_codex_session_tree_inventory_from_base_v0(
+    session_roots: &[PathBuf],
+    base_sources: &HashMap<SourceKey, CertifiedSource>,
+) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
+    let seeds = base_sources
+        .values()
+        .filter_map(incremental_seed_from_certificate)
+        .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
+    discover_codex_session_tree_inventory_incremental_v0(session_roots, &seeds)
+}
+
 pub(crate) fn discover_codex_root_inventory_v0(
     session_root: &Path,
 ) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
@@ -278,33 +312,7 @@ pub(crate) fn discover_codex_root_inventory_v0(
 pub(crate) fn discover_codex_session_tree_inventory_v0(
     session_roots: &[PathBuf],
 ) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
-    let mut normalized_roots = session_roots
-        .iter()
-        .map(|root| absolute_lexical_path(root))
-        .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
-    normalized_roots.sort();
-    normalized_roots.dedup();
-    if normalized_roots.is_empty() {
-        return Err(CodexSourceBackedErrorV0::Capture(
-            CaptureError::InvalidPayload(
-                "Codex session-tree authority has no inventory roots".to_owned(),
-            ),
-        ));
-    }
-
-    let mut retained_roots = Vec::with_capacity(normalized_roots.len());
-    for root in &normalized_roots {
-        retained_roots.push(discover_codex_session_catalog_retained(root)?);
-    }
-    build_codex_session_tree_inventory_v0(&normalized_roots, retained_roots)
-}
-
-pub(super) fn rediscover_codex_root_inventory_v0(
-    session_root: &Path,
-    root: &ProviderSourceRoot,
-) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
-    let retained = rediscover_codex_session_catalog_retained(session_root, root)?;
-    build_codex_root_inventory_v0(session_root, retained)
+    discover_codex_session_tree_inventory_incremental_v0(session_roots, &[])
 }
 
 fn build_codex_root_inventory_v0(
@@ -339,51 +347,411 @@ fn build_codex_root_inventory_v0(
     Ok(CodexRootInventoryV0 {
         sources,
         certificate,
-        root: retained.root,
     })
 }
 
-fn build_codex_session_tree_inventory_v0(
+pub(crate) fn discover_codex_session_tree_inventory_from_plans_v0(
     session_roots: &[PathBuf],
-    retained_roots: Vec<crate::provider::codex::catalog::RetainedCodexSessionCatalog>,
+    prior_inventory: &CodexSessionTreeInventoryV0,
 ) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
-    if session_roots.len() != retained_roots.len() {
+    let seeds = prior_inventory
+        .sources
+        .iter()
+        .map(|(source, source_key, native_session_id)| {
+            let expected = codex_source_key(native_session_id)?;
+            if !expected.exact_descriptor_eq(source_key) {
+                return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
+            }
+            Ok(CodexIncrementalInventorySeedV0 {
+                native_session_id: native_session_id.clone(),
+                parent_native_session_id: source.catalog_parent_native_session_id.clone(),
+                root_native_session_id: source.catalog_root_native_session_id.clone(),
+                observation: source.catalog_observation.clone(),
+            })
+        })
+        .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
+    discover_codex_session_tree_inventory_incremental_v0(session_roots, &seeds)
+}
+
+#[derive(Debug, Clone)]
+struct CodexIncrementalInventorySeedV0 {
+    native_session_id: String,
+    parent_native_session_id: Option<String>,
+    root_native_session_id: Option<String>,
+    observation: CodexFileObservation,
+}
+
+#[derive(Debug)]
+struct CodexMetadataInventoryLeafV0 {
+    source_root: String,
+    source_path: PathBuf,
+    relative_path: PathBuf,
+    observation: CodexFileObservation,
+    authority: ProviderSourceRoot,
+}
+
+fn incremental_seed_from_certificate(
+    certificate: &CertifiedSource,
+) -> Option<CodexSourceBackedResultV0<CodexIncrementalInventorySeedV0>> {
+    let source_key = certificate.observation().source();
+    if !managed_codex_session_source(source_key)
+        || certificate.observation().revision_kind() != CODEX_SOURCE_REVISION_KIND
+    {
+        return None;
+    }
+    let SourceAnchor::ProviderNative { namespace, key } = source_key.anchor() else {
+        return None;
+    };
+    let TypedKey::Utf8(native_session_id) = key else {
+        return None;
+    };
+    if namespace != CODEX_SOURCE_ANCHOR_NAMESPACE {
+        return None;
+    }
+    let observation = match serde_json::from_slice::<CodexFileObservation>(
+        certificate.observation().revision(),
+    ) {
+        Ok(observation) => observation,
+        Err(error) => return Some(Err(error.into())),
+    };
+    let (parent_native_session_id, root_native_session_id) = certificate
+        .frontier()
+        .filter(|frontier| frontier.checkpoint_kind() == CODEX_FRONTIER_KIND)
+        .and_then(|frontier| match frontier.checkpoint() {
+            TypedKey::Bytes(bytes) => CodexNativeCheckpoint::decode(bytes).ok(),
+            _ => None,
+        })
+        .filter(|checkpoint| checkpoint.owner.native_session_id == *native_session_id)
+        .map(|checkpoint| {
+            (
+                checkpoint.owner.parent_native_session_id,
+                checkpoint.owner.root_native_session_id,
+            )
+        })
+        .unwrap_or_default();
+    Some(Ok(CodexIncrementalInventorySeedV0 {
+        native_session_id: native_session_id.clone(),
+        parent_native_session_id,
+        root_native_session_id,
+        observation,
+    }))
+}
+
+fn discover_codex_session_tree_inventory_incremental_v0(
+    session_roots: &[PathBuf],
+    seeds: &[CodexIncrementalInventorySeedV0],
+) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
+    let normalized_roots = normalized_session_roots(session_roots)?;
+    let mut leaves = Vec::new();
+    let mut root_revisions = Vec::with_capacity(normalized_roots.len());
+    let mut authorities = Vec::with_capacity(normalized_roots.len());
+    let mut work = CodexCatalogWorkV0::default();
+    for session_root in &normalized_roots {
+        let (root, mut root_leaves, root_work) =
+            discover_codex_metadata_inventory_root_v0(session_root)?;
+        work.add_assign(root_work);
+        crate::provider::codex::catalog::ensure_catalog_source_bound(
+            leaves.len().saturating_add(root_leaves.len()),
+        )?;
+        leaves.append(&mut root_leaves);
+        root_revisions.push(codex_root_revision_v0(session_root)?);
+        authorities.push(root);
+    }
+
+    let candidates = exact_seed_candidates(&leaves, seeds);
+    let mut catalog_sources = Vec::with_capacity(leaves.len());
+    for (leaf, seed_index) in leaves.into_iter().zip(candidates) {
+        let source = match seed_index {
+            Some(seed_index) => catalog_source_from_seed(&leaf, &seeds[seed_index]),
+            None => {
+                work.source_body_reads = work.source_body_reads.saturating_add(1);
+                work.session_meta_parses = work.session_meta_parses.saturating_add(1);
+                catalog_source_from_body(&leaf)?
+            }
+        };
+        catalog_sources.push(source);
+    }
+    for authority in &authorities {
+        authority.revalidate()?;
+    }
+
+    let mut sources = bind_source_keys(catalog_sources)?;
+    sort_bound_sources(&mut sources);
+    let observation = if let [session_root] = normalized_roots.as_slice() {
+        codex_inventory_observation_v0(session_root, &root_revisions[0], &sources)?
+    } else {
+        codex_session_tree_inventory_observation_v0(&normalized_roots, &root_revisions, &sources)?
+    };
+    let discovery_revision = if normalized_roots.len() == 1 {
+        CODEX_DISCOVERY_REVISION
+    } else {
+        CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION
+    };
+    let source_keys = sources
+        .iter()
+        .map(|(_, source_key, _)| source_key.clone())
+        .collect();
+    let certificate = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        discovery_revision,
+        source_keys,
+    )?;
+    Ok(CodexSessionTreeInventoryV0 {
+        sources,
+        certificate,
+        work,
+    })
+}
+
+fn discover_codex_metadata_inventory_root_v0(
+    session_root: &Path,
+) -> CodexSourceBackedResultV0<(
+    ProviderSourceRoot,
+    Vec<CodexMetadataInventoryLeafV0>,
+    CodexCatalogWorkV0,
+)> {
+    let authority = ProviderSourceRoot::open(session_root)?;
+    let mut leaves = Vec::new();
+    let mut pending = vec![(PathBuf::new(), 0_usize)];
+    let mut visited_directories = 0_usize;
+    let mut visited_entries = 0_usize;
+    while let Some((relative_directory, depth)) = pending.pop() {
+        if depth > PROVIDER_JSONL_INVENTORY_MAX_DEPTH {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex catalog directory depth exceeds the provider inventory bound".to_owned(),
+                ),
+            ));
+        }
+        visited_directories = visited_directories.saturating_add(1);
+        if visited_directories > PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex catalog directory count exceeds the provider inventory bound".to_owned(),
+                ),
+            ));
+        }
+        let directory = authority.open_directory(&relative_directory)?;
+        let names = directory.entries(
+            PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES
+                .saturating_sub(visited_entries)
+                .saturating_add(1),
+        )?;
+        visited_entries = visited_entries.saturating_add(names.len());
+        if visited_entries > PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex catalog entry count exceeds the provider inventory bound".to_owned(),
+                ),
+            ));
+        }
+        let mut child_directories = Vec::new();
+        for name in names {
+            let relative_path = relative_directory.join(&name);
+            let source_path = session_root.join(&relative_path);
+            if source_path.as_os_str().as_encoded_bytes().len()
+                > PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES
+            {
+                return Err(CodexSourceBackedErrorV0::Capture(
+                    CaptureError::InvalidPayload(
+                        "Codex catalog path exceeds the provider inventory bound".to_owned(),
+                    ),
+                ));
+            }
+            match directory.open_child(&name)? {
+                OpenedProviderSourcePath::Directory(_) => {
+                    child_directories.push((relative_path, depth.saturating_add(1)));
+                }
+                OpenedProviderSourcePath::File(opened)
+                    if source_path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        == Some("jsonl") =>
+                {
+                    crate::provider::provider_path_identity(&source_path)?;
+                    let observation = opened_codex_file_observation(&source_path, opened.file())?;
+                    opened.revalidate_leaf()?;
+                    leaves.push(CodexMetadataInventoryLeafV0 {
+                        source_root: session_root.display().to_string(),
+                        source_path,
+                        relative_path,
+                        observation,
+                        authority: authority.clone(),
+                    });
+                    crate::provider::codex::catalog::ensure_catalog_source_bound(leaves.len())?;
+                }
+                OpenedProviderSourcePath::File(_) => {}
+            }
+        }
+        directory.revalidate()?;
+        child_directories.reverse();
+        pending.extend(child_directories);
+    }
+    authority.revalidate()?;
+    let source_observations =
+        u64::try_from(leaves.len()).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
+    Ok((
+        authority,
+        leaves,
+        CodexCatalogWorkV0 {
+            inventory_walks: 1,
+            source_observations,
+            ..CodexCatalogWorkV0::default()
+        },
+    ))
+}
+
+fn exact_seed_candidates(
+    leaves: &[CodexMetadataInventoryLeafV0],
+    seeds: &[CodexIncrementalInventorySeedV0],
+) -> Vec<Option<usize>> {
+    let mut seeds_by_stable = HashMap::<[u8; 32], Vec<usize>>::new();
+    let mut leaves_by_stable = HashMap::<[u8; 32], Vec<usize>>::new();
+    let mut seeds_by_native_id = HashMap::<&str, Vec<usize>>::new();
+    for (index, seed) in seeds.iter().enumerate() {
+        if let Some(stable) = seed.observation.stable_token {
+            seeds_by_stable.entry(stable).or_default().push(index);
+        }
+        seeds_by_native_id
+            .entry(seed.native_session_id.as_str())
+            .or_default()
+            .push(index);
+    }
+    for (index, leaf) in leaves.iter().enumerate() {
+        if let Some(stable) = leaf.observation.stable_token {
+            leaves_by_stable.entry(stable).or_default().push(index);
+        }
+    }
+
+    let mut candidates = leaves
+        .iter()
+        .map(|leaf| {
+            let stable_candidate = leaf.observation.stable_token.and_then(|stable| {
+                match (
+                    seeds_by_stable.get(&stable).map(Vec::as_slice),
+                    leaves_by_stable.get(&stable).map(Vec::as_slice),
+                ) {
+                    (Some([seed_index]), Some([_]))
+                        if seeds[*seed_index].observation == leaf.observation =>
+                    {
+                        Some(*seed_index)
+                    }
+                    _ => None,
+                }
+            });
+            stable_candidate.or_else(|| {
+                let native_session_id = codex_native_session_id_path_hint(&leaf.source_path)?;
+                match seeds_by_native_id
+                    .get(native_session_id.as_str())
+                    .map(Vec::as_slice)
+                {
+                    Some([seed_index]) if seeds[*seed_index].observation == leaf.observation => {
+                        Some(*seed_index)
+                    }
+                    _ => None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut candidate_counts = HashMap::<usize, usize>::new();
+    for seed_index in candidates.iter().flatten() {
+        *candidate_counts.entry(*seed_index).or_default() += 1;
+    }
+    for candidate in &mut candidates {
+        if candidate.is_some_and(|seed_index| candidate_counts.get(&seed_index) != Some(&1)) {
+            *candidate = None;
+        }
+    }
+    candidates
+}
+
+fn catalog_source_from_seed(
+    leaf: &CodexMetadataInventoryLeafV0,
+    seed: &CodexIncrementalInventorySeedV0,
+) -> CodexCatalogSource {
+    CodexCatalogSource {
+        source_root: leaf.source_root.clone(),
+        source_path: leaf.source_path.clone(),
+        cataloged_at_ms: 0,
+        catalog_observation: leaf.observation.clone(),
+        catalog_native_session_id: Some(seed.native_session_id.clone()),
+        catalog_parent_native_session_id: seed.parent_native_session_id.clone(),
+        catalog_root_native_session_id: seed.root_native_session_id.clone(),
+        opened: None,
+        authority_root: Some(leaf.authority.clone()),
+        authority_relative_path: Some(leaf.relative_path.clone()),
+    }
+}
+
+fn catalog_source_from_body(
+    leaf: &CodexMetadataInventoryLeafV0,
+) -> CodexSourceBackedResultV0<CodexCatalogSource> {
+    let opened = leaf.authority.open_file(&leaf.relative_path)?;
+    let mut catalog = catalog_codex_explicit_session_opened(&leaf.source_path, &opened)?;
+    catalog.source_root = leaf.source_root.clone();
+    let discovery = super::discover_codex_catalog_sources(&[catalog]);
+    if discovery.ineligible != 0 || !discovery.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: discovery.rejections.len(),
+            failed: discovery.ineligible,
+        });
+    }
+    let mut sources = discovery.sources;
+    if sources.len() != 1 {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: sources.len(),
+            failed: 0,
+        });
+    }
+    let mut source = sources
+        .pop()
+        .ok_or(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: 1,
+            failed: 0,
+        })?;
+    if source.catalog_observation != leaf.observation {
         return Err(CodexSourceBackedErrorV0::Capture(
-            CaptureError::SystemInvariant(
-                "Codex session-tree roots did not match their retained inventories",
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    source.authority_root = Some(leaf.authority.clone());
+    source.authority_relative_path = Some(leaf.relative_path.clone());
+    Ok(source)
+}
+
+fn codex_native_session_id_path_hint(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem.len() >= 36 {
+        let tail = &stem[stem.len() - 36..];
+        if tail
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-')
+        {
+            return Some(tail.to_owned());
+        }
+    }
+    (!stem.trim().is_empty()).then(|| stem.to_owned())
+}
+
+fn normalized_session_roots(session_roots: &[PathBuf]) -> CodexSourceBackedResultV0<Vec<PathBuf>> {
+    let mut normalized_roots = session_roots
+        .iter()
+        .map(|root| absolute_lexical_path(root))
+        .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
+    normalized_roots.sort();
+    normalized_roots.dedup();
+    if normalized_roots.is_empty() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Codex session-tree authority has no inventory roots".to_owned(),
             ),
         ));
     }
+    Ok(normalized_roots)
+}
 
-    let mut rejected = 0_usize;
-    let mut failed = 0_usize;
-    let mut catalog_sources = Vec::new();
-    let mut root_revisions = Vec::with_capacity(session_roots.len());
-    for (session_root, retained) in session_roots.iter().zip(&retained_roots) {
-        let discovery = super::discover_codex_catalog_sources(&retained.sessions);
-        rejected = rejected.saturating_add(discovery.rejections.len());
-        failed = failed
-            .saturating_add(retained.summary.failed_sessions)
-            .saturating_add(discovery.ineligible);
-        catalog_sources.extend(bind_catalog_capabilities(
-            discovery.sources,
-            &retained.root,
-            session_root,
-        )?);
-        crate::provider::codex::catalog::ensure_catalog_source_bound(catalog_sources.len())?;
-        root_revisions.push(codex_root_revision_v0(session_root)?);
-    }
-    if rejected != 0 || failed != 0 {
-        return Err(CodexSourceBackedErrorV0::IncompleteCatalog { rejected, failed });
-    }
-    for retained in &retained_roots {
-        retained.root.revalidate()?;
-    }
-
-    // Native session identity, not physical root or path, is the source
-    // identity. Bind only after every root is open so a session cannot be
-    // concurrently owned by both the live and archived inventories.
-    let mut sources = bind_source_keys(catalog_sources)?;
+fn sort_bound_sources(sources: &mut [(CodexCatalogSource, SourceKey, String)]) {
     sources.sort_by(|left, right| {
         left.1
             .identity()
@@ -396,22 +764,6 @@ fn build_codex_session_tree_inventory_v0(
             })
             .then_with(|| left.2.cmp(&right.2))
     });
-    let observation =
-        codex_session_tree_inventory_observation_v0(session_roots, &root_revisions, &sources)?;
-    let source_keys = sources
-        .iter()
-        .map(|(_, source_key, _)| source_key.clone())
-        .collect::<Vec<_>>();
-    let certificate = CertifiedSourceInventory::certify(
-        observation.clone(),
-        observation,
-        CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION,
-        source_keys,
-    )?;
-    Ok(CodexSessionTreeInventoryV0 {
-        sources,
-        certificate,
-    })
 }
 
 fn codex_inventory_observation_v0(

@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use rusqlite::{params_from_iter, Connection, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::native_source::NativeSqliteValue;
@@ -14,8 +14,9 @@ use super::position::{NanoClawFrontier, NanoClawMessageSource};
 
 const NANOCLAW_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
 pub(super) const NANOCLAW_NATIVE_MAX_RECORD_BYTES: u64 = 1024 * 1024;
+pub(super) const NANOCLAW_NATIVE_SET_READ_MAX_ROWS: usize = 256;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct NanoClawSessionRow {
     pub(super) id: String,
     pub(super) agent_group_id: String,
@@ -346,27 +347,58 @@ pub(super) fn nanoclaw_hydrate_native_session(
     conn.query_row(
         &format!("select {projection} from sessions s where s.rowid = ?1"),
         [rowid],
-        |row| {
-            Ok(NanoClawSessionRow {
-                id: row.get(0)?,
-                agent_group_id: row.get(1)?,
-                messaging_group_id: row.get(2)?,
-                thread_id: row.get(3)?,
-                agent_provider: row.get(4)?,
-                status: row.get(5)?,
-                container_status: row.get(6)?,
-                last_active: row.get(7)?,
-                created_at: row.get(8)?,
-                agent_group_name: row.get(9)?,
-                agent_group_folder: row.get(10)?,
-                messaging_channel_type: row.get(11)?,
-                messaging_platform_id: row.get(12)?,
-                messaging_instance: row.get(13)?,
-                messaging_name: row.get(14)?,
-            })
-        },
+        |row| nanoclaw_session_from_row(row, 0),
     )
     .map_err(CaptureError::from)
+}
+
+pub(super) fn nanoclaw_hydrate_native_sessions(
+    conn: &Connection,
+    columns: &BTreeSet<String>,
+    rowids: &[i64],
+) -> Result<BTreeMap<i64, NanoClawSessionRow>> {
+    if rowids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    if rowids.len() > NANOCLAW_NATIVE_SET_READ_MAX_ROWS {
+        return Err(CaptureError::SystemInvariant(
+            "NanoClaw central set read exceeded its row bound",
+        ));
+    }
+    let projection = nanoclaw_session_projection(conn, columns)?.join(", ");
+    let parameters = (1..=rowids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = conn.prepare(&format!(
+        "select s.rowid, {projection} from sessions s \
+         where s.rowid in ({parameters}) order by s.rowid"
+    ))?;
+    let rows = statement.query_map(params_from_iter(rowids.iter()), |row| {
+        Ok((row.get(0)?, nanoclaw_session_from_row(row, 1)?))
+    })?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(CaptureError::from)
+}
+
+fn nanoclaw_session_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<NanoClawSessionRow> {
+    Ok(NanoClawSessionRow {
+        id: row.get(offset)?,
+        agent_group_id: row.get(offset + 1)?,
+        messaging_group_id: row.get(offset + 2)?,
+        thread_id: row.get(offset + 3)?,
+        agent_provider: row.get(offset + 4)?,
+        status: row.get(offset + 5)?,
+        container_status: row.get(offset + 6)?,
+        last_active: row.get(offset + 7)?,
+        created_at: row.get(offset + 8)?,
+        agent_group_name: row.get(offset + 9)?,
+        agent_group_folder: row.get(offset + 10)?,
+        messaging_channel_type: row.get(offset + 11)?,
+        messaging_platform_id: row.get(offset + 12)?,
+        messaging_instance: row.get(offset + 13)?,
+        messaging_name: row.get(offset + 14)?,
+    })
 }
 
 pub(super) fn nanoclaw_message_after(
@@ -602,26 +634,63 @@ pub(super) fn nanoclaw_hydrate_native_message(
             source.table()
         ),
         [rowid],
-        |row| {
-            Ok(NanoClawMessageRow {
-                source: source.label(),
-                id: row.get(0)?,
-                seq: row.get(1)?,
-                kind: row.get(2)?,
-                timestamp: row.get(3)?,
-                status: row.get(4)?,
-                in_reply_to: row.get(5)?,
-                platform_id: row.get(6)?,
-                channel_type: row.get(7)?,
-                thread_id: row.get(8)?,
-                content: row.get(9)?,
-                trigger: row.get(10)?,
-                source_session_id: row.get(11)?,
-                on_wake: row.get(12)?,
-            })
-        },
+        |row| nanoclaw_message_from_row(row, 0, source),
     )
     .map_err(CaptureError::from)
+}
+
+pub(super) fn nanoclaw_hydrate_native_messages(
+    conn: &Connection,
+    columns: &BTreeSet<String>,
+    source: NanoClawMessageSource,
+    rowids: &[i64],
+) -> Result<BTreeMap<i64, NanoClawMessageRow>> {
+    if rowids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    if rowids.len() > NANOCLAW_NATIVE_SET_READ_MAX_ROWS {
+        return Err(CaptureError::SystemInvariant(
+            "NanoClaw component set read exceeded its row bound",
+        ));
+    }
+    let projection = nanoclaw_message_projection(source, columns).join(", ");
+    let parameters = (1..=rowids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = conn.prepare(&format!(
+        "select m.rowid, {projection} from {} m \
+         where m.rowid in ({parameters}) order by m.rowid",
+        source.table()
+    ))?;
+    let rows = statement.query_map(params_from_iter(rowids.iter()), |row| {
+        Ok((row.get(0)?, nanoclaw_message_from_row(row, 1, source)?))
+    })?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(CaptureError::from)
+}
+
+fn nanoclaw_message_from_row(
+    row: &Row<'_>,
+    offset: usize,
+    source: NanoClawMessageSource,
+) -> rusqlite::Result<NanoClawMessageRow> {
+    Ok(NanoClawMessageRow {
+        source: source.label(),
+        id: row.get(offset)?,
+        seq: row.get(offset + 1)?,
+        kind: row.get(offset + 2)?,
+        timestamp: row.get(offset + 3)?,
+        status: row.get(offset + 4)?,
+        in_reply_to: row.get(offset + 5)?,
+        platform_id: row.get(offset + 6)?,
+        channel_type: row.get(offset + 7)?,
+        thread_id: row.get(offset + 8)?,
+        content: row.get(offset + 9)?,
+        trigger: row.get(offset + 10)?,
+        source_session_id: row.get(offset + 11)?,
+        on_wake: row.get(offset + 12)?,
+    })
 }
 
 pub(super) fn nanoclaw_message_digest_values(

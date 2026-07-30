@@ -4,7 +4,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ctx_history_core::{
@@ -14,9 +14,13 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SessionStatus, SourceAnchor,
     SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
 };
-use rusqlite::ffi::{self, ErrorCode};
+use rusqlite::{
+    ffi::{self, ErrorCode},
+    types::ValueRef,
+};
 use tempfile::TempDir;
 
+use super::manifest::ValidatedManifest;
 use super::*;
 use crate::{RawSqlValue, RAW_SQL_DEFAULT_MAX_ROWS};
 
@@ -27,6 +31,19 @@ fn source(lineage: u8) -> SourceKey {
         "rollout",
         1,
         SourceAnchor::CatalogLineage([lineage; 32]),
+    )
+    .unwrap()
+}
+
+fn corpus_source(index: u64) -> SourceKey {
+    let mut lineage = [0_u8; 32];
+    lineage[24..].copy_from_slice(&index.to_be_bytes());
+    SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "rollout",
+        1,
+        SourceAnchor::CatalogLineage(lineage),
     )
     .unwrap()
 }
@@ -44,6 +61,26 @@ fn certificate(source: SourceKey, revision: u8, events: u64) -> CertifiedSource 
             retained_records: events,
             indexed_documents: events,
             certified_bytes: 100 + u64::from(revision),
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()
+}
+
+fn large_manifest_certificate(index: u64) -> CertifiedSource {
+    let observation =
+        SourceObservation::new(corpus_source(index), "ordinary_file_v1", vec![u8::MAX; 512])
+            .unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "codex-parser-large-manifest-v1",
+        Sha256::digest(index.to_be_bytes()).into(),
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 1,
             ..ScannedSourceCounts::default()
         },
     )
@@ -340,6 +377,137 @@ fn incremental_work_with_unchanged_events(
         assert_eq!(receipt.event_count, unchanged_event_count);
     });
     (append, deletion)
+}
+
+fn secondary_index_definitions(
+    projection: &SourceBackedRelationalProjection,
+) -> Vec<(String, String)> {
+    let mut statement = projection
+        .conn
+        .prepare(
+            "SELECT name, sql
+             FROM sqlite_schema
+             WHERE type = 'index' AND sql IS NOT NULL
+             ORDER BY name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn logical_projection_digest(projection: &SourceBackedRelationalProjection) -> String {
+    let queries = [
+        "SELECT * FROM source_backed_relational_state ORDER BY singleton",
+        "SELECT * FROM source_backed_sources ORDER BY source_id",
+        "SELECT * FROM source_backed_sessions ORDER BY ctx_session_id",
+        "SELECT * FROM source_backed_events ORDER BY ctx_event_id",
+        "SELECT * FROM source_backed_files_touched ORDER BY ctx_file_touch_id",
+    ];
+    let mut digest = Sha256::new();
+    for sql in queries {
+        digest.update((sql.len() as u64).to_be_bytes());
+        digest.update(sql.as_bytes());
+        let mut statement = projection.conn.prepare(sql).unwrap();
+        let column_count = statement.column_count();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            digest.update([0xff]);
+            for column in 0..column_count {
+                match row.get_ref(column).unwrap() {
+                    ValueRef::Null => digest.update([0]),
+                    ValueRef::Integer(value) => {
+                        digest.update([1]);
+                        digest.update(value.to_be_bytes());
+                    }
+                    ValueRef::Real(value) => {
+                        digest.update([2]);
+                        digest.update(value.to_bits().to_be_bytes());
+                    }
+                    ValueRef::Text(value) => {
+                        digest.update([3]);
+                        digest.update((value.len() as u64).to_be_bytes());
+                        digest.update(value);
+                    }
+                    ValueRef::Blob(value) => {
+                        digest.update([4]);
+                        digest.update((value.len() as u64).to_be_bytes());
+                        digest.update(value);
+                    }
+                }
+            }
+        }
+    }
+    hex(&digest.finalize())
+}
+
+#[test]
+#[ignore = "manual relational materialization wall-time fixture"]
+fn relational_materialization_profile_fixture() {
+    const SOURCE_COUNT: u64 = 200;
+    const EVENTS_PER_SOURCE: u64 = 200;
+
+    let sources = (0..SOURCE_COUNT).map(corpus_source).collect::<Vec<_>>();
+    let committed = generation(
+        sources
+            .iter()
+            .cloned()
+            .map(|source| certificate(source, 1, EVENTS_PER_SOURCE))
+            .collect(),
+    );
+    let records = sources
+        .into_iter()
+        .flat_map(|source| records(source, 1, EVENTS_PER_SOURCE))
+        .collect::<Vec<_>>();
+    let expected_events = SOURCE_COUNT * EVENTS_PER_SOURCE;
+    let expected_records = SOURCE_COUNT * 3 + expected_events * 2;
+    assert_eq!(records.len() as u64, expected_records);
+
+    let (_temp, mut projection) = projection();
+    let started = Instant::now();
+    let receipt = projection.rebuild(&committed, records).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(receipt.source_count, SOURCE_COUNT);
+    assert_eq!(receipt.session_count, SOURCE_COUNT);
+    assert_eq!(receipt.event_count, expected_events);
+    assert_eq!(receipt.file_touch_count, expected_events);
+    let foreign_key_errors: i64 = projection
+        .conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_key_errors, 0);
+
+    let database_bytes = fs::metadata(projection.path()).unwrap().len();
+    let wal_path = projection.path().with_extension("sqlite-wal");
+    let wal_bytes = fs::metadata(wal_path).map_or(0, |metadata| metadata.len());
+    let logical_digest = logical_projection_digest(&projection);
+    assert_eq!(
+        logical_digest,
+        "81804b81731f87f2eed19355e6301833f4c0e8dfc9fd2ded7517e15c82f5f241"
+    );
+    let cache_size: i64 = projection
+        .conn
+        .query_row("PRAGMA cache_size", [], |row| row.get(0))
+        .unwrap();
+    let temp_store: i64 = projection
+        .conn
+        .query_row("PRAGMA temp_store", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(cache_size, -65_536);
+    assert_eq!(temp_store, 2);
+    eprintln!(
+        "relational_materialization_profile \
+         sources={SOURCE_COUNT} sessions={SOURCE_COUNT} events={expected_events} \
+         file_touches={expected_events} input_records={expected_records} \
+         logical_digest={} database_bytes={database_bytes} wal_bytes={wal_bytes} \
+         wall_ms={}",
+        logical_digest,
+        elapsed.as_millis()
+    );
 }
 
 #[test]
@@ -792,7 +960,53 @@ fn committed_core_remains_current_when_sql_projection_fails_then_catches_up() {
 }
 
 #[test]
-fn fallible_record_stream_error_rolls_back_generation_transaction() {
+fn provisional_and_final_sessions_preserve_parity_and_missing_sessions_fail_closed() {
+    let source = source(14);
+    let committed = generation(vec![certificate(source.clone(), 1, 2)]);
+    let ordered_records = records(source.clone(), 1, 2);
+    let session_index = ordered_records
+        .iter()
+        .position(|record| matches!(record, RelationalProjectionRecord::Session(_)))
+        .unwrap();
+    let session = ordered_records[session_index].clone();
+    let mut finalized_records = ordered_records.clone();
+    finalized_records.insert(finalized_records.len() - 1, session);
+
+    let (_ordered_temp, mut ordered) = projection();
+    ordered.rebuild(&committed, ordered_records).unwrap();
+    let ordered_digest = logical_projection_digest(&ordered);
+
+    let (_finalized_temp, mut finalized) = projection();
+    finalized
+        .rebuild(&committed, finalized_records.clone())
+        .unwrap();
+    assert_eq!(logical_projection_digest(&finalized), ordered_digest);
+
+    let (_failed_temp, mut failed) = projection();
+    finalized_records.retain(|record| !matches!(record, RelationalProjectionRecord::Session(_)));
+    failed
+        .rebuild(&committed, finalized_records)
+        .expect_err("events without a provisional session must fail");
+    assert_eq!(
+        query_rows(
+            &failed,
+            "SELECT
+                (SELECT COUNT(*) FROM source_backed_sources),
+                (SELECT COUNT(*) FROM source_backed_sessions),
+                (SELECT COUNT(*) FROM source_backed_events),
+                (SELECT COUNT(*) FROM source_backed_files_touched)"
+        )[0],
+        vec![
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+        ]
+    );
+}
+
+#[test]
+fn fallible_record_stream_error_rolls_back_then_replays_with_exact_indexes() {
     let (_temp, mut projection) = projection();
     let source = source(8);
     let generation_one = generation(vec![certificate(source.clone(), 1, 1)]);
@@ -800,15 +1014,25 @@ fn fallible_record_stream_error_rolls_back_generation_transaction() {
         .rebuild(&generation_one, records(source.clone(), 1, 1))
         .unwrap();
     let old_event_id = query_rows(&projection, "SELECT ctx_event_id FROM ctx_events");
+    let old_indexes = secondary_index_definitions(&projection);
 
     let generation_two = generation(vec![certificate(source.clone(), 2, 2)]);
-    let stream = records(source, 2, 2)
+    let mut interrupted_records = records(source, 2, 2);
+    let finalized_session = interrupted_records
+        .iter()
+        .find(|record| matches!(record, RelationalProjectionRecord::Session(_)))
+        .unwrap()
+        .clone();
+    let finalization_index = interrupted_records.len() - 1;
+    interrupted_records.insert(finalization_index, finalized_session);
+    let replay_records = interrupted_records.clone();
+    let stream = interrupted_records
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            if index == 2 {
+            if index == finalization_index {
                 Err(RelationalProjectionError::InvalidRecord(
-                    "injected page read failure".to_owned(),
+                    "injected session finalization failure".to_owned(),
                 ))
             } else {
                 Ok(record)
@@ -821,12 +1045,13 @@ fn fallible_record_stream_error_rolls_back_generation_transaction() {
     assert!(matches!(
         error,
         RelationalProjectionError::InvalidRecord(ref detail)
-            if detail == "injected page read failure"
+            if detail == "injected session finalization failure"
     ));
     assert_eq!(
         old_event_id,
         query_rows(&projection, "SELECT ctx_event_id FROM ctx_events")
     );
+    assert_eq!(secondary_index_definitions(&projection), old_indexes);
     let failed = projection.metadata().unwrap();
     assert_eq!(
         failed.active_core_generation_id.as_deref(),
@@ -837,6 +1062,55 @@ fn fallible_record_stream_error_rolls_back_generation_transaction() {
         Some(generation_two.generation_id.as_str())
     );
     assert_eq!(failed.status, RelationalProjectionStatus::Behind);
+
+    projection
+        .catch_up(&generation_two, replay_records)
+        .unwrap();
+    assert_eq!(secondary_index_definitions(&projection), old_indexes);
+    let replayed = projection.metadata().unwrap();
+    assert_eq!(replayed.status, RelationalProjectionStatus::Ready);
+    assert_eq!(
+        replayed.active_core_generation_id.as_deref(),
+        Some(generation_two.generation_id.as_str())
+    );
+    assert_eq!((replayed.event_count, replayed.file_touch_count), (2, 2));
+}
+
+#[test]
+fn valid_5566_source_manifest_larger_than_8_mib_is_accepted() {
+    const SOURCE_COUNT: usize = 5_566;
+    const PREVIOUS_RELATIONAL_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+    let certificates = (0..SOURCE_COUNT as u64)
+        .map(large_manifest_certificate)
+        .collect::<Vec<_>>();
+    let mut expected_source_ids = certificates
+        .iter()
+        .map(|certificate| {
+            certificate
+                .observation()
+                .source()
+                .identity()
+                .as_uuid()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    expected_source_ids.sort();
+    let committed = generation(certificates);
+
+    assert_eq!(committed.certified_sources, SOURCE_COUNT);
+    assert!(
+        committed.manifest_json.len() > PREVIOUS_RELATIONAL_LIMIT_BYTES,
+        "fixture manifest was only {} bytes",
+        committed.manifest_json.len()
+    );
+
+    let validated = ValidatedManifest::from_commit(&committed).unwrap();
+    assert_eq!(validated.sources.len(), SOURCE_COUNT);
+    assert_eq!(
+        validated.sources.keys().cloned().collect::<Vec<_>>(),
+        expected_source_ids
+    );
 }
 
 #[test]
@@ -894,6 +1168,30 @@ fn manifest_v3_schema_v5_and_exact_policy_hash_fail_closed() {
     replace_manifest(&mut wrong_policy, &wrong_policy_contract);
     assert!(matches!(
         projection.rebuild(&wrong_policy, Vec::new()),
+        Err(RelationalProjectionError::InvalidCoreGeneration(_))
+    ));
+}
+
+#[test]
+fn malformed_manifest_identity_version_and_digest_fail_closed() {
+    let (_temp, mut projection) = projection();
+    let current = generation(vec![certificate(source(10), 1, 1)]);
+
+    let mut malformed = current.clone();
+    malformed.manifest_json = b"{".to_vec();
+    malformed.generation_id = hex(&Sha256::digest(&malformed.manifest_json));
+    assert!(matches!(
+        projection.rebuild(&malformed, Vec::new()),
+        Err(RelationalProjectionError::InvalidCoreGeneration(_))
+    ));
+
+    let mut wrong_identity = current.clone();
+    let mut wrong_identity_contract: GenerationManifest =
+        serde_json::from_slice(&current.manifest_json).unwrap();
+    wrong_identity_contract.identity_version += 1;
+    replace_manifest(&mut wrong_identity, &wrong_identity_contract);
+    assert!(matches!(
+        projection.rebuild(&wrong_identity, Vec::new()),
         Err(RelationalProjectionError::InvalidCoreGeneration(_))
     ));
 

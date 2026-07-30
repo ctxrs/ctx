@@ -1,8 +1,21 @@
 use std::fs;
 
-use ctx_history_core::{NativeRecordCoordinate, TypedKey};
+use ctx_history_core::{
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
+    NativeRecordCoordinate, TypedKey,
+};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 
+use crate::{
+    refresh_source_backed_generation, register_shelley_source_backed_route, ProviderCatalogSupport,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
+    SourceBackedProviderRegistry,
+};
+
+use super::super::scanner::{
+    reset_shelley_query_counters, shelley_query_counters, ShelleyQueryCounters,
+};
 use super::*;
 
 fn create_fixture(root: &Path, text: &str) -> PathBuf {
@@ -60,6 +73,51 @@ fn create_fixture(root: &Path, text: &str) -> PathBuf {
     )
     .unwrap();
     database
+}
+
+fn insert_fixture_messages(database: &Path, through: i64, body_bytes: usize) {
+    let mut connection = Connection::open(database).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for rowid in 2..=through {
+        transaction
+            .execute(
+                "insert into messages (
+                     message_id, conversation_id, sequence_id, type, user_data, created_at
+                 ) values (?1, 'conversation-1', ?2, 'user', ?3, ?4)",
+                params![
+                    format!("message-{rowid}"),
+                    rowid + 6,
+                    format!("message-{rowid}-{}", "x".repeat(body_bytes)),
+                    format!("2026-07-28T20:00:{:02}Z", rowid % 60),
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+fn shelley_registry(data_root: &Path, cwd: &Path, database: &Path) -> SourceBackedProviderRegistry {
+    let source = ProviderSource {
+        provider: CaptureProvider::Shelley,
+        path: database.to_path_buf(),
+        exists: true,
+        source_format: SHELLEY_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_shelley_source_backed_route(&mut registry, source, data_root, cwd).unwrap();
+    registry
+}
+
+fn writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -142,6 +200,198 @@ fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
             fs::read(PathBuf::from(component)).unwrap()
         })
         .collect()
+}
+
+fn shelley_query_shape(counters: ShelleyQueryCounters) -> [u64; 6] {
+    [
+        counters.candidate_set_reads,
+        counters.message_set_reads,
+        counters.conversation_candidate_set_reads,
+        counters.conversation_set_reads,
+        counters.relationship_set_reads,
+        counters.rows_projected,
+    ]
+}
+
+#[test]
+fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = create_fixture(temp.path(), "message-1");
+    let connection = Connection::open(&database).unwrap();
+    let collision_ids = ["collision-507bc35f-9bs", "collision-a084ee59-mhm"];
+    let released_bucket = crate::provider::normalization::text_id_index(
+        &format!("conversation-1:{}", collision_ids[0]),
+        4_096,
+    );
+    assert_eq!(
+        crate::provider::normalization::text_id_index(
+            &format!("conversation-1:{}", collision_ids[1]),
+            4_096,
+        ),
+        released_bucket
+    );
+    for rowid in 2..=40_i64 {
+        let (message_id, sequence_id) = match rowid {
+            2 => (collision_ids[0].to_owned(), 8),
+            3 => (collision_ids[1].to_owned(), 8),
+            _ => (format!("message-{rowid}"), rowid + 6),
+        };
+        connection
+            .execute(
+                "insert into messages (
+                     message_id, conversation_id, sequence_id, type, user_data, created_at
+                ) values (?1, 'conversation-1', ?2, 'user', ?3, ?4)",
+                params![
+                    message_id,
+                    sequence_id,
+                    format!("message-{rowid}"),
+                    format!("2026-07-28T20:{rowid:02}:30Z"),
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+
+    reset_shelley_query_counters();
+    let (documents, receipt) = drain(&adapter);
+    assert_eq!(documents.len(), 40);
+    assert_eq!(receipt.certificate.counts().complete_records, 40);
+    assert_eq!(
+        documents
+            .iter()
+            .map(|document| document.body.as_str())
+            .collect::<Vec<_>>(),
+        (1..=40)
+            .map(|rowid| format!("message-{rowid}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(documents[1].event_sequence, 8 * 4_096 + released_bucket);
+    assert_ne!(documents[2].event_sequence, documents[1].event_sequence);
+    assert_ne!(documents[2].event_sequence & (1_u64 << 63), 0);
+    for (index, document) in documents.iter().enumerate() {
+        let rowid = i64::try_from(index).unwrap() + 1;
+        assert!(matches!(
+            document.locator.coordinate(),
+            NativeRecordCoordinate::ProviderSqlite {
+                logical_relation,
+                primary_key: TypedKey::Composite(parts),
+                row_version: None,
+            } if logical_relation == SHELLEY_COMPOUND_LOCATOR_RELATION
+                && parts.as_slice()
+                    == [
+                        TypedKey::Bool(rowid == 1),
+                        TypedKey::I64(rowid),
+                        TypedKey::I64(1),
+                    ]
+        ));
+    }
+    let cold_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(cold_work), [4, 3, 3, 3, 6, 40]);
+    assert_eq!(cold_work.pages_emitted, 1);
+    assert_eq!(cold_work.peak_buffered_rows, 40);
+    assert!(cold_work.peak_buffered_bytes > 0);
+    assert_eq!(cold_work.hydration_snapshot_opens, 0);
+
+    reset_shelley_query_counters();
+    let (replay, replay_receipt) = drain(&adapter);
+    assert_eq!(
+        replay
+            .iter()
+            .map(|document| (
+                document.event_id,
+                document.event_sequence,
+                document.locator.coordinate().clone(),
+                document.body.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        documents
+            .iter()
+            .map(|document| (
+                document.event_id,
+                document.event_sequence,
+                document.locator.coordinate().clone(),
+                document.body.clone(),
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        replay_receipt.certificate.content_digest(),
+        receipt.certificate.content_digest()
+    );
+    let replay_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(replay_work), [4, 3, 3, 3, 6, 40]);
+    assert_eq!(replay_work.pages_emitted, 1);
+    assert_eq!(replay_work.peak_buffered_rows, 40);
+    assert!(replay_work.peak_buffered_bytes > 0);
+    assert_eq!(replay_work.hydration_snapshot_opens, 0);
+
+    reset_shelley_query_counters();
+    let exact = adapter.hydrate(&documents[39].locator).unwrap();
+    assert_eq!(exact.text, "message-40");
+    assert_eq!(
+        exact.native_record_digest,
+        *documents[39].locator.record_digest()
+    );
+    let hydration_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(hydration_work), [1, 1, 1, 1, 2, 1]);
+    assert_eq!(hydration_work.pages_emitted, 0);
+    assert_eq!(hydration_work.peak_buffered_rows, 0);
+    assert_eq!(hydration_work.peak_buffered_bytes, 0);
+    assert_eq!(hydration_work.hydration_snapshot_opens, 1);
+}
+
+#[test]
+fn large_shelley_projection_emits_first_page_with_page_bounded_result_memory() {
+    const ROWS: i64 = 4_096;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    create_fixture(temp.path(), "message-1");
+    insert_fixture_messages(&temp.path().join("shelley.db"), ROWS, 128);
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+
+    reset_shelley_query_counters();
+    let mut scan = adapter.start_scan().unwrap();
+    let first = scan.next_page().unwrap().unwrap();
+    assert_eq!(first.counts.complete_records, SHELLEY_PAGE_MAX_UNITS as u64);
+    assert_eq!(first.documents.len(), SHELLEY_PAGE_MAX_UNITS);
+    assert!(first.retained_bytes <= SHELLEY_PAGE_MAX_BYTES);
+    assert!(scan.sqlite_snapshot.is_some());
+    assert!(scan.receipt.is_none());
+    let first_work = shelley_query_counters();
+    assert_eq!(first_work.rows_projected, SHELLEY_PAGE_MAX_UNITS as u64);
+    assert_eq!(first_work.pages_emitted, 1);
+    assert_eq!(first_work.peak_buffered_rows, SHELLEY_PAGE_MAX_UNITS as u64);
+    assert!(first_work.peak_buffered_bytes <= SHELLEY_PAGE_MAX_BYTES as u64);
+
+    let mut complete_records = first.counts.complete_records;
+    while let Some(page) = scan.next_page().unwrap() {
+        complete_records += page.counts.complete_records;
+    }
+    let receipt = scan.finish().unwrap();
+    assert_eq!(complete_records, ROWS as u64);
+    assert_eq!(receipt.certificate.counts().complete_records, ROWS as u64);
+    let complete_work = shelley_query_counters();
+    assert_eq!(complete_work.rows_projected, ROWS as u64);
+    assert_eq!(
+        complete_work.pages_emitted,
+        ROWS as u64 / SHELLEY_PAGE_MAX_UNITS as u64
+    );
+    assert_eq!(
+        complete_work.peak_buffered_rows,
+        SHELLEY_PAGE_MAX_UNITS as u64
+    );
+    assert!(complete_work.peak_buffered_bytes <= SHELLEY_PAGE_MAX_BYTES as u64);
 }
 
 #[test]
@@ -234,6 +484,116 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
 }
 
 #[test]
+fn shelley_route_cold_noop_rewrite_and_grouped_hydration_are_exact() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    let database = create_fixture(&provider_root, "message-1");
+    insert_fixture_messages(&database, 40, 32);
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute(
+            "update messages set user_data = 'message-1-wal' where rowid = 1",
+            [],
+        )
+        .unwrap();
+    let persistent_before = sqlite_persistent_bytes(&database);
+    let registry = shelley_registry(&data_root, &provider_root, &database);
+
+    reset_shelley_query_counters();
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 40);
+    assert_eq!(cold.sources.len(), 1);
+    let cold_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(cold_work), [4, 3, 3, 3, 6, 40]);
+    assert_eq!(cold_work.pages_emitted, 1);
+    assert_eq!(cold_work.hydration_snapshot_opens, 0);
+    assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
+
+    reset_shelley_query_counters();
+    let noop = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(noop.sources, cold.sources);
+    assert_eq!(shelley_query_counters(), ShelleyQueryCounters::default());
+    assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
+
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let source = verified.manifest().sources[0]
+        .observation()
+        .source()
+        .clone();
+    let mut events = verified.source_event_page(&source, None, 40).unwrap().items;
+    assert_eq!(events.len(), 40);
+    events.reverse();
+    let requests = events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let batch = BatchHydrationRequest::new(requests).unwrap();
+
+    reset_shelley_query_counters();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&batch)
+        .unwrap()
+        .into_records();
+    assert_eq!(hydrated.len(), events.len());
+    for (record, event) in hydrated.iter().zip(&events) {
+        assert_eq!(record.event_id, event.event_id);
+        let NativeRecordCoordinate::ProviderSqlite { primary_key, .. } = event.locator.coordinate()
+        else {
+            panic!("expected Shelley SQLite coordinate");
+        };
+        let TypedKey::Composite(parts) = primary_key else {
+            panic!("expected Shelley compound coordinate");
+        };
+        let TypedKey::I64(rowid) = parts[1] else {
+            panic!("expected Shelley message rowid");
+        };
+        let expected = if rowid == 1 {
+            "message-1-wal".to_owned()
+        } else {
+            format!("message-{rowid}-{}", "x".repeat(32))
+        };
+        assert_eq!(
+            String::from_utf8(record.provider_bytes.clone()).unwrap(),
+            expected
+        );
+    }
+    let hydration_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(hydration_work), [3, 3, 3, 3, 6, 40]);
+    assert_eq!(hydration_work.pages_emitted, 0);
+    assert_eq!(hydration_work.peak_buffered_rows, 0);
+    assert_eq!(hydration_work.peak_buffered_bytes, 0);
+    assert_eq!(hydration_work.hydration_snapshot_opens, 1);
+    assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
+
+    writer
+        .execute(
+            "update messages set user_data = 'replacement-40' where rowid = 40",
+            [],
+        )
+        .unwrap();
+    let rewritten_persistent = sqlite_persistent_bytes(&database);
+    reset_shelley_query_counters();
+    let rewrite =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(rewrite.commit.generation_id, noop.commit.generation_id);
+    assert_ne!(rewrite.sources, noop.sources);
+    assert_eq!(rewrite.commit.indexed_documents, 40);
+    let rewrite_work = shelley_query_counters();
+    assert_eq!(shelley_query_shape(rewrite_work), [4, 3, 3, 3, 6, 40]);
+    assert_eq!(rewrite_work.pages_emitted, 1);
+    assert_eq!(rewrite_work.hydration_snapshot_opens, 0);
+    assert_eq!(sqlite_persistent_bytes(&database), rewritten_persistent);
+    assert!(registry.resolver_registry().hydrate_batch(&batch).is_err());
+    drop(writer);
+}
+
+#[test]
 fn shelley_source_backed_lineage_uses_native_parent_and_root_threads() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = create_fixture(temp.path(), "root");
@@ -311,9 +671,10 @@ fn shelley_source_backed_lineage_uses_native_parent_and_root_threads() {
 }
 
 #[test]
-fn shelley_source_backed_finishes_before_releasing_first_page() {
+fn shelley_source_backed_releases_pages_before_terminal_source_certification() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = create_fixture(temp.path(), "before replacement");
+    insert_fixture_messages(&database, 65, 16);
     let original = temp.path().join("original.db");
     let adapter = discover_shelley_source_backed_exact_cwd(
         crate::test_provider_sqlite_data_root(),
@@ -327,13 +688,17 @@ fn shelley_source_backed_finishes_before_releasing_first_page() {
         .documents
         .iter()
         .any(|document| document.body.contains("before replacement")));
-    assert!(scan.sqlite_snapshot.is_none());
-    assert!(scan.receipt.is_some());
+    assert_eq!(page.counts.complete_records, 64);
+    assert!(scan.sqlite_snapshot.is_some());
+    assert!(scan.receipt.is_none());
 
     fs::rename(&database, &original).unwrap();
     create_fixture(temp.path(), "after replacement");
-    assert!(scan.next_page().unwrap().is_none());
-    scan.finish().unwrap();
+    assert!(scan.next_page().is_err());
+    assert!(matches!(
+        scan.finish(),
+        Err(ShelleySourceBackedError::ScanIncomplete)
+    ));
 }
 
 #[test]

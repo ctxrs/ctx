@@ -36,7 +36,7 @@ use super::credential_vault::CredentialVaultNamespace;
 use super::helper_command;
 use super::verified_executable::VerifiedHelperExecutable;
 pub(crate) use support::default_helper_path;
-use support::{git_executable, helper_executable};
+use support::{git_executable, helper_executable, helper_path};
 
 #[path = "client_errors.rs"]
 mod errors;
@@ -46,6 +46,13 @@ pub(crate) use errors::stable_error_code;
 #[path = "client_output.rs"]
 mod source_manifest;
 pub(crate) use source_manifest::sync_source_manifest_materialization;
+
+/// Verifies that this installation has a selectable Pro helper before callers
+/// perform expensive Core index admission work. The eventual connection still
+/// performs the complete executable verification and protocol handshake.
+pub(crate) fn preflight_source_manifest_materialization(data_root: &Path) -> Result<()> {
+    helper_path(data_root).map(drop)
+}
 
 #[path = "client_status.rs"]
 mod client_status;

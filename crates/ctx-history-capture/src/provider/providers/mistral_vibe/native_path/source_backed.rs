@@ -21,8 +21,8 @@ use super::*;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjector, JsonlRecordRef,
+        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
+        JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -89,6 +89,10 @@ impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {

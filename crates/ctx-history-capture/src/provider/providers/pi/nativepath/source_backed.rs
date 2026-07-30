@@ -29,9 +29,9 @@ use crate::{
         provider_path_identity,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
-            observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyHydrator,
-            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
-            JsonlRecordRef,
+            observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyAppendMode,
+            JsonlFamilyHydrator, JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector,
+            JsonlFileObservation, JsonlRecordRef,
         },
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
@@ -136,6 +136,10 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {

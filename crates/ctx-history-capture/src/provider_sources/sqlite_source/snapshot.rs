@@ -92,7 +92,12 @@ fn open_root_handle_sqlite_source_snapshot_inner(
     let family = SqliteSourceFamily::open(authority, database_name, after_parent_certification)?;
     let native_evidence = family.capture_evidence()?;
 
-    let acquired = acquire_sqlite_connection(authority.data_root(), &family, &native_evidence)?;
+    let acquired = acquire_sqlite_connection(
+        authority.data_root(),
+        &authority.snapshot_context,
+        &family,
+        &native_evidence,
+    )?;
     verify_connection_read_only(&acquired.connection)?;
     configure_and_pin_snapshot(&acquired.connection)?;
     before_source_revalidation();
@@ -106,13 +111,16 @@ fn open_root_handle_sqlite_source_snapshot_inner(
     let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
     Ok(SqliteSourceReadSnapshot {
         connection: Some(acquired.connection),
-        family,
+        family: Some(family),
         native_evidence,
         sqlite_evidence,
         evidence,
         strategy: acquired.strategy,
         copied_bytes: acquired.copied_bytes,
         _snapshot_directory: acquired.snapshot_directory,
+        snapshot_activity: Some(acquired.snapshot_activity),
+        snapshot_context: Arc::clone(&authority.snapshot_context),
+        terminal_fence_slot: Arc::default(),
     })
 }
 
@@ -121,10 +129,12 @@ struct AcquiredSqliteConnection {
     strategy: SqliteSourceSnapshotStrategy,
     copied_bytes: u64,
     snapshot_directory: Option<TempDir>,
+    snapshot_activity: SqliteSourceSnapshotActivity,
 }
 
 fn acquire_sqlite_connection(
     data_root: &Path,
+    snapshot_context: &Arc<SqliteSourceSnapshotContext>,
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
 ) -> SqliteSourceAccessResult<AcquiredSqliteConnection> {
@@ -136,6 +146,8 @@ fn acquire_sqlite_connection(
                 strategy: SqliteSourceSnapshotStrategy::ImmutableMain,
                 copied_bytes: 0,
                 snapshot_directory: None,
+                snapshot_activity: snapshot_context
+                    .record_open(SqliteSourceSnapshotStrategy::ImmutableMain, 0)?,
             });
         }
     }
@@ -143,6 +155,7 @@ fn acquire_sqlite_connection(
     enforce_snapshot_copy_bounds(family, evidence)?;
     let (snapshot_directory, snapshot_path, copied_bytes) =
         copy_sqlite_family_to_ctx(data_root, family, evidence)?;
+    snapshot_context.record_source_bytes_copied(copied_bytes)?;
     let connection = Connection::open_with_flags(
         &snapshot_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -156,6 +169,8 @@ fn acquire_sqlite_connection(
         strategy: SqliteSourceSnapshotStrategy::CopiedFamily,
         copied_bytes,
         snapshot_directory: Some(snapshot_directory),
+        snapshot_activity: snapshot_context
+            .record_open(SqliteSourceSnapshotStrategy::CopiedFamily, copied_bytes)?,
     })
 }
 

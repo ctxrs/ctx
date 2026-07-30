@@ -72,6 +72,7 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) owners: &'writer mut HashMap<[u8; 32], SourceOwner>,
     pub(in super::super) complete_inventories: &'writer mut Vec<CompleteInventoryOwner>,
     pub(in super::super) route_index: usize,
+    pub(in super::super) leaf_worker_budget: usize,
 }
 
 #[derive(Clone)]

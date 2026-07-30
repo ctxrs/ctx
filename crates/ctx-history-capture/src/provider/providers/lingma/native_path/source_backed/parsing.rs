@@ -13,9 +13,9 @@ use crate::{
 };
 
 use super::super::{
-    detect_schema, hash_candidate, initial_prefix_hasher, load_candidates, load_raw_row,
+    detect_schema, hash_candidate, initial_prefix_hasher, load_candidates,
     records::{assistant_text, lingma_logical_record_sha256, native_values},
-    SqliteEncoding,
+    visit_raw_rows, Candidate, RawRow, SqliteEncoding,
 };
 #[cfg(test)]
 use super::{
@@ -224,74 +224,88 @@ fn scan_rows(
         if candidates.is_empty() {
             break;
         }
-        for candidate in &candidates {
-            certified_bytes = certified_bytes
-                .checked_add(u64::try_from(candidate.encoded_bytes).map_err(|_| {
-                    CaptureError::SystemInvariant("Lingma certified byte count exceeds u64")
-                })?)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Lingma certified byte count exhausted",
-                ))?;
-            let raw = candidate
-                .can_hydrate()
-                .then(|| load_raw_row(connection, candidate.rowid))
-                .transpose()?;
-            hash_candidate(&mut hasher, candidate, raw.as_ref());
-            let parsed = if !candidate.required_fields_present() || !candidate.can_hydrate() {
-                None
-            } else {
-                raw.and_then(|raw| super::super::decode_raw_row(raw, encoding).ok())
-            };
-            match parsed {
-                Some(row) if row.chat_prompt.trim().is_empty() => {
-                    ignored_records = ignored_records.saturating_add(1);
-                }
-                Some(row) => {
-                    let logical_records = 1_u64 + u64::from(assistant_text(&row).is_some());
-                    retained_records = retained_records
-                        .checked_add(logical_records)
-                        .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
-                    let record_digest = lingma_logical_record_sha256(&native_values(&row));
-                    let request_identity_unique = row
-                        .request_id
-                        .as_ref()
-                        .filter(|request_id| !request_id.trim().is_empty())
-                        .is_some_and(|request_id| {
-                            !duplicate_requests.contains(&(
-                                row.session_id.as_bytes().to_vec(),
-                                request_id.as_bytes().to_vec(),
-                            ))
-                        });
-                    let mut projected = Vec::with_capacity(2);
-                    project_row(
-                        source,
-                        source_path,
-                        ParsedRow {
-                            ordinal: physical_ordinal,
-                            row,
-                            record_digest,
-                            request_identity_unique,
-                        },
-                        &mut projected,
-                    )?;
-                    indexed_documents = indexed_documents
-                        .checked_add(
-                            u64::try_from(projected.len())
-                                .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?,
-                        )
-                        .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
-                    if page.len().saturating_add(projected.len()) > SOURCE_BACKED_PAGE_ROWS {
-                        emit_page(sink, &mut page)?;
-                    }
-                    page.extend(projected.into_iter().map(|record| record.document));
-                }
-                None => {
-                    rejected_records = rejected_records.saturating_add(1);
-                }
+        let rowids = candidates
+            .iter()
+            .filter(|candidate| candidate.can_hydrate())
+            .map(|candidate| candidate.rowid)
+            .collect::<Vec<_>>();
+        let mut candidate_index = 0;
+        visit_raw_rows(connection, &rowids, |raw| {
+            while candidates
+                .get(candidate_index)
+                .is_some_and(|candidate| !candidate.can_hydrate())
+            {
+                process_candidate(
+                    &candidates[candidate_index],
+                    None,
+                    encoding,
+                    source,
+                    source_path,
+                    &duplicate_requests,
+                    sink,
+                    &mut page,
+                    &mut hasher,
+                    &mut physical_ordinal,
+                    &mut certified_bytes,
+                    &mut retained_records,
+                    &mut rejected_records,
+                    &mut ignored_records,
+                    &mut indexed_documents,
+                )?;
+                candidate_index += 1;
             }
-            physical_ordinal = physical_ordinal.saturating_add(1);
-            after_rowid = Some(candidate.rowid);
+            let candidate = candidates
+                .get(candidate_index)
+                .ok_or(CaptureError::SourceChangedDuringCapture)?;
+            if candidate.rowid != raw.rowid {
+                return Err(CaptureError::SourceChangedDuringCapture.into());
+            }
+            candidate_index += 1;
+            process_candidate(
+                candidate,
+                Some(raw),
+                encoding,
+                source,
+                source_path,
+                &duplicate_requests,
+                sink,
+                &mut page,
+                &mut hasher,
+                &mut physical_ordinal,
+                &mut certified_bytes,
+                &mut retained_records,
+                &mut rejected_records,
+                &mut ignored_records,
+                &mut indexed_documents,
+            )
+        })?;
+        while candidates
+            .get(candidate_index)
+            .is_some_and(|candidate| !candidate.can_hydrate())
+        {
+            process_candidate(
+                &candidates[candidate_index],
+                None,
+                encoding,
+                source,
+                source_path,
+                &duplicate_requests,
+                sink,
+                &mut page,
+                &mut hasher,
+                &mut physical_ordinal,
+                &mut certified_bytes,
+                &mut retained_records,
+                &mut rejected_records,
+                &mut ignored_records,
+                &mut indexed_documents,
+            )?;
+            candidate_index += 1;
         }
+        if candidate_index != candidates.len() {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        after_rowid = candidates.last().map(|candidate| candidate.rowid);
     }
 
     let complete_records = retained_records
@@ -308,6 +322,88 @@ fn scan_rows(
         certified_bytes,
         content_digest: hasher.finalize().into(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_candidate(
+    candidate: &Candidate,
+    raw: Option<RawRow>,
+    encoding: SqliteEncoding,
+    source: &SourceKey,
+    source_path: &str,
+    duplicate_requests: &BTreeSet<DuplicateRequestIdentity>,
+    sink: &mut impl LingmaSourceBackedSinkV0,
+    page: &mut Vec<LexicalDocument>,
+    hasher: &mut sha2::Sha256,
+    physical_ordinal: &mut u64,
+    certified_bytes: &mut u64,
+    retained_records: &mut u64,
+    rejected_records: &mut u64,
+    ignored_records: &mut u64,
+    indexed_documents: &mut u64,
+) -> LingmaSourceBackedResultV0<()> {
+    *certified_bytes = certified_bytes
+        .checked_add(u64::try_from(candidate.encoded_bytes).map_err(|_| {
+            CaptureError::SystemInvariant("Lingma certified byte count exceeds u64")
+        })?)
+        .ok_or(CaptureError::SystemInvariant(
+            "Lingma certified byte count exhausted",
+        ))?;
+    hash_candidate(hasher, candidate, raw.as_ref());
+    let parsed = if candidate.can_hydrate() {
+        raw.and_then(|raw| super::super::decode_raw_row(raw, encoding).ok())
+    } else {
+        None
+    };
+    match parsed {
+        Some(row) if row.chat_prompt.trim().is_empty() => {
+            *ignored_records = ignored_records.saturating_add(1);
+        }
+        Some(row) => {
+            let logical_records = 1_u64 + u64::from(assistant_text(&row).is_some());
+            *retained_records = retained_records
+                .checked_add(logical_records)
+                .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
+            let record_digest = lingma_logical_record_sha256(&native_values(&row));
+            let request_identity_unique = row
+                .request_id
+                .as_ref()
+                .filter(|request_id| !request_id.trim().is_empty())
+                .is_some_and(|request_id| {
+                    !duplicate_requests.contains(&(
+                        row.session_id.as_bytes().to_vec(),
+                        request_id.as_bytes().to_vec(),
+                    ))
+                });
+            let mut projected = Vec::with_capacity(2);
+            project_row(
+                source,
+                source_path,
+                ParsedRow {
+                    ordinal: *physical_ordinal,
+                    row,
+                    record_digest,
+                    request_identity_unique,
+                },
+                &mut projected,
+            )?;
+            *indexed_documents = indexed_documents
+                .checked_add(
+                    u64::try_from(projected.len())
+                        .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?,
+                )
+                .ok_or(LingmaSourceBackedErrorV0::CountOverflow)?;
+            if page.len().saturating_add(projected.len()) > SOURCE_BACKED_PAGE_ROWS {
+                emit_page(sink, page)?;
+            }
+            page.extend(projected.into_iter().map(|record| record.document));
+        }
+        None => {
+            *rejected_records = rejected_records.saturating_add(1);
+        }
+    }
+    *physical_ordinal = physical_ordinal.saturating_add(1);
+    Ok(())
 }
 
 fn duplicate_request_identities(

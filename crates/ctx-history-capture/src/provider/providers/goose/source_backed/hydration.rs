@@ -24,9 +24,9 @@ use crate::{
             position::decode_goose_message_locator,
             schema::{self, GooseNativeSchema},
             stream::{
-                goose_native_message_identity, goose_normalized_message_id_sql,
-                GooseMessageCellDisposition, GooseRetainedContentClass, GooseRetainedMessage,
-                GooseScannedMessage,
+                goose_message_identity_counts_sql, goose_native_message_identity,
+                goose_normalized_message_id_sql, GooseMessageCellDisposition,
+                GooseRetainedContentClass, GooseRetainedMessage, GooseScannedMessage,
             },
         },
         source_backed::hydration_failure,
@@ -85,6 +85,7 @@ impl GooseSourceBackedResolverV0 {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) | Err(_) => continue,
             };
+            let terminal_revalidate = snapshot.terminal_revalidator();
             let loaded = (|| {
                 let connection = snapshot.connection().map_err(goose_unavailable)?;
                 let schema = GooseNativeSchema::probe(connection).map_err(goose_unavailable)?;
@@ -92,6 +93,9 @@ impl GooseSourceBackedResolverV0 {
             })();
             snapshot.finish().map_err(goose_unavailable)?;
             retained.revalidate().map_err(goose_unavailable)?;
+            terminal_revalidate().map_err(goose_unavailable)?;
+            #[cfg(test)]
+            retained.record_snapshot_work();
             let rows = loaded?;
             opened_route = true;
             for (index, coordinate) in coordinates.iter().enumerate() {
@@ -229,24 +233,43 @@ fn load_hydration_rows(
     let expressions = schema::goose_message_expressions(&columns, "m");
     let select = expressions.hydration.join(", ");
     let current_id = goose_normalized_message_id_sql(&schema.message_id_expression("m"));
-    let candidate_id = goose_normalized_message_id_sql(&schema.message_id_expression("candidate"));
+    let identity_counts =
+        goose_message_identity_counts_sql(schema, "identity_candidate", "selected_message_ids");
     let mut loaded = BTreeMap::new();
     for batch in keys.chunks(GOOSE_HYDRATION_KEY_BATCH) {
         let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "select s.rowid, {select},
-                    case when {current_id} is null then 0 else (
-                        select count(*) from messages candidate
-                        where {candidate_id} = {current_id}
-                    ) end
-             from messages m
+            "with selected_keys as materialized (
+                 select
+                     m.rowid as sqlite_rowid,
+                     {current_id} as native_message_id
+                 from messages m
+                 where m.id in ({placeholders})
+             ),
+             selected_message_ids as (
+                 select distinct native_message_id
+                 from selected_keys
+                 where native_message_id is not null
+             ),
+             identity_counts as (
+                 {identity_counts}
+             )
+             select
+                 s.rowid,
+                 {select},
+                 coalesce(identity_counts.message_id_uses, 0)
+             from selected_keys
+             join messages m on m.rowid = selected_keys.sqlite_rowid
              left join sessions s on s.id = m.session_id
-             where m.id in ({placeholders})
+             left join identity_counts
+               on identity_counts.native_message_id = selected_keys.native_message_id
              order by m.id"
         );
         let mut statement = connection.prepare(&sql)?;
+        #[cfg(test)]
+        super::record_goose_hydration_query();
         let rows = statement.query_map(params_from_iter(batch.iter()), |row| {
             let mut values = vec![row
                 .get::<_, Option<i64>>(0)?

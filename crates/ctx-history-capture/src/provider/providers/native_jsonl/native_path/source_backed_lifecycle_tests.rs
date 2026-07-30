@@ -4,7 +4,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -15,12 +15,13 @@ use ctx_history_core::{
     TypedKey,
 };
 use ctx_history_index::{GenerationWriter, IndexError, VerifiedIndex, WriterOptions};
+use serde_json::{json, Value};
 
 use super::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, SourceBackedCoordinatorError,
-        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        SourceBackedProviderRegistry, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceStatus,
@@ -55,13 +56,31 @@ fn qwen_route_fixture() -> (
 }
 
 fn qwen_registry(provider_root: &Path) -> SourceBackedProviderRegistry {
-    let mut registry = SourceBackedProviderRegistry::new();
-    registration::register(
-        &mut registry,
-        qwen_source(provider_root),
-        SourceBackedRouteSelection::Automatic,
+    direct_jsonl_registry(
+        CaptureProvider::QwenCode,
+        provider_root,
+        "qwen_code_chat_jsonl_tree",
     )
-    .unwrap();
+}
+
+fn direct_jsonl_registry(
+    provider: CaptureProvider,
+    provider_root: &Path,
+    source_format: &'static str,
+) -> SourceBackedProviderRegistry {
+    let source = ProviderSource {
+        provider,
+        path: provider_root.to_path_buf(),
+        exists: true,
+        source_format,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    registration::register(&mut registry, source, SourceBackedRouteSelection::Automatic).unwrap();
     registry
 }
 
@@ -69,10 +88,17 @@ fn qwen_registry_with_test_observer(
     provider_root: &Path,
     observer: registration::DirectJsonlRegistrationTestObserver,
 ) -> SourceBackedProviderRegistry {
+    direct_jsonl_registry_with_test_observer(qwen_source(provider_root), observer)
+}
+
+fn direct_jsonl_registry_with_test_observer(
+    source: ProviderSource,
+    observer: registration::DirectJsonlRegistrationTestObserver,
+) -> SourceBackedProviderRegistry {
     let mut registry = SourceBackedProviderRegistry::new();
     registration::register_with_test_observer(
         &mut registry,
-        qwen_source(provider_root),
+        source,
         SourceBackedRouteSelection::Automatic,
         observer,
     )
@@ -99,6 +125,194 @@ fn writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+fn write_jsonl_values(path: &Path, records: &[Value]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+fn direct_family_fixture(
+    parent: &Path,
+    provider: CaptureProvider,
+    marker: &str,
+) -> (std::path::PathBuf, &'static str) {
+    let (root, transcript, source_format, records) = match provider {
+        CaptureProvider::Antigravity => {
+            let root = parent.join("antigravity");
+            let transcript = root.join("agy-life/.system_generated/logs/transcript_full.jsonl");
+            (
+                root,
+                transcript,
+                crate::ANTIGRAVITY_CLI_SOURCE_FORMAT,
+                vec![json!({
+                    "step_index": 0,
+                    "source": "user",
+                    "type": "USER_INPUT",
+                    "status": "ok",
+                    "created_at": "2026-07-25T12:00:00Z",
+                    "content": marker,
+                })],
+            )
+        }
+        CaptureProvider::CopilotCli => {
+            let root = parent.join("copilot");
+            let transcript = root.join("copilot-life/events.jsonl");
+            (
+                root,
+                transcript,
+                crate::COPILOT_CLI_SOURCE_FORMAT,
+                vec![
+                    json!({
+                        "id": "copilot-life-start",
+                        "timestamp": "2026-07-25T12:00:00Z",
+                        "type": "session.start",
+                        "data": {
+                            "sessionId": "copilot-life",
+                            "startTime": "2026-07-25T12:00:00Z",
+                            "selectedModel": "gpt-5-mini",
+                            "context": {"cwd": "/workspace/copilot"},
+                        },
+                    }),
+                    json!({
+                        "id": "copilot-message",
+                        "timestamp": "2026-07-25T12:00:01Z",
+                        "type": "user.message",
+                        "data": {"content": marker},
+                    }),
+                ],
+            )
+        }
+        CaptureProvider::FactoryAiDroid => {
+            let root = parent.join("factory");
+            let transcript = root.join("project/droid-life.jsonl");
+            (
+                root,
+                transcript,
+                crate::FACTORY_DROID_SOURCE_FORMAT,
+                vec![
+                    json!({
+                        "type": "session_start",
+                        "sessionId": "droid-life",
+                        "timestamp": "2026-07-25T12:00:00Z",
+                        "cwd": "/workspace/factory",
+                        "model": "factory/droid",
+                    }),
+                    json!({
+                        "type": "message",
+                        "id": "droid-message",
+                        "timestamp": "2026-07-25T12:00:01Z",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": marker}],
+                        },
+                        "model": "factory/droid",
+                    }),
+                ],
+            )
+        }
+        CaptureProvider::Qoder => {
+            let root = parent.join("qoder");
+            let transcript = root.join("sanitized-workspace/transcript/qoder-life.jsonl");
+            (
+                root,
+                transcript,
+                "qoder_transcript_jsonl_tree",
+                vec![
+                    json!({
+                        "type": "session_meta",
+                        "sessionId": "qoder-life",
+                        "uuid": "qoder-life-meta",
+                        "timestamp": "2026-07-25T12:00:00Z",
+                        "cwd": "/workspace/qoder",
+                        "data": {
+                            "meta_type": "session_info",
+                            "content": {"mode": "agent", "session_type": "assistant"},
+                        },
+                    }),
+                    json!({
+                        "type": "user",
+                        "sessionId": "qoder-life",
+                        "uuid": "qoder-message",
+                        "timestamp": "2026-07-25T12:00:01Z",
+                        "cwd": "/workspace/qoder",
+                        "message": {"role": "user", "content": marker},
+                        "model": "qoder-agent",
+                    }),
+                ],
+            )
+        }
+        CaptureProvider::QwenCode => {
+            let root = parent.join("qwen");
+            let transcript = root.join("sanitized-workspace/chats/qwen-life.jsonl");
+            (
+                root,
+                transcript,
+                "qwen_code_chat_jsonl_tree",
+                vec![json!({
+                    "uuid": "qwen-message",
+                    "sessionId": "qwen-life",
+                    "timestamp": "2026-07-25T12:00:01Z",
+                    "type": "user",
+                    "cwd": "/workspace/qwen",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": marker}],
+                    },
+                    "model": "qwen3-coder",
+                })],
+            )
+        }
+        CaptureProvider::Tabnine => {
+            let root = parent.join("tabnine");
+            let transcript = root.join("tmp/project/chats/session-tabnine-life.jsonl");
+            (
+                root,
+                transcript,
+                crate::TABNINE_CLI_SOURCE_FORMAT,
+                vec![
+                    json!({
+                        "sessionId": "tabnine-life",
+                        "projectHash": "tabnine-nativepath-project",
+                        "startTime": "2026-07-25T12:00:00Z",
+                        "lastUpdated": "2026-07-25T12:00:59Z",
+                        "kind": "main",
+                        "directories": ["/workspace/tabnine"],
+                    }),
+                    json!({
+                        "id": "tabnine-message",
+                        "timestamp": "2026-07-25T12:00:01Z",
+                        "type": "user",
+                        "content": marker,
+                        "model": "tabnine-agent",
+                    }),
+                ],
+            )
+        }
+        CaptureProvider::Windsurf => {
+            let root = parent.join("windsurf");
+            let transcript = root.join("windsurf-life.jsonl");
+            (
+                root,
+                transcript,
+                "windsurf_cascade_hook_transcript_jsonl_tree",
+                vec![json!({
+                    "status": "done",
+                    "type": "user_input",
+                    "timestamp": "2026-07-25T12:00:00Z",
+                    "user_input": {"user_response": marker},
+                })],
+            )
+        }
+        _ => panic!("test fixture requested a non-direct JSONL provider"),
+    };
+    write_jsonl_values(&transcript, &records);
+    (root, source_format)
 }
 
 #[test]
@@ -324,11 +538,7 @@ fn exact_noop_performs_zero_provider_projections_and_preserves_generation() {
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
 
-    assert_eq!(
-        super::super::reader::provider_projection_count(),
-        0,
-        "exact no-op refresh must not project provider records"
-    );
+    assert_eq!(super::super::reader::provider_projection_count(), 0);
     assert_eq!(
         inventory_traversals(),
         3,
@@ -337,6 +547,414 @@ fn exact_noop_performs_zero_provider_projections_and_preserves_generation() {
     assert_eq!(unchanged.sources, cold.sources);
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+}
+
+#[test]
+fn direct_jsonl_worker_policy_honors_default_and_requested_counts() {
+    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 12, None), 8);
+    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 12, Some(4)), 4);
+    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 3, Some(4)), 3);
+    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 12, Some(0)), 1);
+    assert_eq!(
+        direct_jsonl_scanner_worker_count_policy(32, 64, Some(usize::MAX)),
+        16
+    );
+    assert_eq!(direct_jsonl_scanner_worker_count_policy(8, 0, Some(4)), 0);
+}
+
+#[test]
+fn every_direct_jsonl_provider_replacement_opens_and_projects_identity_once() {
+    let providers = [
+        CaptureProvider::Antigravity,
+        CaptureProvider::CopilotCli,
+        CaptureProvider::FactoryAiDroid,
+        CaptureProvider::Qoder,
+        CaptureProvider::QwenCode,
+        CaptureProvider::Tabnine,
+        CaptureProvider::Windsurf,
+    ];
+
+    for provider in providers {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let fixture_parent = temp.path().join(provider.as_str());
+        let (root, source_format) =
+            direct_family_fixture(&fixture_parent, provider, "opening marker");
+        let registry = direct_jsonl_registry(provider, &root, source_format);
+        let index_root = temp.path().join("index");
+        with_scanner_workers(8, || {
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap()
+        });
+
+        direct_family_fixture(
+            &fixture_parent,
+            provider,
+            "replacement marker with a longer payload",
+        );
+        reset_scan_work(&root);
+        with_scanner_workers(8, || {
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap()
+        });
+
+        assert_eq!(
+            scan_work(&root),
+            DirectJsonlScanWork {
+                leaf_opens: 1,
+                identity_projections: 1,
+            },
+            "{provider} replacement performed duplicate leaf I/O"
+        );
+    }
+}
+
+#[test]
+fn forced_parallel_scanners_match_serial_ids_for_record_and_path_identity_providers() {
+    const SOURCE_COUNT: usize = 12;
+
+    fn assert_parity(
+        index_parent: &Path,
+        registry: &SourceBackedProviderRegistry,
+        expected_sources: usize,
+    ) {
+        let serial_root = index_parent.join("serial");
+        let serial = with_scanner_workers(1, || {
+            refresh_source_backed_generation(&serial_root, registry, writer_options()).unwrap()
+        });
+        assert_eq!(
+            scanner_activity(),
+            DirectJsonlScannerActivity {
+                worker_count: 1,
+                sources_started: expected_sources,
+                sources_completed: expected_sources,
+                peak_active_scanners: 1,
+            }
+        );
+        assert_eq!(serial.sources.len(), expected_sources);
+
+        let parallel_root = index_parent.join("parallel");
+        let parallel = with_scanner_workers(8, || {
+            refresh_source_backed_generation(&parallel_root, registry, writer_options()).unwrap()
+        });
+        let activity = scanner_activity();
+        assert_eq!(activity.worker_count, 8);
+        assert_eq!(activity.sources_started, expected_sources);
+        assert_eq!(activity.sources_completed, expected_sources);
+        assert!(
+            activity.peak_active_scanners >= 4,
+            "forced shared-runner capture did not keep four provider scanners active"
+        );
+        assert!(activity.peak_active_scanners <= activity.worker_count);
+        assert_eq!(parallel.sources, serial.sources);
+        assert_eq!(parallel.commit.generation_id, serial.commit.generation_id);
+        assert_eq!(
+            parallel.commit.indexed_documents,
+            serial.commit.indexed_documents
+        );
+
+        let serial_index = VerifiedIndex::open(&serial_root).unwrap();
+        let parallel_index = VerifiedIndex::open(&parallel_root).unwrap();
+        for certificate in &serial.sources {
+            let source = certificate.observation().source();
+            assert_eq!(
+                parallel_index
+                    .source_event_page(source, None, 32)
+                    .unwrap()
+                    .items,
+                serial_index
+                    .source_event_page(source, None, 32)
+                    .unwrap()
+                    .items,
+                "parallel capture changed event/session IDs, locators, or canonical event order"
+            );
+        }
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let qwen_root = temp.path().join(".qwen/projects");
+    let qwen_chats = qwen_root.join("workspace/chats");
+    fs::create_dir_all(&qwen_chats).unwrap();
+    for ordinal in 0..SOURCE_COUNT {
+        fs::write(
+            qwen_chats.join(format!("session-{ordinal:02}.jsonl")),
+            QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", &format!("qwen-parallel-{ordinal:02}")),
+        )
+        .unwrap();
+    }
+    assert_parity(
+        &temp.path().join("qwen-indexes"),
+        &qwen_registry(&qwen_root),
+        SOURCE_COUNT,
+    );
+
+    let windsurf_root = temp.path().join("windsurf");
+    fs::create_dir_all(&windsurf_root).unwrap();
+    for ordinal in 0..SOURCE_COUNT {
+        fs::write(
+            windsurf_root.join(format!("windsurf-parallel-{ordinal:02}.jsonl")),
+            format!(
+                "{{\"status\":\"done\",\"type\":\"user_input\",\
+                 \"timestamp\":\"2026-07-25T12:00:{ordinal:02}Z\",\
+                 \"user_input\":{{\"user_response\":\"windsurf sentinel {ordinal:02}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    assert_parity(
+        &temp.path().join("windsurf-indexes"),
+        &direct_jsonl_registry(
+            CaptureProvider::Windsurf,
+            &windsurf_root,
+            "windsurf_cascade_hook_transcript_jsonl_tree",
+        ),
+        SOURCE_COUNT,
+    );
+}
+
+#[test]
+fn duplicate_worker_discovered_identity_fails_deterministically_without_publication() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join(".qwen/projects");
+    let chats = provider_root.join("workspace/chats");
+    fs::create_dir_all(&chats).unwrap();
+    let first = chats.join("first.jsonl");
+    let second = chats.join("second.jsonl");
+    fs::write(
+        &first,
+        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-dup-a"),
+    )
+    .unwrap();
+    fs::write(
+        &second,
+        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-dup-b"),
+    )
+    .unwrap();
+    let registry = qwen_registry(&provider_root);
+    let index_root = temp.path().join("index");
+    let baseline =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(baseline.sources.len(), 2);
+
+    fs::write(
+        &second,
+        QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", "qwen-dup-a"),
+    )
+    .unwrap();
+    let serial_error = with_scanner_workers(1, || {
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err()
+    });
+    let parallel_error = with_scanner_workers(8, || {
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err()
+    });
+    let duplicate_detail = |error: SourceBackedCoordinatorError| match error {
+        SourceBackedCoordinatorError::RouteScan { source, .. } => {
+            assert_eq!(source.kind, SourceBackedRouteErrorKind::InvalidSource);
+            source.detail
+        }
+        other => panic!("unexpected duplicate-identity error: {other}"),
+    };
+    assert_eq!(
+        duplicate_detail(serial_error),
+        duplicate_detail(parallel_error),
+        "worker arrival order changed the duplicate-identity failure"
+    );
+
+    let retained = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(retained.generation_id(), baseline.commit.generation_id);
+    assert_eq!(retained.document_count(), baseline.commit.indexed_documents);
+}
+
+#[test]
+fn mutation_after_worker_identity_projection_fails_closed() {
+    let (temp, provider_root, transcript, _registry) = qwen_route_fixture();
+    let index_root = temp.path().join("index");
+    let mutate_on_begin = Arc::new(AtomicBool::new(false));
+    let armed = Arc::clone(&mutate_on_begin);
+    let transcript_to_mutate = transcript.clone();
+    let replacement =
+        QWEN_LIFECYCLE_TRANSCRIPT.replace("lifecycle sentinel", "replacement sentinel");
+    let active_mutation =
+        replacement.replace("replacement sentinel", "mutation after worker identity");
+    let registry = qwen_registry_with_test_observer(
+        &provider_root,
+        Arc::new(move |event| {
+            if event == registration::DirectJsonlRegistrationTestEvent::BeginSource
+                && armed.swap(false, Ordering::SeqCst)
+            {
+                fs::write(&transcript_to_mutate, &active_mutation).unwrap();
+            }
+        }),
+    );
+    let baseline =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    fs::write(&transcript, replacement).unwrap();
+    mutate_on_begin.store(true, Ordering::SeqCst);
+    reset_scan_work(&provider_root);
+    with_scanner_workers(8, || {
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err()
+    });
+    assert!(!mutate_on_begin.load(Ordering::SeqCst));
+    assert_eq!(
+        scan_work(&provider_root),
+        DirectJsonlScanWork {
+            leaf_opens: 1,
+            identity_projections: 1,
+        }
+    );
+
+    let retained = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(retained.generation_id(), baseline.commit.generation_id);
+    assert_eq!(retained.document_count(), baseline.commit.indexed_documents);
+}
+
+#[test]
+fn thousand_source_lifecycle_uses_linear_indexes_and_preserves_change_parity() {
+    const SOURCE_COUNT: usize = 1_001;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_root = temp.path().join(".qwen/projects");
+    let chats = provider_root.join("workspace/chats");
+    fs::create_dir_all(&chats).unwrap();
+    for ordinal in 0..SOURCE_COUNT {
+        fs::write(
+            chats.join(format!("session-{ordinal:04}.jsonl")),
+            QWEN_LIFECYCLE_TRANSCRIPT.replace("qwen-life", &format!("qwen-scale-{ordinal:04}")),
+        )
+        .unwrap();
+    }
+    let registry = qwen_registry(&provider_root);
+    let index_root = temp.path().join("index");
+    let refresh = || {
+        with_scanner_workers(8, || {
+            refresh_source_backed_generation(&index_root, &registry, writer_options())
+        })
+    };
+
+    let cold = refresh().unwrap();
+    assert_eq!(cold.sources.len(), SOURCE_COUNT);
+    let cold_source_digests = cold
+        .sources
+        .iter()
+        .map(|certificate| certificate.observation().source().exact_descriptor_digest())
+        .collect::<Vec<_>>();
+
+    reset_lifecycle_work();
+    super::super::reader::reset_provider_projection_count();
+    let unchanged = refresh().unwrap();
+    assert_eq!(
+        lifecycle_work(),
+        DirectJsonlLifecycleWork {
+            base_certificate_decodes: SOURCE_COUNT,
+            base_index_entries: SOURCE_COUNT,
+            base_index_lookups: SOURCE_COUNT,
+            current_index_entries: SOURCE_COUNT,
+            retirement_lookups: SOURCE_COUNT,
+        },
+        "base/current lifecycle membership must perform one indexed operation per source"
+    );
+    assert_eq!(super::super::reader::provider_projection_count(), 0);
+    assert_eq!(unchanged.sources, cold.sources);
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let event = index
+        .source_event_page(source, None, 1)
+        .unwrap()
+        .items
+        .pop()
+        .unwrap();
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    reset_hydration_work();
+    registry
+        .resolver_registry()
+        .hydrate_event(&request)
+        .unwrap();
+    assert_eq!(
+        hydration_work(),
+        DirectJsonlHydrationWork {
+            inventory_scans: 1,
+            leaf_index_entries: SOURCE_COUNT,
+            leaf_index_lookups: 1,
+            source_binds: 1,
+            leaf_opens: 1,
+        },
+        "hydration must build one linear leaf index and bind by one constant-time lookup"
+    );
+
+    let adapter = super::super::qwen_code_source_backed_adapter();
+    let changed_path = chats.join("session-0000.jsonl");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&changed_path)
+        .unwrap()
+        .write_all(
+            concat!(
+                "{\"uuid\":\"qwen-event-appended\",\"sessionId\":\"qwen-scale-0000\",",
+                "\"timestamp\":\"2026-07-25T12:00:03Z\",\"type\":\"assistant\",",
+                "\"cwd\":\"/workspace/qwen\",\"message\":{\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"appended sentinel\"}]},",
+                "\"model\":\"qwen3-coder\"}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let appended = refresh().unwrap();
+    assert_eq!(appended.sources.len(), SOURCE_COUNT);
+    assert_eq!(
+        appended
+            .sources
+            .iter()
+            .map(|certificate| { certificate.observation().source().exact_descriptor_digest() })
+            .collect::<Vec<_>>(),
+        cold_source_digests,
+        "append must preserve exact source identities and canonical order"
+    );
+    assert_ne!(
+        appended.commit.generation_id,
+        unchanged.commit.generation_id
+    );
+
+    fs::write(
+        &changed_path,
+        QWEN_LIFECYCLE_TRANSCRIPT
+            .replace("qwen-life", "qwen-scale-0000")
+            .replace("lifecycle sentinel", "rewritten sentinel"),
+    )
+    .unwrap();
+    let changed = refresh().unwrap();
+    assert_eq!(changed.sources.len(), SOURCE_COUNT);
+    assert_eq!(
+        changed
+            .sources
+            .iter()
+            .map(|certificate| { certificate.observation().source().exact_descriptor_digest() })
+            .collect::<Vec<_>>(),
+        cold_source_digests,
+        "content rewrite must preserve exact source identities and canonical order"
+    );
+    assert_ne!(changed.sources, appended.sources);
+    assert_ne!(changed.commit.generation_id, appended.commit.generation_id);
+
+    let deleted_source = adapter.source_key("qwen-scale-0001").unwrap();
+    fs::remove_file(chats.join("session-0001.jsonl")).unwrap();
+    let deletion = refresh().unwrap();
+    assert_eq!(deletion.sources.len(), SOURCE_COUNT - 1);
+    assert!(deletion.sources.iter().all(|certificate| {
+        !certificate
+            .observation()
+            .source()
+            .exact_descriptor_eq(&deleted_source)
+    }));
+    assert_ne!(deletion.commit.generation_id, changed.commit.generation_id);
+
+    let deletion_noop = refresh().unwrap();
+    assert_eq!(deletion_noop.sources, deletion.sources);
+    assert_eq!(
+        deletion_noop.commit.generation_id,
+        deletion.commit.generation_id
+    );
+    assert_eq!(deletion_noop.commit.opstamp, deletion.commit.opstamp);
 }
 
 #[test]
@@ -353,11 +971,7 @@ fn metadata_only_same_content_churn_is_a_logical_noop() {
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
 
-    assert_eq!(
-        super::super::reader::provider_projection_count(),
-        0,
-        "metadata-only logical no-op must not project provider records"
-    );
+    assert_eq!(super::super::reader::provider_projection_count(), 0);
     assert_eq!(unchanged.sources, cold.sources);
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
@@ -525,7 +1139,7 @@ fn final_inventory_rejects_rewrite_after_per_source_terminal_revalidation() {
 }
 
 #[test]
-fn grouped_checkpoint_hydration_binds_and_opens_once_without_header_projection() {
+fn grouped_checkpoint_hydration_binds_and_opens_once_with_exact_owner_projections() {
     let (temp, provider_root, _transcript, registry) = qwen_route_fixture();
     let index_root = temp.path().join("index");
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
@@ -567,6 +1181,8 @@ fn grouped_checkpoint_hydration_binds_and_opens_once_without_header_projection()
         hydration_work(),
         DirectJsonlHydrationWork {
             inventory_scans: 1,
+            leaf_index_entries: 1,
+            leaf_index_lookups: 1,
             source_binds: 1,
             leaf_opens: 1,
         }
@@ -613,6 +1229,8 @@ fn route_batch_discovers_and_binds_once_instead_of_per_event() {
         hydration_work(),
         DirectJsonlHydrationWork {
             inventory_scans: 1,
+            leaf_index_entries: 1,
+            leaf_index_lookups: 1,
             source_binds: 1,
             leaf_opens: 1,
         }
@@ -686,6 +1304,8 @@ fn repeated_single_hydration_reuses_one_resident_inventory_and_source_binding() 
         hydration_work(),
         DirectJsonlHydrationWork {
             inventory_scans: 1,
+            leaf_index_entries: 1,
+            leaf_index_lookups: 1,
             source_binds: 1,
             leaf_opens: 2,
         }
@@ -804,6 +1424,8 @@ fn resident_single_hydration_preserves_stale_and_deleted_failure_kinds() {
         hydration_work(),
         DirectJsonlHydrationWork {
             inventory_scans: 2,
+            leaf_index_entries: 2,
+            leaf_index_lookups: 2,
             source_binds: 2,
             leaf_opens: 3,
         },
@@ -816,6 +1438,86 @@ fn resident_single_hydration_preserves_stale_and_deleted_failure_kinds() {
         .hydrate_event(&request)
         .unwrap_err();
     assert_eq!(deleted.kind, HydrationFailureKind::ConfirmedDeleted);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn active_parallel_scans_bound_provider_fds_to_worker_count() {
+    const SOURCE_COUNT: usize = 128;
+    const WORKERS: usize = 8;
+
+    fn retained_provider_fds(root: &Path) -> usize {
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|target| target.starts_with(root))
+            .count()
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("windsurf");
+    fs::create_dir_all(&root).unwrap();
+    for ordinal in 0..SOURCE_COUNT {
+        write_jsonl_values(
+            &root.join(format!("session-{ordinal:04}.jsonl")),
+            &[json!({
+                "status": "done",
+                "type": "user_input",
+                "timestamp": "2026-07-25T12:00:00Z",
+                "user_input": {"user_response": format!("fd sentinel {ordinal}")},
+            })],
+        );
+    }
+    let peak_fds = Arc::new(AtomicUsize::new(0));
+    let observed_peak = Arc::clone(&peak_fds);
+    let observed_root = root.clone();
+    let source = ProviderSource {
+        provider: CaptureProvider::Windsurf,
+        path: root.clone(),
+        exists: true,
+        source_format: "windsurf_cascade_hook_transcript_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let registry = direct_jsonl_registry_with_test_observer(
+        source,
+        Arc::new(move |event| {
+            if event == registration::DirectJsonlRegistrationTestEvent::BeginSource {
+                observed_peak.fetch_max(retained_provider_fds(&observed_root), Ordering::SeqCst);
+            }
+        }),
+    );
+
+    reset_scan_work(&root);
+    with_scanner_workers(WORKERS, || {
+        refresh_source_backed_generation(temp.path().join("index"), &registry, writer_options())
+            .unwrap()
+    });
+    let activity = scanner_activity();
+    assert_eq!(activity.worker_count, WORKERS);
+    assert_eq!(activity.sources_started, SOURCE_COUNT);
+    assert_eq!(activity.sources_completed, SOURCE_COUNT);
+    assert!(activity.peak_active_scanners >= 4);
+    assert!(activity.peak_active_scanners <= WORKERS);
+    assert_eq!(
+        scan_work(&root),
+        DirectJsonlScanWork {
+            leaf_opens: SOURCE_COUNT,
+            identity_projections: SOURCE_COUNT,
+        }
+    );
+    assert!(
+        peak_fds.load(Ordering::SeqCst) <= WORKERS.saturating_mul(2).saturating_add(4),
+        "active scans retained more than a bounded pair of descriptors per worker"
+    );
+    assert!(
+        retained_provider_fds(&root) <= 4,
+        "completed scans retained leaf descriptors"
+    );
 }
 
 #[cfg(target_os = "linux")]

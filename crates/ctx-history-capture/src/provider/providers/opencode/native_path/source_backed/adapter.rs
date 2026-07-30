@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use ctx_history_core::{
@@ -10,7 +11,8 @@ use ctx_history_core::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    open_root_authorized_snapshot, opencode_family_source_backed_registrations, scan_source,
+    observe_logical_source, open_root_authorized_snapshot_retained,
+    opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeLogicalObservation,
     OpenCodeScanOutput, OpenCodeSourceBackedError, OpenCodeSourceBackedRegistration,
     OpenCodeSourceBackedResult, PARSER_REVISION, SQLITE_SOURCE_INVALID_REASON,
 };
@@ -26,7 +28,9 @@ use crate::{
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
         SourceBackedRouteSelection,
     },
-    provider_sources::{SqliteSourceAccessError, SqliteSourceEvidence},
+    provider_sources::{
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+    },
     CaptureError, ProviderSource,
 };
 
@@ -35,11 +39,13 @@ struct OpenCodeDocumentTreeAdapter {
     data_root: PathBuf,
     registration: OpenCodeSourceBackedRegistration,
     path: PathBuf,
+    #[cfg(test)]
+    work_observer: Option<OpenCodeWorkObserver>,
 }
 
 #[derive(Debug)]
 enum OpenCodeTreeAuthority {
-    Present(SqliteSourceEvidence),
+    Present,
     Missing {
         source_root: ProviderSourceRoot,
         database_leaf: OsString,
@@ -47,10 +53,42 @@ enum OpenCodeTreeAuthority {
     },
 }
 
-type OpenCodeDocumentTree = CompleteDocumentTree<(), OpenCodeTreeAuthority>;
+struct OpenCodeDocumentLeaf {
+    observation: OpenCodeLogicalObservation,
+    source_root: ProviderSourceRoot,
+    sqlite_authority: SqliteSourceDirectoryAuthority,
+    snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
+    terminal_revalidate:
+        Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
+    work: Mutex<OpenCodeSqliteWorkCounters>,
+}
+
+type OpenCodeDocumentTree = CompleteDocumentTree<OpenCodeDocumentLeaf, OpenCodeTreeAuthority>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct OpenCodeSqliteWorkCounters {
+    pub(super) snapshot_opens: u64,
+    pub(super) immutable_snapshot_opens: u64,
+    pub(super) copied_snapshot_opens: u64,
+    pub(super) source_bytes_copied: u64,
+    pub(super) logical_observation_passes: u64,
+    pub(super) logical_rows_observed: u64,
+    pub(super) projection_passes: u64,
+    pub(super) logical_rows_projected: u64,
+    pub(super) documents_staged: u64,
+    pub(super) max_buffered_documents: u64,
+    pub(super) exact_replays: u64,
+    pub(super) terminal_fences: u64,
+    pub(super) terminal_revalidations: u64,
+    pub(super) active_snapshots: u64,
+    pub(super) max_active_snapshots: u64,
+}
+
+#[cfg(test)]
+type OpenCodeWorkObserver = std::sync::Arc<Mutex<Vec<OpenCodeSqliteWorkCounters>>>;
 
 impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
-    type Leaf = ();
+    type Leaf = OpenCodeDocumentLeaf;
     type TreeAuthority = OpenCodeTreeAuthority;
 
     fn parser_revision(&self) -> &'static str {
@@ -62,26 +100,33 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<OpenCodeDocumentTree> {
-        discover_document_tree(&self.data_root, &self.path).map_err(route_error)
+        discover_document_tree(&self.data_root, &self.path, self.registration.dialect)
+            .map_err(route_error)
     }
 
     fn scan_changed(
         &self,
         authority: &Self::TreeAuthority,
-        _leaf: &Self::Leaf,
+        leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        let OpenCodeTreeAuthority::Present(physical_evidence) = authority else {
+        let OpenCodeTreeAuthority::Present = authority else {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Internal,
                 "missing OpenCode-family tree unexpectedly contained a leaf",
             ));
         };
-        let scan = scan_source(
-            &self.data_root,
+        let snapshot = leaf
+            .snapshot
+            .lock()
+            .map_err(|_| source_internal("OpenCode-family snapshot lock was poisoned"))?
+            .take()
+            .ok_or_else(|| source_internal("OpenCode-family snapshot was already consumed"))?;
+        let scan = scan_pinned_source(
             &self.path,
             self.registration.dialect,
-            Some(physical_evidence),
+            &leaf.observation,
+            snapshot,
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(source) => sink.begin_source(source).map_err(Into::into),
                 OpenCodeScanOutput::Document(document) => {
@@ -90,6 +135,24 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             },
         )
         .map_err(route_error)?;
+        if !scan.source.exact_descriptor_eq(&leaf.observation.source)
+            || scan.certificate.counts().complete_records != leaf.observation.logical_rows
+        {
+            return Err(source_changed(
+                "OpenCode-family projection did not match its logical observation",
+            ));
+        }
+        {
+            let mut work = leaf
+                .work
+                .lock()
+                .map_err(|_| source_internal("OpenCode-family work counter lock was poisoned"))?;
+            work.projection_passes = 1;
+            work.logical_rows_projected = scan.certificate.counts().complete_records;
+            work.documents_staged = scan.certificate.counts().indexed_documents;
+            work.max_buffered_documents =
+                u64::from(scan.certificate.counts().indexed_documents != 0);
+        }
         let observation = scan.certificate.observation().clone();
         Ok(DocumentSourceTerminal {
             source: scan.source,
@@ -106,20 +169,38 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
         tree: &OpenCodeDocumentTree,
     ) -> SourceBackedRouteResult<[u8; 32]> {
         match &tree.authority {
-            OpenCodeTreeAuthority::Present(expected) => {
-                let current = observe_present_document_tree(&self.data_root, &self.path)
-                    .map_err(route_error)?;
-                let OpenCodeTreeAuthority::Present(current_evidence) = current.authority else {
-                    return Err(source_changed(
-                        "OpenCode-family SQLite database disappeared before publication",
+            OpenCodeTreeAuthority::Present => {
+                let [observed] = tree.leaves.as_slice() else {
+                    return Err(source_internal(
+                        "present OpenCode-family tree must contain exactly one leaf",
                     ));
                 };
-                if current_evidence != *expected {
-                    return Err(source_changed(
-                        "OpenCode-family physical SQLite family changed before publication",
-                    ));
+                let leaf = &observed.provider_leaf;
+                let exact_replay = if let Some(snapshot) = leaf
+                    .snapshot
+                    .lock()
+                    .map_err(|_| source_internal("OpenCode-family snapshot lock was poisoned"))?
+                    .take()
+                {
+                    snapshot
+                        .finish()
+                        .map_err(|error| route_error(error.into()))?;
+                    true
+                } else {
+                    false
+                };
+                leaf.source_root
+                    .revalidate()
+                    .map_err(|error| route_error(error.into()))?;
+                (leaf.terminal_revalidate)().map_err(|error| route_error(error.into()))?;
+                let counters = finalize_work_counters(leaf, exact_replay)?;
+                #[cfg(test)]
+                if let Some(observer) = &self.work_observer {
+                    observer.lock().unwrap().push(counters);
                 }
-                Ok(current.tree_fingerprint)
+                #[cfg(not(test))]
+                let _ = counters;
+                Ok(tree.tree_fingerprint)
             }
             OpenCodeTreeAuthority::Missing {
                 source_root,
@@ -148,6 +229,34 @@ pub(crate) fn register(
     selection: SourceBackedRouteSelection,
     data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
+    register_adapter(
+        registry,
+        source,
+        selection,
+        data_root,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn register_with_work_observer(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    work_observer: OpenCodeWorkObserver,
+) -> SourceBackedCoordinatorResult<()> {
+    register_adapter(registry, source, selection, data_root, Some(work_observer))
+}
+
+fn register_adapter(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    #[cfg(test)] work_observer: Option<OpenCodeWorkObserver>,
+) -> SourceBackedCoordinatorResult<()> {
     let registration = registration_for_provider(source.provider).ok_or_else(|| {
         invalid_route(
             source.provider,
@@ -158,6 +267,8 @@ pub(crate) fn register(
         data_root: data_root.to_path_buf(),
         registration,
         path: source.path.clone(),
+        #[cfg(test)]
+        work_observer,
     };
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }
@@ -173,8 +284,9 @@ fn registration_for_provider(
 fn discover_document_tree(
     data_root: &Path,
     path: &std::path::Path,
+    dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    match observe_present_document_tree(data_root, path) {
+    match observe_present_document_tree(data_root, path, dialect) {
         Ok(tree) => Ok(tree),
         Err(error) if source_missing(&error) => observe_missing_document_tree(path),
         Err(error) => Err(error),
@@ -184,24 +296,32 @@ fn discover_document_tree(
 fn observe_present_document_tree(
     data_root: &Path,
     path: &std::path::Path,
+    dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, path)?;
-    let opening = sqlite_snapshot.evidence().clone();
-    let closing = sqlite_snapshot.finish()?;
-    source_root.revalidate()?;
-    if opening != closing {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-    let leaf_fingerprint = DocumentLeafFingerprint::new(*closing.revision());
+    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
+    let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
+    let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
+    let leaf_fingerprint = DocumentLeafFingerprint::new(observation.fingerprint);
     let tree_fingerprint = leaf_fingerprint.as_bytes();
+    let logical_rows = observation.logical_rows;
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
-        vec![ObservedDocumentLeaf::with_durable_replay(
+        vec![ObservedDocumentLeaf::new(
             leaf_fingerprint,
-            (),
-            false,
+            OpenCodeDocumentLeaf {
+                observation,
+                source_root: authorized.source_root,
+                sqlite_authority: authorized.sqlite_authority,
+                snapshot: Mutex::new(Some(authorized.sqlite_snapshot)),
+                terminal_revalidate,
+                work: Mutex::new(OpenCodeSqliteWorkCounters {
+                    logical_observation_passes: 1,
+                    logical_rows_observed: logical_rows,
+                    ..OpenCodeSqliteWorkCounters::default()
+                }),
+            },
         )],
-        OpenCodeTreeAuthority::Present(closing),
+        OpenCodeTreeAuthority::Present,
     ))
 }
 
@@ -252,6 +372,53 @@ fn revalidate_missing_database(
     Ok(())
 }
 
+fn finalize_work_counters(
+    leaf: &OpenCodeDocumentLeaf,
+    exact_replay: bool,
+) -> SourceBackedRouteResult<OpenCodeSqliteWorkCounters> {
+    let snapshot = leaf.sqlite_authority.snapshot_counters();
+    let mut work = leaf
+        .work
+        .lock()
+        .map_err(|_| source_internal("OpenCode-family work counter lock was poisoned"))?;
+    work.immutable_snapshot_opens = snapshot.immutable_snapshot_opens();
+    work.copied_snapshot_opens = snapshot.copied_snapshot_opens();
+    work.snapshot_opens = work
+        .immutable_snapshot_opens
+        .checked_add(work.copied_snapshot_opens)
+        .ok_or_else(|| source_internal("OpenCode-family snapshot open count overflowed"))?;
+    work.source_bytes_copied = snapshot.source_bytes_copied();
+    work.terminal_fences = snapshot.terminal_fences();
+    work.terminal_revalidations = snapshot.terminal_revalidations();
+    work.active_snapshots = snapshot.active_snapshots();
+    work.max_active_snapshots = snapshot.max_active_snapshots();
+    work.exact_replays = u64::from(exact_replay);
+    let counters = *work;
+    if counters.snapshot_opens != 1
+        || counters.logical_observation_passes != 1
+        || counters.terminal_fences != 1
+        || counters.terminal_revalidations < 2
+        || counters.active_snapshots != 0
+        || counters.max_active_snapshots != 1
+        || counters.projection_passes + counters.exact_replays != 1
+        || counters.max_buffered_documents > 1
+        || (exact_replay
+            && (counters.projection_passes != 0
+                || counters.logical_rows_projected != 0
+                || counters.documents_staged != 0
+                || counters.max_buffered_documents != 0))
+        || (!exact_replay
+            && (counters.projection_passes != 1
+                || counters.logical_rows_projected != counters.logical_rows_observed
+                || counters.documents_staged > counters.logical_rows_projected))
+    {
+        return Err(source_internal(
+            "OpenCode-family lifecycle violated its one-snapshot bounded-work contract",
+        ));
+    }
+    Ok(counters)
+}
+
 fn source_missing(error: &OpenCodeSourceBackedError) -> bool {
     match error {
         OpenCodeSourceBackedError::Capture(CaptureError::Io(error)) => {
@@ -294,6 +461,10 @@ fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
 
 fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
+}
+
+fn source_internal(detail: impl Into<String>) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
 }
 
 fn unavailable_io(kind: std::io::ErrorKind) -> bool {

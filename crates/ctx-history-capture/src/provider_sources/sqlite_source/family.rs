@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(test)]
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug)]
 pub(super) struct SqliteSourceFamily {
@@ -16,7 +16,7 @@ pub(super) struct SqliteSourceFamily {
     shared_memory_path: PathBuf,
     journal_path: PathBuf,
     #[cfg(test)]
-    revalidation_count: Cell<u32>,
+    revalidation_count: AtomicU32,
 }
 
 impl SqliteSourceFamily {
@@ -75,7 +75,7 @@ impl SqliteSourceFamily {
             shared_memory_path,
             journal_path,
             #[cfg(test)]
-            revalidation_count: Cell::new(0),
+            revalidation_count: AtomicU32::new(0),
         })
     }
 
@@ -111,8 +111,11 @@ impl SqliteSourceFamily {
         expected: &SqliteFamilyEvidence,
     ) -> SqliteSourceAccessResult<()> {
         #[cfg(test)]
-        self.revalidation_count
-            .set(self.revalidation_count.get().saturating_add(1));
+        let _ =
+            self.revalidation_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
         self.authority.revalidate()?;
         if self.authority.identity != expected.parent_identity {
             return Err(SqliteSourceAccessError::SourceChanged);
@@ -162,7 +165,7 @@ impl SqliteSourceFamily {
 
     #[cfg(test)]
     pub(super) fn revalidation_count(&self) -> u32 {
-        self.revalidation_count.get()
+        self.revalidation_count.load(Ordering::Relaxed)
     }
 }
 
