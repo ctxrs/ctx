@@ -21,7 +21,8 @@ use ctx_history_core::{
     HydrationFailureKind, ScannedSourceCounts, SourceAnchor, SourceFrontier, SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
+    CommitReceipt, GenerationRemoval, GenerationWriter, IndexError, LexicalDocument,
+    RevalidationTarget, WriterOptions,
 };
 use thiserror::Error;
 
@@ -140,6 +141,15 @@ pub(crate) fn source_backed_base_sources(
                 .cloned()
                 .collect()
         })
+        .unwrap_or_default()
+}
+
+pub(crate) fn source_backed_base_removals(
+    sink: &SourceBackedGenerationSink<'_>,
+) -> Vec<GenerationRemoval> {
+    sink.writer
+        .base_manifest()
+        .map(|manifest| manifest.removals.clone())
         .unwrap_or_default()
 }
 

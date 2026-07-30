@@ -110,8 +110,20 @@ fn expected_state(
             )
         })
         .collect();
+    let owned_sources = observed
+        .leaves()
+        .iter()
+        .map(|leaf| {
+            (
+                leaf.source().exact_descriptor_digest(),
+                leaf.source().clone(),
+            )
+        })
+        .collect();
     (
         FamilyResident {
+            ownership_initialized: true,
+            owned_sources,
             terminal_sources,
             certified_inventory: Some(inventory.clone()),
             hydration_inventory: None,

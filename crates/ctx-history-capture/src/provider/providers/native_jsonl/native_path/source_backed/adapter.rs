@@ -6,9 +6,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
-    StableEntityId, TypedKey,
+    derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, NativeSessionKey, SessionIdentityInput, SourceAnchor,
+    SourceInventoryObservation, SourceKey, StableEntityId, TypedKey,
 };
 use sha2::{Digest, Sha256};
 
@@ -577,6 +577,35 @@ impl DirectJsonlSourceAdapter {
         decode_certificate(self, certificate).is_ok_and(|checkpoint| {
             checkpoint.physical.identity().source_path().as_path() == leaf.path
         })
+    }
+
+    pub(super) fn certificate_belongs_to_root(
+        self,
+        root: &Path,
+        certificate: &CertifiedSource,
+    ) -> bool {
+        decode_certificate(self, certificate).is_ok_and(|checkpoint| {
+            checkpoint
+                .physical
+                .identity()
+                .source_path()
+                .starts_with(root)
+        })
+    }
+
+    pub(super) fn deletion_belongs_to_root(
+        self,
+        root: &Path,
+        deletion: &CertifiedSourceDeletion,
+    ) -> bool {
+        deletion.validate_contract().is_ok()
+            && self.owns(deletion.source())
+            && deletion.discovery_revision() == DIRECT_JSONL_DISCOVERY_REVISION
+            && deletion.inventory().provider() == self.provider.as_str()
+            && deletion.inventory().authority_namespace()
+                == DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE
+            && TypedKey::bytes(path_key(root))
+                .is_ok_and(|key| deletion.inventory().authority_key() == &key)
     }
 
     pub(super) fn physical_identity(self, source: &SourceKey, path: &Path) -> JsonlSourceIdentity {

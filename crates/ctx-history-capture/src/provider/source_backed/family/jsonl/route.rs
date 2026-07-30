@@ -24,9 +24,9 @@ use super::{
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::{
-        source_backed_base_sources, SourceBackedGenerationSink, SourceBackedRevalidationTarget,
-        SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
-        SourceBackedRouteResult,
+        source_backed_base_removals, source_backed_base_sources, SourceBackedGenerationSink,
+        SourceBackedRevalidationTarget, SourceBackedRouteDriver, SourceBackedRouteError,
+        SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     CaptureError, Result,
 };
@@ -42,6 +42,8 @@ const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
 
 mod hydration;
 use hydration::{hydrate_batch, hydrate_single};
+mod ownership;
+use ownership::base_sources_for_root;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -376,6 +378,8 @@ struct TerminalSourceEvidence {
 
 #[derive(Default)]
 struct FamilyResident {
+    ownership_initialized: bool,
+    owned_sources: HashMap<[u8; 32], SourceKey>,
     terminal_sources: HashMap<[u8; 32], TerminalSourceEvidence>,
     certified_inventory: Option<CertifiedSourceInventory>,
     hydration_inventory: Option<JsonlFamilyInventory>,
@@ -390,6 +394,7 @@ pub(crate) fn jsonl_family_driver(
     let scan_root = root.clone();
     let scan_resident = Arc::clone(&resident);
     let owns_adapter = Arc::clone(&adapter);
+    let owns_resident = Arc::clone(&resident);
     let revalidation_resident = Arc::clone(&resident);
     let hydration_adapter = Arc::clone(&adapter);
     let hydration_root = root.clone();
@@ -403,7 +408,16 @@ pub(crate) fn jsonl_family_driver(
 
     SourceBackedRouteDriver::new(
         move |sink| capture(&*scan_adapter, &scan_root, &scan_resident, sink),
-        move |source| owns_adapter.owns(source),
+        move |source| {
+            owns_adapter.owns(source)
+                && owns_resident.lock().is_ok_and(|resident| {
+                    !resident.ownership_initialized
+                        || resident
+                            .owned_sources
+                            .get(&source.exact_descriptor_digest())
+                            .is_some_and(|owned| owned.exact_descriptor_eq(source))
+                })
+        },
         move |target| revalidate_target(&revalidation_resident, target),
         move |request| {
             hydrate_single(
@@ -442,7 +456,38 @@ fn capture(
             "provider JSONL root is unavailable",
         ));
     }
-    let bases = source_backed_base_sources(sink, |source| adapter.owns(source));
+    let bases = base_sources_for_root(adapter, &opening, sink).map_err(route_invalid)?;
+    let mut owned_sources = HashMap::with_capacity(bases.len() + opening.leaves.len());
+    for source in bases
+        .iter()
+        .map(|base| base.observation().source())
+        .chain(opening.leaves().iter().map(JsonlFamilyLeaf::source))
+    {
+        let digest = source.exact_descriptor_digest();
+        if owned_sources
+            .insert(digest, source.clone())
+            .is_some_and(|previous| !previous.exact_descriptor_eq(source))
+        {
+            return Err(route_invalid(
+                "JSONL route source descriptor digest collision",
+            ));
+        }
+    }
+    for removal in source_backed_base_removals(sink) {
+        let deletion = removal.deletion();
+        let inventory = deletion.inventory();
+        if adapter.owns(deletion.source())
+            && inventory.authority_namespace() == FAMILY_INVENTORY_AUTHORITY
+            && inventory.authority_key()
+                == &TypedKey::bytes(root.as_os_str().as_encoded_bytes().to_vec())
+                    .map_err(route_invalid)?
+        {
+            owned_sources.insert(
+                deletion.source().exact_descriptor_digest(),
+                deletion.source().clone(),
+            );
+        }
+    }
     let mut terminal_sources = HashMap::with_capacity(opening.leaves.len());
 
     for leaf in opening.leaves() {
@@ -478,6 +523,8 @@ fn capture(
     let mut resident = resident
         .lock()
         .map_err(|_| route_internal("JSONL resident catalog lock was poisoned"))?;
+    resident.ownership_initialized = true;
+    resident.owned_sources = owned_sources;
     resident.terminal_sources = terminal_sources;
     resident.certified_inventory = Some(inventory);
     resident.hydration_inventory = Some(closing);

@@ -1,10 +1,11 @@
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, SourceKey};
 
 use super::{
     hydrate_batch, hydrate_single, DirectJsonlDisposition, DirectJsonlHydrationCatalog,
@@ -12,10 +13,10 @@ use super::{
 };
 use crate::provider::source_backed::{
     executable_route, invalid_route, route_coordinator_error, route_error,
-    source_backed_base_sources, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
-    SourceBackedProviderRegistry, SourceBackedRevalidationTarget, SourceBackedRouteDriver,
-    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
-    SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    source_backed_base_removals, source_backed_base_sources, SourceBackedCoordinatorResult,
+    SourceBackedGenerationSink, SourceBackedProviderRegistry, SourceBackedRevalidationTarget,
+    SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
 };
 use crate::ProviderSource;
 
@@ -41,14 +42,32 @@ pub(crate) fn register(
     let terminal_evidence = Arc::new(DirectJsonlTerminalEvidenceSet::default());
     let capture_terminal_evidence = Arc::clone(&terminal_evidence);
     let revalidation_terminal_evidence = Arc::clone(&terminal_evidence);
+    let route_sources = Arc::new(Mutex::new(None::<HashMap<[u8; 32], SourceKey>>));
+    let capture_route_sources = Arc::clone(&route_sources);
+    let owns_route_sources = Arc::clone(&route_sources);
     let hydration_catalog = Arc::new(Mutex::new(None::<DirectJsonlHydrationCatalog>));
     let single_hydration_catalog = Arc::clone(&hydration_catalog);
     let batch_hydration_catalog = Arc::clone(&hydration_catalog);
     let driver = SourceBackedRouteDriver::new(
-        move |sink| capture(adapter, &capture_root, &capture_terminal_evidence, sink),
+        move |sink| {
+            capture(
+                adapter,
+                &capture_root,
+                &capture_terminal_evidence,
+                &capture_route_sources,
+                sink,
+            )
+        },
         move |source| {
             source.provider() == provider.as_str()
                 && source.source_format() == certified_source_format
+                && owns_route_sources.lock().is_ok_and(|sources| {
+                    sources.as_ref().is_none_or(|sources| {
+                        sources
+                            .get(&source.exact_descriptor_digest())
+                            .is_some_and(|owned| owned.exact_descriptor_eq(source))
+                    })
+                })
         },
         move |target| {
             revalidate_target(
@@ -102,6 +121,7 @@ fn capture(
     adapter: DirectJsonlSourceAdapter,
     root: &Path,
     terminal_evidence: &DirectJsonlTerminalEvidenceSet,
+    route_sources: &Mutex<Option<HashMap<[u8; 32], SourceKey>>>,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<()> {
     terminal_evidence.reset().map_err(route_error)?;
@@ -118,7 +138,27 @@ fn capture(
             "direct JSONL inventory contains inaccessible sources",
         ));
     }
-    let base_sources = source_backed_base_sources(sink, |source| adapter.owns(source));
+    let base_sources = source_backed_base_sources(sink, |source| adapter.owns(source))
+        .into_iter()
+        .filter(|source| adapter.certificate_belongs_to_root(root, source))
+        .collect::<Vec<_>>();
+    let mut owned_sources = base_sources
+        .iter()
+        .map(|base| {
+            (
+                base.observation().source().exact_descriptor_digest(),
+                base.observation().source().clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for removal in source_backed_base_removals(sink) {
+        if adapter.deletion_belongs_to_root(root, removal.deletion()) {
+            owned_sources.insert(
+                removal.source().exact_descriptor_digest(),
+                removal.source().clone(),
+            );
+        }
+    }
     let mut sources = Vec::with_capacity(inventory.leaves().len());
     let mut admission_rejections = Vec::new();
     for leaf in inventory.leaves() {
@@ -137,6 +177,15 @@ fn capture(
             Err(error) => return Err(route_error(error)),
         };
         let source = reader.source().clone();
+        let digest = source.exact_descriptor_digest();
+        if owned_sources
+            .insert(digest, source.clone())
+            .is_some_and(|previous| !previous.exact_descriptor_eq(&source))
+        {
+            return Err(route_error(
+                "direct JSONL route source descriptor digest collision",
+            ));
+        }
         match reader.disposition() {
             DirectJsonlDisposition::Unchanged | DirectJsonlDisposition::Append => {
                 let staged_base = sink
@@ -218,6 +267,10 @@ fn capture(
                 .map_err(route_coordinator_error)?;
         }
     }
+    *route_sources
+        .lock()
+        .map_err(|_| route_error("direct JSONL route source lock was poisoned"))? =
+        Some(owned_sources);
     Ok(())
 }
 

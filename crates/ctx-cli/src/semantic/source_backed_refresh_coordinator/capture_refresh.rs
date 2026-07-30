@@ -124,7 +124,7 @@ pub(super) fn refresh_all_provider_sources(
         .as_ref()
         .map(|index| index.manifest().sources.clone())
         .unwrap_or_default();
-    reject_blocking_automatic_registry_issues(&build.issues, &retained_sources)?;
+    reject_blocking_automatic_registry_issues(&build.issues)?;
     reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
     if build.registry.executable_route_count() == 0 {
         return refresh_without_executable_routes(
@@ -260,32 +260,28 @@ fn source_backed_discovery_context() -> Result<DiscoveryContext> {
 
 pub(super) fn reject_blocking_automatic_registry_issues(
     issues: &[SourceBackedAutomaticRegistryIssue],
-    retained_sources: &[CertifiedSource],
 ) -> Result<()> {
+    // Missing automatic roots are not evidence that another explicit route for
+    // the same provider family is unavailable. Exact retained-source coverage
+    // is enforced below by the registered routes and again by publication
+    // recertification, so a genuinely unowned retained source still fails
+    // closed without rejecting a distinct explicit root at this coarse layer.
     let mut blocker_count = 0usize;
     let mut blocker_details = Vec::new();
     for issue in issues {
         let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
             continue;
         };
-        let retained_provider_family = retained_sources.iter().any(|retained| {
-            let retained = retained.observation().source();
-            retained.provider() == source.provider.as_str()
-                && retained.source_format() == source.source_format
-        });
-        let blocks_publication = retained_provider_family
-            || match reason {
-                SourceBackedAutomaticUnavailableReason::SourceStatus(
-                    ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
-                ) => false,
-                SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. } => true,
-                SourceBackedAutomaticUnavailableReason::SourceStatus(_)
-                | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
-                | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
-                | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => {
-                    source.exists
-                }
-            };
+        let blocks_publication = match reason {
+            SourceBackedAutomaticUnavailableReason::SourceStatus(
+                ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
+            ) => false,
+            SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. } => true,
+            SourceBackedAutomaticUnavailableReason::SourceStatus(_)
+            | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
+            | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
+            | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => source.exists,
+        };
         if !blocks_publication {
             continue;
         }
