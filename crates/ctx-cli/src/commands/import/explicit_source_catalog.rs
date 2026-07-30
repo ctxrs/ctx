@@ -364,56 +364,6 @@ pub(crate) fn upsert_explicit_source(
     })
 }
 
-#[allow(dead_code)] // The catalog management command consumes this narrow seam next.
-pub(crate) fn disable_explicit_source(
-    data_root: &Path,
-    provider: CaptureProvider,
-    source_format: &str,
-) -> Result<ExplicitSourceCatalogAuthority> {
-    let metadata = route_metadata(provider, source_format)?;
-    let catalog_root = catalog_root(data_root);
-    let lock = open_catalog_lock(&catalog_root, false)?;
-    FileExt::lock_exclusive(&lock).context("lock explicit source catalog for disable")?;
-    let mut snapshot = load_catalog_unlocked(&catalog_root)?;
-    let mut changed = false;
-    let mut found = false;
-    for entry in &mut snapshot.entries {
-        if entry.provider == provider.as_str()
-            && entry.certified_source_format()? == metadata.certified_source_format
-        {
-            if found {
-                bail!(
-                    "explicit source catalog contains duplicate {}/{} authority",
-                    provider.as_str(),
-                    metadata.certified_source_format
-                );
-            }
-            found = true;
-            if entry.enabled {
-                entry.enabled = false;
-                changed = true;
-            }
-        }
-    }
-    if !found {
-        bail!(
-            "explicit source catalog has no {}/{} entry to disable",
-            provider.as_str(),
-            metadata.certified_source_format
-        );
-    }
-    if changed {
-        let revision = snapshot
-            .authority
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("explicit source catalog revision overflow"))?;
-        snapshot.authority = authority_for(revision, &snapshot.entries)?;
-        write_catalog_snapshot(&catalog_root, &snapshot)?;
-    }
-    Ok(snapshot.authority)
-}
-
 pub(crate) fn load_explicit_source_catalog_authority(
     data_root: &Path,
 ) -> Result<ExplicitSourceCatalogAuthority> {

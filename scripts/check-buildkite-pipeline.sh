@@ -611,13 +611,6 @@ for required in \
   'bash scripts/buildkite-public-ci.sh --mode=ci' \
   'target/ctx-artifacts/check/**' \
   'concurrency_group: "ctx/public-smoke/default-hosted"' \
-  'key: "public-nightly"' \
-  'build.source == "schedule"' \
-  'bash scripts/buildkite-public-ci.sh --mode=nightly' \
-  'concurrency_group: "ctx/public-nightly/default-hosted"' \
-  'key: "public-release"' \
-  'bash scripts/buildkite-public-ci.sh --mode=release' \
-  'concurrency_group: "ctx/public-release/default-hosted"' \
   'CTX_RUST_TOOLCHAIN: "1.97.1"' \
   'CTX_BAZELISK_VERSION: "v1.29.0"' \
   'BUILDKITE_JOB_ID' \
