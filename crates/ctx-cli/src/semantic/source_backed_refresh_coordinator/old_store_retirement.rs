@@ -35,16 +35,22 @@ pub(super) fn retire(data_root: &Path) -> Result<()> {
     retire_with(data_root, || {})
 }
 
-fn retire_with(data_root: &Path, after_preflight: impl FnOnce()) -> Result<()> {
-    let mut names = fixed_file_names();
-    for entry in fs::read_dir(data_root)
-        .with_context(|| format!("inventory old Store root {}", data_root.display()))?
-    {
-        let name = entry?.file_name();
-        if dynamic_file_name_is_exact(&name) {
-            names.insert(name);
+pub(super) fn is_required(data_root: &Path) -> Result<bool> {
+    for name in candidate_names(data_root)? {
+        match fs::symlink_metadata(data_root.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect old Store root {}", data_root.display()))
+            }
         }
     }
+    Ok(false)
+}
+
+fn retire_with(data_root: &Path, after_preflight: impl FnOnce()) -> Result<()> {
+    let names = candidate_names(data_root)?;
 
     let mut plan = Vec::new();
     for name in names {
@@ -86,6 +92,19 @@ fn retire_with(data_root: &Path, after_preflight: impl FnOnce()) -> Result<()> {
     #[cfg(not(unix))]
     let _ = removed_any;
     Ok(())
+}
+
+fn candidate_names(data_root: &Path) -> Result<BTreeSet<OsString>> {
+    let mut names = fixed_file_names();
+    for entry in fs::read_dir(data_root)
+        .with_context(|| format!("inventory old Store root {}", data_root.display()))?
+    {
+        let name = entry?.file_name();
+        if dynamic_file_name_is_exact(&name) {
+            names.insert(name);
+        }
+    }
+    Ok(names)
 }
 
 fn inspect_file(path: &Path) -> Result<Option<FileIdentity>> {

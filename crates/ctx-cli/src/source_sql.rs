@@ -91,7 +91,7 @@ impl SqlCompatibility {
     ) -> SqlCompatibilityResult<Self> {
         let compatibility = Self::open(projection_path)?;
         if generation_path.join("meta.json").try_exists()? {
-            let index = VerifiedIndex::open(&generation_path).map_err(|error| {
+            let index = VerifiedIndex::open_pinned(&generation_path).map_err(|error| {
                 RelationalProjectionError::InvalidCoreGeneration(error.to_string())
             })?;
             let metadata = compatibility.metadata()?;

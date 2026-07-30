@@ -160,7 +160,7 @@ fn project_exact_core_generation(
     core_generation_id: &str,
 ) -> std::result::Result<ProjectionOutcome, SourceBackedRelationalCatchUpError> {
     let index_root = source_backed_index_root(data_root);
-    let index = VerifiedIndex::open(&index_root).map_err(|error| {
+    let index = VerifiedIndex::open_pinned(&index_root).map_err(|error| {
         SourceBackedRelationalCatchUpError::IndexUnavailable(format!(
             "open verified source-backed index {}: {error}",
             index_root.display()

@@ -125,6 +125,7 @@ fn capture_coordinator_error(error: SourceBackedCoordinatorError) -> CaptureErro
     CaptureError::InvalidPayload(error.to_string())
 }
 
+#[cfg(test)]
 pub(in crate::provider::source_backed) fn codex_display_bytes(
     hydrated: CodexHydratedRecordV0,
 ) -> Result<Vec<u8>, HydrationFailure> {

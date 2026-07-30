@@ -22,6 +22,7 @@ fn no_op_and_repeat_are_idempotent() {
         fs::read(root.join("config.toml")).unwrap(),
         b"retirement-test"
     );
+    assert!(!is_required(&root).unwrap());
 }
 
 #[test]
@@ -55,12 +56,14 @@ fn exact_store_vector_stage_probe_and_worker_leaves_are_retired() {
     ];
     write_files(&root, &names);
     assert!(canonical_uuid_v4(uuid));
+    assert!(is_required(&root).unwrap());
 
     retire(&root).unwrap();
 
     for name in names {
         assert!(!root.join(name).exists(), "retained exact leaf {name}");
     }
+    assert!(!is_required(&root).unwrap());
 }
 
 #[test]

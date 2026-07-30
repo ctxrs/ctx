@@ -10,6 +10,7 @@ use crate::output::compact_json;
 pub(super) struct SourceHydrationBatchItem {
     pub(super) event_identity: StableEntityId,
     pub(super) locator: SourceRecordLocator,
+    pub(super) source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

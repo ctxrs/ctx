@@ -35,6 +35,37 @@ pub(super) fn execute_capture_owned_refresh(
     execute_capture_owned_refresh_with(execution, &discovery, refresh_all_provider_sources)
 }
 
+pub(super) fn recover_capture_owned_resolver(
+    data_root: &Path,
+) -> Result<Option<(String, Arc<SourceBackedResolverRegistry>)>> {
+    let Some(generation_id) = retained_generation_hint(data_root)? else {
+        return Ok(None);
+    };
+    if !source_backed_index_root(data_root)
+        .join("meta.json")
+        .is_file()
+    {
+        return Ok(None);
+    }
+
+    let discovery = source_backed_discovery_context()?.with_data_root(data_root);
+    let mut report = discover_provider_sources_with_context(&discovery);
+    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+        .context("validate provider roots before restoring source hydration")?;
+    let catalog = load_explicit_source_catalog_authority(data_root)?;
+    catalog
+        .validate_source_roots(data_root)
+        .context("validate explicit provider roots before restoring source hydration")?;
+    catalog.remove_shadowed_automatic_routes(data_root, &mut report)?;
+    let mut build =
+        build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
+    catalog.register_routes(data_root, &source_backed_index_root(data_root), &mut build)?;
+    Ok(Some((
+        generation_id,
+        Arc::new(build.registry.resolver_registry()),
+    )))
+}
+
 pub(super) fn execute_capture_owned_refresh_with<Refresh>(
     execution: SourceBackedRefreshExecution<'_>,
     discovery: &DiscoveryContext,

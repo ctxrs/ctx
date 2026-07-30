@@ -3,6 +3,11 @@ use super::*;
 mod termination;
 use termination::terminate_identity_verified_residual_daemon;
 
+pub(in crate::semantic) fn terminate_current_executable_daemon(data_root: &Path) -> Result<()> {
+    let executable = env::current_exe().context("resolve current ctx executable")?;
+    terminate_identity_verified_residual_daemon(data_root, &executable)
+}
+
 fn daemon_upgrade_handoff_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_UPGRADE_HANDOFF_FILE)
 }

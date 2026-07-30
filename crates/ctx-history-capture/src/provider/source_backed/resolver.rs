@@ -14,7 +14,26 @@ struct ResolvedHydrationGroup {
 }
 
 impl SourceBackedResolverRegistry {
-    fn resolve_route_index(&self, source: &SourceKey) -> Result<usize, HydrationFailure> {
+    fn resolve_route_index(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<usize, HydrationFailure> {
+        let source = request.locator().source();
+        if let Some(source_path) = request.source_path_hint() {
+            let source_path = Path::new(source_path);
+            let mut path_matches = self.routes.iter().enumerate().filter(|(_, route)| {
+                route.metadata.source.provider.as_str() == source.provider()
+                    && route.metadata.certified_source_format == source.source_format()
+                    && route.driver.is_some()
+                    && source_path.is_absolute()
+                    && source_path.starts_with(&route.metadata.source.path)
+            });
+            if let Some((route_index, _)) = path_matches.next() {
+                if path_matches.next().is_none() {
+                    return Ok(route_index);
+                }
+            }
+        }
         let mut matches = self.routes.iter().enumerate().filter(|(_, route)| {
             route.metadata.source.provider.as_str() == source.provider()
                 && route.metadata.certified_source_format == source.source_format()
@@ -62,7 +81,7 @@ impl SourceBackedResolverRegistry {
         // failures cannot produce a partially hydrated return value.
         for (position, event) in request.events().iter().enumerate() {
             let source = event.locator().source();
-            let route_index = self.resolve_route_index(source)?;
+            let route_index = self.resolve_route_index(event)?;
             let key = (route_index, source.exact_descriptor_digest());
             if let Some(group_index) = group_indices.get(&key).copied() {
                 let group = groups.get_mut(group_index).ok_or_else(|| {
@@ -156,8 +175,7 @@ impl ContentSourceResolver for SourceBackedResolverRegistry {
         &self,
         request: &EventHydrationRequest,
     ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        let source = request.locator().source();
-        let route_index = self.resolve_route_index(source)?;
+        let route_index = self.resolve_route_index(request)?;
         let route = self.routes.get(route_index).ok_or_else(|| {
             hydration_failure(
                 HydrationFailureKind::InvalidLocator,

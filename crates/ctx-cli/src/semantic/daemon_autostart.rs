@@ -67,7 +67,7 @@ pub(crate) use handoff::prepare_daemon_uninstall;
 pub(super) use handoff::{
     acknowledge_daemon_restart_requests, current_process_owns_daemon_upgrade_handoff,
     daemon_upgrade_handoff_blocks_current_process, read_daemon_restart_request,
-    write_daemon_restart_request,
+    terminate_current_executable_daemon, write_daemon_restart_request,
 };
 pub(crate) use handoff::{
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,

@@ -225,10 +225,17 @@ pub(crate) fn write_manifest(
     Ok(())
 }
 
+pub(crate) fn verify_searcher_structure(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+) -> Result<()> {
+    verify_total_document_count(searcher, manifest.indexed_documents)
+}
+
 pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
     use tantivy::query::TermQuery;
 
-    verify_total_document_count(searcher, manifest.indexed_documents)?;
+    verify_searcher_structure(searcher, manifest)?;
     let source_field = required_field(searcher.schema(), "source_key")?;
     for source in &manifest.sources {
         let source_id = source_token(source.observation().source());
