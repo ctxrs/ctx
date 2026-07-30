@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small real-binary query/show resource sanity for the nightly test tier."""
+"""Small real-product refresh/query/show sanity for the nightly test tier."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import unittest
 
 EVENT_COUNT = 64
 QUERY = "nightly performance sentinel"
+APPEND_QUERY = f"{QUERY} tiny append"
 COMMAND_TIMEOUT_SECONDS = 30.0
 MAX_COMMAND_SECONDS = 15.0
 MAX_PEAK_RSS_BYTES = 512 * 1024 * 1024
@@ -40,6 +41,29 @@ class CommandSample:
     packet: dict[str, object]
     elapsed_seconds: float
     peak_rss_bytes: int | None
+
+
+@dataclass(frozen=True)
+class PublishedFileState:
+    body: bytes
+    modified_ns: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class RefreshSnapshot:
+    request_id: str
+    previous_generation: str | None
+    generation_id: str
+    generation_changed: bool
+    indexed_documents: int
+    current: dict[str, object]
+    opstamp: int
+    segments: tuple[str, ...]
+    meta: PublishedFileState
+    manifest: PublishedFileState
+    manifest_names: tuple[str, ...]
+    index_bytes: int
 
 
 def json_line(value: object) -> str:
@@ -103,6 +127,25 @@ def write_codex_fixture(home: Path) -> tuple[Path, int]:
     return session_path, len(body)
 
 
+def append_codex_event(session_path: Path) -> int:
+    instant = dt.datetime(2026, 7, 30, 12, 0, 1, tzinfo=dt.timezone.utc)
+    body = json_line(
+        {
+            "timestamp": instant.isoformat().replace("+00:00", "Z"),
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": APPEND_QUERY}],
+                "phase": "commentary",
+            },
+        }
+    ).encode()
+    with session_path.open("ab") as fixture:
+        fixture.write(body)
+    return len(body)
+
+
 def isolated_env(root: Path, home: Path) -> dict[str, str]:
     temp_root = root / "tmp"
     temp_root.mkdir()
@@ -151,6 +194,83 @@ def run_checked(args: list[str], env: dict[str, str], cwd: Path) -> bytes:
             args, completed.returncode, completed.stdout, completed.stderr
         )
     return completed.stdout
+
+
+def run_json(args: list[str], env: dict[str, str], cwd: Path) -> dict[str, object]:
+    packet = json.loads(run_checked(args, env, cwd))
+    if not isinstance(packet, dict):
+        raise RuntimeError(f"{' '.join(args)} did not return a JSON object")
+    return packet
+
+
+def published_file_state(path: Path) -> PublishedFileState:
+    metadata = path.stat()
+    return PublishedFileState(
+        body=path.read_bytes(),
+        modified_ns=metadata.st_mtime_ns,
+        inode=metadata.st_ino,
+    )
+
+
+def directory_bytes(path: Path) -> int:
+    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+
+
+def refresh_snapshot(
+    search: dict[str, object], root: Path, env: dict[str, str]
+) -> RefreshSnapshot:
+    retrieval = search["retrieval"]
+    status = run_json(["status", "--format=json"], env, root)
+    daemon = status["daemon"]
+    job = daemon["jobs"]["source_backed_refresh"]
+    receipt = job["receipt"]
+    current = receipt["current"]
+    generation_id = retrieval["generation_id"]
+    indexed_documents = retrieval["indexed_documents"]
+    if (
+        daemon["mode"] != "source-refresh-only"
+        or job["owner"] != "daemon"
+        or job["status"] != "completed"
+        or job["request_state"] != "published"
+    ):
+        raise RuntimeError(f"refresh did not use the ready daemon product seam: {job!r}")
+    if (
+        job["published_generation"] != generation_id
+        or receipt["published_generation"] != generation_id
+        or status["lexical"]["generation_id"] != generation_id
+        or current["current_indexed_documents"] != indexed_documents
+    ):
+        raise RuntimeError(
+            "search, status, receipt, and lexical generation facts disagree: "
+            f"search={search!r}, status={status!r}"
+        )
+
+    index_root = Path(env["CTX_DATA_ROOT"]) / "search" / "lexical"
+    meta = published_file_state(index_root / "meta.json")
+    meta_packet = json.loads(meta.body)
+    segments = tuple(
+        sorted(segment["segment_id"] for segment in meta_packet["segments"])
+    )
+    manifest_directory = index_root / "ctx-generations"
+    manifest_path = manifest_directory / f"{generation_id}.json"
+    manifest = published_file_state(manifest_path)
+    manifest_names = tuple(
+        sorted(path.name for path in manifest_directory.iterdir() if path.is_file())
+    )
+    return RefreshSnapshot(
+        request_id=job["request_id"],
+        previous_generation=job.get("previous_generation"),
+        generation_id=generation_id,
+        generation_changed=job["generation_changed"],
+        indexed_documents=indexed_documents,
+        current=dict(current),
+        opstamp=meta_packet["opstamp"],
+        segments=segments,
+        meta=meta,
+        manifest=manifest,
+        manifest_names=manifest_names,
+        index_bytes=directory_bytes(index_root),
+    )
 
 
 def linux_peak_rss_bytes(pid: int) -> int | None:
@@ -248,9 +368,7 @@ def start_daemon(
                 stderr_file.read(),
             )
         try:
-            status = json.loads(
-                run_checked(["daemon", "status", "--format=json"], env, root)
-            )
+            status = run_json(["daemon", "status", "--format=json"], env, root)
             last_status = status
         except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
             time.sleep(0.02)
@@ -294,12 +412,12 @@ def stop_daemon(
 
 
 class SmallQueryShowPerformanceTest(unittest.TestCase):
-    def test_small_query_and_show_stay_within_sanity_bounds(self) -> None:
+    def test_refresh_query_and_show_stay_within_sanity_bounds(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ctx-performance-sanity-") as temporary:
             root = Path(temporary)
             home = root / "home"
             home.mkdir()
-            _fixture_path, fixture_bytes = write_codex_fixture(home)
+            fixture_path, fixture_bytes = write_codex_fixture(home)
             env = isolated_env(root, home)
             run_checked(
                 ["setup", "--catalog-only", "--no-daemon", "--progress", "none"],
@@ -308,22 +426,113 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             )
             daemon, daemon_stdout, daemon_stderr = start_daemon(root, env)
             try:
-                initial = json.loads(
-                    run_checked(
-                        [
-                            "search",
-                            QUERY,
-                            "--refresh",
-                            "wait",
-                            "--format=json",
-                            "--limit",
-                            "1",
-                        ],
-                        env,
-                        root,
-                    )
+                initial_search = run_json(
+                    [
+                        "search",
+                        QUERY,
+                        "--refresh",
+                        "wait",
+                        "--format=json",
+                        "--limit",
+                        "1",
+                    ],
+                    env,
+                    root,
                 )
-                self.assertTrue(initial.get("results"))
+                self.assertTrue(initial_search.get("results"))
+                initial = refresh_snapshot(initial_search, root, env)
+                self.assertTrue(initial.segments)
+
+                noop_search = run_json(
+                    [
+                        "search",
+                        QUERY,
+                        "--refresh",
+                        "wait",
+                        "--format=json",
+                        "--limit",
+                        "1",
+                    ],
+                    env,
+                    root,
+                )
+                noop = refresh_snapshot(noop_search, root, env)
+                self.assertNotEqual(noop.request_id, initial.request_id)
+                self.assertFalse(noop.generation_changed)
+                self.assertEqual(noop.previous_generation, initial.generation_id)
+                self.assertEqual(noop.generation_id, initial.generation_id)
+                self.assertEqual(noop.indexed_documents, initial.indexed_documents)
+                # `receipt.current` is generation state, not per-command
+                # attribution. Comparing the complete object with immutable
+                # publication state keeps this no-work assertion truthful.
+                self.assertEqual(noop.current, initial.current)
+                self.assertEqual(noop.opstamp, initial.opstamp)
+                self.assertEqual(noop.segments, initial.segments)
+                self.assertEqual(noop.meta, initial.meta)
+                self.assertEqual(noop.manifest, initial.manifest)
+                self.assertEqual(noop.manifest_names, initial.manifest_names)
+                self.assertEqual(noop.index_bytes, initial.index_bytes)
+
+                append_bytes = append_codex_event(fixture_path)
+                appended_search = run_json(
+                    [
+                        "search",
+                        APPEND_QUERY,
+                        "--refresh",
+                        "wait",
+                        "--format=json",
+                        "--limit",
+                        "1",
+                    ],
+                    env,
+                    root,
+                )
+                appended_results = appended_search.get("results")
+                self.assertIsInstance(appended_results, list)
+                self.assertEqual(len(appended_results), 1)
+                self.assertIn(APPEND_QUERY, appended_results[0].get("snippet", ""))
+                appended = refresh_snapshot(appended_search, root, env)
+                self.assertNotEqual(appended.request_id, noop.request_id)
+                self.assertTrue(appended.generation_changed)
+                self.assertEqual(appended.previous_generation, noop.generation_id)
+                self.assertNotEqual(appended.generation_id, noop.generation_id)
+                self.assertEqual(
+                    appended.indexed_documents, noop.indexed_documents + 1
+                )
+                expected_current = dict(noop.current)
+                for field, delta in {
+                    "current_indexed_documents": 1,
+                    "current_complete_records": 1,
+                    "current_retained_records": 1,
+                    "current_certified_source_bytes": append_bytes,
+                }.items():
+                    expected_current[field] = int(noop.current[field]) + delta
+                self.assertEqual(appended.current, expected_current)
+                self.assertGreater(appended.opstamp, noop.opstamp)
+                self.assertLessEqual(
+                    len(appended.segments),
+                    len(noop.segments) + 1,
+                    "one tiny append exposed more than one additional active segment",
+                )
+                self.assertLessEqual(
+                    appended.index_bytes,
+                    initial.index_bytes * 2,
+                    "one tiny append more than doubled retained lexical storage",
+                )
+                self.assertEqual(
+                    len(appended.manifest_names), len(noop.manifest_names) + 1
+                )
+                self.assertEqual(
+                    published_file_state(
+                        Path(env["CTX_DATA_ROOT"])
+                        / "search"
+                        / "lexical"
+                        / "ctx-generations"
+                        / f"{initial.generation_id}.json"
+                    ),
+                    initial.manifest,
+                )
+
                 search_samples = [
                     run_measured(
                         [
@@ -390,10 +599,34 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
         search_max = max(sample.elapsed_seconds for sample in search_samples)
         show_max = max(sample.elapsed_seconds for sample in show_samples)
         rss_max = max(measured_rss, default=0)
+        append_complete_delta = int(
+            appended.current["current_complete_records"]
+        ) - int(noop.current["current_complete_records"])
+        append_retained_delta = int(
+            appended.current["current_retained_records"]
+        ) - int(noop.current["current_retained_records"])
+        append_source_bytes_delta = int(
+            appended.current["current_certified_source_bytes"]
+        ) - int(noop.current["current_certified_source_bytes"])
         print(
             "performance sanity:"
-            f" fixture_events={EVENT_COUNT}"
-            f" fixture_bytes={fixture_bytes}"
+            f" fixture_events={EVENT_COUNT + 1}"
+            f" initial_fixture_bytes={fixture_bytes}"
+            f" append_bytes={append_bytes}"
+            f" noop_generation_changed={str(noop.generation_changed).lower()}"
+            f" noop_current_unchanged=true"
+            f" noop_publication_unchanged=true"
+            f" noop_opstamp={noop.opstamp}"
+            f" append_document_delta="
+            f"{appended.indexed_documents - noop.indexed_documents}"
+            f" append_complete_record_delta={append_complete_delta}"
+            f" append_retained_record_delta={append_retained_delta}"
+            f" append_source_bytes_delta={append_source_bytes_delta}"
+            f" append_opstamp={appended.opstamp}"
+            f" segments_before={len(noop.segments)}"
+            f" segments_after={len(appended.segments)}"
+            f" index_bytes_before={initial.index_bytes}"
+            f" index_bytes_after={appended.index_bytes}"
             f" search_max_seconds={search_max:.3f}"
             f" show_max_seconds={show_max:.3f}"
             f" peak_rss_bytes={rss_max}"
