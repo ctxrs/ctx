@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 
-use ctx_history_core::platform_security::restrict_private_directory;
+use ctx_history_core::platform_security::{restrict_private_directory, restrict_private_file};
 use tempfile::tempdir;
 
 use super::*;
@@ -18,6 +18,7 @@ struct RecordingBackend {
     deleted: RefCell<Vec<String>>,
     deletion_thumbprints: RefCell<Vec<String>>,
     deletion_namespaces: RefCell<Vec<GraphKeyCredentialNamespace>>,
+    partial_credentials_deleted: RefCell<bool>,
     credentials_deleted: RefCell<bool>,
 }
 
@@ -61,6 +62,14 @@ impl DeletionBackend for RecordingBackend {
             bail!("key_store_unavailable: simulated graph-key verification failure");
         }
         let _ = self.graph_key_missing;
+        Ok(())
+    }
+
+    fn delete_partial_bootstrap_credentials(&self, _data_root: &Path) -> Result<()> {
+        self.partial_credentials_deleted.replace(true);
+        if self.fail_commercial_credentials_after_delete {
+            bail!("key_store_unavailable: simulated partial credential deletion failure");
+        }
         Ok(())
     }
 
@@ -213,7 +222,7 @@ fn direct_deletion_accepts_an_already_missing_graph_key() {
         graph_key_missing: true,
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     service.delete_graph_data(root.path()).unwrap();
     assert!(!pro.join(PRO_GRAPH_FILE_NAME).exists());
     assert_eq!(service.backend.deleted.borrow().len(), 1);
@@ -250,7 +259,7 @@ fn mixed_valid_and_corrupt_namespace_inventory_deletes_nothing() {
         corrupt_inventory: true,
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     let error = service.delete_graph_data(root.path()).unwrap_err();
     assert!(error.to_string().starts_with("key_store_unavailable:"));
     assert_eq!(service.backend.inventory_reads.get(), 1);
@@ -263,9 +272,8 @@ fn mixed_valid_and_corrupt_namespace_inventory_deletes_nothing() {
 fn missing_or_empty_roots_are_vault_free_idempotent_noops() {
     let parent = tempdir().unwrap();
     let missing = parent.path().join("missing");
-    let mut missing_service = LocalDeletionService {
-        backend: RecordingBackend::default(),
-    };
+    let mut missing_service =
+        LocalDeletionService::with_backend_for_test(RecordingBackend::default());
     missing_service.delete_graph_data(&missing).unwrap();
     assert!(!missing.exists());
     assert!(missing_service.backend.deleted.borrow().is_empty());
@@ -275,13 +283,89 @@ fn missing_or_empty_roots_are_vault_free_idempotent_noops() {
     crate::identity::installation_id(empty.path()).unwrap();
     let empty_pro = ProFilesystemLayout::new(empty.path()).pro_root();
     fs::create_dir(&empty_pro).unwrap();
-    let mut empty_service = LocalDeletionService {
-        backend: RecordingBackend::default(),
-    };
+    let mut empty_service =
+        LocalDeletionService::with_backend_for_test(RecordingBackend::default());
     empty_service.delete_graph_data(empty.path()).unwrap();
     assert!(empty_pro.is_dir());
     assert!(empty_service.backend.deleted.borrow().is_empty());
     assert_eq!(empty_service.backend.inventory_reads.get(), 0);
+}
+
+#[test]
+fn helperless_graphless_bootstrap_skips_helper_ipc_and_cleans_credentials() {
+    let root = tempdir().unwrap();
+    crate::identity::installation_id(root.path()).unwrap();
+    let pro = ProFilesystemLayout::new(root.path()).pro_root();
+    fs::create_dir(&pro).unwrap();
+    restrict_private_directory(&pro).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    let backend = RecordingBackend {
+        corrupt_inventory: true,
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    service.delete_graph_data(root.path()).unwrap();
+    assert_eq!(service.backend.inventory_reads.get(), 0);
+    assert!(service.backend.deleted.borrow().is_empty());
+    assert!(local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
+
+    service.delete_commercial_credentials(root.path()).unwrap();
+    assert!(*service.backend.partial_credentials_deleted.borrow());
+    assert!(!*service.backend.credentials_deleted.borrow());
+    service.finish_deletion(root.path()).unwrap();
+    assert!(!local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
+}
+
+#[test]
+fn helperless_bootstrap_retry_validates_legacy_cleanup_identity_without_helper_ipc() {
+    let root = tempdir().unwrap();
+    let installation_id = crate::identity::installation_id(root.path()).unwrap();
+    let pro = ProFilesystemLayout::new(root.path()).pro_root();
+    fs::create_dir(&pro).unwrap();
+    restrict_private_directory(&pro).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    write_graph_key_cleanup_phase(
+        root.path(),
+        &installation_id,
+        &BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 22)]),
+    )
+    .unwrap();
+    let backend = RecordingBackend {
+        corrupt_inventory: true,
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    service.delete_graph_data(root.path()).unwrap();
+    assert_eq!(service.backend.inventory_reads.get(), 0);
+    assert!(service.backend.deleted.borrow().is_empty());
+    service.delete_commercial_credentials(root.path()).unwrap();
+    service.finish_deletion(root.path()).unwrap();
+    assert!(!local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
+}
+
+#[test]
+fn helperless_bootstrap_credential_failure_is_typed_and_keeps_retry_journal() {
+    let root = tempdir().unwrap();
+    crate::identity::installation_id(root.path()).unwrap();
+    let pro = ProFilesystemLayout::new(root.path()).pro_root();
+    fs::create_dir(&pro).unwrap();
+    restrict_private_directory(&pro).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    let backend = RecordingBackend {
+        fail_commercial_credentials_after_delete: true,
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    service.delete_graph_data(root.path()).unwrap();
+    let error = service
+        .delete_commercial_credentials(root.path())
+        .unwrap_err();
+    assert!(error.to_string().starts_with("key_store_unavailable:"));
+    assert!(local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
+    assert!(service.backend.deleted.borrow().is_empty());
 }
 
 #[test]
@@ -317,7 +401,7 @@ fn helper_present_without_graph_deletes_recorded_graph_keys() {
         targets,
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     service.delete_graph_data(root.path()).unwrap();
 
     assert_eq!(service.backend.inventory_reads.get(), 1);
@@ -338,6 +422,32 @@ fn helper_present_without_graph_deletes_recorded_graph_keys() {
 }
 
 #[test]
+fn signed_helper_marker_without_binary_stays_on_helper_deletion_path() {
+    let root = tempdir().unwrap();
+    crate::identity::installation_id(root.path()).unwrap();
+    let layout = ProFilesystemLayout::new(root.path());
+    fs::create_dir(layout.pro_root()).unwrap();
+    restrict_private_directory(&layout.pro_root()).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    fs::create_dir(layout.bin_dir()).unwrap();
+    restrict_private_directory(&layout.bin_dir()).unwrap();
+    fs::write(layout.helper_marker_path(), b"signed marker").unwrap();
+    restrict_private_file(&layout.helper_marker_path()).unwrap();
+    let backend = RecordingBackend {
+        targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 23)]),
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    service.delete_graph_data(root.path()).unwrap();
+    assert_eq!(service.backend.inventory_reads.get(), 1);
+    assert_eq!(service.backend.deleted.borrow().len(), 1);
+    service.delete_commercial_credentials(root.path()).unwrap();
+    assert!(!*service.backend.partial_credentials_deleted.borrow());
+    assert!(*service.backend.credentials_deleted.borrow());
+}
+
+#[test]
 fn cleanup_phase_is_durable_before_graph_key_deletion() {
     let (root, _) = fixture();
     let backend = RecordingBackend {
@@ -345,7 +455,7 @@ fn cleanup_phase_is_durable_before_graph_key_deletion() {
         require_cleanup_phase_for_graph_delete: Some(root.path().to_path_buf()),
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     service.delete_graph_data(root.path()).unwrap();
     assert_eq!(service.backend.deleted.borrow().len(), 1);
     assert!(local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
@@ -360,9 +470,7 @@ fn late_failure_retries_from_cleanup_phase_after_records_are_gone() {
         fail_commercial_credentials_after_delete: true,
         ..RecordingBackend::default()
     };
-    let mut first = LocalDeletionService {
-        backend: first_backend,
-    };
+    let mut first = LocalDeletionService::with_backend_for_test(first_backend);
     first.delete_graph_data(root.path()).unwrap();
     assert!(!pro.join(PRO_GRAPH_FILE_NAME).exists());
     assert!(first.delete_commercial_credentials(root.path()).is_err());
@@ -374,9 +482,7 @@ fn late_failure_retries_from_cleanup_phase_after_records_are_gone() {
         graph_key_missing: true,
         ..RecordingBackend::default()
     };
-    let mut retry = LocalDeletionService {
-        backend: retry_backend,
-    };
+    let mut retry = LocalDeletionService::with_backend_for_test(retry_backend);
     retry.delete_graph_data(root.path()).unwrap();
     assert_eq!(retry.backend.inventory_reads.get(), 0);
     assert_eq!(retry.backend.deleted.borrow().len(), 1);
@@ -395,9 +501,7 @@ fn cleanup_phase_cannot_cross_installation_identities() {
         &BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 14)]),
     )
     .unwrap();
-    let mut service = LocalDeletionService {
-        backend: RecordingBackend::default(),
-    };
+    let mut service = LocalDeletionService::with_backend_for_test(RecordingBackend::default());
     let error = service.delete_graph_data(root.path()).unwrap_err();
     assert!(error.to_string().starts_with("key_store_unavailable:"));
     assert!(service.backend.deleted.borrow().is_empty());
@@ -411,9 +515,7 @@ fn empty_cleanup_phase_cannot_delete_graph_artifacts() {
         .unwrap()
         .unwrap();
     write_graph_key_cleanup_phase(root.path(), &installation_id, &BTreeSet::new()).unwrap();
-    let mut service = LocalDeletionService {
-        backend: RecordingBackend::default(),
-    };
+    let mut service = LocalDeletionService::with_backend_for_test(RecordingBackend::default());
     let error = service.delete_graph_data(root.path()).unwrap_err();
     assert!(error.to_string().starts_with("key_store_unavailable:"));
     assert!(service.backend.deleted.borrow().is_empty());
@@ -430,7 +532,7 @@ fn graph_family_and_interrupted_rebuild_files_are_all_removed() {
         targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 4)]),
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     service.delete_graph_data(root.path()).unwrap();
     assert!(graph_paths(&pro).iter().all(|path| !path.exists()));
 }
@@ -443,7 +545,7 @@ fn failed_authoritative_key_inventory_verification_preserves_graph_files() {
         fail_graph_key_verification: true,
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
 }
@@ -458,7 +560,7 @@ fn graph_root_is_reverified_immediately_before_file_removal() {
         make_root_unsafe_on_graph_delete: Some(pro.clone()),
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert_eq!(service.backend.deleted.borrow().len(), 1);
     assert!(graph.exists());
@@ -481,7 +583,7 @@ fn symlink_graph_or_graph_root_fails_before_key_deletion() {
         targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 7)]),
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(service.backend.deleted.borrow().is_empty());
 
@@ -512,7 +614,7 @@ fn shared_graph_root_fails_before_key_deletion() {
         targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 8)]),
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(service.backend.deleted.borrow().is_empty());
     assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
@@ -527,7 +629,7 @@ fn shared_graph_root_fails_before_key_derivation_on_windows() {
         targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 9)]),
         ..RecordingBackend::default()
     };
-    let mut service = LocalDeletionService { backend };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(service.backend.deleted.borrow().is_empty());
     assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
@@ -545,9 +647,7 @@ fn graph_identity_matches_private_protocol_v1_format() {
 #[test]
 fn missing_identity_fails_closed_while_ciphertext_remains() {
     let (root, pro) = fixture();
-    let mut service = LocalDeletionService {
-        backend: RecordingBackend::default(),
-    };
+    let mut service = LocalDeletionService::with_backend_for_test(RecordingBackend::default());
     assert!(service
         .delete_graph_data(root.path())
         .unwrap_err()

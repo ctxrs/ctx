@@ -97,18 +97,31 @@ impl GraphKeyCleanupPhase {
 
 pub(super) struct LocalDeletionService<B = PlatformDeletionBackend> {
     backend: B,
+    helperless_bootstrap: bool,
+}
+
+#[cfg(test)]
+impl<B> LocalDeletionService<B> {
+    fn with_backend_for_test(backend: B) -> Self {
+        Self {
+            backend,
+            helperless_bootstrap: false,
+        }
+    }
 }
 
 impl LocalDeletionService<PlatformDeletionBackend> {
     pub(super) const fn production() -> Self {
         Self {
             backend: PlatformDeletionBackend,
+            helperless_bootstrap: false,
         }
     }
 }
 
 impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
     fn delete_graph_data(&mut self, data_root: &Path) -> Result<()> {
+        self.helperless_bootstrap = false;
         let graph = GraphArtifacts::inspect(data_root)?;
         let initialization_recorded = local_pro_initialization_indicator_exists(data_root)?;
         let helper_present = local_pro_helper_exists(data_root)?;
@@ -125,6 +138,7 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
             .ok_or_else(|| {
                 anyhow!("key_store_unavailable: local Pro installation identity is missing")
             })?;
+        let helperless_bootstrap = initialization_recorded && !graph.any_present && !helper_present;
         let targets = match cleanup_phase {
             Some(phase) => {
                 let targets = phase.validated_targets(&installation_id)?;
@@ -133,6 +147,11 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
                         "key_store_unavailable: graph-key cleanup phase is incomplete while local Pro artifacts remain"
                     );
                 }
+                targets
+            }
+            None if helperless_bootstrap => {
+                let targets = BTreeSet::new();
+                write_graph_key_cleanup_phase(data_root, &installation_id, &targets)?;
                 targets
             }
             None => {
@@ -146,24 +165,33 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
                 targets
             }
         };
-        for target in &targets {
-            let graph_id =
-                pro_graph_record_id(&installation_id, &target.installation_key_thumbprint)
-                    .ok_or_else(|| {
-                        anyhow!("key_store_unavailable: local Pro installation identity is invalid")
-                    })?;
-            self.backend
-                .delete_graph_record(data_root, target, &graph_id)?;
+        if !helperless_bootstrap {
+            for target in &targets {
+                let graph_id =
+                    pro_graph_record_id(&installation_id, &target.installation_key_thumbprint)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "key_store_unavailable: local Pro installation identity is invalid"
+                            )
+                        })?;
+                self.backend
+                    .delete_graph_record(data_root, target, &graph_id)?;
+            }
         }
         graph.delete()?;
         if GraphArtifacts::inspect(data_root)?.any_present {
             bail!("key_store_unavailable: encrypted Pro graph deletion could not be verified");
         }
+        self.helperless_bootstrap = helperless_bootstrap;
         Ok(())
     }
 
     fn delete_commercial_credentials(&mut self, data_root: &Path) -> Result<()> {
-        self.backend.delete_commercial_credentials(data_root)
+        if self.helperless_bootstrap {
+            self.backend.delete_partial_bootstrap_credentials(data_root)
+        } else {
+            self.backend.delete_commercial_credentials(data_root)
+        }
     }
 
     fn finish_deletion(&mut self, data_root: &Path) -> Result<()> {
@@ -315,13 +343,18 @@ fn clear_graph_key_cleanup_phase(data_root: &Path) -> Result<()> {
 }
 
 fn local_pro_helper_exists(data_root: &Path) -> Result<bool> {
-    let path = ProFilesystemLayout::new(data_root).helper_path();
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
-        Ok(_) => bail!("invalid_request: local Pro helper is not a regular file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).context("inspect local Pro helper"),
+    let layout = ProFilesystemLayout::new(data_root);
+    for path in [layout.helper_path(), layout.helper_marker_path()] {
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                return Ok(true);
+            }
+            Ok(_) => bail!("invalid_request: local Pro helper artifact is not a regular file"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect local Pro helper artifact"),
+        }
     }
+    Ok(false)
 }
 
 fn publish_private_lifecycle_file(
@@ -374,6 +407,7 @@ trait DeletionBackend {
         target: &GraphKeyDeletionTarget,
         graph_id: &str,
     ) -> Result<()>;
+    fn delete_partial_bootstrap_credentials(&self, data_root: &Path) -> Result<()>;
     fn delete_commercial_credentials(&self, data_root: &Path) -> Result<()>;
 }
 
@@ -413,9 +447,44 @@ impl DeletionBackend for PlatformDeletionBackend {
         )
     }
 
+    fn delete_partial_bootstrap_credentials(&self, data_root: &Path) -> Result<()> {
+        delete_partial_bootstrap_credentials(data_root)
+    }
+
     fn delete_commercial_credentials(&self, data_root: &Path) -> Result<()> {
         commercial_deletion::delete_credentials(data_root)
     }
+}
+
+fn delete_partial_bootstrap_credentials(data_root: &Path) -> Result<()> {
+    for namespace in [
+        CredentialVaultNamespace::Production,
+        CredentialVaultNamespace::Staging,
+    ] {
+        let vault =
+            PlatformCredentialVault::production(data_root, namespace).map_err(vault_error)?;
+        for kind in [
+            CredentialRecordKind::WorkOsSession,
+            CredentialRecordKind::AnonymousTrial,
+            CredentialRecordKind::SignedEntitlement,
+            CredentialRecordKind::InstallationSigningKey,
+        ] {
+            match vault.delete(kind) {
+                Ok(()) | Err(CredentialVaultError::NotFound) => {}
+                Err(error) => return Err(vault_error(error)),
+            }
+            match vault.load(kind) {
+                Err(CredentialVaultError::NotFound) => {}
+                Ok(_) | Err(CredentialVaultError::Corrupt) => {
+                    bail!(
+                        "key_store_unavailable: partial Pro credential deletion could not be verified"
+                    )
+                }
+                Err(error) => return Err(vault_error(error)),
+            }
+        }
+    }
+    PlatformCredentialVault::cleanup_backend_state(data_root).map_err(vault_error)
 }
 
 trait CredentialRecordReader {

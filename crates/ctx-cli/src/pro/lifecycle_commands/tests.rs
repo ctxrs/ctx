@@ -300,6 +300,21 @@ fn never_pro_missing_and_empty_roots_are_truthful_idempotent_noops() {
         assert!(!ProFilesystemLayout::new(empty.path()).pro_root().exists());
         epoch.assert_preserved();
     }
+
+    let pristine = tempfile::tempdir().unwrap();
+    crate::identity::installation_id(pristine.path()).unwrap();
+    let mut production = LocalDeletionService::production();
+    let value = run_uninstall(
+        pristine.path(),
+        Some(&mut production),
+        UninstallDataDisposition::Delete,
+        true,
+    )
+    .unwrap();
+    assert_eq!(value["local_pro_data"], "absent");
+    assert!(!ProFilesystemLayout::new(pristine.path())
+        .pro_root()
+        .exists());
 }
 
 #[test]
@@ -346,6 +361,85 @@ fn interrupted_artifact_fetch_retains_cleanup_evidence_until_verified_uninstall(
     .unwrap();
     assert!(repeated.calls.is_empty());
     assert_eq!(value["local_pro_data"], "absent");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn no_native_partial_bootstrap_delete_data_cleans_and_retries_without_helper_ipc() {
+    let root = tempfile::tempdir().unwrap();
+    crate::identity::installation_id(root.path()).unwrap();
+    let result = with_pro_initialization(root.path(), || -> Result<()> {
+        crate::pro::credential_vault::PlatformCredentialVault::store_file_fallback_installation_key_for_test(
+            root.path(),
+            crate::pro::credential_vault::CredentialVaultNamespace::Production,
+            [0x42; ctx_pro_host_protocol::INSTALLATION_PUBLIC_KEY_BYTES],
+        )?;
+        bail!("artifact_download_failed: simulated failure before helper installation")
+    });
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .starts_with("artifact_download_failed:"));
+
+    let pro = ProFilesystemLayout::new(root.path()).pro_root();
+    let selector = pro.join(".ctx-pro.credential-backend-v1");
+    let file_vault = pro.join(".ctx-pro.credentials-v1");
+    assert_eq!(
+        fs::read(&selector).unwrap(),
+        b"ctx-pro-credential-backend-v1:file\n"
+    );
+    assert!(file_vault.is_dir());
+    assert!(!default_helper_path(root.path()).exists());
+    assert!(!ProFilesystemLayout::new(root.path()).graph_path().exists());
+
+    let mut deletion = LocalDeletionService::production();
+    let value = run_uninstall(
+        root.path(),
+        Some(&mut deletion),
+        UninstallDataDisposition::Delete,
+        true,
+    )
+    .unwrap();
+    assert_eq!(value["local_pro_data"], "absent");
+    assert_eq!(value["helper_removed"], false);
+    assert_eq!(value["next_action"], serde_json::Value::Null);
+    for path in [
+        selector.clone(),
+        file_vault.clone(),
+        pro.join(".ctx-pro-key-store-v1"),
+        pro.join(".ctx-pro.initialized"),
+        pro.join(".ctx-pro.graph-key-cleanup.json"),
+        ProFilesystemLayout::new(root.path()).bin_dir(),
+    ] {
+        assert!(
+            !path.exists(),
+            "partial Pro artifact remained: {}",
+            path.display()
+        );
+    }
+
+    let mut entries_before_retry = fs::read_dir(&pro)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    entries_before_retry.sort();
+    let mut retry = LocalDeletionService::production();
+    let value = run_uninstall(
+        root.path(),
+        Some(&mut retry),
+        UninstallDataDisposition::Delete,
+        true,
+    )
+    .unwrap();
+    assert_eq!(value["local_pro_data"], "absent");
+    assert!(!selector.exists());
+    assert!(!file_vault.exists());
+    let mut entries_after_retry = fs::read_dir(&pro)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    entries_after_retry.sort();
+    assert_eq!(entries_after_retry, entries_before_retry);
 }
 
 #[test]
