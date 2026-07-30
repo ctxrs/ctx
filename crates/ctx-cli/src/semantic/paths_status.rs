@@ -505,10 +505,12 @@ pub(super) fn daemon_report_with_disabled_status(
         pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
     let owner_identity_matches = lock_reports_running
         && lock_value.as_ref().is_some_and(|identity| {
-            crate::upgrade::installation_executable_path()
-                .ok()
+            identity
+                .get("binary")
+                .and_then(Value::as_str)
+                .map(Path::new)
                 .and_then(|executable| {
-                    daemon_owner_binary_identity_matches(identity, &executable).ok()
+                    daemon_owner_binary_identity_matches(identity, executable).ok()
                 })
                 .unwrap_or(false)
         });
