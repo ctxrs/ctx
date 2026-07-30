@@ -58,19 +58,25 @@ impl CodexNativeScanner {
             ));
         }
         if let Some(mut replay) = self.replay.take() {
-            let after = observed_opened_file(&replay.source, &self.opened)?;
-            if after != replay.before_observation {
-                return Err(source_changed_during_scan());
+            let current = observed_opened_file(&replay.source, &self.opened)?;
+            if current != replay.before_observation {
+                revalidate_opened_prefix(
+                    self.opened.file(),
+                    replay.before_observation.len,
+                    replay.full_revision_sha256,
+                )?;
+                self.opened.revalidate_same_object()?;
             }
-            replay.after_observation = after;
+            replay.after_observation = replay.before_observation.clone();
             return Ok(replay);
         }
 
-        let full_revision_sha256 = self.full_hasher.finalize().into();
+        let full_revision_sha256: [u8; 32] = self.full_hasher.finalize().into();
         let complete_prefix_sha256 = self.complete_hasher.finalize().into();
-        let after = observed_opened_file(&self.source, &self.opened)?;
-        if after != self.before {
-            return Err(source_changed_during_scan());
+        let current = observed_opened_file(&self.source, &self.opened)?;
+        if current != self.before {
+            revalidate_opened_prefix(self.opened.file(), self.before.len, full_revision_sha256)?;
+            self.opened.revalidate_same_object()?;
         }
         if let Some(owner) = self.owner.as_ref() {
             validate_catalog_owner(
@@ -81,8 +87,8 @@ impl CodexNativeScanner {
 
         Ok(CodexSourceScan {
             source: self.source,
-            before_observation: self.before,
-            after_observation: after,
+            before_observation: self.before.clone(),
+            after_observation: self.before,
             disposition: self.disposition,
             full_revision_sha256,
             complete_prefix_sha256,

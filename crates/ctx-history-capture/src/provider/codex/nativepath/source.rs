@@ -17,22 +17,40 @@ use crate::{
 };
 
 const CATALOG_CHANGE_TOKEN_KEY: &str = "inventory_file_change_token_v1";
+const CATALOG_STABLE_TOKEN_KEY: &str = "inventory_file_stable_token_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CodexFileObservation {
     pub(crate) len: u64,
     pub(crate) modified_at_ms: i64,
+    #[serde(default)]
+    pub(crate) stable_token: Option<[u8; 32]>,
     pub(crate) change_token: [u8; 32],
 }
 
 impl CodexFileObservation {
-    pub(crate) fn from_parts(len: u64, modified_at: SystemTime, change_token: [u8; 32]) -> Self {
+    pub(crate) fn from_parts(
+        len: u64,
+        modified_at: SystemTime,
+        stable_token: Option<[u8; 32]>,
+        change_token: [u8; 32],
+    ) -> Self {
         Self {
             len,
             modified_at_ms: system_time_ms(modified_at),
+            stable_token,
             change_token,
         }
+    }
+
+    /// Returns true when `current` is either the exact observation or a
+    /// strictly longer observation of the same retained ordinary file.
+    pub(crate) fn admits_append_only_growth(&self, current: &Self) -> bool {
+        self == current
+            || (current.len > self.len
+                && self.stable_token.is_some()
+                && self.stable_token == current.stable_token)
     }
 }
 
@@ -120,12 +138,18 @@ fn catalog_source(session: &CatalogSession) -> Result<CodexCatalogSource, &'stat
     if session.source_path.trim().is_empty() {
         return Err("Codex catalog source path is empty");
     }
-    let token = session
+    let change_token = session
         .metadata
         .get(CATALOG_CHANGE_TOKEN_KEY)
         .and_then(serde_json::Value::as_str)
         .ok_or("Codex catalog change token is missing")
         .and_then(decode_change_token)?;
+    let stable_token = session
+        .metadata
+        .get(CATALOG_STABLE_TOKEN_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(decode_change_token)
+        .transpose()?;
     Ok(CodexCatalogSource {
         source_root: session.source_root.clone(),
         source_path: PathBuf::from(&session.source_path),
@@ -133,7 +157,8 @@ fn catalog_source(session: &CatalogSession) -> Result<CodexCatalogSource, &'stat
         catalog_observation: CodexFileObservation {
             len: session.file_size_bytes,
             modified_at_ms: session.file_modified_at_ms,
-            change_token: token,
+            stable_token,
+            change_token,
         },
         catalog_native_session_id: session.external_session_id.clone(),
         catalog_parent_native_session_id: session.parent_external_session_id.clone(),

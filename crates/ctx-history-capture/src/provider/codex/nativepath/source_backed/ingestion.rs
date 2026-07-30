@@ -46,7 +46,7 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
     if use_parallel_cold {
         sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
     }
-    let mut revalidation = HashMap::<SourceKey, (CodexCatalogSource, CodexFileObservation)>::new();
+    let mut revalidation = HashMap::<SourceKey, CodexTerminalSourceEvidenceV0>::new();
 
     if use_parallel_cold {
         let worker_count = cold_scanner_worker_count(
@@ -123,10 +123,10 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
         match target {
             RevalidationTarget::Source(certificate) => revalidation
                 .get_key_value(certificate.observation().source())
-                .is_some_and(|(source_key, (source, observation))| {
+                .is_some_and(|(source_key, evidence)| {
                     closing.contains(source_key)
                         && source_key.exact_descriptor_eq(certificate.observation().source())
-                        && revalidate_codex_source_observation(source, observation).is_ok()
+                        && evidence.revalidate()
                 }),
             RevalidationTarget::Deletion(deletion) => deletion.verifies(closing),
         }
@@ -144,7 +144,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     base_sources: &HashMap<SourceKey, CertifiedSource>,
     writer: &mut GenerationWriter,
-    revalidation: &mut HashMap<SourceKey, (CodexCatalogSource, CodexFileObservation)>,
+    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
@@ -187,7 +187,15 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                 writer.certify_source_append(append)?;
                 timings.certification += certification_started.elapsed();
                 counters.replayed_sources = counters.replayed_sources.saturating_add(1);
-                revalidation.insert(source_key, (source, proof.checkpoint.observation.clone()));
+                revalidation.insert(
+                    source_key,
+                    CodexTerminalSourceEvidenceV0 {
+                        source,
+                        observation: proof.checkpoint.observation.clone(),
+                        certified_len: proof.checkpoint.observation.len,
+                        full_revision_sha256: proof.checkpoint.full_revision_sha256,
+                    },
+                );
                 continue;
             }
         }
@@ -309,7 +317,15 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             }
         }
         timings.certification += certification_started.elapsed();
-        revalidation.insert(source_key, (source, scan.after_observation.clone()));
+        revalidation.insert(
+            source_key,
+            CodexTerminalSourceEvidenceV0 {
+                source,
+                observation: scan.after_observation.clone(),
+                certified_len: scan.before_observation.len,
+                full_revision_sha256: scan.full_revision_sha256,
+            },
+        );
     }
     Ok(())
 }

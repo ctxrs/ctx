@@ -242,6 +242,12 @@ pub(super) fn object_fingerprint(stamp: &ObjectStamp) -> [u8; 32] {
     digest.finalize().into()
 }
 
+pub(super) fn same_object(left: &ObjectStamp, right: &ObjectStamp) -> bool {
+    left.volume_serial_number == right.volume_serial_number
+        && left.file_id == right.file_id
+        && left.creation_time == right.creation_time
+}
+
 pub(super) fn object_change_token(stamp: &ObjectStamp) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(super::ORDINARY_FILE_TOKEN_DOMAIN);

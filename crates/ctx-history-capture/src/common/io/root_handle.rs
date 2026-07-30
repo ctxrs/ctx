@@ -407,6 +407,37 @@ impl OpenedProviderSourceFile {
         Ok(bytes)
     }
 
+    /// Reads an exact range from an append-friendly source and permits only a
+    /// same-object metadata change while the range is read. Callers must bind
+    /// the returned bytes to their own digest and frozen-prefix evidence.
+    pub(crate) fn read_exact_range_allow_append(
+        &self,
+        offset: u64,
+        length: usize,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        if length > maximum_bytes {
+            return Err(CaptureError::InvalidPayload(format!(
+                "provider source range exceeds {maximum_bytes} bytes"
+            )));
+        }
+        let length_u64 = u64::try_from(length)
+            .map_err(|_| CaptureError::SystemInvariant("range length exceeds u64"))?;
+        let end = offset.checked_add(length_u64).ok_or_else(|| {
+            CaptureError::InvalidPayload("provider source range overflows".into())
+        })?;
+        let current_len = self.file.metadata()?.len();
+        if end > current_len {
+            return Err(CaptureError::InvalidPayload(
+                "provider source range exceeds the opened file".into(),
+            ));
+        }
+        let mut bytes = vec![0_u8; length];
+        platform::read_exact_at(&self.file, &mut bytes, offset)?;
+        self.revalidate_same_object()?;
+        Ok(bytes)
+    }
+
     /// Confirms the open handle did not change while read and its route beneath
     /// the retained authority still names the same object.
     ///
@@ -440,6 +471,53 @@ impl OpenedProviderSourceFile {
         let named = platform::object_stamp(&file, &metadata)?;
         if named != self.opened {
             return Err(changed_path(self.display_path()));
+        }
+        Ok(())
+    }
+
+    /// Confirms the route still names the same ordinary file while allowing
+    /// append-only metadata changes on that object.
+    pub(crate) fn revalidate_same_object_leaf(&self) -> Result<()> {
+        let current_metadata = self.file.metadata()?;
+        let current = platform::object_stamp(&self.file, &current_metadata)?;
+        if !platform::same_object(&current, &self.opened) {
+            return Err(changed_path(self.display_path()));
+        }
+        let reopened = match &self.route {
+            ProviderSourceFileRoute::Absolute(path) => platform::open_absolute(path)
+                .map_err(|error| map_changed_open_error(path, error))?,
+            ProviderSourceFileRoute::Relative {
+                root,
+                relative_path,
+            } => {
+                let reopened = root.open_path(relative_path)?;
+                return match reopened {
+                    OpenedProviderSourcePath::File(reopened)
+                        if platform::same_object(&reopened.opened, &self.opened) =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(changed_path(self.display_path())),
+                };
+            }
+        };
+        let platform::OpenedPath::File { file, metadata, .. } = reopened else {
+            return Err(changed_path(self.display_path()));
+        };
+        let named = platform::object_stamp(&file, &metadata)?;
+        if !platform::same_object(&named, &self.opened) {
+            return Err(changed_path(self.display_path()));
+        }
+        Ok(())
+    }
+
+    /// Confirms same-object leaf identity and the retained root route. This is
+    /// used only by append-friendly providers that separately freeze and hash
+    /// the admitted byte prefix.
+    pub(crate) fn revalidate_same_object(&self) -> Result<()> {
+        self.revalidate_same_object_leaf()?;
+        if let ProviderSourceFileRoute::Relative { root, .. } = &self.route {
+            root.revalidate()?;
         }
         Ok(())
     }
@@ -675,6 +753,36 @@ mod tests {
         assert_eq!(bytes, b"0123456789");
         assert!(source.revalidate_leaf().is_err());
         assert!(source.revalidate().is_err());
+    }
+
+    #[test]
+    fn append_friendly_range_permits_same_object_growth_but_rejects_replacement() {
+        use std::io::Write;
+
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("source.jsonl");
+        let moved = temp.path().join("moved.jsonl");
+        fs::write(&path, b"first\n").unwrap();
+        let root = ProviderSourceRoot::open(temp.path()).unwrap();
+        let source = root.open_file(Path::new("source.jsonl")).unwrap();
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"second\n")
+            .unwrap();
+        assert_eq!(
+            source.read_exact_range_allow_append(0, 6, 6).unwrap(),
+            b"first\n"
+        );
+        assert!(source.revalidate_same_object().is_ok());
+        assert!(source.revalidate().is_err());
+
+        fs::rename(&path, &moved).unwrap();
+        fs::write(&path, b"replacement\n").unwrap();
+        assert!(source.revalidate_same_object_leaf().is_err());
+        assert!(source.read_exact_range_allow_append(0, 6, 6).is_err());
     }
 
     #[test]

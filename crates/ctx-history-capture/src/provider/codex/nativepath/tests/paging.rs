@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn terminal_authority_rejects_mutation_and_retry_keeps_the_safe_prefix_identity() {
+fn terminal_authority_defers_a_verified_append_and_retry_advances_the_prefix() {
     let initial = [
         session_meta("mutation-owner"),
         message("user", "before mutation"),
@@ -22,16 +22,10 @@ fn terminal_authority_rejects_mutation_and_retry_keeps_the_safe_prefix_identity(
 
     let appended = message("assistant", "after mutation");
     fs::write(&path, format!("{initial}{appended}")).unwrap();
-    let error = scanner.finish().unwrap_err();
-    assert!(
-        matches!(
-            error,
-            crate::CaptureError::SourceChangedDuringCapture
-                | crate::CaptureError::InvalidPayload(_)
-                | crate::CaptureError::InvalidProviderTranscriptPath { .. }
-        ),
-        "{error:?}"
-    );
+    let frozen = scanner.finish().unwrap();
+    assert_eq!(frozen.complete_prefix_end, initial.len() as u64);
+    assert_eq!(frozen.next_raw_ordinal, 3);
+    assert_eq!(frozen.before_observation, frozen.after_observation);
 
     let (retry_scan, retry) = scan_collect(discover_one(&path, "mutation-owner"), None);
     assert_eq!(

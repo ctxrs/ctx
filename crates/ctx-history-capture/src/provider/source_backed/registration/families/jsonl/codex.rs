@@ -1,6 +1,12 @@
 use super::*;
 use std::sync::Mutex;
 
+#[derive(Clone)]
+struct CodexSessionTreeTerminalEvidence {
+    inventory: CertifiedSourceInventory,
+    sources: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+}
+
 pub(super) fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
@@ -8,11 +14,20 @@ pub(super) fn register_codex_session_tree_route(
 ) -> SourceBackedCoordinatorResult<()> {
     let root = source.path.clone();
     let capture_root = root.clone();
-    let revalidation_root = root.clone();
     let complete_inventory_revalidation_root = root.clone();
     let hydration_root = root;
+    let terminal_evidence = Arc::new(Mutex::new(None::<CodexSessionTreeTerminalEvidence>));
+    let capture_terminal_evidence = Arc::clone(&terminal_evidence);
+    let source_terminal_evidence = Arc::clone(&terminal_evidence);
+    let inventory_terminal_evidence = terminal_evidence;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
+            *capture_terminal_evidence.lock().map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Codex terminal evidence lock was poisoned",
+                )
+            })? = None;
             let opening = discover_codex_root_inventory_v0(&capture_root).map_err(route_error)?;
             sink.certify_complete_inventory(opening.certificate.clone())
                 .map_err(route_coordinator_error)?;
@@ -48,26 +63,40 @@ pub(super) fn register_codex_session_tree_route(
                     .map_err(route_coordinator_error)?;
                 }
             }
+            *capture_terminal_evidence.lock().map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Codex terminal evidence lock was poisoned",
+                )
+            })? = Some(CodexSessionTreeTerminalEvidence {
+                inventory: opening.certificate,
+                sources: revalidation,
+            });
             Ok(())
         },
         provider_format_scope(CaptureProvider::Codex, "codex_session_jsonl"),
         move |target| {
-            let Ok(inventory) = discover_codex_root_inventory_v0(&revalidation_root) else {
+            let Ok(evidence) = source_terminal_evidence.lock() else {
+                return false;
+            };
+            let Some(evidence) = evidence.as_ref() else {
                 return false;
             };
             match target {
-                SourceBackedRevalidationTarget::Source(expected) => inventory
+                SourceBackedRevalidationTarget::Source(expected) => evidence
                     .sources
-                    .iter()
-                    .find(|(_, source_key, _)| {
-                        source_key.exact_descriptor_eq(expected.observation().source())
-                    })
-                    .and_then(|(source, source_key, _)| {
-                        codex_source_observation(source_key, &source.catalog_observation).ok()
+                    .get(expected.observation().source())
+                    .and_then(|evidence| {
+                        codex_source_observation(
+                            expected.observation().source(),
+                            &evidence.observation,
+                        )
+                        .ok()
                     })
                     .is_some_and(|observation| observation == *expected.observation()),
                 SourceBackedRevalidationTarget::Deletion(deletion) => {
-                    deletion.verifies(&inventory.certificate)
+                    deletion.verifies(&evidence.inventory)
+                        && !evidence.sources.contains_key(deletion.source())
                 }
             }
         },
@@ -82,8 +111,30 @@ pub(super) fn register_codex_session_tree_route(
         },
     )
     .with_complete_inventory_revalidation(move |expected| {
-        discover_codex_root_inventory_v0(&complete_inventory_revalidation_root)
-            .is_ok_and(|current| current.certificate == *expected)
+        let terminal = inventory_terminal_evidence
+            .lock()
+            .ok()
+            .and_then(|evidence| evidence.clone());
+        let Some(terminal) = terminal else {
+            return false;
+        };
+        if terminal.inventory != *expected {
+            return false;
+        }
+        let Ok(current) = discover_codex_root_inventory_v0(&complete_inventory_revalidation_root)
+        else {
+            return false;
+        };
+        current.certificate == *expected
+            && current.sources.len() == terminal.sources.len()
+            && current.sources.iter().all(|(source, source_key, _)| {
+                terminal.sources.get(source_key).is_some_and(|certified| {
+                    certified
+                        .observation
+                        .admits_append_only_growth(&source.catalog_observation)
+                        && certified.revalidate()
+                })
+            })
     });
     registry.register(executable_route(
         source,

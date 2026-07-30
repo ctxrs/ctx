@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     fs,
     hint::black_box,
+    io::Write,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -14,7 +15,7 @@ use tempfile::TempDir;
 
 use super::rows::CodexSourceBackedRowV0;
 use super::*;
-use crate::{observe_ordinary_file, CODEX_SESSION_SOURCE_FORMAT};
+use crate::{common::io::open_provider_source_file, CODEX_SESSION_SOURCE_FORMAT};
 
 fn jsonl(value: Value) -> String {
     let mut line = serde_json::to_string(&value).unwrap();
@@ -112,12 +113,8 @@ fn reasoning(text: &str) -> String {
 }
 
 fn catalog_session(path: &Path, native_session_id: &str) -> CatalogSession {
-    let observation = observe_ordinary_file(path).unwrap();
-    let modified_at_ms = observation
-        .modified_at()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap())
-        .unwrap_or_default();
+    let opened = open_provider_source_file(path).unwrap();
+    let observation = opened_codex_file_observation(path, opened.file()).unwrap();
     CatalogSession {
         provider: CaptureProvider::Codex,
         source_format: CODEX_SESSION_SOURCE_FORMAT.to_owned(),
@@ -130,13 +127,18 @@ fn catalog_session(path: &Path, native_session_id: &str) -> CatalogSession {
         external_agent_id: None,
         cwd: Some("/workspace".to_owned()),
         session_started_at_ms: Some(0),
-        file_size_bytes: observation.len(),
-        file_modified_at_ms: modified_at_ms,
+        file_size_bytes: observation.len,
+        file_modified_at_ms: observation.modified_at_ms,
         cataloged_at_ms: 1,
         metadata: json!({
-            "inventory_file_change_token_v1": observation.token_hex(),
+            "inventory_file_change_token_v1": hex_token(&observation.change_token),
+            "inventory_file_stable_token_v1": observation.stable_token.as_ref().map(hex_token),
         }),
     }
+}
+
+fn hex_token(token: &[u8; 32]) -> String {
+    token.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(super) fn discover_one(path: &Path, native_session_id: &str) -> CodexCatalogSource {

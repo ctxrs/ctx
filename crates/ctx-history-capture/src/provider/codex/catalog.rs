@@ -520,6 +520,7 @@ fn catalog_codex_session_opened(
         cataloged_at_ms,
         metadata: json!({
             "inventory_file_change_token_v1": hex_digest(&observation.change_token),
+            "inventory_file_stable_token_v1": observation.stable_token.as_ref().map(hex_digest),
             "normalization_capture_revision": CODEX_CAPTURE_REVISION,
             "normalization_policy_revision": CODEX_POLICY_REVISION,
             "originator": payload.and_then(|payload| payload.get("originator")).and_then(Value::as_str),

@@ -98,7 +98,7 @@ pub(super) fn cold_scanner_worker_count(
 pub(super) fn ingest_codex_cold_parallel_v0(
     sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     writer: &mut GenerationWriter,
-    revalidation: &mut HashMap<SourceKey, (CodexCatalogSource, CodexFileObservation)>,
+    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
     worker_count: usize,
@@ -345,7 +345,7 @@ fn consume_cold_lanes_v0(
     lane_states: &mut [ColdLaneStateV0],
     plans: &[ColdSourcePlanV0],
     writer: &mut GenerationWriter,
-    revalidation: &mut HashMap<SourceKey, (CodexCatalogSource, CodexFileObservation)>,
+    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
@@ -472,11 +472,13 @@ fn consume_cold_lanes_v0(
                     .checked_add(complete.staged_documents)
                     .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
                 counters.cold_sources = counters.cold_sources.saturating_add(1);
-                let after_observation = complete.scan.after_observation.clone();
-                revalidation.insert(
-                    plan.source_key.clone(),
-                    (complete.scan.source, after_observation),
-                );
+                let evidence = CodexTerminalSourceEvidenceV0 {
+                    source: complete.scan.source,
+                    observation: complete.scan.after_observation,
+                    certified_len: complete.scan.before_observation.len,
+                    full_revision_sha256: complete.scan.full_revision_sha256,
+                };
+                revalidation.insert(plan.source_key.clone(), evidence);
                 lane_state.complete_source();
                 completed_sources = completed_sources
                     .checked_add(1)
