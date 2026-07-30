@@ -212,6 +212,17 @@ pub(super) fn object_fingerprint(stamp: &ObjectStamp) -> [u8; 32] {
     digest.finalize().into()
 }
 
+pub(super) fn object_change_token(stamp: &ObjectStamp) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(super::ORDINARY_FILE_TOKEN_DOMAIN);
+    digest.update(b"unix\0");
+    digest.update(stamp.device.to_le_bytes());
+    digest.update(stamp.inode.to_le_bytes());
+    digest.update(stamp.changed_seconds.to_le_bytes());
+    digest.update(stamp.changed_nanoseconds.to_le_bytes());
+    digest.finalize().into()
+}
+
 #[allow(
     dead_code,
     reason = "exact range hydration migrates to this positioned read API in follow-up slices"
