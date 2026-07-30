@@ -643,5 +643,5 @@ fn document_contract_error(error: impl std::fmt::Display) -> SourceBackedRouteEr
 }
 
 #[cfg(test)]
-#[path = "document_family/tests.rs"]
+#[path = "document/tests.rs"]
 mod tests;

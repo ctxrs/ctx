@@ -1,7 +1,5 @@
 //! One-pass replacement-only source-backed ingestion for Auggie documents.
 
-#[path = "document_family.rs"]
-mod document_family;
 #[path = "source_backed/hydration.rs"]
 mod hydration;
 
@@ -29,10 +27,6 @@ use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use self::document_family::{
-    register_replacement_document_tree_route, ChangedDocumentSink, CompleteDocumentTree,
-    DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
-};
 use self::hydration::hydrate_auggie_group_with_observer;
 #[cfg(test)]
 use self::hydration::hydrate_auggie_source_backed;
@@ -51,6 +45,11 @@ use crate::{
         ProviderSourceRoot,
     },
     provider::source_backed::{
+        family::document::{
+            register_replacement_document_tree_route, ChangedDocumentSink, CompleteDocumentTree,
+            DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
+            ReplacementDocumentTree,
+        },
         route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     CaptureError, ProviderAdapterContext, AUGGIE_SESSION_JSON_SOURCE_FORMAT,

@@ -555,7 +555,7 @@ fn many_leaf_discovery_closes_every_leaf_and_retains_only_bounded_tree_authority
 #[test]
 fn production_document_route_has_no_captured_driver_collector_or_spool() {
     let source_backed = include_str!("source_backed.rs");
-    let family = include_str!("document_family.rs");
+    let family = include_str!("../../../source_backed/family/document.rs");
     let hydration = include_str!("source_backed/hydration.rs");
     let source = include_str!("source.rs");
     for (name, production) in [

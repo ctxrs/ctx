@@ -4,6 +4,7 @@
 //! retain every semantic decision, including parsing, identity, counters, and
 //! projection.
 
+pub(crate) mod document;
 pub(crate) mod jsonl;
 
 #[cfg(test)]
