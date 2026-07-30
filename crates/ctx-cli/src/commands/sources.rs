@@ -19,8 +19,9 @@ use crate::provider_sources::{
     plugin_sources_json, provider_cli_name, sources_json, SourceInfo,
 };
 use crate::ui::{
-    diagnostic, empty_state, hint, outcome, section, table, Action, Diagnostic, DiagnosticLevel,
-    Document, EmptyState, Field, Hint, Outcome, OutcomeState, RenderContext, Table, Ui,
+    canonical_human_output_bytes, diagnostic, empty_state, hint, outcome, section, table, Action,
+    Diagnostic, DiagnosticLevel, Document, EmptyState, Field, Hint, Outcome, OutcomeState,
+    RenderContext, Table, Ui,
 };
 use crate::{SourcesArgs, DEFAULT_VISIBLE_SOURCE_PROVIDERS};
 
@@ -102,7 +103,16 @@ pub(crate) fn run_sources(
             &plugin_failures,
             hidden_missing_sources,
         );
-        let output_bytes = document.render_plain().len();
+        let output_bytes = canonical_human_output_bytes(|context| {
+            render_sources_human(
+                context,
+                &visible_sources,
+                &discovery_report.issues,
+                &plugin_sources,
+                &plugin_failures,
+                hidden_missing_sources,
+            )
+        });
         ui.write_stdout(&document)?;
         output_bytes
     };

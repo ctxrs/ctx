@@ -10,10 +10,10 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     bootstrap::{scan_color_mode, scan_machine_output_hint},
-    diagnostic, empty_state, evidence_list, fields, hint, outcome, progress, section, table,
-    Action, ColorMode, Diagnostic, DiagnosticLevel, Document, EmptyState, Evidence, Field, Hint,
-    Line, Outcome, OutcomeState, Progress, RenderContext, Span, StreamKind, Table, TestContext,
-    Token, Ui,
+    canonical_human_output_bytes, diagnostic, empty_state, evidence_list, fields, hint, outcome,
+    progress, section, table, Action, ColorMode, Diagnostic, DiagnosticLevel, Document, EmptyState,
+    Evidence, Field, Hint, Line, Outcome, OutcomeState, Progress, RenderContext, Span, StreamKind,
+    Table, TestContext, Token, Ui,
 };
 
 fn tty(width: usize) -> RenderContext {
@@ -88,6 +88,24 @@ fn render_context_resolves_color_width_and_unicode_explicitly() {
 
     let unknown = RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 32).unknown_width());
     assert_eq!(unknown.terminal_width(), Some(80));
+}
+
+#[test]
+fn canonical_human_measurement_is_plain_unbounded_and_deterministic() {
+    let context = RenderContext::canonical_human_measurement();
+    assert_eq!(context.stream(), StreamKind::Stdout);
+    assert_eq!(context.color_mode(), ColorMode::Never);
+    assert!(!context.is_terminal());
+    assert!(!context.color_enabled());
+    assert_eq!(context.terminal_width(), None);
+    assert_eq!(context.content_width(), None);
+    assert!(context.unicode());
+
+    let bytes = canonical_human_output_bytes(|measurement| {
+        assert_eq!(*measurement, context);
+        Document::from_line(Line::text("stable"))
+    });
+    assert_eq!(bytes, "stable\n".len());
 }
 
 #[test]

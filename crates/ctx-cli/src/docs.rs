@@ -9,8 +9,8 @@ use crate::{
     local_usage::CliUsage,
     output::JsonOutputFormat,
     ui::{
-        empty_state, fields, hint, outcome, section, table, Action, Document, EmptyState, Field,
-        Hint, Outcome, OutcomeState, RenderContext, Table, Ui,
+        canonical_human_output_bytes, empty_state, fields, hint, outcome, section, table, Action,
+        Document, EmptyState, Field, Hint, Outcome, OutcomeState, RenderContext, Table, Ui,
     },
     Cli,
 };
@@ -365,7 +365,7 @@ fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry, ui: &mut Ui) -> R
         Ok(output.len())
     } else {
         let document = render_docs_list(ui.stdout_context());
-        let output_bytes = document.render_plain().len();
+        let output_bytes = canonical_human_output_bytes(|context| render_docs_list(context));
         ui.write_stdout(&document)?;
         Ok(output_bytes)
     }
@@ -414,7 +414,8 @@ fn search_docs(
         Ok(output.len())
     } else {
         let document = render_docs_search(ui.stdout_context(), query, &results);
-        let output_bytes = document.render_plain().len();
+        let output_bytes =
+            canonical_human_output_bytes(|context| render_docs_search(context, query, &results));
         ui.write_stdout(&document)?;
         Ok(output_bytes)
     }

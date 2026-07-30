@@ -10,15 +10,12 @@ use crate::{
     output::{compact_json, print_json},
     provider_args::ProviderArg,
     transcript::provider_resume_json,
-    ui::Ui,
+    ui::{canonical_human_output_bytes, Ui},
     LocateArgs, LocateTarget,
 };
 
 use super::{
-    render::{
-        canonical_human_output_bytes, pretty_json_stdout_bytes, render_locate_document,
-        timestamp_json,
-    },
+    render::{pretty_json_stdout_bytes, render_locate_document, timestamp_json},
     shared::{
         event_source_json, open_index, resolve_event, resolve_session, session_source_json,
         source_path_exists, validate_ctx_id, validate_session_selector,
@@ -100,7 +97,8 @@ pub(crate) fn run_locate(
         output_bytes
     } else {
         let document = render_locate_document(&value, ui.stdout_context());
-        let output_bytes = canonical_human_output_bytes(&document);
+        let output_bytes =
+            canonical_human_output_bytes(|context| render_locate_document(&value, context));
         ui.write_stdout(&document)?;
         output_bytes
     };

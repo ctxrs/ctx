@@ -5,12 +5,15 @@ use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
-    canonical_human_output_bytes, render_locate_document, render_search_document,
-    render_show_document, render_show_jsonl, render_show_markdown, render_show_text,
+    render_locate_document, render_search_document, render_show_document, render_show_jsonl,
+    render_show_markdown, render_show_text,
 };
 use crate::{
     cli::Cli,
-    ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Token},
+    ui::{
+        canonical_human_output_bytes, ColorMode, Document, RenderContext, StreamKind, TestContext,
+        Token,
+    },
 };
 
 const SESSION_ID: &str = "01900000-0000-7000-8000-000000000001";
@@ -414,12 +417,36 @@ fn styled_output_strips_to_plain_and_canonical_bytes_ignore_color() {
             let styled_output = styled_document.render(&styled);
             assert!(styled_output.contains("\u{1b}["));
             assert_eq!(strip_ansi(&styled_output), plain_document.render_plain());
-            assert_eq!(
-                canonical_human_output_bytes(&styled_document),
-                plain_document.render_plain().len()
-            );
         }
     }
+}
+
+#[test]
+fn canonical_human_bytes_ignore_live_width_color_and_pipe_capabilities() {
+    let expected = canonical_human_output_bytes(|measurement| {
+        render_search_document(&search_value(), false, measurement)
+    });
+    let mut live_lengths = Vec::new();
+    for live in [
+        context(32, ColorMode::Always),
+        context(80, ColorMode::Never),
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+    ] {
+        let live_document = render_search_document(&search_value(), false, &live);
+        live_lengths.push(live_document.render_plain().len());
+        assert_eq!(
+            canonical_human_output_bytes(|measurement| {
+                render_search_document(&search_value(), false, measurement)
+            }),
+            expected
+        );
+    }
+    live_lengths.sort_unstable();
+    live_lengths.dedup();
+    assert!(
+        live_lengths.len() > 1,
+        "fixture must prove live wrapping changes rendered byte counts"
+    );
 }
 
 #[test]

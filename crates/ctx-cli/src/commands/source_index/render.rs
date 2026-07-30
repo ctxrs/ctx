@@ -30,15 +30,6 @@ pub(super) use locate::render_locate_document;
 pub(super) use search::render_search_document;
 pub(super) use show::render_show_document;
 
-/// Returns the canonical byte count for structured human output.
-///
-/// Callers must measure the plain document before `Ui` applies terminal
-/// styling so color capability never changes usage accounting.
-#[must_use]
-pub(super) fn canonical_human_output_bytes(document: &crate::ui::Document) -> usize {
-    document.render_plain().len()
-}
-
 pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
     Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
 }
