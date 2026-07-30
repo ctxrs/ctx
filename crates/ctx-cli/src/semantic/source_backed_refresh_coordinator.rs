@@ -329,7 +329,10 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
 }
 
 fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
-    let verified = VerifiedIndex::open(source_backed_index_root(data_root))
+    if !old_store_retirement::is_required(data_root)? {
+        return Ok(());
+    }
+    let verified = VerifiedIndex::open_pinned(source_backed_index_root(data_root))
         .context("reopen source-backed generation before retiring the old Store family")?;
     if verified.generation_id() != generation_id {
         bail!(

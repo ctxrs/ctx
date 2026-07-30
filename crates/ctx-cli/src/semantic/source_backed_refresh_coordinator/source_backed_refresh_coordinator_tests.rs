@@ -1076,6 +1076,17 @@ fn verified_generation_mismatch_never_retires_old_store() {
 }
 
 #[test]
+fn completed_refresh_skips_generation_reopen_when_no_old_store_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+
+    complete_verified_source_epoch(&data_root, "already-retired").unwrap();
+
+    assert!(!source_backed_index_root(&data_root).exists());
+}
+
+#[test]
 fn failed_pre_activation_refresh_leaves_old_store_bytes_for_forward_retry() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
