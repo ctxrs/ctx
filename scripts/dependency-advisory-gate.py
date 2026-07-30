@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -13,8 +13,15 @@ import re
 import subprocess
 import sys
 import tempfile
-import tomllib
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 in the pinned Ubuntu 22.04 builder.
+    import tomli as tomllib
+
+
+UTC = timezone.utc
 
 
 LOCKFILE_NAMES = {
