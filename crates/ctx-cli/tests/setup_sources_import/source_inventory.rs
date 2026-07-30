@@ -62,6 +62,63 @@ fn sources_default_hides_unsupported_missing_locations() {
 }
 
 #[test]
+fn sources_lists_persisted_explicit_roots_with_json_parity_and_deduplication() {
+    let temp = tempdir();
+    let explicit_root = temp.path().join("external-codex-history");
+    copy_dir_all(
+        Path::new(&provider_history_fixture("codex-sessions")),
+        &explicit_root,
+    );
+    let explicit_path = explicit_root.to_str().unwrap();
+
+    let before = json_output(ctx(&temp).args(["sources", "--provider", "codex", "--format=json"]));
+    assert!(before["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|source| source["path"] != explicit_path));
+
+    for _ in 0..2 {
+        json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            explicit_path,
+            "--format=json",
+            "--progress",
+            "none",
+        ]));
+    }
+
+    let after = json_output(ctx(&temp).args(["sources", "--provider", "codex", "--format=json"]));
+    let matches = after["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|source| source["path"] == explicit_path)
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "configured source was not deduplicated");
+    assert_eq!(matches[0]["provider"], "codex");
+    assert_eq!(matches[0]["status"], "available");
+    assert_eq!(matches[0]["importable"], true);
+
+    let human = ctx(&temp)
+        .args(["sources", "--provider", "codex"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human = String::from_utf8(human).unwrap();
+    assert_eq!(
+        human.matches(explicit_path).count(),
+        1,
+        "human and JSON source inventories diverged: {human}"
+    );
+}
+
+#[test]
 fn sources_provider_filter_rejects_unsupported_providers() {
     let temp = tempdir();
 

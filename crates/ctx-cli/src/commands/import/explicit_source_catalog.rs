@@ -395,6 +395,17 @@ pub(crate) fn load_explicit_source_catalog_authority(
     Ok(load_catalog(data_root)?.authority)
 }
 
+pub(crate) fn load_explicit_source_catalog_sources(
+    data_root: &Path,
+) -> Result<Vec<ProviderSource>> {
+    load_catalog(data_root)?
+        .entries
+        .iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| source_from_catalog_entry(entry, false))
+        .collect()
+}
+
 pub(crate) fn validate_explicit_source_catalog_roots(data_root: &Path) -> Result<()> {
     let snapshot = load_catalog(data_root)?;
     for entry in snapshot.entries.iter().filter(|entry| entry.enabled) {
