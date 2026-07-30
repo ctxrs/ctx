@@ -113,10 +113,16 @@ impl DaemonRetryBackoff {
 
     pub(super) fn retry_after_ms(&self) -> Option<u64> {
         self.retry_not_before.map(|retry_not_before| {
-            retry_not_before
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(u128::from(u64::MAX)) as u64
+            let remaining = retry_not_before.saturating_duration_since(Instant::now());
+            let millis = remaining
+                .as_nanos()
+                .div_ceil(1_000_000)
+                .min(u128::from(u64::MAX)) as u64;
+            if remaining.is_zero() {
+                0
+            } else {
+                millis.max(1)
+            }
         })
     }
 

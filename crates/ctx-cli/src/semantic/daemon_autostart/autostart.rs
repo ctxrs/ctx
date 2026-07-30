@@ -276,8 +276,62 @@ fn daemon_handoff_observation(
         {
             DaemonHandoffObservation::Pending
         }
+        DaemonHandoffObservation::Pending
+            if lock_active
+                && lock_pid.is_some_and(|pid| {
+                    daemon_source_refresh_endpoint_is_usable(data_root, pid)
+                }) =>
+        {
+            daemon_live_endpoint_observation_from(status.as_ref(), lock_pid, expected_config)
+        }
         observation => observation,
     }
+}
+
+pub(super) fn daemon_live_endpoint_observation_from(
+    status: Option<&Value>,
+    lock_pid: Option<u32>,
+    expected_config: &AppConfig,
+) -> DaemonHandoffObservation {
+    let Some(status) = status else {
+        return DaemonHandoffObservation::Pending;
+    };
+    let status_pid = status
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    if status.get("status").and_then(Value::as_str) != Some("running")
+        || status_pid.is_none()
+        || status_pid != lock_pid
+    {
+        return DaemonHandoffObservation::Pending;
+    }
+    match status
+        .get("config_reload")
+        .and_then(|reload| reload.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("failed" | "activation_failed") => {
+            let error = status
+                .get("config_reload")
+                .and_then(|reload| reload.get("last_error"))
+                .and_then(Value::as_str)
+                .or_else(|| status.get("last_error").and_then(Value::as_str))
+                .unwrap_or("daemon configuration failed");
+            return DaemonHandoffObservation::Failed(error.to_owned());
+        }
+        Some("applied") if daemon_applied_config_matches(status, expected_config) => {}
+        _ => return DaemonHandoffObservation::Pending,
+    }
+    let heartbeat_at_ms = status
+        .get("heartbeat_at_ms")
+        .and_then(Value::as_i64)
+        .filter(|heartbeat| *heartbeat > 0)
+        .unwrap_or_default();
+    DaemonHandoffObservation::Running(DaemonHandoff {
+        pid: status_pid.unwrap_or_default(),
+        heartbeat_at_ms,
+    })
 }
 
 fn daemon_source_refresh_endpoint_is_usable(data_root: &Path, expected_pid: u32) -> bool {

@@ -40,6 +40,7 @@ struct DaemonWakeupState {
     shutdown_signals: u64,
     blocking_waits: u64,
     timeout_wakeups: u64,
+    scheduled_retry_wakeups: u64,
     work_cycles: u64,
     no_work_cycles: u64,
 }
@@ -116,6 +117,11 @@ impl DaemonWakeup {
         }
     }
 
+    pub(super) fn record_scheduled_retry_wakeup(&self) {
+        let mut state = self.lock_state();
+        state.scheduled_retry_wakeups = state.scheduled_retry_wakeups.saturating_add(1);
+    }
+
     fn snapshot(&self) -> Value {
         let state = self.lock_state();
         compact_json(json!({
@@ -124,6 +130,7 @@ impl DaemonWakeup {
             "ipc_signals": state.ipc_signals,
             "shutdown_signals": state.shutdown_signals,
             "timeout_wakeups": state.timeout_wakeups,
+            "scheduled_retry_wakeups": state.scheduled_retry_wakeups,
             "work_cycles": state.work_cycles,
             "no_work_cycles": state.no_work_cycles,
         }))

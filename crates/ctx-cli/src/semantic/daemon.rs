@@ -852,10 +852,17 @@ pub(super) fn run_daemon_inner(
                 break;
             }
             let safety_due = wake.timed_out && Instant::now() >= next_safety_reconcile;
+            let retry_wakeup_due = wake.timed_out && daemon_retry_due(&runtime);
+            if retry_wakeup_due {
+                wakeup.record_scheduled_retry_wakeup();
+            }
+            let source_retry_due = retry_wakeup_due
+                && runtime.history_retry.consecutive_failures > 0
+                && runtime.history_retry.ready();
             if safety_due {
                 next_safety_reconcile = Instant::now() + safety_interval;
             }
-            if wake.filesystem || safety_due {
+            if wake.filesystem || safety_due || source_retry_due {
                 if let Some(source_refresh) = refresh_service
                     .as_ref()
                     .map(|service| service.source_refresh.as_ref())
@@ -873,11 +880,12 @@ pub(super) fn run_daemon_inner(
                 // reconciliation retry it.
             }
             if let Some(watcher) = file_watcher.as_ref() {
-                let _ = watcher.write_receipt(if safety_due || wake.filesystem {
-                    "active"
-                } else {
-                    "idle"
-                });
+                let _ =
+                    watcher.write_receipt(if safety_due || wake.filesystem || source_retry_due {
+                        "active"
+                    } else {
+                        "idle"
+                    });
             }
             if daemon_upgrade_handoff_blocks_current_process(data_root)
                 || installation_upgrade_blocks_current_process(data_root)
