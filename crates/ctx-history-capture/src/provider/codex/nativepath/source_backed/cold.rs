@@ -472,12 +472,12 @@ fn consume_cold_lanes_v0(
                     .checked_add(complete.staged_documents)
                     .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
                 counters.cold_sources = counters.cold_sources.saturating_add(1);
-                let evidence = CodexTerminalSourceEvidenceV0 {
-                    source: complete.scan.source,
-                    observation: complete.scan.after_observation,
-                    certified_len: complete.scan.before_observation.len,
-                    full_revision_sha256: complete.scan.full_revision_sha256,
-                };
+                let evidence = CodexTerminalSourceEvidenceV0::new(
+                    complete.scan.source,
+                    complete.scan.after_observation,
+                    complete.scan.before_observation.len,
+                    complete.scan.full_revision_sha256,
+                );
                 revalidation.insert(plan.source_key.clone(), evidence);
                 lane_state.complete_source();
                 completed_sources = completed_sources

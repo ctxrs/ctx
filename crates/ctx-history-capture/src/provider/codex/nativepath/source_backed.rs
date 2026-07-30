@@ -166,6 +166,25 @@ pub(crate) struct CodexTerminalSourceEvidenceV0 {
 }
 
 impl CodexTerminalSourceEvidenceV0 {
+    pub(crate) fn new(
+        mut source: CodexCatalogSource,
+        observation: CodexFileObservation,
+        certified_len: u64,
+        full_revision_sha256: [u8; 32],
+    ) -> Self {
+        // The retained root plus relative route can reopen the same ordinary
+        // object without following links. Keeping one opened file per source
+        // until publication exhausts ordinary process descriptor limits on
+        // large provider trees.
+        source.opened = None;
+        Self {
+            source,
+            observation,
+            certified_len,
+            full_revision_sha256,
+        }
+    }
+
     pub(crate) fn revalidate(&self) -> bool {
         revalidate_codex_source_observation(
             &self.source,
