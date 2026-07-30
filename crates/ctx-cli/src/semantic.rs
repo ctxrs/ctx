@@ -121,9 +121,10 @@ mod daemon_autostart;
 #[allow(unused_imports)]
 pub(crate) use daemon_autostart::{
     autostart_daemon_and_wait, begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    complete_replacement_daemon_handoff, daemon_autostart_suppression_reason,
-    finish_replacement_daemon_handoff, mark_replacement_helper_handoff, maybe_autostart_daemon,
-    DaemonHandoff, DaemonUpgradeHandoff,
+    begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
+    daemon_autostart_suppression_reason, finish_replacement_daemon_handoff,
+    mark_replacement_helper_handoff, maybe_autostart_daemon,
+    replacement_helper_owns_daemon_handoff, DaemonHandoff, DaemonUpgradeHandoff,
 };
 mod health_search;
 pub(crate) use health_search::semantic_worker_cache_dir;

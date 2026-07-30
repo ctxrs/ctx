@@ -196,6 +196,18 @@ ctx_rust_binary(
 )
 
 ctx_rust_binary(
+    name = "ctx_v025_upgrade_fixture",
+    testonly = True,
+    srcs = ["tests/fixtures/v025_upgrade_fixture.rs"],
+    crate_name = "ctx_v025_upgrade_fixture",
+    crate_root = "tests/fixtures/v025_upgrade_fixture.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+ctx_rust_binary(
     name = "ctx_upgrade_test_harness",
     testonly = True,
     srcs = PROD_SRCS,
@@ -288,9 +300,13 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "auto_upgrade_acceptance_tests",
     src = "tests/auto_upgrade_acceptance.rs",
-    extra_data = [":ctx_auto_upgrade_acceptance_fixture"],
+    extra_data = [
+        ":ctx_auto_upgrade_acceptance_fixture",
+        ":ctx_v025_upgrade_fixture",
+    ],
     extra_env = {
         "CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE": "$(rootpath :ctx_auto_upgrade_acceptance_fixture)",
+        "CTX_V025_UPGRADE_FIXTURE": "$(rootpath :ctx_v025_upgrade_fixture)",
         "RUST_TEST_THREADS": "1",
     },
     tags = ["release-gate"],

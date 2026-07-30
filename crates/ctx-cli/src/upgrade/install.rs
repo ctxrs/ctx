@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::{bail, Result};
 
+pub(in crate::upgrade) use marker::classify_install_marker_at;
 pub(crate) use marker::is_valid_install_attempt_id;
 pub(super) use marker::InstallFingerprint;
 pub(super) use marker::{current_install_path, InstallMarker};

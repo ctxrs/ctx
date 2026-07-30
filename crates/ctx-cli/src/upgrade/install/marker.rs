@@ -71,7 +71,10 @@ fn classify_install_marker_for_current_exe(platform: &str) -> Result<ManagedInst
     Ok(classify_install_marker_at(&path, platform))
 }
 
-fn classify_install_marker_at(path: &Path, platform: &str) -> ManagedInstallMarker {
+pub(in crate::upgrade) fn classify_install_marker_at(
+    path: &Path,
+    platform: &str,
+) -> ManagedInstallMarker {
     let marker = match read_install_marker_at(path) {
         Ok(Some(marker)) => marker,
         Ok(None) => return ManagedInstallMarker::Absent,

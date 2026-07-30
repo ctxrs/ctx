@@ -203,15 +203,25 @@ pub(in crate::semantic) fn handoff_mismatched_daemon_owner(
                 .and_then(|pid| u32::try_from(pid).ok())
                 == Some(owner_pid)
     });
-    if !accepted {
-        return Err(binary_identity_handoff_error());
-    }
-
-    let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
-    while daemon_lock_is_active(data_root) {
-        if daemon_lock_matches_cached_identity(data_root, &expected_canonical, &expected_sha256) {
-            return Ok(());
+    if accepted {
+        let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
+        while daemon_lock_is_active(data_root) {
+            if daemon_lock_matches_cached_identity(data_root, &expected_canonical, &expected_sha256)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
         }
+    }
+    if daemon_lock_is_active(data_root) {
+        super::handoff::terminate_identity_verified_residual_daemon(data_root, expected_executable)
+            .map_err(|_| binary_identity_handoff_error())?;
+    }
+    let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
+    while daemon_lock_is_active(data_root) {
         if Instant::now() >= deadline {
             return Err(binary_identity_handoff_error());
         }

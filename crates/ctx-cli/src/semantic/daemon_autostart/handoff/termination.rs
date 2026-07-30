@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(unix)]
-pub(super) fn terminate_identity_verified_residual_daemon(
+pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     data_root: &Path,
     expected_executable: &Path,
 ) -> Result<()> {
@@ -172,69 +172,30 @@ fn verify_residual_daemon_identity(
         .and_then(Value::as_str)
         .map(Path::new)
         .ok_or_else(|| anyhow!("ctx daemon lock has no executable identity"))?;
-    if !same_unix_file(recorded_binary, expected_executable)? {
+    let recorded_canonical = fs::canonicalize(recorded_binary);
+    let expected_canonical = fs::canonicalize(expected_executable);
+    let path_matches = match (recorded_canonical, expected_canonical) {
+        (Ok(recorded), Ok(expected)) => recorded == expected,
+        _ => recorded_binary == expected_executable,
+    };
+    if !path_matches {
         return Err(anyhow!(
             "ctx daemon lock executable is not the installed ctx executable"
         ));
     }
-    let process_executable = unix_process_executable(pid).ok_or_else(|| {
-        anyhow!(
-            "cannot verify executable identity for residual ctx process {pid}; refusing to signal"
-        )
+    let recorded_sha256 = value
+        .get("binary_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("ctx daemon lock has no executable digest identity"))?;
+    let process_sha256 = process_executable_sha256(pid).ok_or_else(|| {
+        anyhow!("cannot verify executable image for residual ctx process {pid}; refusing to signal")
     })?;
-    if !same_unix_file(&process_executable, expected_executable)? {
+    if process_sha256 != recorded_sha256 {
         return Err(anyhow!(
-            "residual lock owner is not the installed ctx executable; refusing to signal"
+            "residual lock owner image does not match its held ctx daemon lock; refusing to signal"
         ));
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn same_unix_file(left: &Path, right: &Path) -> Result<bool> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let left = fs::metadata(left)
-        .with_context(|| format!("inspect executable identity {}", left.display()))?;
-    let right = fs::metadata(right)
-        .with_context(|| format!("inspect executable identity {}", right.display()))?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
-}
-
-#[cfg(target_os = "linux")]
-fn unix_process_executable(pid: u32) -> Option<PathBuf> {
-    fs::read_link(format!("/proc/{pid}/exe")).ok()
-}
-
-#[cfg(target_os = "macos")]
-fn unix_process_executable(pid: u32) -> Option<PathBuf> {
-    use std::ffi::CStr;
-
-    const MAX_PATH_BYTES: usize = 4096;
-    unsafe extern "C" {
-        fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, size: u32) -> libc::c_int;
-    }
-    let mut buffer = vec![0_u8; MAX_PATH_BYTES];
-    let length = unsafe {
-        proc_pidpath(
-            libc::pid_t::try_from(pid).ok()?,
-            buffer.as_mut_ptr().cast(),
-            u32::try_from(buffer.len()).ok()?,
-        )
-    };
-    if length <= 0 {
-        return None;
-    }
-    CStr::from_bytes_until_nul(&buffer)
-        .ok()
-        .map(|path| PathBuf::from(path.to_string_lossy().into_owned()))
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn unix_process_executable(pid: u32) -> Option<PathBuf> {
-    [format!("/proc/{pid}/file"), format!("/proc/{pid}/exe")]
-        .into_iter()
-        .find_map(|path| fs::read_link(path).ok())
 }
 
 #[cfg(unix)]
@@ -251,7 +212,7 @@ fn signal_verified_process(pid: u32, signal: libc::c_int) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub(super) fn terminate_identity_verified_residual_daemon(
+pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     data_root: &Path,
     expected_executable: &Path,
 ) -> Result<()> {
@@ -330,14 +291,18 @@ fn verify_residual_daemon_identity(
             "ctx daemon lock executable is not the installed ctx executable"
         ));
     }
-    let process_executable = windows_process_executable(pid).ok_or_else(|| {
+    let recorded_sha256 = value
+        .get("binary_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("ctx daemon lock has no executable digest identity"))?;
+    let process_sha256 = process_executable_sha256(pid).ok_or_else(|| {
         anyhow!(
-            "cannot verify executable identity for residual ctx process {pid}; refusing to terminate"
+            "cannot verify executable image for residual ctx process {pid}; refusing to terminate"
         )
     })?;
-    if !same_windows_path(&process_executable, expected_executable) {
+    if process_sha256 != recorded_sha256 {
         return Err(anyhow!(
-            "residual lock owner is not the installed ctx executable; refusing to terminate"
+            "residual lock owner image does not match its held ctx daemon lock; refusing to terminate"
         ));
     }
     Ok(())
@@ -353,35 +318,8 @@ fn same_windows_path(left: &Path, right: &Path) -> bool {
     normalize(left) == normalize(right)
 }
 
-#[cfg(windows)]
-fn windows_process_executable(pid: u32) -> Option<PathBuf> {
-    use windows_sys::Win32::{
-        Foundation::CloseHandle,
-        System::Threading::{
-            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-        },
-    };
-
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-    let mut buffer = vec![0_u16; 32_768];
-    let mut length = u32::try_from(buffer.len()).ok()?;
-    let succeeded =
-        unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &raw mut length) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    (succeeded != 0).then(|| {
-        PathBuf::from(String::from_utf16_lossy(
-            &buffer[..usize::try_from(length).unwrap_or(0)],
-        ))
-    })
-}
-
 #[cfg(not(any(unix, windows)))]
-pub(super) fn terminate_identity_verified_residual_daemon(
+pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     _data_root: &Path,
     _expected_executable: &Path,
 ) -> Result<()> {

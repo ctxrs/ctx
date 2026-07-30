@@ -4,7 +4,9 @@ mod support;
 mod unix {
     use std::{
         fs,
+        os::unix::fs::PermissionsExt as _,
         path::{Path, PathBuf},
+        process::{Child, Command as StdCommand, Stdio},
         time::{Duration, Instant},
     };
 
@@ -37,6 +39,125 @@ mod unix {
         } else {
             std::env::current_dir().unwrap().join(configured)
         }
+    }
+
+    fn configured_v025_fixture() -> PathBuf {
+        let configured = PathBuf::from(
+            std::env::var_os("CTX_V025_UPGRADE_FIXTURE")
+                .expect("Bazel must provide the v0.25-like upgrade fixture"),
+        );
+        if configured.is_absolute() {
+            configured
+        } else {
+            std::env::current_dir().unwrap().join(configured)
+        }
+    }
+
+    fn hermetic_std_command(temp: &tempfile::TempDir, binary: &Path) -> StdCommand {
+        let prepared = ctx_from_binary(temp, binary);
+        let mut command = StdCommand::new(prepared.get_program());
+        for (name, value) in prepared.get_envs() {
+            match value {
+                Some(value) => {
+                    command.env(name, value);
+                }
+                None => {
+                    command.env_remove(name);
+                }
+            }
+        }
+        command
+    }
+
+    fn install_v025_fixture(temp: &FiniteDaemonTestRoot) -> PathBuf {
+        let target = copied_ctx_binary(temp);
+        fs::remove_file(&target).unwrap();
+        fs::copy(configured_v025_fixture(), &target).unwrap();
+        make_file_executable(&target);
+        fs::write(
+            install_marker_path(&target),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "manager": "ctx-hosted-installer",
+                "install_attempt_id": "ia_v025_fixture_install",
+                "install_path": target,
+                "platform": test_platform_key().replace('_', "-"),
+                "channel": "stable",
+                "version": "0.25.0",
+                "sha256": sha256_hex(&fs::read(&target).unwrap()),
+                "installed_at": "2026-07-30T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        target
+    }
+
+    fn v1_v025_candidate(temp: &FiniteDaemonTestRoot) -> PathBuf {
+        let candidate = temp.path().join("v025-next/ctx");
+        if candidate.exists() {
+            return candidate;
+        }
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::copy(configured_hook_fixture(), &candidate).unwrap();
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
+        if fs::metadata(&candidate).unwrap().len() > 128 * 1024 * 1024 {
+            let stripped = StdCommand::new("strip")
+                .arg("-S")
+                .arg(&candidate)
+                .status()
+                .unwrap();
+            assert!(stripped.success(), "strip v1 legacy-upgrade candidate");
+        }
+        make_file_executable(&candidate);
+        candidate
+    }
+
+    fn start_v025_daemon(temp: &FiniteDaemonTestRoot, target: &Path) -> Child {
+        let root = data_root(temp);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.toml"),
+            "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[upgrade]\nauto = \"apply\"\n",
+        )
+        .unwrap();
+        let mut command = hermetic_std_command(temp, target);
+        let child = command
+            .args(["--data-root", root.to_str().unwrap(), "daemon"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for("v0.25 fixture daemon owner", Duration::from_secs(5), || {
+            fs::read(root.join("daemon/daemon.lock"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| value["pid"].as_u64())
+                == Some(u64::from(child.id()))
+        });
+        child
+    }
+
+    fn run_v025_upgrade(
+        temp: &FiniteDaemonTestRoot,
+        target: &Path,
+        abort_after_probe: bool,
+    ) -> std::process::Output {
+        let candidate = v1_v025_candidate(temp);
+        let root = data_root(temp);
+        let mut command = hermetic_std_command(temp, target);
+        command
+            .env_remove("CTX_DATA_ROOT")
+            .env("CTX_UPGRADE_BACKGROUND_CHILD", "1")
+            .args(["--data-root", root.to_str().unwrap(), "upgrade"])
+            .arg("--candidate")
+            .arg(candidate);
+        if abort_after_probe {
+            command.env("CTX_V025_ABORT_AFTER_PROBE_FOR_TESTS", "1");
+            command.env("CTX_LEGACY_UPGRADE_HELPER_TIMEOUT_MS_FOR_TESTS", "300");
+        }
+        command.output().unwrap()
     }
 
     fn managed_hook_candidate(temp: &tempfile::TempDir, install_attempt_id: &str) -> PathBuf {
@@ -758,6 +879,130 @@ mod unix {
         assert_eq!(state["attempt_source"], "daemon");
         assert!(!temp.path().join("upgrade-state.json").exists());
         assert!(!temp.path().join("upgrade.lock").exists());
+    }
+
+    #[test]
+    fn v025_automatic_upgrade_quiesces_before_replacement_and_restarts_persistent_owner() {
+        let temp = finite_daemon_test_root();
+        let target = install_v025_fixture(&temp);
+        let old_bytes = fs::read(&target).unwrap();
+        let mut old_daemon = start_v025_daemon(&temp, &target);
+        let old_pid = old_daemon.id();
+
+        let output = run_v025_upgrade(&temp, &target, false);
+        assert!(output.status.success(), "{output:?}");
+        assert_ne!(fs::read(&target).unwrap(), old_bytes);
+        assert!(!old_daemon.wait().unwrap().success());
+        assert!(!process_is_running(old_pid));
+
+        let root = data_root(&temp);
+        let mut replacement_pid = None;
+        wait_for(
+            "identity-verified v1 persistent daemon",
+            Duration::from_secs(15),
+            || {
+                replacement_pid = running_daemon_pid(&root, Some(old_pid));
+                replacement_pid.is_some()
+            },
+        );
+        let status = json_output(ctx_from_binary(&temp, &target).args([
+            "daemon",
+            "status",
+            "--format=json",
+        ]));
+        assert_eq!(status["daemon"]["running"], true);
+        assert_eq!(
+            status["daemon"]["lock_identity"]["owner_image_matches"],
+            true
+        );
+        assert_eq!(status["daemon"]["pid"], replacement_pid.unwrap());
+        assert!(!root.join("Store").exists());
+        stop_daemon(replacement_pid.unwrap());
+    }
+
+    #[test]
+    fn v025_interrupted_probe_is_fix_forward_and_retry_restarts_once() {
+        let temp = finite_daemon_test_root();
+        let target = install_v025_fixture(&temp);
+        let mut old_daemon = start_v025_daemon(&temp, &target);
+        let old_pid = old_daemon.id();
+
+        let interrupted = run_v025_upgrade(&temp, &target, true);
+        assert_eq!(interrupted.status.code(), Some(86), "{interrupted:?}");
+        assert!(!old_daemon.wait().unwrap().success());
+        assert!(!process_is_running(old_pid));
+        std::thread::sleep(Duration::from_millis(400));
+        let stale_lock_pid = fs::read_to_string(data_root(&temp).join("upgrade.lock"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        assert!(!process_is_running(stale_lock_pid));
+
+        let retried = run_v025_upgrade(&temp, &target, false);
+        assert!(retried.status.success(), "{retried:?}");
+        let root = data_root(&temp);
+        let mut replacement_pid = None;
+        wait_for("retry replacement daemon", Duration::from_secs(15), || {
+            replacement_pid = running_daemon_pid(&root, Some(old_pid));
+            replacement_pid.is_some()
+        });
+        assert!(!root.join("upgrade.lock").exists());
+        stop_daemon(replacement_pid.unwrap());
+    }
+
+    #[test]
+    fn status_rejects_and_autostart_recovers_deleted_old_owner_image() {
+        let temp = finite_daemon_test_root();
+        let target = install_v025_fixture(&temp);
+        let mut old_daemon = start_v025_daemon(&temp, &target);
+        let old_pid = old_daemon.id();
+        let candidate = v1_v025_candidate(&temp);
+        let staged = target.with_extension("new");
+        fs::copy(&candidate, &staged).unwrap();
+        fs::rename(&staged, &target).unwrap();
+        fs::write(
+            install_marker_path(&target),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "manager": "ctx-hosted-installer",
+                "install_attempt_id": "ia_stale_owner_replacement",
+                "install_path": target,
+                "platform": test_platform_key().replace('_', "-"),
+                "channel": "stable",
+                "version": "1.0.0",
+                "sha256": sha256_hex(&fs::read(&target).unwrap()),
+                "installed_at": "2026-07-30T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let stale = json_output(ctx_from_binary(&temp, &target).args([
+            "daemon",
+            "status",
+            "--format=json",
+        ]));
+        assert_eq!(stale["daemon"]["running"], false);
+        assert_eq!(stale["daemon"]["status"], "stale_lock");
+        assert_eq!(stale["daemon"]["recoverable"], true);
+        assert_eq!(stale["daemon"]["reason"], "daemon_owner_identity_mismatch");
+
+        ctx_from_binary(&temp, &target)
+            .args(["daemon", "enable", "--format=json"])
+            .assert()
+            .success();
+        assert!(!old_daemon.wait().unwrap().success());
+        assert!(!process_is_running(old_pid));
+        let root = data_root(&temp);
+        let mut replacement_pid = None;
+        wait_for("recovered v1 owner", Duration::from_secs(15), || {
+            replacement_pid = running_daemon_pid(&root, Some(old_pid));
+            replacement_pid.is_some()
+        });
+        stop_daemon(replacement_pid.unwrap());
     }
 
     #[test]

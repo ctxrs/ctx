@@ -113,6 +113,9 @@ fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
 }
 
 pub(crate) fn run_cli() -> Result<()> {
+    if upgrade::run_legacy_automatic_upgrade_bridge()? {
+        return Ok(());
+    }
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
     let cli = Cli::parse();

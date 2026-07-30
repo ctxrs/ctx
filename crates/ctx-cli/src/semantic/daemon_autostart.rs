@@ -33,8 +33,9 @@ use super::{
         daemon_lock_is_active, daemon_lock_is_owned_by, daemon_lock_is_stale,
         daemon_lock_matches_executable, daemon_lock_path, daemon_root_path, executable_sha256,
         observe_pid_advisory_lock, open_or_create_pid_lock_file, pid_from_lock_json,
-        pid_lock_guard_path, process_state, read_daemon_status, read_pid_lock_json,
-        write_daemon_status, write_private_json_file, PidAdvisoryLockObservation, ProcessState,
+        pid_lock_guard_path, process_executable_sha256, process_state, read_daemon_status,
+        read_pid_lock_json, write_daemon_status, write_private_json_file,
+        PidAdvisoryLockObservation, ProcessState,
     },
     query_service::daemon_source_refresh_request,
     runtime_limits::{
@@ -72,8 +73,9 @@ pub(super) use handoff::{
 };
 pub(crate) use handoff::{
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    complete_replacement_daemon_handoff, finish_replacement_daemon_handoff,
-    mark_replacement_helper_handoff, DaemonUpgradeHandoff,
+    begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
+    finish_replacement_daemon_handoff, mark_replacement_helper_handoff,
+    replacement_helper_owns_daemon_handoff, DaemonUpgradeHandoff,
 };
 use handoff::{daemon_upgrade_handoff_is_active, remove_daemon_restart_requests};
 #[cfg(test)]
@@ -85,7 +87,9 @@ use installation::{
     open_installation_daemon_quiescence_lock_at, read_installation_daemon_restarts_from,
     registered_installation_daemon_roots_from, wait_for_installation_daemon_quiescence_at,
 };
-use installation::{read_installation_daemon_restarts, wait_for_installation_daemon_quiescence};
+use installation::{
+    read_installation_daemon_restarts, wait_for_installation_daemon_quiescence_for,
+};
 
 pub(super) use recovery::resume_completed_installation_daemons;
 use recovery::{
