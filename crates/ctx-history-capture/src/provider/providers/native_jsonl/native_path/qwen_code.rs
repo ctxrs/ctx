@@ -12,8 +12,8 @@ use crate::{
 
 use super::super::result_content::{NativeJsonlResultExtractionError, NativeJsonlResultSubrecord};
 
-pub(crate) const fn qwen_code_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
-    super::DirectJsonlSourceAdapter::new(
+pub(crate) const fn qwen_code_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
+    super::DirectJsonlFamilyAdapter::new(
         CaptureProvider::QwenCode,
         QWEN_CODE_SOURCE_FORMAT,
         "qwen-code-direct-native-jsonl-v1",

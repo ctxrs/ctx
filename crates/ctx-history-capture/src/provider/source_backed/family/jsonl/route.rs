@@ -251,6 +251,10 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory>;
 
+    fn discovery_error_kind(&self, _error: &CaptureError) -> SourceBackedRouteErrorKind {
+        SourceBackedRouteErrorKind::InvalidSource
+    }
+
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
@@ -286,6 +290,27 @@ pub(crate) struct JsonlFamilyLeaf {
 }
 
 impl JsonlFamilyLeaf {
+    pub(crate) fn bind_observed(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+        observation: JsonlFileObservation,
+    ) -> Self {
+        Self {
+            source,
+            source_path,
+            authority_path,
+            authority,
+            observation,
+            binding,
+            identity_probe: None,
+            identity_probe_rejected_records: 0,
+            whole_record: false,
+        }
+    }
+
     pub(crate) fn observe(
         source: SourceKey,
         source_path: PathBuf,
@@ -462,11 +487,33 @@ impl JsonlFamilyLeaf {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct JsonlFamilyRejectedLeaf {
+    source_path: PathBuf,
+    authority_path: PathBuf,
+    proof: TypedKey,
+}
+
+impl JsonlFamilyRejectedLeaf {
+    pub(crate) fn bind_observed(
+        source_path: PathBuf,
+        authority_path: PathBuf,
+        proof: TypedKey,
+    ) -> Self {
+        Self {
+            source_path,
+            authority_path,
+            proof,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct JsonlFamilyInventory {
     root_missing: bool,
     observation: SourceInventoryObservation,
     authority: Option<Arc<ProviderSourceRoot>>,
     leaves: Vec<JsonlFamilyLeaf>,
+    rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
 }
 
 impl JsonlFamilyInventory {
@@ -474,24 +521,44 @@ impl JsonlFamilyInventory {
         provider: CaptureProvider,
         root: &Path,
         authority: Arc<ProviderSourceRoot>,
+        leaves: Vec<JsonlFamilyLeaf>,
+    ) -> Result<Self> {
+        Self::present_with_rejected(provider, root, authority, leaves, Vec::new())
+    }
+
+    pub(crate) fn present_with_rejected(
+        provider: CaptureProvider,
+        root: &Path,
+        authority: Arc<ProviderSourceRoot>,
         mut leaves: Vec<JsonlFamilyLeaf>,
+        mut rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
     ) -> Result<Self> {
         leaves.sort_by(|left, right| left.source_path.cmp(&right.source_path));
-        let observation = inventory_observation(provider, root, false, Some(&authority), &leaves)?;
+        rejected_leaves.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+        let observation = inventory_observation(
+            provider,
+            root,
+            false,
+            Some(&authority),
+            &leaves,
+            &rejected_leaves,
+        )?;
         Ok(Self {
             root_missing: false,
             observation,
             authority: Some(authority),
             leaves,
+            rejected_leaves,
         })
     }
 
     pub(crate) fn missing(provider: CaptureProvider, root: &Path) -> Result<Self> {
         Ok(Self {
             root_missing: true,
-            observation: inventory_observation(provider, root, true, None, &[])?,
+            observation: inventory_observation(provider, root, true, None, &[], &[])?,
             authority: None,
             leaves: Vec::new(),
+            rejected_leaves: Vec::new(),
         })
     }
 
@@ -501,6 +568,10 @@ impl JsonlFamilyInventory {
 
     pub(crate) fn leaves(&self) -> &[JsonlFamilyLeaf] {
         &self.leaves
+    }
+
+    pub(crate) fn rejected_leaves(&self) -> &[JsonlFamilyRejectedLeaf] {
+        &self.rejected_leaves
     }
 
     fn certify_against(&self, closing: &Self) -> Result<CertifiedSourceInventory> {
@@ -641,11 +712,17 @@ fn capture(
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<()> {
     reset_terminal(resident)?;
-    let opening = discover(adapter, root).map_err(route_invalid)?;
+    let opening = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing() {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::Unavailable,
             "provider JSONL root is unavailable",
+        ));
+    }
+    if opening.leaves().is_empty() && !opening.rejected_leaves().is_empty() {
+        return Err(SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::InvalidSource,
+            "provider JSONL root contains only rejected identity leaves",
         ));
     }
     let bases = base_sources_for_root(adapter, &opening, sink).map_err(route_invalid)?;
@@ -683,7 +760,7 @@ fn capture(
     let bases_by_descriptor = bases_by_descriptor(&bases)?;
     let terminal_sources = scan_leaves(adapter, opening.leaves(), &bases_by_descriptor, sink)?;
 
-    let closing = discover(adapter, root).map_err(route_invalid)?;
+    let closing = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
     let inventory = opening.certify_against(&closing).map_err(route_invalid)?;
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_internal)?;
@@ -752,6 +829,13 @@ fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamily
 
 fn route_invalid(error: impl std::fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
+}
+
+fn route_discovery(
+    adapter: &dyn JsonlFamilyAdapter,
+    error: CaptureError,
+) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(adapter.discovery_error_kind(&error), error.to_string())
 }
 
 fn route_internal(error: impl std::fmt::Display) -> SourceBackedRouteError {

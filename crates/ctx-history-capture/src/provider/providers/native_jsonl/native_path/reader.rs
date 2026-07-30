@@ -98,6 +98,17 @@ impl DirectJsonlProjector {
         #[cfg(test)]
         DIRECT_JSONL_PROVIDER_PROJECTIONS
             .set(DIRECT_JSONL_PROVIDER_PROJECTIONS.get().saturating_add(1));
+        self.project_record_inner(record)
+    }
+
+    pub(crate) fn identify_record(
+        &mut self,
+        record: JsonlRecordRef<'_>,
+    ) -> Result<Vec<DirectJsonlRejection>> {
+        Ok(self.project_record_inner(record)?.rejections)
+    }
+
+    fn project_record_inner(&mut self, record: JsonlRecordRef<'_>) -> Result<ProjectedLine> {
         let evidence = record.evidence();
         self.project_line(
             record.bytes(),
