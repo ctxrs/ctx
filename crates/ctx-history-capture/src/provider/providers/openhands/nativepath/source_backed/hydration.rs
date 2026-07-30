@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Component, Path},
 };
 
@@ -127,22 +127,30 @@ fn hydrate_batch(
     if !plan.source.exact_descriptor_eq(&first_source) {
         return Err(OpenHandsSourceBackedErrorV2::InvalidLocator);
     }
-    let leaves = group
-        .leaves()
+    let leaf_ordinals = coordinates
         .iter()
-        .map(|leaf| (leaf.coordinates().relative_file_key.as_str(), leaf))
-        .collect::<BTreeMap<_, _>>();
+        .map(|coordinate| {
+            group
+                .leaf_ordinal(&coordinate.relative_file_key)
+                .ok_or_else(|| {
+                    OpenHandsSourceBackedErrorV2::LocatorLeafNotFound(
+                        coordinate.relative_file_key.clone(),
+                    )
+                })
+        })
+        .collect::<OpenHandsSourceBackedResultV2<Vec<_>>>()?;
 
     let mut records = Vec::with_capacity(request.len());
-    for (event, coordinate) in request.events().iter().zip(coordinates) {
-        let leaf = leaves
-            .get(coordinate.relative_file_key.as_str())
-            .ok_or_else(|| {
-                OpenHandsSourceBackedErrorV2::LocatorLeafNotFound(
-                    coordinate.relative_file_key.clone(),
-                )
-            })?;
-        let provider_bytes = group.read_leaf(leaf)?;
+    for ((event, coordinate), leaf_ordinal) in request
+        .events()
+        .iter()
+        .zip(coordinates)
+        .zip(leaf_ordinals.iter().copied())
+    {
+        let leaf = group.leaf_at(leaf_ordinal).ok_or_else(|| {
+            OpenHandsSourceBackedErrorV2::LocatorLeafNotFound(coordinate.relative_file_key.clone())
+        })?;
+        let provider_bytes = group.read_leaf_at(leaf_ordinal)?;
         let record_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
         let legacy_observation = OpenHandsFileObservation::from_metadata(leaf.metadata())?;
         let leaf_revision = leaf_revision_digest(
@@ -168,7 +176,7 @@ fn hydrate_batch(
             provider_bytes: body.into_bytes(),
         });
     }
-    group.revalidate()?;
+    group.revalidate_leaves(leaf_ordinals)?;
     let result = BatchHydrationResult::new(records)?;
     result
         .validate_for_request(request)

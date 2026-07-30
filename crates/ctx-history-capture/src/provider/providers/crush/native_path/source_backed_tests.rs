@@ -1,23 +1,154 @@
+use std::sync::{Arc, Mutex};
+
+use ctx_history_core::{BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{config::DbConfig, Connection};
 use serde_json::json;
 
 use super::*;
+use crate::provider::source_backed::{
+    refresh_source_backed_generation, register_crush_source_backed_route,
+    SourceBackedProviderRegistry, SourceBackedRouteSelection,
+};
+use crate::{
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
+};
 
 #[derive(Clone)]
 struct TestInventory {
-    observation: CrushProjectInventoryObservationV0,
+    observation: Arc<Mutex<CrushProjectInventoryObservationV0>>,
+    work: Arc<Mutex<TestInventoryWork>>,
+}
+
+#[derive(Default)]
+struct TestInventoryWork {
+    projection_passes: u64,
+    snapshots: Vec<CrushSnapshotWorkV0>,
 }
 
 impl TestInventory {
     fn new(observation: CrushProjectInventoryObservationV0) -> Self {
-        Self { observation }
+        Self {
+            observation: Arc::new(Mutex::new(observation)),
+            work: Arc::default(),
+        }
+    }
+
+    fn replace(&self, observation: CrushProjectInventoryObservationV0) {
+        *self.observation.lock().unwrap() = observation;
+    }
+
+    fn work(&self) -> (u64, Vec<CrushSnapshotWorkV0>) {
+        let work = self.work.lock().unwrap();
+        (work.projection_passes, work.snapshots.clone())
     }
 }
 
 impl CrushProjectInventorySourceV0 for TestInventory {
     fn observe(&self) -> CrushSourceBackedResultV0<CrushProjectInventoryObservationV0> {
-        Ok(self.observation.clone())
+        Ok(self.observation.lock().unwrap().clone())
     }
+
+    fn record_projection_pass(&self) {
+        let mut work = self.work.lock().unwrap();
+        work.projection_passes = work.projection_passes.saturating_add(1);
+    }
+
+    fn record_snapshot_work(&self, work: CrushSnapshotWorkV0) {
+        self.work.lock().unwrap().snapshots.push(work);
+    }
+}
+
+#[test]
+fn inventory_route_reuses_logical_leaves_and_deletes_without_projection() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let first = temp.path().join("route-first.db");
+    let second = temp.path().join("route-second.db");
+    write_database(&first, "session-a", "message-a", "alpha");
+    write_database(&second, "session-b", "message-b", "beta");
+    let route_inventory = Arc::new(TestInventory::new(inventory(
+        b"route-inventory-1",
+        vec![
+            database("route-project-a", &first),
+            database("route-project-b", &second),
+        ],
+    )));
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_crush_source_backed_route(
+        &mut registry,
+        ProviderSource {
+            provider: CaptureProvider::Crush,
+            path: temp.path().to_path_buf(),
+            exists: true,
+            source_format: CRUSH_SQLITE_SOURCE_FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Explicit,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+        Arc::clone(&route_inventory),
+    )
+    .unwrap();
+    let index_root = temp.path().join("route-index");
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
+    assert_eq!(cold.sources.len(), 2);
+    let (projection_passes, snapshots) = route_inventory.work();
+    assert_eq!(projection_passes, 2);
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots
+        .iter()
+        .all(|work| work.immutable_snapshot_opens == 1
+            && work.copied_snapshot_opens == 0
+            && work.source_bytes_copied == 0
+            && work.max_active_snapshots == 1));
+
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+    assert_eq!(route_inventory.work().0, 2);
+
+    Connection::open(&first)
+        .unwrap()
+        .execute(
+            "update messages set parts = ?1 where id = 'message-a'",
+            [json!([{"type": "text", "data": {"text": "alpha changed"}}]).to_string()],
+        )
+        .unwrap();
+    refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
+    assert_eq!(route_inventory.work().0, 3);
+
+    route_inventory.replace(inventory(
+        b"route-inventory-2",
+        vec![database("route-project-a", &first)],
+    ));
+    let deleted = refresh_source_backed_generation(&index_root, &registry, options).unwrap();
+    assert_eq!(deleted.sources.len(), 1);
+    assert_eq!(route_inventory.work().0, 3);
+
+    let source = crush_source_key(TypedKey::utf8("route-project-a").unwrap()).unwrap();
+    let events = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(&source, None, 8)
+        .unwrap()
+        .items;
+    assert_eq!(events.len(), 1);
+    let request =
+        EventHydrationRequest::new(events[0].event_id, events[0].locator.clone()).unwrap();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(vec![request]).unwrap())
+        .unwrap();
+    assert_eq!(hydrated.records()[0].provider_bytes, b"alpha changed");
 }
 
 #[test]
@@ -86,7 +217,10 @@ fn source_backed_multi_db_root_guards_and_exact_hydration() {
     let hydrated =
         CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
             .unwrap()
-            .hydrate(&locator)
+            .hydrate_locators(&[&locator])
+            .unwrap()
+            .into_iter()
+            .next()
             .unwrap();
     assert_eq!(hydrated.provider_session_id, "session-a");
     assert_eq!(hydrated.native_record_id, "message-a");
@@ -132,16 +266,19 @@ fn source_backed_replacement_keeps_ids_and_rejects_stale_locator() {
     assert!(matches!(
         CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
             .unwrap()
-            .hydrate(&before.locator),
-        Err(CrushSourceBackedErrorV0::StaleSourceEvidence)
+            .hydrate_locators(&[&before.locator]),
+        Err(CrushSourceBackedErrorV0::StaleRecordEvidence)
     ));
-    assert_eq!(
+    let hydrated =
         CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
             .unwrap()
-            .hydrate(&after.locator)
+            .hydrate_locators(&[&after.locator])
             .unwrap()
-            .decoded_display_text
-            .as_deref(),
+            .into_iter()
+            .next()
+            .unwrap();
+    assert_eq!(
+        hydrated.decoded_display_text.as_deref(),
         Some("after replacement")
     );
 }
@@ -152,15 +289,19 @@ fn document_for_only_message(source: &OpenedSource) -> LexicalDocument {
         after_rowid: None,
         next_ordinal: 0,
     };
-    let candidate = next_candidate(source.connection().unwrap(), &source.schema, &frontier)
-        .unwrap()
-        .unwrap();
+    let candidate = super::super::query::next_candidate(
+        source.connection().unwrap(),
+        &source.schema,
+        &frontier,
+    )
+    .unwrap()
+    .unwrap();
     let CrushHydratedRow::Message {
         row,
         session: Some(session),
         digest_values,
         ..
-    } = hydrate_row_from_connection(
+    } = super::super::query::hydrate_row_from_connection(
         source.connection().unwrap(),
         &source.schema,
         CrushNativePhase::Messages,
@@ -185,6 +326,8 @@ fn document_for_only_message(source: &OpenedSource) -> LexicalDocument {
     };
     lexical_document(
         source,
+        &load_session_parents(source.connection().unwrap(), &source.schema.session_columns)
+            .unwrap(),
         &row,
         &session,
         &digest_values,
@@ -215,11 +358,16 @@ fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
     assert!(document.body.ends_with("crush-tail"));
     assert!(finish_opened_source(source).unwrap());
 
-    let hydrated =
+    let resolver =
         CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap()
-            .hydrate(&document.locator)
             .unwrap();
+    let hydrated = resolver
+        .hydrate_locators(&[&document.locator])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(resolver.hydration_counters(), (1, 1));
     assert_eq!(
         hydrated.decoded_display_text.as_deref(),
         Some(text.as_str())

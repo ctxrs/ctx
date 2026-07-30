@@ -8,6 +8,8 @@ use ctx_history_core::{
     NativeItemKey, NativeRecordCoordinate, PositionStability, SourceKey, SourceRecordLocator,
     SubrecordSelector, TypedKey,
 };
+#[cfg(test)]
+use std::path::PathBuf;
 
 #[cfg(test)]
 use super::decode_certificate;
@@ -28,6 +30,8 @@ std::thread_local! {
     static DIRECT_JSONL_HYDRATION_WORK: std::cell::Cell<DirectJsonlHydrationWork> =
         const { std::cell::Cell::new(DirectJsonlHydrationWork {
             inventory_scans: 0,
+            leaf_index_entries: 0,
+            leaf_index_lookups: 0,
             source_binds: 0,
             leaf_opens: 0,
         }) };
@@ -44,10 +48,18 @@ pub(super) fn hydration_work() -> DirectJsonlHydrationWork {
 }
 
 #[cfg(test)]
-fn record_hydration_work(inventories: usize, binds: usize, opens: usize) {
+fn record_hydration_work(
+    inventories: usize,
+    leaf_index_entries: usize,
+    leaf_index_lookups: usize,
+    binds: usize,
+    opens: usize,
+) {
     let work = DIRECT_JSONL_HYDRATION_WORK.get();
     DIRECT_JSONL_HYDRATION_WORK.set(DirectJsonlHydrationWork {
         inventory_scans: work.inventory_scans.saturating_add(inventories),
+        leaf_index_entries: work.leaf_index_entries.saturating_add(leaf_index_entries),
+        leaf_index_lookups: work.leaf_index_lookups.saturating_add(leaf_index_lookups),
         source_binds: work.source_binds.saturating_add(binds),
         leaf_opens: work.leaf_opens.saturating_add(opens),
     });
@@ -150,10 +162,23 @@ impl DirectJsonlSourceAdapter {
             return Err(DirectJsonlSourceBackedError::IncompleteInventory);
         }
         #[cfg(test)]
-        record_hydration_work(1, 0, 0);
+        let mut leaves_by_path = HashMap::with_capacity(inventory.leaves.len());
+        let mut leaves_by_route = HashMap::with_capacity(inventory.leaves.len());
+        for (index, leaf) in inventory.leaves.iter().enumerate() {
+            #[cfg(test)]
+            leaves_by_path.entry(leaf.path.clone()).or_insert(index);
+            leaves_by_route
+                .entry(leaf.route_key.clone())
+                .or_insert(index);
+        }
+        #[cfg(test)]
+        record_hydration_work(1, inventory.leaves.len(), 0, 0, 0);
         Ok(DirectJsonlHydrationCatalog {
             adapter: self,
             inventory,
+            #[cfg(test)]
+            leaves_by_path,
+            leaves_by_route,
             resident_sources: HashMap::new(),
         })
     }
@@ -163,6 +188,8 @@ impl DirectJsonlSourceAdapter {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DirectJsonlHydrationWork {
     pub(crate) inventory_scans: usize,
+    pub(crate) leaf_index_entries: usize,
+    pub(crate) leaf_index_lookups: usize,
     pub(crate) source_binds: usize,
     pub(crate) leaf_opens: usize,
 }
@@ -170,6 +197,9 @@ pub(crate) struct DirectJsonlHydrationWork {
 pub(crate) struct DirectJsonlHydrationCatalog {
     adapter: DirectJsonlSourceAdapter,
     inventory: super::DirectJsonlSourceInventory,
+    #[cfg(test)]
+    leaves_by_path: HashMap<PathBuf, usize>,
+    leaves_by_route: HashMap<Vec<u8>, usize>,
     resident_sources: HashMap<[u8; 32], DirectJsonlResidentHydrationSource>,
 }
 
@@ -205,11 +235,12 @@ impl DirectJsonlHydrationCatalog {
             }
             binding.clone()
         } else {
+            #[cfg(test)]
+            self.record_leaf_lookup();
             let leaf = self
-                .inventory
-                .leaves
-                .iter()
-                .find(|leaf| leaf.path == *checkpoint.physical.identity().source_path())
+                .leaves_by_path
+                .get(checkpoint.physical.identity().source_path().as_path())
+                .and_then(|index| self.inventory.leaves.get(*index))
                 .ok_or(DirectJsonlSourceBackedError::SourceAbsent)?
                 .clone();
             let native_session_id = checkpoint
@@ -262,11 +293,12 @@ impl DirectJsonlHydrationCatalog {
             if !expected_source.exact_descriptor_eq(source) {
                 return Err(DirectJsonlSourceBackedError::InvalidLocator);
             }
+            #[cfg(test)]
+            self.record_leaf_lookup();
             let leaf = self
-                .inventory
-                .leaves
-                .iter()
-                .find(|leaf| leaf.route_key == route_key)
+                .leaves_by_route
+                .get(&route_key)
+                .and_then(|index| self.inventory.leaves.get(*index))
                 .ok_or(DirectJsonlSourceBackedError::SourceAbsent)?
                 .clone();
             let binding = DirectJsonlResidentHydrationSource {
@@ -290,7 +322,12 @@ impl DirectJsonlHydrationCatalog {
 
     #[cfg(test)]
     fn record_source_binding(&self) {
-        record_hydration_work(0, 1, 0);
+        record_hydration_work(0, 0, 0, 1, 0);
+    }
+
+    #[cfg(test)]
+    fn record_leaf_lookup(&self) {
+        record_hydration_work(0, 0, 1, 0, 0);
     }
 }
 
@@ -302,7 +339,7 @@ fn hydrate_bound_group(
     requests: &[EventHydrationRequest],
 ) -> DirectJsonlSourceBackedResult<Vec<HydratedProviderRecord>> {
     #[cfg(test)]
-    record_hydration_work(0, 0, 1);
+    record_hydration_work(0, 0, 0, 0, 1);
     let (current_leaf, source_file) =
         adapter.open_leaf_for_hydration(leaf, source, native_session_id)?;
     let mut sub_ordinals = Vec::with_capacity(requests.len());

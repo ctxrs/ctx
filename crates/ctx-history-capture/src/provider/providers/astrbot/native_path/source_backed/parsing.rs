@@ -20,7 +20,7 @@ use super::super::super::{
         PlatformMessageLink, PlatformMessageRow,
     },
     source::{
-        fetch_candidate, hydrate_conversation, hydrate_platform_message, AstrBotSql, RowCandidate,
+        fetch_candidates, visit_conversations, visit_platform_messages, AstrBotSql, RowCandidate,
     },
     ASTRBOT_CAPTURE_REVISION, ASTRBOT_POLICY_REVISION,
 };
@@ -193,148 +193,138 @@ pub(crate) fn scan_astrbot_snapshot_v0(
     let mut checkpoint_links = BTreeMap::new();
 
     loop {
-        let Some(candidate) = fetch_candidate(
+        let candidates = fetch_candidates(
             conn,
             &sql.conversation_candidate_initial,
             &sql.conversation_candidate_after,
             conversation_after,
-        )?
-        else {
+            SOURCE_BACKED_PAGE_ROWS,
+        )?;
+        if candidates.is_empty() {
             break;
-        };
-        conversation_after = Some(candidate.physical_rowid);
-        add_certified_bytes(&mut counts, candidate.observed_bytes()?)?;
-        if candidate.observed_bytes()?
-            > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX)
-        {
-            content_chain = chain_hash(
-                content_chain,
-                candidate_hash(
+        }
+        let mut rowids = Vec::with_capacity(candidates.len());
+        for candidate in &candidates {
+            if !candidate_is_oversize(*candidate)? {
+                rowids.push(candidate.physical_rowid);
+            }
+        }
+        let mut candidate_index = 0;
+        visit_conversations(
+            conn,
+            &sql.conversation_hydration,
+            &rowids,
+            |physical_rowid, row| {
+                process_oversize_run(
+                    &candidates,
+                    &mut candidate_index,
                     b"astrbot-source-backed-conversation-oversize-v0\0",
-                    candidate,
-                ),
-            );
-            add_complete(&mut counts)?;
-            add_rejected(&mut counts)?;
-            native_ordinal = native_ordinal
-                .checked_add(1)
-                .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;
-            continue;
-        }
-
-        let row =
-            hydrate_conversation(conn, &sql.conversation_hydration, candidate.physical_rowid)?;
-        let row_digest = logical_values_digest(&super::super::super::model::conversation_values(
-            row.clone(),
-        ));
-        content_chain = chain_hash(content_chain, row_digest);
-        let (items, content_is_array) = conversation_items(&row.content);
-        let provider_session_id = provider_session_id(&row);
-        for item in &items {
-            if let Some(checkpoint) = checkpoint_id(item) {
-                checkpoint_links.insert(
-                    checkpoint,
-                    PlatformMessageLink {
-                        provider_session_id: provider_session_id.clone(),
-                        parent_created_at: row.created_at,
-                    },
-                );
-            }
-        }
-        let item_count = items.len().max(1);
-        for item_index in 0..item_count {
-            add_complete(&mut counts)?;
-            let item = items.get(item_index);
-            let event =
-                source_backed_conversation_event(&row, item, content_is_array, native_ordinal);
-            if let Some(event) = event {
-                let complete_text = if content_is_array {
-                    item.and_then(item_text)
-                        .filter(|text| !text.trim().is_empty())
-                        .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
-                } else {
-                    item.and_then(provider_value_text)
-                        .filter(|text| !text.trim().is_empty())
-                        .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
-                };
-                let session = conversation_session_fact(&row);
-                let document = conversation_document(
-                    source,
-                    candidate.physical_rowid,
-                    item_index,
-                    row_digest,
-                    item,
-                    &session,
-                    &event,
-                    &complete_text,
+                    &mut counts,
+                    &mut content_chain,
+                    &mut native_ordinal,
                 )?;
-                emit_bounded(sink, &mut page, document)?;
-                add_retained(&mut counts)?;
-            } else {
-                add_ignored(&mut counts)?;
-            }
-            native_ordinal = native_ordinal
-                .checked_add(1)
-                .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;
+                let candidate = candidates.get(candidate_index).copied().ok_or(
+                    AstrBotSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture),
+                )?;
+                candidate_index += 1;
+                if candidate.physical_rowid != physical_rowid {
+                    return Err(AstrBotSourceBackedErrorV0::Capture(
+                        CaptureError::SourceChangedDuringCapture,
+                    ));
+                }
+                process_conversation_row(
+                    source,
+                    candidate,
+                    row,
+                    sink,
+                    &mut page,
+                    &mut checkpoint_links,
+                    &mut counts,
+                    &mut content_chain,
+                    &mut native_ordinal,
+                )
+            },
+        )?;
+        process_oversize_run(
+            &candidates,
+            &mut candidate_index,
+            b"astrbot-source-backed-conversation-oversize-v0\0",
+            &mut counts,
+            &mut content_chain,
+            &mut native_ordinal,
+        )?;
+        if candidate_index != candidates.len() {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
         }
+        conversation_after = candidates.last().map(|candidate| candidate.physical_rowid);
     }
 
-    if let (Some(initial), Some(after)) = (
+    if let (Some(initial), Some(after), Some(hydration)) = (
         sql.platform_message_candidate_initial.as_deref(),
         sql.platform_message_candidate_after.as_deref(),
+        sql.platform_message_hydration.as_deref(),
     ) {
         let mut platform_after = None;
         loop {
-            let Some(candidate) = fetch_candidate(conn, initial, after, platform_after)? else {
+            let candidates = fetch_candidates(
+                conn,
+                initial,
+                after,
+                platform_after,
+                SOURCE_BACKED_PAGE_ROWS,
+            )?;
+            if candidates.is_empty() {
                 break;
-            };
-            platform_after = Some(candidate.physical_rowid);
-            add_certified_bytes(&mut counts, candidate.observed_bytes()?)?;
-            add_complete(&mut counts)?;
-            if candidate.observed_bytes()?
-                > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX)
-            {
-                content_chain = chain_hash(
-                    content_chain,
-                    candidate_hash(b"astrbot-source-backed-platform-oversize-v0\0", candidate),
-                );
-                add_rejected(&mut counts)?;
-            } else {
-                let (unit, rejection, row_digest, complete_text) = source_backed_platform_unit(
-                    conn,
-                    &sql,
-                    candidate,
-                    native_ordinal,
-                    &checkpoint_links,
-                )?;
-                content_chain = chain_hash(content_chain, row_digest);
-                if rejection.is_some() {
-                    add_rejected(&mut counts)?;
-                } else if let Some(unit) = unit {
-                    if let Some(event) = unit.event {
-                        let document = platform_document(
-                            source,
-                            candidate.physical_rowid,
-                            candidate.legacy_order.logical_id,
-                            row_digest,
-                            &unit.session,
-                            &event,
-                            complete_text
-                                .as_deref()
-                                .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?,
-                        )?;
-                        emit_bounded(sink, &mut page, document)?;
-                        add_retained(&mut counts)?;
-                    } else {
-                        add_ignored(&mut counts)?;
-                    }
-                } else {
-                    add_ignored(&mut counts)?;
+            }
+            let mut rowids = Vec::with_capacity(candidates.len());
+            for candidate in &candidates {
+                if !candidate_is_oversize(*candidate)? {
+                    rowids.push(candidate.physical_rowid);
                 }
             }
-            native_ordinal = native_ordinal
-                .checked_add(1)
-                .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;
+            let mut candidate_index = 0;
+            visit_platform_messages(conn, hydration, &rowids, |physical_rowid, row| {
+                process_oversize_run(
+                    &candidates,
+                    &mut candidate_index,
+                    b"astrbot-source-backed-platform-oversize-v0\0",
+                    &mut counts,
+                    &mut content_chain,
+                    &mut native_ordinal,
+                )?;
+                let candidate = candidates.get(candidate_index).copied().ok_or(
+                    AstrBotSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture),
+                )?;
+                candidate_index += 1;
+                if candidate.physical_rowid != physical_rowid {
+                    return Err(AstrBotSourceBackedErrorV0::Capture(
+                        CaptureError::SourceChangedDuringCapture,
+                    ));
+                }
+                process_platform_row(
+                    source,
+                    candidate,
+                    row,
+                    &checkpoint_links,
+                    sink,
+                    &mut page,
+                    &mut counts,
+                    &mut content_chain,
+                    &mut native_ordinal,
+                )
+            })?;
+            process_oversize_run(
+                &candidates,
+                &mut candidate_index,
+                b"astrbot-source-backed-platform-oversize-v0\0",
+                &mut counts,
+                &mut content_chain,
+                &mut native_ordinal,
+            )?;
+            if candidate_index != candidates.len() {
+                return Err(CaptureError::SourceChangedDuringCapture.into());
+            }
+            platform_after = candidates.last().map(|candidate| candidate.physical_rowid);
         }
     }
 
@@ -360,6 +350,74 @@ pub(crate) fn scan_astrbot_snapshot_v0(
     .certify(source.source_key.clone())?)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn process_conversation_row(
+    source: &AstrBotSourceBackedSourceV0,
+    candidate: RowCandidate,
+    row: ConversationRow,
+    sink: &mut impl AstrBotSourceBackedSinkV0,
+    page: &mut Vec<LexicalDocument>,
+    checkpoint_links: &mut BTreeMap<String, PlatformMessageLink>,
+    counts: &mut ScannedSourceCounts,
+    content_chain: &mut [u8; 32],
+    native_ordinal: &mut u64,
+) -> AstrBotSourceBackedResultV0<()> {
+    add_certified_bytes(counts, candidate.observed_bytes()?)?;
+    let row_digest = logical_values_digest(&super::super::super::model::conversation_values(
+        row.clone(),
+    ));
+    *content_chain = chain_hash(*content_chain, row_digest);
+    let (items, content_is_array) = conversation_items(&row.content);
+    let provider_session_id = provider_session_id(&row);
+    for item in &items {
+        if let Some(checkpoint) = checkpoint_id(item) {
+            checkpoint_links.insert(
+                checkpoint,
+                PlatformMessageLink {
+                    provider_session_id: provider_session_id.clone(),
+                    parent_created_at: row.created_at,
+                },
+            );
+        }
+    }
+    let item_count = items.len().max(1);
+    for item_index in 0..item_count {
+        add_complete(counts)?;
+        let item = items.get(item_index);
+        let event = source_backed_conversation_event(&row, item, content_is_array, *native_ordinal);
+        if let Some(event) = event {
+            let complete_text = if content_is_array {
+                item.and_then(item_text)
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
+            } else {
+                item.and_then(provider_value_text)
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
+            };
+            let session = conversation_session_fact(&row);
+            let document = conversation_document(
+                source,
+                candidate.physical_rowid,
+                item_index,
+                row_digest,
+                item,
+                &session,
+                &event,
+                &complete_text,
+            )?;
+            emit_bounded(sink, page, document)?;
+            add_retained(counts)?;
+        } else {
+            add_ignored(counts)?;
+        }
+        *native_ordinal = native_ordinal
+            .checked_add(1)
+            .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;
+    }
+    Ok(())
+}
+
 fn emit_bounded(
     sink: &mut impl AstrBotSourceBackedSinkV0,
     page: &mut Vec<LexicalDocument>,
@@ -375,19 +433,10 @@ fn emit_bounded(
 }
 
 fn source_backed_platform_unit(
-    conn: &rusqlite::Connection,
-    sql: &AstrBotSql,
-    candidate: RowCandidate,
+    row: PlatformMessageRow,
     native_ordinal: u64,
     checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
 ) -> AstrBotSourceBackedResultV0<PlatformUnitProjection> {
-    let hydration =
-        sql.platform_message_hydration
-            .as_deref()
-            .ok_or(CaptureError::SystemInvariant(
-                "AstrBot platform-message hydration SQL is missing",
-            ))?;
-    let row = hydrate_platform_message(conn, hydration, candidate.physical_rowid)?;
     let row_sha256 = serialized_hash(b"astrbot-platform-row-v1\0", &row)?;
     let link = row
         .llm_checkpoint_id
@@ -425,6 +474,101 @@ fn source_backed_platform_unit(
         row_sha256,
         Some(text),
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_platform_row(
+    source: &AstrBotSourceBackedSourceV0,
+    candidate: RowCandidate,
+    row: PlatformMessageRow,
+    checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
+    sink: &mut impl AstrBotSourceBackedSinkV0,
+    page: &mut Vec<LexicalDocument>,
+    counts: &mut ScannedSourceCounts,
+    content_chain: &mut [u8; 32],
+    native_ordinal: &mut u64,
+) -> AstrBotSourceBackedResultV0<()> {
+    add_certified_bytes(counts, candidate.observed_bytes()?)?;
+    add_complete(counts)?;
+    let (unit, rejection, row_digest, complete_text) =
+        source_backed_platform_unit(row, *native_ordinal, checkpoint_links)?;
+    *content_chain = chain_hash(*content_chain, row_digest);
+    if rejection.is_some() {
+        add_rejected(counts)?;
+    } else if let Some(unit) = unit {
+        if let Some(event) = unit.event {
+            let document = platform_document(
+                source,
+                candidate.physical_rowid,
+                candidate.legacy_order.logical_id,
+                row_digest,
+                &unit.session,
+                &event,
+                complete_text
+                    .as_deref()
+                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?,
+            )?;
+            emit_bounded(sink, page, document)?;
+            add_retained(counts)?;
+        } else {
+            add_ignored(counts)?;
+        }
+    } else {
+        add_ignored(counts)?;
+    }
+    *native_ordinal = native_ordinal
+        .checked_add(1)
+        .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;
+    Ok(())
+}
+
+fn candidate_is_oversize(candidate: RowCandidate) -> AstrBotSourceBackedResultV0<bool> {
+    Ok(candidate.observed_bytes()?
+        > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX))
+}
+
+fn process_oversize_run(
+    candidates: &[RowCandidate],
+    index: &mut usize,
+    hash_domain: &[u8],
+    counts: &mut ScannedSourceCounts,
+    content_chain: &mut [u8; 32],
+    native_ordinal: &mut u64,
+) -> AstrBotSourceBackedResultV0<()> {
+    while candidates
+        .get(*index)
+        .copied()
+        .map(candidate_is_oversize)
+        .transpose()?
+        == Some(true)
+    {
+        process_oversize_candidate(
+            candidates[*index],
+            hash_domain,
+            counts,
+            content_chain,
+            native_ordinal,
+        )?;
+        *index += 1;
+    }
+    Ok(())
+}
+
+fn process_oversize_candidate(
+    candidate: RowCandidate,
+    hash_domain: &[u8],
+    counts: &mut ScannedSourceCounts,
+    content_chain: &mut [u8; 32],
+    native_ordinal: &mut u64,
+) -> AstrBotSourceBackedResultV0<()> {
+    add_certified_bytes(counts, candidate.observed_bytes()?)?;
+    *content_chain = chain_hash(*content_chain, candidate_hash(hash_domain, candidate));
+    add_complete(counts)?;
+    add_rejected(counts)?;
+    *native_ordinal = native_ordinal
+        .checked_add(1)
+        .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;
+    Ok(())
 }
 
 fn add_complete(counts: &mut ScannedSourceCounts) -> AstrBotSourceBackedResultV0<()> {

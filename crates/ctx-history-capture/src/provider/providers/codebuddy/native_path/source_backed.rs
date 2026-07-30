@@ -11,15 +11,16 @@ use ctx_history_index::LexicalDocument;
 #[cfg(test)]
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Barrier, Mutex,
 };
 
 use crate::provider::{
     provider_safe_path_segment,
     source_backed::{
+        document_leaf_execution_policy,
         family::document::{
-            register_replacement_document_tree_route, ChangedDocumentSink, DocumentSourceTerminal,
-            ReplacementDocumentTree,
+            register_replacement_document_tree_route, ChangedDocumentSink,
+            DocumentLeafExecutionPolicy, DocumentSourceTerminal, ReplacementDocumentTree,
         },
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
@@ -76,6 +77,69 @@ struct CodeBuddyDocumentAdapter {
     context: ProviderAdapterContext,
     #[cfg(test)]
     parse_count: Option<Arc<AtomicUsize>>,
+    #[cfg(test)]
+    leaf_workers: Option<usize>,
+    #[cfg(test)]
+    scan_activity: Option<Arc<CodeBuddyScanActivity>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct CodeBuddyScanActivity {
+    barrier: Mutex<Option<Arc<Barrier>>>,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+#[cfg(test)]
+impl CodeBuddyScanActivity {
+    fn new(participants: usize) -> Arc<Self> {
+        Arc::new(Self {
+            barrier: Mutex::new(Some(Arc::new(Barrier::new(participants)))),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        })
+    }
+
+    fn begin(self: &Arc<Self>) -> CodeBuddyScanActivityGuard {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        let barrier = self
+            .barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+        CodeBuddyScanActivityGuard {
+            activity: Arc::clone(self),
+        }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    fn disable_barrier(&self) {
+        *self
+            .barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+struct CodeBuddyScanActivityGuard {
+    activity: Arc<CodeBuddyScanActivity>,
+}
+
+#[cfg(test)]
+impl Drop for CodeBuddyScanActivityGuard {
+    fn drop(&mut self) {
+        let previous = self.activity.active.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0);
+    }
 }
 
 impl ReplacementDocumentTree for CodeBuddyDocumentAdapter {
@@ -88,6 +152,22 @@ impl ReplacementDocumentTree for CodeBuddyDocumentAdapter {
 
     fn owns_source(&self, source: &SourceKey) -> bool {
         owns_codebuddy_source(source)
+    }
+
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        #[cfg(test)]
+        if let Some(leaf_workers) = self.leaf_workers {
+            return DocumentLeafExecutionPolicy::IndependentWithWorkers(leaf_workers);
+        }
+        document_leaf_execution_policy(CaptureProvider::CodeBuddy)
+    }
+
+    fn independent_leaf_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<SourceKey> {
+        Ok(leaf.source.clone())
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<CodeBuddyDocumentTree> {
@@ -112,6 +192,11 @@ impl ReplacementDocumentTree for CodeBuddyDocumentAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
+        #[cfg(test)]
+        let _scan_activity = self
+            .scan_activity
+            .as_ref()
+            .map(CodeBuddyScanActivity::begin);
         #[cfg(test)]
         if let Some(parse_count) = self.parse_count.as_ref() {
             parse_count.fetch_add(1, Ordering::Relaxed);
@@ -595,6 +680,10 @@ pub(crate) mod registration {
             context,
             #[cfg(test)]
             parse_count: None,
+            #[cfg(test)]
+            leaf_workers: None,
+            #[cfg(test)]
+            scan_activity: None,
         };
         register_replacement_document_tree_route(registry, source, selection, adapter)
     }

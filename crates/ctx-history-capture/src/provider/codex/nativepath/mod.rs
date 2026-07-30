@@ -38,8 +38,9 @@ pub(crate) use source_backed::{
     ingest_codex_sources_serial_v0, ingest_codex_sources_v0, managed_codex_session_source,
     observe_codex_explicit_session_source_backed_v0,
     source_observation as codex_source_observation,
-    writer_base_sources as codex_writer_base_sources, CodexExplicitSessionSourceBackedInputV0,
-    CodexSessionTreeInventoryV0, CodexTerminalSourceEvidenceV0,
+    writer_base_sources as codex_writer_base_sources, CodexCatalogWorkV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
+    CodexTerminalSourceEvidenceV0,
 };
 pub use source_backed::{
     hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,

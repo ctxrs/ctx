@@ -572,19 +572,39 @@ fn replacement_tree_publishes_noop_replacement_and_authoritative_deletion() {
         memory_bytes: 15_000_000,
     };
 
+    registration::reset_route_work_counters();
     let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
     assert_eq!(cold.commit.indexed_documents, 2);
-    assert!(cold.sources[0].frontier().is_none());
+    assert!(cold.sources[0].frontier().is_some());
+    let cold_work = registration::route_work_counters();
+    assert_eq!(cold_work.logical_observation_passes, 1);
+    assert_eq!(cold_work.projection_passes, 1);
+    assert_eq!(
+        cold_work.immutable_snapshot_opens + cold_work.copied_snapshot_opens,
+        1
+    );
+    assert_eq!(cold_work.terminal_fences, 1);
+    assert_eq!(cold_work.terminal_revalidations, 2);
 
     Connection::open(&path)
         .unwrap()
         .execute_batch("vacuum")
         .unwrap();
+    registration::reset_route_work_counters();
     let logical_noop =
         refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
     assert_eq!(logical_noop.sources, cold.sources);
     assert_eq!(logical_noop.commit.indexed_documents, 2);
     assert!(logical_noop.removals.is_empty());
+    let replay_work = registration::route_work_counters();
+    assert_eq!(replay_work.logical_observation_passes, 1);
+    assert_eq!(replay_work.projection_passes, 0);
+    assert_eq!(
+        replay_work.immutable_snapshot_opens + replay_work.copied_snapshot_opens,
+        1
+    );
+    assert_eq!(replay_work.terminal_fences, 1);
+    assert_eq!(replay_work.terminal_revalidations, 2);
 
     Connection::open(&path)
         .unwrap()
@@ -595,10 +615,20 @@ fn replacement_tree_publishes_noop_replacement_and_authoritative_deletion() {
             [],
         )
         .unwrap();
+    registration::reset_route_work_counters();
     let replacement = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
     assert_ne!(replacement.sources, logical_noop.sources);
     assert_eq!(replacement.commit.indexed_documents, 2);
-    assert!(replacement.sources[0].frontier().is_none());
+    assert!(replacement.sources[0].frontier().is_some());
+    let replacement_work = registration::route_work_counters();
+    assert_eq!(replacement_work.logical_observation_passes, 1);
+    assert_eq!(replacement_work.projection_passes, 1);
+    assert_eq!(
+        replacement_work.immutable_snapshot_opens + replacement_work.copied_snapshot_opens,
+        1
+    );
+    assert_eq!(replacement_work.terminal_fences, 1);
+    assert_eq!(replacement_work.terminal_revalidations, 2);
 
     fs::remove_file(&path).unwrap();
     let deleted = refresh_source_backed_generation(&index, &registry, options).unwrap();

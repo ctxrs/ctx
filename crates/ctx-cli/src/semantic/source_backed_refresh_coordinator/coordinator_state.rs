@@ -1,38 +1,21 @@
 use super::*;
 
+mod generation_authority;
 mod generation_observation;
+mod read_model;
 mod runtime_metadata;
+use generation_authority::RetainedGenerationResolver;
+pub(crate) use generation_authority::{
+    GenerationBoundSourceBackedResolver, SourceBackedResolverAccessError,
+};
+use read_model::{
+    SourceBackedRefreshAttempt, SourceBackedRefreshProgress, SourceBackedRefreshState,
+};
+pub(crate) use read_model::{SourceBackedRefreshReceipt, SourceBackedRefreshTimings};
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
     SourceRefreshRuntimeMetadata,
 };
-
-/// Verified terminal receipt for one daemon-owned source refresh.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct SourceBackedRefreshReceipt {
-    pub(crate) previous_generation: Option<String>,
-    pub(crate) published_generation: String,
-    pub(crate) generation_changed: bool,
-    pub(crate) current: SourceBackedRefreshCurrent,
-}
-
-impl SourceBackedRefreshReceipt {
-    pub(crate) fn to_json(&self) -> Value {
-        compact_json(json!({
-            "previous_generation": self.previous_generation,
-            "published_generation": self.published_generation,
-            "generation_changed": self.generation_changed,
-            "current": self.current.to_json(),
-        }))
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) struct SourceBackedRefreshTimings {
-    pub(crate) discovery_us: u64,
-    pub(crate) scan_stage_us: u64,
-    pub(crate) commit_us: u64,
-}
 
 pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) phase: String,
@@ -111,231 +94,12 @@ impl SourceBackedRefreshExecutor for CaptureOwnedSourceBackedRefreshExecutor {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum SourceBackedRefreshState {
-    Queued,
-    Running,
-    Published,
-    Failed,
-}
-
-impl SourceBackedRefreshState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Published => "published",
-            Self::Failed => "failed",
-        }
-    }
-
-    fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SourceBackedRefreshProgress {
-    phase: String,
-    completed_sources: usize,
-    total_sources: usize,
-    current_source: Option<String>,
-}
-
-impl Default for SourceBackedRefreshProgress {
-    fn default() -> Self {
-        Self {
-            phase: "queued".to_owned(),
-            completed_sources: 0,
-            total_sources: 0,
-            current_source: None,
-        }
-    }
-}
-
-impl SourceBackedRefreshProgress {
-    fn to_json(&self) -> Value {
-        compact_json(json!({
-            "phase": self.phase,
-            "completed_sources": self.completed_sources,
-            "total_sources": self.total_sources,
-            "current_source": self.current_source,
-        }))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SourceBackedRefreshAttempt {
-    request_id: String,
-    state: SourceBackedRefreshState,
-    requested_at_ms: i64,
-    started_at_ms: Option<i64>,
-    finished_at_ms: Option<i64>,
-    previous_generation: Option<String>,
-    published_generation: Option<String>,
-    requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    coalesced_requests: u64,
-    progress: SourceBackedRefreshProgress,
-    scanned_routes: Option<usize>,
-    unsupported_routes: Option<usize>,
-    certified_source_count: Option<usize>,
-    certified_source_bytes: Option<u64>,
-    receipt: Option<SourceBackedRefreshReceipt>,
-    timings: Option<SourceBackedRefreshTimings>,
-    daemon_mode: DaemonMode,
-    trigger: &'static str,
-    trigger_provenance: &'static str,
-    last_error: Option<String>,
-    post_publication_error: Option<String>,
-}
-
-impl SourceBackedRefreshAttempt {
-    fn failure_code(&self) -> Option<&'static str> {
-        self.last_error
-            .as_deref()
-            .filter(|error| error.contains(TERMINAL_COVERAGE_ERROR_CODE))
-            .map(|_| TERMINAL_COVERAGE_ERROR_CODE)
-    }
-
-    fn failure_reason(&self) -> Option<&'static str> {
-        self.failure_code()
-            .map(|_| "provider_terminal_coverage_unavailable")
-    }
-
-    fn to_json(&self) -> Value {
-        compact_json(json!({
-            "ok": true,
-            "schema_version": 1,
-            "owner": "daemon",
-            "request_id": self.request_id,
-            "request_state": self.state.as_str(),
-            "requested_at_ms": self.requested_at_ms,
-            "started_at_ms": self.started_at_ms,
-            "finished_at_ms": self.finished_at_ms,
-            "previous_generation": self.previous_generation,
-            "published_generation": self.published_generation,
-            "requested_explicit_source_catalog": self.requested_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "published_explicit_source_catalog": self.published_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
-            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
-            "coalesced_requests": self.coalesced_requests,
-            "progress": self.progress.to_json(),
-            "scanned_routes": self.scanned_routes,
-            "unsupported_routes": self.unsupported_routes,
-            "certified_source_count": self.certified_source_count,
-            "certified_source_bytes": self.certified_source_bytes,
-            "timings_us": self.timings.map(SourceBackedRefreshTimings::to_json),
-            "daemon_mode": self.daemon_mode.as_str(),
-            "trigger": self.trigger,
-            "trigger_provenance": self.trigger_provenance,
-            "error_code": self.failure_code(),
-            "reason": self.failure_reason(),
-            "last_error": self.last_error,
-            "post_publication_error": self.post_publication_error,
-        }))
-    }
-
-    fn job_json(&self) -> Value {
-        let status = match self.state {
-            SourceBackedRefreshState::Published => "completed",
-            SourceBackedRefreshState::Failed => "failed",
-            SourceBackedRefreshState::Queued | SourceBackedRefreshState::Running => "running",
-        };
-        compact_json(json!({
-            "mode": SourceBackedRefreshMode::Background.as_str(),
-            "owner": "daemon",
-            "kind": "source_backed",
-            "status": status,
-            "request_id": self.request_id,
-            "request_state": self.state.as_str(),
-            "source_count": self.progress.total_sources,
-            "last_run_at_ms": self.started_at_ms.unwrap_or(self.requested_at_ms),
-            "previous_generation": self.previous_generation,
-            "published_generation": self.published_generation,
-            "requested_explicit_source_catalog": self.requested_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "published_explicit_source_catalog": self.published_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
-            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
-            "coalesced_requests": self.coalesced_requests,
-            "progress": self.progress.to_json(),
-            "scanned_routes": self.scanned_routes,
-            "unsupported_routes": self.unsupported_routes,
-            "certified_source_count": self.certified_source_count,
-            "certified_source_bytes": self.certified_source_bytes,
-            "timings_us": self.timings.map(SourceBackedRefreshTimings::to_json),
-            "daemon_mode": self.daemon_mode.as_str(),
-            "trigger": self.trigger,
-            "trigger_provenance": self.trigger_provenance,
-            "error_code": self.failure_code(),
-            "reason": self.failure_reason(),
-            "last_error": self.last_error,
-            "post_publication_error": self.post_publication_error,
-        }))
-    }
-}
-
-impl SourceBackedRefreshTimings {
-    fn to_json(self) -> Value {
-        json!({
-            "discovery": self.discovery_us,
-            "scan_stage": self.scan_stage_us,
-            "commit": self.commit_us,
-        })
-    }
-}
-
 pub(super) struct SourceBackedRefreshCoordinatorState {
     active_request_id: Option<String>,
     pending_request_ids: VecDeque<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
     published_resolvers: HashMap<String, RetainedGenerationResolver>,
     current_published_generation: Option<String>,
-}
-
-struct RetainedGenerationResolver {
-    resolver: Arc<GenerationBoundSourceBackedResolver>,
-    retired_at: Option<StdInstant>,
-}
-
-impl SourceBackedRefreshCoordinatorState {
-    fn install_resolver(&mut self, resolver: Arc<GenerationBoundSourceBackedResolver>) {
-        let generation_id = resolver.generation_id.clone();
-        let now = StdInstant::now();
-        if let Some(previous) = self.current_published_generation.as_deref() {
-            if previous != generation_id {
-                if let Some(retained) = self.published_resolvers.get_mut(previous) {
-                    retained.retired_at.get_or_insert(now);
-                }
-            }
-        }
-        self.published_resolvers.insert(
-            generation_id.clone(),
-            RetainedGenerationResolver {
-                resolver,
-                retired_at: None,
-            },
-        );
-        self.current_published_generation = Some(generation_id);
-        self.prune_retired_resolvers(now, SOURCE_RESOLVER_RETIREMENT_GRACE);
-    }
-
-    fn prune_retired_resolvers(&mut self, now: StdInstant, grace: StdDuration) {
-        self.published_resolvers.retain(|_, retained| {
-            retained.retired_at.is_none_or(|retired_at| {
-                now.saturating_duration_since(retired_at) < grace
-                    || Arc::strong_count(&retained.resolver) > 1
-            })
-        });
-    }
 }
 
 pub(in crate::semantic) struct SourceBackedRefreshCoordinator {
@@ -347,45 +111,6 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) job: Value,
     pub(in crate::semantic) did_work: bool,
     pub(in crate::semantic) failed: bool,
-}
-
-/// One leaseable resolver whose identity is inseparable from the verified
-/// lexical generation that installed it.
-#[derive(Debug)]
-#[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
-pub(crate) struct GenerationBoundSourceBackedResolver {
-    generation_id: String,
-    source_manifest: Option<SourceManifest>,
-    resolver: Arc<SourceBackedResolverRegistry>,
-}
-
-#[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
-impl GenerationBoundSourceBackedResolver {
-    pub(crate) fn generation_id(&self) -> &str {
-        &self.generation_id
-    }
-
-    pub(crate) fn resolver(&self) -> &SourceBackedResolverRegistry {
-        self.resolver.as_ref()
-    }
-
-    pub(crate) fn source_manifest(&self) -> Option<&SourceManifest> {
-        self.source_manifest.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Eq, Error, PartialEq)]
-#[allow(dead_code)] // Query IPC exposes this typed failure in the hydration lane.
-pub(crate) enum SourceBackedResolverAccessError {
-    #[error("daemon has no resolver retained for source-backed generation {requested_generation}")]
-    Missing { requested_generation: String },
-    #[error(
-        "daemon resolver generation mismatch: requested {requested_generation}, retained {retained_generation}"
-    )]
-    GenerationMismatch {
-        requested_generation: String,
-        retained_generation: String,
-    },
 }
 
 impl SourceBackedRefreshCoordinator {
@@ -438,53 +163,8 @@ impl SourceBackedRefreshCoordinator {
             generation_id,
             source_manifest: None,
             resolver,
+            verified_index: Mutex::new(None),
         }));
-    }
-
-    pub(in crate::semantic) fn retained_published_generation(
-        &self,
-    ) -> Option<Arc<GenerationBoundSourceBackedResolver>> {
-        let state = self.lock_state();
-        state
-            .current_published_generation
-            .as_deref()
-            .and_then(|generation_id| state.published_resolvers.get(generation_id))
-            .map(|retained| Arc::clone(&retained.resolver))
-    }
-
-    /// Returns the resolver only when it is bound to the caller's exact
-    /// lexical generation. Missing or stale daemon state queues the same
-    /// provider-wide refresh path and remains a typed failure.
-    #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
-    pub(crate) fn resolver_for_generation(
-        &self,
-        data_root: &Path,
-        generation_id: &str,
-    ) -> std::result::Result<
-        Arc<GenerationBoundSourceBackedResolver>,
-        SourceBackedResolverAccessError,
-    > {
-        let result = {
-            let mut state = self.lock_state();
-            state.prune_retired_resolvers(StdInstant::now(), SOURCE_RESOLVER_RETIREMENT_GRACE);
-            if let Some(retained) = state.published_resolvers.get(generation_id) {
-                return Ok(Arc::clone(&retained.resolver));
-            }
-            match state.current_published_generation.as_ref() {
-                Some(retained_generation) => SourceBackedResolverAccessError::GenerationMismatch {
-                    requested_generation: generation_id.to_owned(),
-                    retained_generation: retained_generation.clone(),
-                },
-                None => SourceBackedResolverAccessError::Missing {
-                    requested_generation: generation_id.to_owned(),
-                },
-            }
-        };
-        self.enqueue_with_metadata(
-            Some(generation_id.to_owned()),
-            source_refresh_runtime_metadata(data_root),
-        );
-        Err(result)
     }
 
     /// Preserves the capture resolver's typed failure while arranging for
@@ -570,8 +250,12 @@ impl SourceBackedRefreshCoordinator {
 
     pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
         let executor = Arc::clone(&self.executor);
-        self.run_next_with(
+        let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
+        let publication_probe_attempted = Cell::new(false);
+        let request_id_cell = RefCell::new(None::<String>);
+        let run = self.run_next_with(
             |request_id, coordinator| {
+                request_id_cell.replace(Some(request_id.to_owned()));
                 let requested_catalog = coordinator.requested_explicit_source_catalog(request_id);
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
@@ -580,12 +264,99 @@ impl SourceBackedRefreshCoordinator {
                     coordinator,
                     requested_catalog.as_ref(),
                 )?;
+                let probe_started = StdInstant::now();
+                publication_probe_attempted.set(true);
+                let pin = Arc::new(
+                    open_verified_index(&source_backed_index_root(data_root))
+                        .context("verify source-backed generation after publication")?,
+                );
+                let verification = verify_source_backed_publication(&publication, &pin);
+                coordinator.set_publication_probe_timing(
+                    request_id,
+                    nonzero_duration_micros(probe_started.elapsed()),
+                );
+                verified_index.replace(Some(pin));
+                verification?;
                 Ok(publication)
             },
-            || published_generation_id(data_root),
-            |generation_id| complete_verified_source_epoch(data_root, generation_id),
+            || {
+                if let Some(verified) = verified_index.borrow().as_ref() {
+                    return Ok(Some(verified.generation_id().to_owned()));
+                }
+                if publication_probe_attempted.get() {
+                    bail!(
+                        "post-publication verified-index probe already failed in this refresh cycle"
+                    );
+                }
+                let verified = open_published_generation(data_root)?.map(Arc::new);
+                let generation_id = verified
+                    .as_ref()
+                    .map(|index| index.generation_id().to_owned());
+                verified_index.replace(verified);
+                Ok(generation_id)
+            },
+            |generation_id| {
+                let retirement_started = StdInstant::now();
+                let result = verified_index
+                    .borrow()
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow!("verified source generation {generation_id} has no publication pin")
+                    })
+                    .and_then(|verified| {
+                        complete_verified_source_epoch_with(
+                            data_root,
+                            generation_id,
+                            verified.as_ref(),
+                        )
+                    });
+                if let Some(request_id) = request_id_cell.borrow().as_deref() {
+                    self.set_retirement_timing(
+                        request_id,
+                        nonzero_duration_micros(retirement_started.elapsed()),
+                    );
+                }
+                result
+            },
             |_| Ok(()),
-        )
+        )?;
+        if !run.failed {
+            let pin = verified_index.into_inner();
+            let generation_id = run.job.get("published_generation").and_then(Value::as_str);
+            let binding = match (pin, generation_id) {
+                (Some(pin), Some(generation_id)) => {
+                    self.bind_verified_index(data_root, generation_id, pin)
+                }
+                _ => Err(anyhow!(
+                    "completed source publication has no exact verified generation pin"
+                )),
+            };
+            if let Err(error) = binding {
+                let mut job = run.job;
+                job["post_publication_error"] =
+                    Value::String(format!("bind exact verified publication pin: {error:#}"));
+                return Some(SourceBackedRefreshRun {
+                    job,
+                    did_work: run.did_work,
+                    failed: false,
+                });
+            }
+        }
+        Some(run)
+    }
+
+    fn set_retirement_timing(&self, request_id: &str, duration_us: u64) {
+        let mut state = self.lock_state();
+        if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
+            attempt.retirement_us = duration_us;
+        }
+    }
+
+    fn set_publication_probe_timing(&self, request_id: &str, duration_us: u64) {
+        let mut state = self.lock_state();
+        if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
+            attempt.publication_probe_us = duration_us;
+        }
     }
 
     pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
@@ -692,6 +463,8 @@ impl SourceBackedRefreshCoordinator {
             certified_source_bytes: None,
             receipt: None,
             timings: None,
+            publication_probe_us: 0,
+            retirement_us: 0,
             daemon_mode: metadata.daemon_mode,
             trigger: metadata.trigger,
             trigger_provenance: metadata.trigger_provenance,
@@ -871,6 +644,7 @@ impl SourceBackedRefreshCoordinator {
                             generation_id: observed.clone(),
                             source_manifest,
                             resolver,
+                            verified_index: Mutex::new(None),
                         })
                     });
                 }
@@ -921,19 +695,6 @@ impl SourceBackedRefreshCoordinator {
             did_work,
             failed: failed_run,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn prune_retired_resolvers_for_test(&self) {
-        self.lock_state()
-            .prune_retired_resolvers(StdInstant::now(), StdDuration::ZERO);
-    }
-
-    #[cfg(test)]
-    pub(super) fn has_retained_resolver_for_test(&self, generation_id: &str) -> bool {
-        self.lock_state()
-            .published_resolvers
-            .contains_key(generation_id)
     }
 
     pub(super) fn lock_state(

@@ -1,33 +1,37 @@
 use super::*;
 
-pub(crate) fn goose_prepare_native_identity_index(
-    conn: &Connection,
-    schema: &GooseNativeSchema,
-    limits: GooseNativePageLimits,
-) -> Result<()> {
-    let session_expressions = schema.session_hydration_expressions("s");
-    let retained_bytes = goose_retained_length_expr(&session_expressions);
-    let max_session_bytes = i64::try_from(goose_projection_page_budget(limits, false)?)
-        .map_err(|_| CaptureError::SystemInvariant("Goose session page limit exceeds i64"))?;
-    let duplicate_accepted_identity = conn.query_row(
-        &format!(
-            "select exists(
-                 select 1
-                 from sessions s
-                 where {}
-                   and trim(s.id) != ''
-                   and {retained_bytes} <= ?1
-                 group by s.id
-                 having count(*) > 1
-             )",
-            schema.session_storage_class_predicate("s")
-        ),
-        [max_session_bytes],
-        |row| row.get::<_, bool>(0),
+pub(crate) fn goose_require_canonical_native_order(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "select table_name, name, pk
+         from (
+             select 'messages' as table_name, name, pk
+             from pragma_table_info('messages')
+             where pk > 0
+             union all
+             select 'sessions' as table_name, name, pk
+             from pragma_table_info('sessions')
+             where pk > 0
+         )
+         order by table_name, pk",
     )?;
-    if duplicate_accepted_identity {
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let primary_keys = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    if primary_keys
+        != [
+            ("messages".to_owned(), "id".to_owned(), 1),
+            ("sessions".to_owned(), "id".to_owned(), 1),
+        ]
+    {
         return Err(CaptureError::InvalidPayload(
-            "Goose accepted session identities are not unique".to_owned(),
+            "Goose logical fingerprint requires sole native primary keys \
+             messages.id and sessions.id"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -78,6 +82,23 @@ pub(in super::super) fn goose_normalized_message_id_sql(message_id: &str) -> Str
               then nullif(trim(cast({message_id} as text)), '')
               else null
          end"
+    )
+}
+
+pub(in super::super) fn goose_message_identity_counts_sql(
+    schema: &GooseNativeSchema,
+    candidate_alias: &str,
+    selected_relation: &str,
+) -> String {
+    let candidate = goose_normalized_message_id_sql(&schema.message_id_expression(candidate_alias));
+    format!(
+        "select
+             {candidate} as native_message_id,
+             count(*) as message_id_uses
+         from messages {candidate_alias}
+         join {selected_relation} selected_identity
+           on selected_identity.native_message_id = {candidate}
+         group by {candidate}"
     )
 }
 

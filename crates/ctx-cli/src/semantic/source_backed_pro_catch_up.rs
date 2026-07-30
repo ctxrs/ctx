@@ -15,13 +15,17 @@ use thiserror::Error;
 
 use crate::{
     compact_json,
-    pro::{stable_error_code, sync_source_manifest_materialization},
+    pro::{
+        preflight_source_manifest_materialization, stable_error_code,
+        sync_source_manifest_materialization,
+    },
 };
 
 use super::{
     paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
     source_backed_refresh_coordinator::{
-        source_backed_index_root, GenerationBoundSourceBackedResolver,
+        nonzero_duration_micros, open_verified_index, source_backed_index_root,
+        GenerationBoundSourceBackedResolver,
     },
 };
 
@@ -50,6 +54,8 @@ struct SourceBackedProCatchUpStatus {
     receipt_core_generation_id: Option<String>,
     attempts: u64,
     last_attempt_at_ms: i64,
+    #[serde(default)]
+    last_attempt_duration_us: u64,
     error_code: Option<String>,
     last_error: Option<String>,
     #[serde(default)]
@@ -75,6 +81,7 @@ impl SourceBackedProCatchUpStatus {
             receipt_core_generation_id: None,
             attempts,
             last_attempt_at_ms: utc_now().timestamp_millis(),
+            last_attempt_duration_us: 0,
             error_code: None,
             last_error: None,
             reason: None,
@@ -107,6 +114,11 @@ impl SourceBackedProCatchUpStatus {
         self.consecutive_failures = 0;
         self.retry_after_ms = None;
         self.retry_not_before_at_ms = None;
+        self
+    }
+
+    fn with_duration(mut self, duration_us: u64) -> Self {
+        self.last_attempt_duration_us = duration_us;
         self
     }
 
@@ -205,27 +217,39 @@ pub(super) fn run_after_core_publication(
             SourceBackedProCatchUpError::MissingManifest(core_generation_id.to_owned()),
         );
     };
+    let verified_index = authority.verified_index();
     run_with(
         data_root,
         core_generation_id,
-        authority.generation_id(),
-        manifest,
-        authority.resolver(),
+        ProCatchUpAuthority {
+            generation_id: authority.generation_id(),
+            manifest,
+            resolver: authority.resolver(),
+            verified_index: verified_index.as_deref(),
+        },
+        preflight_source_manifest_materialization,
         |data_root, manifest, index, resolver| {
             sync_source_manifest_materialization(data_root, manifest.clone(), index, resolver)
         },
     )
 }
 
-fn run_with<Sync>(
+struct ProCatchUpAuthority<'a> {
+    generation_id: &'a str,
+    manifest: &'a SourceManifest,
+    resolver: &'a SourceBackedResolverRegistry,
+    verified_index: Option<&'a VerifiedIndex>,
+}
+
+fn run_with<Preflight, Sync>(
     data_root: &Path,
     core_generation_id: &str,
-    authority_generation_id: &str,
-    manifest: &SourceManifest,
-    resolver: &SourceBackedResolverRegistry,
+    authority: ProCatchUpAuthority<'_>,
+    preflight: Preflight,
     sync: Sync,
 ) -> Result<SourceBackedProCatchUpRun>
 where
+    Preflight: FnOnce(&Path) -> Result<()>,
     Sync: FnOnce(
         &Path,
         &SourceManifest,
@@ -245,22 +269,36 @@ where
     }
 
     let attempts = next_attempt(prior.as_ref(), core_generation_id);
+    let attempt_started = Instant::now();
     let pending = SourceBackedProCatchUpStatus::pending(core_generation_id, attempts);
     persist_status(data_root, &pending)?;
 
     let result = (|| {
         require_generation(
             core_generation_id,
-            authority_generation_id,
+            authority.generation_id,
             "retained resolver registry",
         )?;
         require_generation(
             core_generation_id,
-            &manifest.core_generation_id,
+            &authority.manifest.core_generation_id,
             "retained source manifest",
         )?;
-        let index = open_exact_index(data_root, core_generation_id)?;
-        let receipt = sync(data_root, manifest, &index, resolver)
+        preflight(data_root).map_err(SourceBackedProCatchUpError::projection)?;
+        let opened_index: VerifiedIndex;
+        let index = match authority.verified_index {
+            Some(index) => index,
+            None => {
+                opened_index = open_exact_index(data_root, core_generation_id)?;
+                &opened_index
+            }
+        };
+        require_generation(
+            core_generation_id,
+            index.generation_id(),
+            "pinned VerifiedIndex",
+        )?;
+        let receipt = sync(data_root, authority.manifest, index, authority.resolver)
             .map_err(SourceBackedProCatchUpError::projection)?;
         require_generation(
             core_generation_id,
@@ -272,7 +310,9 @@ where
 
     match result {
         Ok(receipt) => {
-            let completed = pending.completed(receipt.core_generation_id);
+            let completed = pending
+                .completed(receipt.core_generation_id)
+                .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
             persist_status(data_root, &completed)?;
             Ok(SourceBackedProCatchUpRun {
                 status: completed.to_json()?,
@@ -280,7 +320,9 @@ where
             })
         }
         Err(error) => {
-            let failed = pending.error(error);
+            let failed = pending
+                .error(error)
+                .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
             persist_status(data_root, &failed)?;
             Ok(SourceBackedProCatchUpRun {
                 status: failed.to_json()?,
@@ -332,7 +374,7 @@ fn open_exact_index(
     core_generation_id: &str,
 ) -> std::result::Result<VerifiedIndex, SourceBackedProCatchUpError> {
     let index_root = source_backed_index_root(data_root);
-    let index = VerifiedIndex::open_pinned(&index_root)
+    let index = open_verified_index(&index_root)
         .with_context(|| {
             format!(
                 "open verified source-backed lexical index {}",
@@ -435,6 +477,8 @@ mod tests {
 
     use ctx_history_index::{GenerationWriter, WriterOptions};
 
+    use crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens;
+
     use super::*;
 
     #[test]
@@ -470,26 +514,43 @@ mod tests {
         }
     }
 
+    fn authority<'a>(
+        generation_id: &'a str,
+        manifest: &'a SourceManifest,
+        resolver: &'a SourceBackedResolverRegistry,
+        verified_index: Option<&'a VerifiedIndex>,
+    ) -> ProCatchUpAuthority<'a> {
+        ProCatchUpAuthority {
+            generation_id,
+            manifest,
+            resolver,
+            verified_index,
+        }
+    }
+
     #[test]
     fn successful_projection_persists_the_exact_core_generation() {
         let temp = tempfile::tempdir().unwrap();
         let (generation, manifest, resolver) = empty_authority(temp.path());
+        let index = open_verified_index(&source_backed_index_root(temp.path())).unwrap();
 
-        let run = run_with(
-            temp.path(),
-            &generation,
-            &generation,
-            &manifest,
-            resolver.as_ref(),
-            |_, supplied_manifest, index, supplied_resolver| {
-                assert_eq!(supplied_manifest.core_generation_id, generation);
-                assert_eq!(index.generation_id(), generation);
-                assert!(std::ptr::eq(supplied_resolver, resolver.as_ref()));
-                Ok(receipt(&generation))
-            },
-        )
-        .unwrap();
+        let (run, verified_opens) = count_verified_index_opens(|| {
+            run_with(
+                temp.path(),
+                &generation,
+                authority(&generation, &manifest, resolver.as_ref(), Some(&index)),
+                |_| Ok(()),
+                |_, supplied_manifest, index, supplied_resolver| {
+                    assert_eq!(supplied_manifest.core_generation_id, generation);
+                    assert_eq!(index.generation_id(), generation);
+                    assert!(std::ptr::eq(supplied_resolver, resolver.as_ref()));
+                    Ok(receipt(&generation))
+                },
+            )
+            .unwrap()
+        });
 
+        assert_eq!(verified_opens, 0, "Pro must reuse the Core verified pin");
         assert!(run.did_work);
         assert_eq!(run.status["status"], "completed");
         assert_eq!(run.status["core_generation_id"], generation);
@@ -499,9 +560,8 @@ mod tests {
         let exact_no_op = run_with(
             temp.path(),
             &generation,
-            &generation,
-            &manifest,
-            resolver.as_ref(),
+            authority(&generation, &manifest, resolver.as_ref(), Some(&index)),
+            |_| panic!("exact completed generation must not preflight Pro again"),
             |_, _, _, _| panic!("exact completed generation must not invoke Pro again"),
         )
         .unwrap();
@@ -516,16 +576,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (generation, manifest, resolver) = empty_authority(temp.path());
 
-        let run = run_with(
-            temp.path(),
-            &generation,
-            &generation,
-            &manifest,
-            resolver.as_ref(),
-            |_, _, _, _| Err(anyhow::anyhow!("pro_not_installed: helper unavailable")),
-        )
-        .unwrap();
+        let (run, verified_opens) = count_verified_index_opens(|| {
+            run_with(
+                temp.path(),
+                &generation,
+                authority(&generation, &manifest, resolver.as_ref(), None),
+                |_| Err(anyhow::anyhow!("pro_not_installed: helper unavailable")),
+                |_, _, _, _| panic!("missing Pro helper must fail before index-backed sync"),
+            )
+            .unwrap()
+        });
 
+        assert_eq!(verified_opens, 0, "missing Pro must open zero Core indexes");
         assert!(!run.did_work);
         assert_eq!(run.status["status"], "error");
         assert_eq!(run.status["pending"], true);
@@ -533,6 +595,9 @@ mod tests {
         assert_eq!(run.status["reason"], "pro_not_installed");
         assert_eq!(run.status["error_code"], "pro_not_installed");
         assert_eq!(run.status["core_generation_id"], generation);
+        assert!(run.status["last_attempt_duration_us"]
+            .as_u64()
+            .is_some_and(|duration| duration > 0));
     }
 
     #[test]
@@ -544,9 +609,8 @@ mod tests {
         let first = run_with(
             temp.path(),
             &generation,
-            &generation,
-            &manifest,
-            resolver.as_ref(),
+            authority(&generation, &manifest, resolver.as_ref(), None),
+            |_| Ok(()),
             |_, _, _, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err(anyhow::anyhow!("helper_crashed: retry later"))
@@ -558,9 +622,8 @@ mod tests {
         let second = run_with(
             temp.path(),
             &generation,
-            &generation,
-            &manifest,
-            resolver.as_ref(),
+            authority(&generation, &manifest, resolver.as_ref(), None),
+            |_| Ok(()),
             |_, _, _, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(receipt(&generation))
@@ -584,9 +647,8 @@ mod tests {
         let run = run_with(
             temp.path(),
             &generation,
-            &generation,
-            &manifest,
-            resolver.as_ref(),
+            authority(&generation, &manifest, resolver.as_ref(), None),
+            |_| Ok(()),
             |_, _, _, _| Ok(receipt(&wrong_generation)),
         )
         .unwrap();
@@ -596,6 +658,35 @@ mod tests {
         assert_eq!(run.status["error_code"], "source_pro_generation_mismatch");
         assert_eq!(run.status["core_generation_id"], generation);
         assert!(run.status["receipt_core_generation_id"].is_null());
+    }
+
+    #[test]
+    fn mismatched_verified_pin_fails_before_pro_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let (generation, _, resolver) = empty_authority(temp.path());
+        let index = open_verified_index(&source_backed_index_root(temp.path())).unwrap();
+        let expected = "f".repeat(64);
+        assert_ne!(expected, generation);
+        let manifest = SourceManifest::new(expected.clone(), Vec::new(), Vec::new()).unwrap();
+
+        let (run, verified_opens) = count_verified_index_opens(|| {
+            run_with(
+                temp.path(),
+                &expected,
+                authority(&expected, &manifest, resolver.as_ref(), Some(&index)),
+                |_| Ok(()),
+                |_, _, _, _| panic!("mismatched Core pin must not reach Pro sync"),
+            )
+            .unwrap()
+        });
+
+        assert_eq!(verified_opens, 0);
+        assert!(!run.did_work);
+        assert_eq!(run.status["status"], "error");
+        assert_eq!(run.status["error_code"], "source_pro_generation_mismatch");
+        assert!(run.status["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains(index.generation_id())));
     }
 
     #[test]
@@ -656,7 +747,8 @@ mod tests {
                 "source-backed Pro catch-up contains forbidden architecture term {forbidden}"
             );
         }
-        assert!(source.contains("VerifiedIndex::open_pinned"));
+        assert!(source.contains("open_verified_index"));
+        assert!(!source.contains(&["VerifiedIndex", "::open"].concat()));
         assert!(source.contains("sync_source_manifest_materialization"));
         assert!(source.contains("authority.source_manifest()"));
         assert!(source.contains("authority.resolver()"));

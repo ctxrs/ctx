@@ -7,6 +7,9 @@ use ctx_history_core::{
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 
+use super::source_backed::{
+    reset_warp_source_backed_work, warp_source_backed_work, WarpSourceBackedWork,
+};
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
@@ -99,12 +102,26 @@ fn create_source(path: &Path) -> Connection {
 }
 
 fn insert_task(connection: &Connection, task_id: &str, message_id: &str, body: &str) {
+    insert_task_for_conversation(connection, "conversation", task_id, message_id, body);
+}
+
+fn insert_task_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+    task_id: &str,
+    message_id: &str,
+    body: &str,
+) {
     connection
         .execute(
             "insert into agent_tasks
              (conversation_id, task_id, task, last_modified_at)
-             values ('conversation', ?1, ?2, '2026-07-24 12:00:01')",
-            params![task_id, text_task(task_id, message_id, body)],
+             values (?1, ?2, ?3, '2026-07-24 12:00:01')",
+            params![
+                conversation_id,
+                task_id,
+                text_task(task_id, message_id, body)
+            ],
         )
         .unwrap();
 }
@@ -160,17 +177,23 @@ fn warp_active_wal_noop_replace_delete_and_batch_hydration() {
     assert!(sidecar(&database, "-wal").exists());
 
     let registry = registry(&database);
+    reset_warp_source_backed_work();
     let cold = refresh_source_backed_generation(&index, &registry, options()).unwrap();
     assert_eq!(cold.commit.indexed_documents, 2);
     assert_eq!(cold.sources.len(), 1);
-    assert!(cold.sources[0].frontier().is_none());
+    assert!(cold.sources[0].frontier().is_some());
+    let cold_work = warp_source_backed_work();
+    assert!(cold_work.source_bytes_copied > 0);
+    assert_warp_snapshot_work(cold_work, 1);
 
     writer
         .execute_batch("pragma wal_checkpoint(truncate);")
         .unwrap();
+    reset_warp_source_backed_work();
     let noop = refresh_source_backed_generation(&index, &registry, options()).unwrap();
     assert_eq!(noop.sources, cold.sources);
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
+    assert_warp_snapshot_work(warp_source_backed_work(), 0);
 
     let verified = VerifiedIndex::open(&index).unwrap();
     let source = verified.manifest().sources[0]
@@ -184,6 +207,7 @@ fn warp_active_wal_noop_replace_delete_and_batch_hydration() {
         .collect::<Vec<_>>();
     let batch = BatchHydrationRequest::new(requests).unwrap();
     let resolver = registry.resolver_registry();
+    reset_warp_source_backed_work();
     let mut bodies = resolver
         .hydrate_batch(&batch)
         .unwrap()
@@ -193,6 +217,15 @@ fn warp_active_wal_noop_replace_delete_and_batch_hydration() {
         .collect::<Vec<_>>();
     bodies.sort();
     assert_eq!(bodies, ["first logical body", "second logical body"]);
+    let hydration_work = warp_source_backed_work();
+    assert_eq!(hydration_work.snapshot_opens, 1);
+    assert!(hydration_work.source_bytes_copied > 0);
+    assert_eq!(hydration_work.hydration_queries, 1);
+    assert_eq!(hydration_work.provider_projections, 0);
+    assert_eq!(hydration_work.terminal_fences, 1);
+    assert!(hydration_work.terminal_revalidations >= 2);
+    assert_eq!(hydration_work.active_snapshots, 0);
+    assert_eq!(hydration_work.max_active_snapshots, 1);
 
     writer
         .execute(
@@ -200,9 +233,11 @@ fn warp_active_wal_noop_replace_delete_and_batch_hydration() {
             [text_task("task-1", "message-1", "replacement body")],
         )
         .unwrap();
+    reset_warp_source_backed_work();
     let replacement = refresh_source_backed_generation(&index, &registry, options()).unwrap();
     assert_ne!(replacement.sources, noop.sources);
     assert_eq!(replacement.commit.indexed_documents, 2);
+    assert_warp_snapshot_work(warp_source_backed_work(), 1);
     assert_eq!(
         resolver.hydrate_batch(&batch).unwrap_err().kind,
         HydrationFailureKind::StaleRecordEvidence
@@ -218,10 +253,92 @@ fn warp_active_wal_noop_replace_delete_and_batch_hydration() {
             fs::remove_file(path).unwrap();
         }
     }
+    reset_warp_source_backed_work();
     let deleted = refresh_source_backed_generation(&index, &registry, options()).unwrap();
     assert!(deleted.sources.is_empty());
     assert_eq!(deleted.removals.len(), 1);
     assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+    assert_eq!(warp_source_backed_work(), WarpSourceBackedWork::default());
+}
+
+fn assert_warp_snapshot_work(work: WarpSourceBackedWork, provider_projections: u64) {
+    assert_eq!(work.snapshot_opens, 1);
+    assert_eq!(work.terminal_fences, 1);
+    assert!(work.terminal_revalidations >= 2);
+    assert_eq!(work.active_snapshots, 0);
+    assert_eq!(work.max_active_snapshots, 1);
+    assert_eq!(work.logical_observation_queries, 3);
+    assert_eq!(work.provider_projections, provider_projections);
+    assert_eq!(work.projection_queries, provider_projections * 3);
+    assert_eq!(work.hydration_queries, 0);
+}
+
+#[test]
+fn warp_projection_queries_are_constant_and_hierarchy_is_exact() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("warp.sqlite");
+    let index = temp.path().join("index");
+    let writer = create_source(&database);
+    insert_task(&writer, "task-root", "message-root", "root body");
+    for ordinal in 1..=32 {
+        let conversation_id = format!("conversation-{ordinal:02}");
+        let parent = if ordinal == 1 {
+            "conversation".to_owned()
+        } else {
+            format!("conversation-{:02}", ordinal - 1)
+        };
+        writer
+            .execute(
+                "insert into agent_conversations
+                     (conversation_id, conversation_data, last_modified_at)
+                 values (?1, ?2, '2026-07-24 12:00:00')",
+                params![
+                    conversation_id,
+                    format!(
+                        "{{\"agent_name\":\"Warp {ordinal}\",\
+                           \"parent_conversation_id\":\"{parent}\"}}"
+                    )
+                ],
+            )
+            .unwrap();
+        insert_task_for_conversation(
+            &writer,
+            &conversation_id,
+            &format!("task-{ordinal:02}"),
+            &format!("message-{ordinal:02}"),
+            &format!("body {ordinal}"),
+        );
+    }
+
+    let registry = registry(&database);
+    reset_warp_source_backed_work();
+    let cold = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 33);
+    assert_warp_snapshot_work(warp_source_backed_work(), 1);
+
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let source = verified.manifest().sources[0]
+        .observation()
+        .source()
+        .clone();
+    let events = verified
+        .source_event_page(&source, None, 100)
+        .unwrap()
+        .items;
+    assert_eq!(events.len(), 33);
+    let root = events
+        .iter()
+        .find(|event| event.provider_session_id.as_deref() == Some("conversation"))
+        .unwrap();
+    let deepest = events
+        .iter()
+        .find(|event| event.provider_session_id.as_deref() == Some("conversation-32"))
+        .unwrap();
+    assert!(root.parent_session_id.is_none());
+    assert!(root.is_primary);
+    assert!(deepest.parent_session_id.is_some());
+    assert_eq!(deepest.root_session_id, root.session_id);
+    assert!(!deepest.is_primary);
 }
 
 #[test]

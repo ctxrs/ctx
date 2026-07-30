@@ -148,63 +148,132 @@ pub fn register_custom_history_source_backed_route(
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let scan_input = input.clone();
     let revalidation_input = input.clone();
-    let hydration_input = input;
+    let hydration_input = input.clone();
+    let batch_hydration_input = input;
     let claimed_source = owned_source.clone();
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
-            let opening =
-                observe_custom_history_source_backed_explicit(&scan_input).map_err(route_error)?;
             let base = sink.base_source(&claimed_source).cloned();
-            if opening.is_missing() {
-                let outcome =
-                    scan_custom_history_source_backed_explicit(&scan_input, base.as_ref(), |_| {
-                        Ok(())
-                    })
-                    .map_err(route_error)?;
-                let CustomHistorySourceBackedOutcome::Missing {
+            let mut staging_started = false;
+            let outcome = scan_custom_history_source_backed_explicit(
+                &scan_input,
+                base.as_ref(),
+                |disposition, page| {
+                    if !staging_started {
+                        match disposition {
+                            CustomHistorySourceBackedDisposition::Unchanged
+                            | CustomHistorySourceBackedDisposition::Append => {
+                                let staged = sink
+                                    .begin_source_append(claimed_source.clone())
+                                    .map_err(capture_coordinator_error)?;
+                                if base.as_ref() != Some(staged) {
+                                    return Err(CaptureError::InvalidPayload(
+                                        "Custom History append base changed before staging"
+                                            .to_owned(),
+                                    )
+                                    .into());
+                                }
+                            }
+                            CustomHistorySourceBackedDisposition::Cold
+                            | CustomHistorySourceBackedDisposition::Replacement => {
+                                sink.begin_source(claimed_source.clone())
+                                    .map_err(capture_coordinator_error)?;
+                            }
+                        }
+                        staging_started = true;
+                    }
+                    for document in page.documents {
+                        sink.add_document(document)
+                            .map_err(capture_coordinator_error)?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(route_error)?;
+            let receipt = match outcome {
+                CustomHistorySourceBackedOutcome::Missing {
                     inventory,
                     deletion,
-                } = outcome
-                else {
-                    return Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::SourceChanged,
-                        "Custom History source appeared after its opening observation",
-                    ));
-                };
-                if let Some(deletion) = deletion {
-                    sink.delete_source(deletion, inventory)
-                        .map_err(route_coordinator_error)?;
+                } => {
+                    if staging_started {
+                        return Err(SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "missing Custom History source emitted projection pages",
+                        ));
+                    }
+                    if let Some(deletion) = deletion {
+                        sink.delete_source(deletion, inventory)
+                            .map_err(route_coordinator_error)?;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-
-            sink.begin_source(claimed_source.clone())
-                .map_err(route_coordinator_error)?;
-            let outcome = scan_custom_history_source_backed_explicit(&scan_input, None, |page| {
-                for document in page.documents {
-                    sink.add_document(document)
-                        .map_err(capture_coordinator_error)?;
-                }
-                Ok(())
-            })
-            .map_err(route_error)?;
-            let CustomHistorySourceBackedOutcome::Present(receipt) = outcome else {
+                CustomHistorySourceBackedOutcome::Present(receipt) => receipt,
+            };
+            if !receipt
+                .certificate
+                .observation()
+                .source()
+                .exact_descriptor_eq(&claimed_source)
+            {
                 return Err(SourceBackedRouteError::new(
                     SourceBackedRouteErrorKind::SourceChanged,
-                    "Custom History source disappeared during its replacement scan",
-                ));
-            };
-            if !matches!(
-                receipt.disposition,
-                CustomHistorySourceBackedDisposition::Cold
-            ) {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "cold Custom History scan returned a non-cold disposition",
+                    "Custom History scan changed its source descriptor",
                 ));
             }
-            sink.certify_source(receipt.certificate)
-                .map_err(route_coordinator_error)
+            if !staging_started {
+                match receipt.disposition {
+                    CustomHistorySourceBackedDisposition::Unchanged
+                    | CustomHistorySourceBackedDisposition::Append => {
+                        let staged = sink
+                            .begin_source_append(claimed_source.clone())
+                            .map_err(route_coordinator_error)?;
+                        if base.as_ref() != Some(staged) {
+                            return Err(SourceBackedRouteError::new(
+                                SourceBackedRouteErrorKind::SourceChanged,
+                                "Custom History append base changed before empty staging",
+                            ));
+                        }
+                    }
+                    CustomHistorySourceBackedDisposition::Cold
+                    | CustomHistorySourceBackedDisposition::Replacement => {
+                        sink.begin_source(claimed_source.clone())
+                            .map_err(route_coordinator_error)?;
+                    }
+                }
+            }
+            match receipt.append {
+                Some(append)
+                    if matches!(
+                        receipt.disposition,
+                        CustomHistorySourceBackedDisposition::Unchanged
+                            | CustomHistorySourceBackedDisposition::Append
+                    ) =>
+                {
+                    if base.as_ref() != Some(append.base())
+                        || append.current() != &receipt.certificate
+                    {
+                        return Err(SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "Custom History append evidence changed before certification",
+                        ));
+                    }
+                    sink.certify_source_append(append)
+                        .map_err(route_coordinator_error)
+                }
+                None if matches!(
+                    receipt.disposition,
+                    CustomHistorySourceBackedDisposition::Cold
+                        | CustomHistorySourceBackedDisposition::Replacement
+                ) =>
+                {
+                    sink.certify_source(receipt.certificate)
+                        .map_err(route_coordinator_error)
+                }
+                _ => Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Custom History disposition and append evidence disagree",
+                )),
+            }
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
         move |target| match target {
@@ -229,22 +298,12 @@ pub fn register_custom_history_source_backed_route(
             }
         },
         move |request| {
-            let outcome =
-                scan_custom_history_source_backed_explicit(&hydration_input, None, |_| Ok(()))
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                    })?;
-            let CustomHistorySourceBackedOutcome::Present(receipt) = outcome else {
-                return Err(hydration_failure(
-                    HydrationFailureKind::ConfirmedDeleted,
-                    "the explicit Custom History source is absent",
-                ));
-            };
-            CustomHistorySourceBackedResolver::new([receipt.route])
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
-                .hydrate_event(request)
+            CustomHistorySourceBackedResolver::hydrate_current_event(&hydration_input, request)
         },
-    );
+    )
+    .with_batch_hydration(move |request| {
+        CustomHistorySourceBackedResolver::hydrate_current_batch(&batch_hydration_input, request)
+    });
     registry.register(SourceBackedRoute::explicit_manual(
         source,
         SourceBackedSelectorAuthority::CatalogLineage,

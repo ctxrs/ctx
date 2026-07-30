@@ -1,4 +1,7 @@
 mod execution;
+mod verification;
+
+pub(super) use verification::{stored_verification_record, validate_verification_projection};
 
 use std::{
     cmp::{Ordering, Reverse},

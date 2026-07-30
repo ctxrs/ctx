@@ -17,7 +17,10 @@ pub(crate) mod registration;
 
 use adapter::direct_jsonl_session_identity;
 #[cfg(test)]
-use adapter::{inventory_traversals, reset_inventory_traversals};
+use adapter::{
+    inventory_traversals, reset_inventory_traversals, reset_scan_work, scan_work,
+    DirectJsonlScanWork,
+};
 pub(crate) use adapter::{
     DirectJsonlDisposition, DirectJsonlInventoryLeaf, DirectJsonlSelectedLeaf,
     DirectJsonlSourceAdapter, DirectJsonlSourceInventory,
@@ -26,10 +29,13 @@ pub(crate) use hydration::DirectJsonlHydrationCatalog;
 use hydration::{hydrate_batch, hydrate_single};
 #[cfg(test)]
 use hydration::{hydration_work, reset_hydration_work, DirectJsonlHydrationWork};
-#[cfg(test)]
-use lifecycle::DirectJsonlScanReceipt;
-pub(crate) use lifecycle::DirectJsonlSourceReader;
 use lifecycle::{decode_certificate, decode_previous, DirectJsonlTerminalEvidenceSet};
+pub(crate) use lifecycle::{DirectJsonlScanReceipt, DirectJsonlSourceReader};
+#[cfg(test)]
+use registration::{
+    direct_jsonl_scanner_worker_count_policy, lifecycle_work, reset_lifecycle_work,
+    scanner_activity, with_scanner_workers, DirectJsonlLifecycleWork, DirectJsonlScannerActivity,
+};
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
 const DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION: &str = "direct-native-jsonl-source-backed-v2";

@@ -6,10 +6,20 @@
 //! and commit-time tree revalidation.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
+use crate::provider::source_backed::{
+    executable_route, hydration_failure, route_coordinator_error, source_backed_base_sources,
+    ParallelLeafScanBegin, ParallelLeafScanCancelled, ParallelLeafScanComplete,
+    ParallelLeafScanEmitter, ParallelLeafScanError, ParallelLeafScanJob,
+    ParallelLeafScanWorkerError, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
+    SourceBackedProviderRegistry, SourceBackedRevalidationTarget, SourceBackedRouteDriver,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+};
+use crate::ProviderSource;
 use ctx_history_core::{
     BatchHydrationRequest, BatchHydrationResult, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, EventHydrationRequest,
@@ -18,16 +28,6 @@ use ctx_history_core::{
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
-
-use crate::provider::source_backed::{
-    executable_route, hydration_failure, route_coordinator_error, source_backed_base_sources,
-    SourceBackedCoordinatorResult, SourceBackedGenerationSink, SourceBackedProviderRegistry,
-    SourceBackedRevalidationTarget, SourceBackedRouteDriver, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedRouteSelection,
-    SourceBackedSelectorAuthority,
-};
-use crate::ProviderSource;
-
 const DOCUMENT_FRONTIER_KIND: &str = "ctx-document-full-snapshot-v1";
 const DOCUMENT_INVENTORY_AUTHORITY_NAMESPACE: &str = "ctx.document-tree";
 const DOCUMENT_INVENTORY_REVISION_KIND: &str = "ctx-document-tree-fingerprint-v1";
@@ -35,7 +35,6 @@ const DOCUMENT_INVENTORY_DISCOVERY_REVISION: &str = "ctx-document-tree-discovery
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct DocumentLeafFingerprint([u8; 32]);
-
 impl DocumentLeafFingerprint {
     pub(crate) fn new(value: [u8; 32]) -> Self {
         Self(value)
@@ -82,7 +81,6 @@ pub(crate) struct CompleteDocumentTree<L, A> {
     pub(crate) leaves: Vec<ObservedDocumentLeaf<L>>,
     pub(crate) authority: A,
 }
-
 impl<L, A> CompleteDocumentTree<L, A> {
     pub(crate) fn new(
         tree_fingerprint: [u8; 32],
@@ -95,6 +93,106 @@ impl<L, A> CompleteDocumentTree<L, A> {
             authority,
         }
     }
+}
+
+struct CurrentDocumentSources {
+    ordered: Vec<SourceKey>,
+    canonical: HashMap<[u8; 32], usize>,
+    exact_descriptors: HashMap<[u8; 32], ExactDescriptorEntry>,
+    #[cfg(test)]
+    operations: DocumentMembershipOperations,
+}
+
+struct ExactDescriptorEntry {
+    first: usize,
+    collisions: Vec<usize>,
+}
+impl CurrentDocumentSources {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            ordered: Vec::with_capacity(capacity),
+            canonical: HashMap::with_capacity(capacity),
+            exact_descriptors: HashMap::with_capacity(capacity),
+            #[cfg(test)]
+            operations: DocumentMembershipOperations::default(),
+        }
+    }
+    fn contains_canonical(&mut self, source: &SourceKey) -> bool {
+        #[cfg(test)]
+        {
+            self.operations.canonical_lookups += 1;
+        }
+        self.canonical.contains_key(&source.identity().digest())
+    }
+    fn insert(&mut self, source: SourceKey) -> bool {
+        #[cfg(test)]
+        {
+            self.operations.source_insertions += 1;
+        }
+        let canonical_digest = source.identity().digest();
+        let Entry::Vacant(canonical) = self.canonical.entry(canonical_digest) else {
+            return false;
+        };
+        let descriptor_digest = source.exact_descriptor_digest();
+        let index = self.ordered.len();
+        canonical.insert(index);
+        self.ordered.push(source);
+        self.exact_descriptors
+            .entry(descriptor_digest)
+            .and_modify(|entry| entry.collisions.push(index))
+            .or_insert_with(|| ExactDescriptorEntry {
+                first: index,
+                collisions: Vec::new(),
+            });
+        true
+    }
+    fn contains_exact(&mut self, source: &SourceKey) -> bool {
+        #[cfg(test)]
+        {
+            self.operations.exact_lookups += 1;
+        }
+        let Some(entry) = self
+            .exact_descriptors
+            .get(&source.exact_descriptor_digest())
+        else {
+            return false;
+        };
+        let mut comparisons = 0;
+        let matched = std::iter::once(&entry.first)
+            .chain(&entry.collisions)
+            .any(|index| {
+                comparisons += 1;
+                self.ordered
+                    .get(*index)
+                    .is_some_and(|candidate| candidate.exact_descriptor_eq(source))
+            });
+        #[cfg(test)]
+        {
+            self.operations.exact_comparisons += comparisons;
+        }
+        #[cfg(not(test))]
+        let _ = comparisons;
+        matched
+    }
+    fn ordered_inventory_sources(&self) -> Vec<SourceKey> {
+        self.ordered.clone()
+    }
+    #[cfg(test)]
+    fn reset_operations(&mut self) {
+        self.operations = DocumentMembershipOperations::default();
+    }
+    #[cfg(test)]
+    fn operations(&self) -> DocumentMembershipOperations {
+        self.operations
+    }
+}
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DocumentMembershipOperations {
+    source_insertions: usize,
+    canonical_lookups: usize,
+    exact_lookups: usize,
+    exact_comparisons: usize,
 }
 
 #[derive(Debug)]
@@ -142,33 +240,53 @@ impl DocumentSourceTerminal {
 /// collection. Every emitted document is forwarded immediately to the active
 /// generation replacement.
 pub(crate) struct ChangedDocumentSink<'sink, 'writer> {
-    sink: &'sink mut SourceBackedGenerationSink<'writer>,
+    target: ChangedDocumentTarget<'sink, 'writer>,
     source: Option<SourceKey>,
     emitted_documents: u64,
 }
 
+enum ChangedDocumentTarget<'sink, 'writer> {
+    Generation(&'sink mut SourceBackedGenerationSink<'writer>),
+    Parallel(&'sink mut ParallelLeafScanEmitter<'writer, CertifiedSource, SourceBackedRouteError>),
+}
 impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
     fn new(sink: &'sink mut SourceBackedGenerationSink<'writer>) -> Self {
         Self {
-            sink,
+            target: ChangedDocumentTarget::Generation(sink),
             source: None,
             emitted_documents: 0,
         }
     }
-
+    fn parallel(
+        emitter: &'sink mut ParallelLeafScanEmitter<
+            'writer,
+            CertifiedSource,
+            SourceBackedRouteError,
+        >,
+    ) -> Self {
+        Self {
+            target: ChangedDocumentTarget::Parallel(emitter),
+            source: None,
+            emitted_documents: 0,
+        }
+    }
     pub(crate) fn begin_source(&mut self, source: SourceKey) -> SourceBackedRouteResult<()> {
         if self.source.is_some() {
             return Err(document_internal(
                 "document adapter began more than one source for one observed leaf",
             ));
         }
-        self.sink
-            .begin_source(source.clone())
-            .map_err(route_coordinator_error)?;
+        match &mut self.target {
+            ChangedDocumentTarget::Generation(sink) => sink
+                .begin_source(source.clone())
+                .map_err(route_coordinator_error)?,
+            ChangedDocumentTarget::Parallel(emitter) => emitter
+                .begin(ParallelLeafScanBegin::replace(source.clone()))
+                .map_err(|_| document_internal("independent document leaf scan was cancelled"))?,
+        }
         self.source = Some(source);
         Ok(())
     }
-
     pub(crate) fn emit_document(
         &mut self,
         document: LexicalDocument,
@@ -183,22 +301,28 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 "document adapter emitted a row outside its active exact source",
             ));
         }
-        self.sink
-            .add_document(document)
-            .map_err(route_coordinator_error)?;
+        match &mut self.target {
+            ChangedDocumentTarget::Generation(sink) => {
+                sink.add_document(document)
+                    .map_err(route_coordinator_error)?;
+            }
+            ChangedDocumentTarget::Parallel(emitter) => {
+                emitter.emit_document(document).map_err(|_| {
+                    document_internal("independent document leaf scan was cancelled")
+                })?;
+            }
+        }
         self.emitted_documents = self
             .emitted_documents
             .checked_add(1)
             .ok_or_else(|| document_internal("document emission count overflowed"))?;
         Ok(())
     }
-
     fn source(&self) -> SourceBackedRouteResult<&SourceKey> {
         self.source
             .as_ref()
             .ok_or_else(|| document_internal("document adapter did not begin its source"))
     }
-
     fn certify(
         self,
         terminal: DocumentSourceTerminal,
@@ -218,38 +342,56 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 "document terminal indexed count did not match forwarded documents",
             ));
         }
-        let certificate = terminal.certify(replay_fingerprint)?;
-        self.sink
-            .certify_source(certificate.clone())
-            .map_err(route_coordinator_error)?;
-        Ok(certificate)
+        terminal.certify(replay_fingerprint)
     }
 }
-
+/// Declares whether changed leaves may be scanned independently.
+///
+/// `Independent` is a strong adapter promise: exact source identity must be
+/// derivable without reading content, and each `scan_changed` call must read
+/// and certify only its supplied leaf without depending on scan order or
+/// mutable state shared with another leaf. The family deliberately cannot
+/// infer that promise from `Send + Sync`, so existing adapters remain serial.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DocumentLeafExecutionPolicy {
+    #[default]
+    Serial,
+    Independent,
+    #[cfg(test)]
+    IndependentWithWorkers(usize),
+}
 pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     type Leaf: Send + Sync + 'static;
     type TreeAuthority: Send + Sync + 'static;
 
     fn parser_revision(&self) -> &'static str;
-
     fn owns_source(&self, source: &SourceKey) -> bool;
-
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        DocumentLeafExecutionPolicy::Serial
+    }
+    fn independent_leaf_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        _leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<SourceKey> {
+        Err(document_internal(
+            "document adapter opted into independent leaves without deriving an exact source",
+        ))
+    }
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>>;
-
     fn scan_changed(
         &self,
         authority: &Self::TreeAuthority,
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal>;
-
     fn revalidate_complete(
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]>;
-
     fn hydrate_group(
         &self,
         request: &BatchHydrationRequest,
@@ -372,7 +514,63 @@ where
         }
     }
 
-    let mut current_sources = HashMap::<[u8; 32], SourceKey>::new();
+    let (mut current_sources, certificates) = match adapter.leaf_execution_policy() {
+        DocumentLeafExecutionPolicy::Serial => {
+            scan_document_leaves_serial(adapter, &tree, replayable, sink)?
+        }
+        DocumentLeafExecutionPolicy::Independent => scan_document_leaves_independently(
+            adapter,
+            &tree,
+            replayable,
+            adapter.parser_revision(),
+            sink.recommended_leaf_workers(tree.leaves.len()),
+            sink,
+        )?,
+        #[cfg(test)]
+        DocumentLeafExecutionPolicy::IndependentWithWorkers(worker_count) => {
+            scan_document_leaves_independently(
+                adapter,
+                &tree,
+                replayable,
+                adapter.parser_revision(),
+                worker_count.min(tree.leaves.len()),
+                sink,
+            )?
+        }
+    };
+
+    let inventory = inventory_authority.certify(
+        tree.tree_fingerprint,
+        current_sources.ordered_inventory_sources(),
+    )?;
+    sink.certify_complete_inventory(inventory.clone())
+        .map_err(route_coordinator_error)?;
+    for base in &base_sources {
+        if current_sources.contains_exact(base.observation().source()) {
+            continue;
+        }
+        let deletion = CertifiedSourceDeletion::from_inventory(
+            base.observation().source().clone(),
+            &inventory,
+        )
+        .map_err(document_contract_error)?;
+        sink.delete_source(deletion, inventory.clone())
+            .map_err(route_coordinator_error)?;
+    }
+
+    Ok(ExpectedDocumentRoute::new(tree, certificates, inventory))
+}
+
+fn scan_document_leaves_serial<A>(
+    adapter: &A,
+    tree: &CompleteDocumentTree<A::Leaf, A::TreeAuthority>,
+    mut replayable: HashMap<DocumentLeafFingerprint, CertifiedSource>,
+    sink: &mut SourceBackedGenerationSink<'_>,
+) -> SourceBackedRouteResult<(CurrentDocumentSources, Vec<CertifiedSource>)>
+where
+    A: ReplacementDocumentTree,
+{
+    let mut current_sources = CurrentDocumentSources::with_capacity(tree.leaves.len());
     let mut certificates = Vec::with_capacity(tree.leaves.len());
     for observed in &tree.leaves {
         let replay = observed
@@ -392,9 +590,127 @@ where
                 ));
             }
             let source = changed.source()?.clone();
-            if current_sources.contains_key(&source.identity().digest()) {
+            if current_sources.contains_canonical(&source) {
                 return Err(document_changed(
                     "complete document tree produced a duplicate logical source",
+                ));
+            }
+            let certificate = changed.certify(
+                terminal,
+                observed
+                    .replay_from_frontier
+                    .then_some(observed.fingerprint),
+            )?;
+            sink.certify_source(certificate.clone())
+                .map_err(route_coordinator_error)?;
+            certificate
+        };
+        let source = certificate.observation().source().clone();
+        validate_current_document_source(adapter, &mut current_sources, source)?;
+        certificates.push(certificate);
+    }
+    Ok((current_sources, certificates))
+}
+
+enum IndependentDocumentLeaf<'leaf, L> {
+    Replay {
+        base: Box<CertifiedSource>,
+    },
+    Changed {
+        observed: &'leaf ObservedDocumentLeaf<L>,
+    },
+}
+
+fn scan_document_leaves_independently<A>(
+    adapter: &A,
+    tree: &CompleteDocumentTree<A::Leaf, A::TreeAuthority>,
+    mut replayable: HashMap<DocumentLeafFingerprint, CertifiedSource>,
+    parser_revision: &'static str,
+    worker_count: usize,
+    sink: &mut SourceBackedGenerationSink<'_>,
+) -> SourceBackedRouteResult<(CurrentDocumentSources, Vec<CertifiedSource>)>
+where
+    A: ReplacementDocumentTree,
+{
+    let mut current_sources = CurrentDocumentSources::with_capacity(tree.leaves.len());
+    let mut jobs = Vec::with_capacity(tree.leaves.len());
+    for observed in &tree.leaves {
+        let replay = observed
+            .replay_from_frontier
+            .then(|| replayable.remove(&observed.fingerprint))
+            .flatten();
+        let (source, leaf) = if let Some(base) = replay {
+            (
+                base.observation().source().clone(),
+                IndependentDocumentLeaf::Replay {
+                    base: Box::new(base),
+                },
+            )
+        } else {
+            (
+                adapter.independent_leaf_source(&tree.authority, &observed.provider_leaf)?,
+                IndependentDocumentLeaf::Changed { observed },
+            )
+        };
+        validate_current_document_source(adapter, &mut current_sources, source.clone())?;
+        jobs.push(ParallelLeafScanJob::new(source, leaf));
+    }
+
+    // Jobs and returned certificates retain discovery order. The runner may
+    // interleave bounded staging messages, but the writer canonicalizes source
+    // publication and the family certifies one ordered complete inventory.
+    let certificates = sink
+        .run_parallel_leaf_scans(jobs, worker_count, |job, emitter| match job.leaf() {
+            IndependentDocumentLeaf::Replay { base } => {
+                let append = exact_document_replay_append(base)
+                    .map_err(ParallelLeafScanWorkerError::provider)?;
+                emitter.begin(ParallelLeafScanBegin::append(
+                    job.source().clone(),
+                    base.as_ref().clone(),
+                ))?;
+                emitter.complete(ParallelLeafScanComplete::append(
+                    append,
+                    base.as_ref().clone(),
+                ))?;
+                Ok(())
+            }
+            IndependentDocumentLeaf::Changed { observed } => scan_independent_document_leaf(
+                adapter,
+                &tree.authority,
+                observed,
+                parser_revision,
+                job.source(),
+                emitter,
+            ),
+        })
+        .map_err(document_parallel_error)?;
+    Ok((current_sources, certificates))
+}
+
+fn scan_independent_document_leaf<A>(
+    adapter: &A,
+    authority: &A::TreeAuthority,
+    observed: &ObservedDocumentLeaf<A::Leaf>,
+    parser_revision: &'static str,
+    expected_source: &SourceKey,
+    emitter: &mut ParallelLeafScanEmitter<'_, CertifiedSource, SourceBackedRouteError>,
+) -> Result<(), ParallelLeafScanWorkerError<SourceBackedRouteError>>
+where
+    A: ReplacementDocumentTree,
+{
+    let scan_result = {
+        let mut changed = ChangedDocumentSink::parallel(emitter);
+        (|| {
+            let terminal =
+                adapter.scan_changed(authority, &observed.provider_leaf, &mut changed)?;
+            if terminal.parser_revision != parser_revision {
+                return Err(document_changed(
+                    "document adapter terminal used an unexpected parser revision",
+                ));
+            }
+            if !changed.source()?.exact_descriptor_eq(expected_source) {
+                return Err(document_changed(
+                    "independent document leaf derived a different exact source",
                 ));
             }
             changed.certify(
@@ -402,48 +718,52 @@ where
                 observed
                     .replay_from_frontier
                     .then_some(observed.fingerprint),
-            )?
-        };
-        let source = certificate.observation().source().clone();
-        if !adapter.owns_source(&source) {
-            return Err(document_changed(
-                "document adapter emitted a source outside its route ownership",
-            ));
+            )
+        })()
+    };
+    let certificate = match scan_result {
+        Ok(certificate) => certificate,
+        Err(_) if emitter.is_cancelled() => {
+            return Err(ParallelLeafScanCancelled.into());
         }
-        if current_sources
-            .insert(source.identity().digest(), source)
-            .is_some()
-        {
-            return Err(document_changed(
-                "complete document tree produced a duplicate logical source",
-            ));
-        }
-        certificates.push(certificate);
-    }
+        Err(error) => return Err(ParallelLeafScanWorkerError::provider(error)),
+    };
+    emitter.complete(ParallelLeafScanComplete::replace(
+        certificate.clone(),
+        certificate,
+    ))?;
+    Ok(())
+}
 
-    let inventory = inventory_authority.certify(
-        tree.tree_fingerprint,
-        current_sources.values().cloned().collect(),
-    )?;
-    sink.certify_complete_inventory(inventory.clone())
-        .map_err(route_coordinator_error)?;
-    for base in &base_sources {
-        if current_sources
-            .values()
-            .any(|source| source.exact_descriptor_eq(base.observation().source()))
-        {
-            continue;
-        }
-        let deletion = CertifiedSourceDeletion::from_inventory(
-            base.observation().source().clone(),
-            &inventory,
-        )
-        .map_err(document_contract_error)?;
-        sink.delete_source(deletion, inventory.clone())
-            .map_err(route_coordinator_error)?;
+fn validate_current_document_source<A>(
+    adapter: &A,
+    current_sources: &mut CurrentDocumentSources,
+    source: SourceKey,
+) -> SourceBackedRouteResult<()>
+where
+    A: ReplacementDocumentTree,
+{
+    if !adapter.owns_source(&source) {
+        return Err(document_changed(
+            "document adapter emitted a source outside its route ownership",
+        ));
     }
+    if !current_sources.insert(source) {
+        return Err(document_changed(
+            "complete document tree produced a duplicate logical source",
+        ));
+    }
+    Ok(())
+}
 
-    Ok(ExpectedDocumentRoute::new(tree, certificates, inventory))
+fn document_parallel_error(
+    error: ParallelLeafScanError<SourceBackedRouteError>,
+) -> SourceBackedRouteError {
+    match error {
+        ParallelLeafScanError::Worker { source, .. } => source,
+        ParallelLeafScanError::Sink { source, .. } => route_coordinator_error(source),
+        error => document_internal(format!("independent document leaf runner failed: {error}")),
+    }
 }
 
 fn validate_unique_leaf_fingerprints<L>(
@@ -466,11 +786,19 @@ fn stage_exact_document_replay(
     sink: &mut SourceBackedGenerationSink<'_>,
     base: &CertifiedSource,
 ) -> SourceBackedRouteResult<()> {
+    sink.begin_source_append(base.observation().source().clone())
+        .map_err(route_coordinator_error)?;
+    let append = exact_document_replay_append(base)?;
+    sink.certify_source_append(append)
+        .map_err(route_coordinator_error)
+}
+
+fn exact_document_replay_append(
+    base: &CertifiedSource,
+) -> SourceBackedRouteResult<CertifiedSourceAppend> {
     let frontier = base
         .frontier()
         .ok_or_else(|| document_internal("replayable document source has no frontier"))?;
-    sink.begin_source_append(base.observation().source().clone())
-        .map_err(route_coordinator_error)?;
     let append = CertifiedSourceAppend::certify(
         base,
         base.clone(),
@@ -478,8 +806,7 @@ fn stage_exact_document_replay(
         *frontier.certified_prefix_digest(),
     )
     .map_err(document_contract_error)?;
-    sink.certify_source_append(append)
-        .map_err(route_coordinator_error)
+    Ok(append)
 }
 
 fn document_frontier_fingerprint(certificate: &CertifiedSource) -> Option<DocumentLeafFingerprint> {

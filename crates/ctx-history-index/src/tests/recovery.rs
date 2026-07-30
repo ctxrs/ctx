@@ -508,6 +508,14 @@ fn verified_generation_rejects_a_forged_duplicate_event_identity() {
         vec![duplicate],
     );
 
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let reference_error =
+        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
+    let one_pass_error = verify_searcher(&searcher, &manifest).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&reference_error),
+        std::mem::discriminant(&one_pass_error)
+    );
     let error = match VerifiedIndex::open(temp.path()) {
         Ok(_) => panic!("duplicate event generation unexpectedly opened"),
         Err(error) => error,
@@ -552,6 +560,14 @@ fn verified_generation_rejects_forged_source_ownership() {
         vec![forged],
     );
 
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let reference_error =
+        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
+    let one_pass_error = verify_searcher(&searcher, &manifest).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&reference_error),
+        std::mem::discriminant(&one_pass_error)
+    );
     let error = match VerifiedIndex::open(temp.path()) {
         Ok(_) => panic!("source ownership mismatch unexpectedly opened"),
         Err(error) => error,
@@ -617,4 +633,227 @@ fn invalid_memory_budget_has_no_filesystem_side_effect() {
     };
     assert!(matches!(error, IndexError::IndexMemoryTooSmall { .. }));
     assert!(!root.exists());
+}
+
+#[test]
+fn one_pass_verifier_matches_reference_with_bounded_parallel_segment_state() {
+    const SOURCE_COUNT: usize = 6;
+    const DOCUMENTS_PER_SOURCE: u64 = 24;
+
+    let (temp, sources) = multisegment_fixture(SOURCE_COUNT, DOCUMENTS_PER_SOURCE);
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    assert_eq!(sources.len(), SOURCE_COUNT);
+    assert_eq!(searcher.segment_readers().len(), SOURCE_COUNT);
+
+    let reference =
+        crate::publication::verify_searcher_reference_with_metrics(&searcher, &manifest).unwrap();
+    let one_pass =
+        crate::publication::verify_searcher_with_metrics(&searcher, &manifest, 2, true).unwrap();
+    let expected_documents = SOURCE_COUNT * DOCUMENTS_PER_SOURCE as usize;
+
+    assert_eq!(reference.query_passes, SOURCE_COUNT + 1);
+    assert_eq!(
+        reference.segment_query_visits,
+        (SOURCE_COUNT + 1) * SOURCE_COUNT
+    );
+    assert_eq!(reference.document_decodes, expected_documents);
+    assert_eq!(one_pass.worker_budget, 2);
+    assert_eq!(one_pass.segment_tasks, SOURCE_COUNT);
+    assert_eq!(one_pass.document_decodes, expected_documents);
+    assert_eq!(one_pass.source_terms, SOURCE_COUNT);
+    assert_eq!(one_pass.max_active_workers, 2);
+    assert!(one_pass.segment_tasks < reference.segment_query_visits);
+
+    assert_eq!(one_pass.max_buffered_segments, one_pass.worker_budget);
+    assert!(
+        one_pass.max_buffered_event_identities
+            <= one_pass.worker_budget * DOCUMENTS_PER_SOURCE as usize
+    );
+    assert!(
+        one_pass.max_buffered_session_identities <= one_pass.worker_budget,
+        "one fixture session identity per segment should be buffered"
+    );
+    assert!(
+        one_pass.max_buffered_event_identities < expected_documents,
+        "temporary segment maps must be bounded below full-generation cardinality"
+    );
+}
+
+#[test]
+fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
+    let temp = tempdir().unwrap();
+    let source = source("digest-corruption.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
+    let address = pinned
+        .searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let mut forged = TantivyDocument::default();
+    for (field, value) in document.field_values() {
+        if field != fields.event_identity_digest {
+            forged.add_field_value(field, value);
+        }
+    }
+    forged.add_text(fields.event_identity_digest, "00");
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![certificate(&source, 2, 1)]).unwrap(),
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let reference =
+        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
+    let one_pass = verify_searcher(&searcher, &manifest).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&reference),
+        std::mem::discriminant(&one_pass)
+    );
+    assert!(matches!(
+        one_pass,
+        IndexError::InvalidStoredDocumentField("event_identity")
+    ));
+}
+
+#[test]
+fn one_pass_verifier_matches_reference_for_source_count_corruption() {
+    let temp = tempdir().unwrap();
+    let first = source("count-first.jsonl");
+    let second = source("count-second.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(first.clone()).unwrap();
+    writer.add_document(document(&first, 1, "first")).unwrap();
+    writer.certify_source(certificate(&first, 1, 1)).unwrap();
+    writer.begin_source(second.clone()).unwrap();
+    writer.add_document(document(&second, 1, "second")).unwrap();
+    writer.add_document(document(&second, 2, "second")).unwrap();
+    writer.certify_source(certificate(&second, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![
+            certificate(&first, 2, 2),
+            certificate(&second, 2, 1),
+        ])
+        .unwrap(),
+        &[],
+        Vec::new(),
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let reference =
+        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
+    let one_pass = verify_searcher(&searcher, &manifest).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&reference),
+        std::mem::discriminant(&one_pass)
+    );
+    assert!(matches!(one_pass, IndexError::SourceCountMismatch { .. }));
+}
+
+#[test]
+fn one_pass_verifier_matches_reference_for_total_count_corruption() {
+    let temp = tempdir().unwrap();
+    let source = source("total-count.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![certificate(&source, 2, 2)]).unwrap(),
+        &[],
+        Vec::new(),
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let reference =
+        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
+    let one_pass = verify_searcher(&searcher, &manifest).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&reference),
+        std::mem::discriminant(&one_pass)
+    );
+    assert!(matches!(
+        one_pass,
+        IndexError::DocumentCountMismatch {
+            manifest: 2,
+            index: 1
+        }
+    ));
+}
+
+#[test]
+#[ignore = "manual verifier microbenchmark"]
+fn generation_verifier_multisource_microbenchmark() {
+    const SOURCE_COUNT: usize = 6;
+    const DOCUMENTS_PER_SOURCE: u64 = 96;
+    const ITERATIONS: usize = 3;
+
+    let (temp, _) = multisegment_fixture(SOURCE_COUNT, DOCUMENTS_PER_SOURCE);
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap();
+    crate::publication::verify_searcher_with_metrics(&searcher, &manifest, 2, false).unwrap();
+
+    let reference_start = std::time::Instant::now();
+    for _ in 0..ITERATIONS {
+        std::hint::black_box(
+            crate::publication::verify_searcher_reference_with_metrics(&searcher, &manifest)
+                .unwrap(),
+        );
+    }
+    let reference_elapsed = reference_start.elapsed();
+    let reference =
+        crate::publication::verify_searcher_reference_with_metrics(&searcher, &manifest).unwrap();
+
+    let one_pass_start = std::time::Instant::now();
+    for _ in 0..ITERATIONS {
+        std::hint::black_box(
+            crate::publication::verify_searcher_with_metrics(&searcher, &manifest, 2, false)
+                .unwrap(),
+        );
+    }
+    let one_pass_elapsed = one_pass_start.elapsed();
+    let one_pass =
+        crate::publication::verify_searcher_with_metrics(&searcher, &manifest, 2, false).unwrap();
+
+    println!(
+        "legacy: query_passes={} segment_query_visits={} full_document_decodes={} elapsed_us={}; \
+         one_pass: segment_tasks={} source_terms={} projected_document_decodes={} workers={} \
+         max_buffered_segments={} max_buffered_events={} elapsed_us={}",
+        reference.query_passes,
+        reference.segment_query_visits,
+        reference.document_decodes,
+        reference_elapsed.as_micros(),
+        one_pass.segment_tasks,
+        one_pass.source_terms,
+        one_pass.document_decodes,
+        one_pass.worker_budget,
+        one_pass.max_buffered_segments,
+        one_pass.max_buffered_event_identities,
+        one_pass_elapsed.as_micros(),
+    );
 }

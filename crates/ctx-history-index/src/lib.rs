@@ -7,6 +7,7 @@ mod analyzer;
 mod contracts;
 mod durable_directory;
 mod identity;
+mod index_document;
 pub mod policy;
 mod publication;
 mod query;
@@ -63,19 +64,41 @@ use std::{
 
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
-    SourceKey, StableEntityId, StableEntityKind,
+    SourceKey, StableEntityKind,
 };
 #[cfg(test)]
-use ctx_history_core::{SourceRecordLocator, IDENTITY_VERSION};
+use ctx_history_core::{SourceRecordLocator, StableEntityId, IDENTITY_VERSION};
+#[cfg(test)]
+use tantivy::TantivyDocument;
 use tantivy::{
     directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     indexer::LogMergePolicy,
-    Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term,
+    Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher, Term,
 };
 use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
-use staging::{finish_identical_staging, PendingSource, PendingSourceMode};
+use index_document::{EncodedDocumentIdentities, IndexDocument, IndexSourceFields, SourceToken};
+use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
+
+struct PendingSource {
+    index_fields: IndexSourceFields,
+    staged: StagedPendingSource,
+}
+
+impl std::ops::Deref for PendingSource {
+    type Target = StagedPendingSource;
+
+    fn deref(&self) -> &Self::Target {
+        &self.staged
+    }
+}
+
+impl std::ops::DerefMut for PendingSource {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.staged
+    }
+}
 
 fn reclaim_orphaned_managed_files(index: &mut Index, base_metas: &IndexMeta) -> Result<()> {
     let mut living_files = base_metas
@@ -110,7 +133,7 @@ pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
     preflight_lock: Option<DirectoryLock>,
-    writer: Option<IndexWriter<TantivyDocument>>,
+    writer: Option<IndexWriter<IndexDocument>>,
     writer_options: WriterOptions,
     fields: Fields,
     base_manifest: Option<GenerationManifest>,
@@ -297,7 +320,7 @@ impl GenerationWriter {
         Ok(())
     }
 
-    fn writer_mut(&mut self) -> Result<&mut IndexWriter<TantivyDocument>> {
+    fn writer_mut(&mut self) -> Result<&mut IndexWriter<IndexDocument>> {
         if self.writer.is_none() {
             let preflight_lock = self
                 .preflight_lock
@@ -312,7 +335,7 @@ impl GenerationWriter {
                 hook();
             }
 
-            let writer = self.index.writer_with_num_threads::<TantivyDocument>(
+            let writer = self.index.writer_with_num_threads::<IndexDocument>(
                 self.writer_options.indexer_threads,
                 self.writer_options.memory_bytes,
             )?;
@@ -457,13 +480,17 @@ impl GenerationWriter {
         self.writer_mut()?
             .delete_term(Term::from_field_text(source_key_field, &token));
         self.deletions.remove(&source);
+        let index_fields = IndexSourceFields::new(&source, &token);
         self.pending.insert(
             token,
             PendingSource {
-                source,
-                mode: PendingSourceMode::Replace,
-                staged_documents: 0,
-                certificate: None,
+                index_fields,
+                staged: StagedPendingSource {
+                    source,
+                    mode: PendingSourceMode::Replace,
+                    staged_documents: 0,
+                    certificate: None,
+                },
             },
         );
         Ok(())
@@ -504,10 +531,13 @@ impl GenerationWriter {
         self.pending.insert(
             token.clone(),
             PendingSource {
-                source,
-                mode: PendingSourceMode::Append { base },
-                staged_documents: 0,
-                certificate: None,
+                index_fields: IndexSourceFields::new(&source, &token),
+                staged: StagedPendingSource {
+                    source,
+                    mode: PendingSourceMode::Append { base },
+                    staged_documents: 0,
+                    certificate: None,
+                },
             },
         );
         let pending = self
@@ -522,13 +552,7 @@ impl GenerationWriter {
 
     pub fn add_document(&mut self, document: LexicalDocument) -> Result<()> {
         let locator_bytes = document.validate()?;
-        let event_identity_bytes = document.event_id.encode_canonical()?;
-        let session_identity_bytes = document.session_id.encode_canonical()?;
-        let root_session_identity_bytes = document.root_session_id.encode_canonical()?;
-        let parent_session_identity_bytes = document
-            .parent_session_id
-            .map(StableEntityId::encode_canonical)
-            .transpose()?;
+        let encoded_identities = EncodedDocumentIdentities::new(&document)?;
         if document.event_id.entity_kind() != StableEntityKind::Event {
             return Err(IndexError::InvalidEventIdentityKind(
                 document.event_id.to_string(),
@@ -551,31 +575,45 @@ impl GenerationWriter {
             }
         }
         let source_digest = document.source.identity().digest();
-        let source_descriptor_digest = document.source.exact_descriptor_digest();
         if document.event_id.source_digest() != source_digest
             || document.session_id.source_digest() != source_digest
-            || document.event_id.source_descriptor_digest() != source_descriptor_digest
+        {
+            return Err(IndexError::IdentitySourceMismatch(
+                document.source.identity().to_string(),
+            ));
+        }
+        let token = SourceToken::new(&source_digest);
+        let token = token.as_str()?;
+        let pending_source = match self.pending.get(token) {
+            Some(pending) if pending.source.exact_descriptor_eq(&document.source) => pending,
+            _ => {
+                let source_descriptor_digest = document.source.exact_descriptor_digest();
+                if document.event_id.source_descriptor_digest() != source_descriptor_digest
+                    || document.session_id.source_descriptor_digest() != source_descriptor_digest
+                {
+                    return Err(IndexError::IdentitySourceMismatch(
+                        document.source.identity().to_string(),
+                    ));
+                }
+                return Err(IndexError::DocumentSourceNotActive);
+            }
+        };
+        let source_descriptor_digest = pending_source.index_fields.descriptor_digest();
+        if document.event_id.source_descriptor_digest() != source_descriptor_digest
             || document.session_id.source_descriptor_digest() != source_descriptor_digest
         {
             return Err(IndexError::IdentitySourceMismatch(
                 document.source.identity().to_string(),
             ));
         }
-        let token = source_token(&document.source);
-        let pending_source = &self
-            .pending
-            .get(&token)
-            .ok_or(IndexError::DocumentSourceNotActive)?;
-        if !pending_source.source.exact_descriptor_eq(&document.source) {
-            return Err(IndexError::DocumentSourceNotActive);
-        }
         let is_append = matches!(&pending_source.mode, PendingSourceMode::Append { .. });
+        let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
             validate_event_identity_against_base(
                 base_searcher,
                 self.fields,
                 document.event_id,
-                &token,
+                token,
                 !is_append,
             )?;
             if self
@@ -586,7 +624,7 @@ impl GenerationWriter {
                     base_searcher,
                     self.fields,
                     document.session_id,
-                    &token,
+                    token,
                 )?;
             }
             for related_session_id in document
@@ -618,81 +656,17 @@ impl GenerationWriter {
             document.root_session_id,
         )?;
         register_event_identity(&mut self.staged_event_identities, document.event_id)?;
-        let mut target = TantivyDocument::default();
-        target.add_text(self.fields.event_id, document.event_id.to_string());
-        target.add_text(
-            self.fields.event_identity_digest,
-            hex(&document.event_id.digest()),
+        let target = IndexDocument::from_lexical(
+            self.fields,
+            document,
+            locator_bytes,
+            encoded_identities,
+            index_fields,
         );
-        target.add_bytes(self.fields.event_identity, &event_identity_bytes);
-        let event_uuid = document.event_id.as_uuid().as_u128();
-        target.add_u64(self.fields.event_id_high, (event_uuid >> 64) as u64);
-        target.add_u64(self.fields.event_id_low, event_uuid as u64);
-        target.add_text(self.fields.session_id, document.session_id.to_string());
-        target.add_text(
-            self.fields.session_identity_digest,
-            hex(&document.session_id.digest()),
-        );
-        target.add_bytes(self.fields.session_identity, &session_identity_bytes);
-        if let (Some(parent_session_id), Some(parent_session_identity_bytes)) = (
-            document.parent_session_id,
-            parent_session_identity_bytes.as_ref(),
-        ) {
-            target.add_text(self.fields.parent_session_id, parent_session_id.to_string());
-            target.add_bytes(
-                self.fields.parent_session_identity,
-                parent_session_identity_bytes,
-            );
-        }
-        target.add_text(
-            self.fields.root_session_id,
-            document.root_session_id.to_string(),
-        );
-        target.add_bytes(
-            self.fields.root_session_identity,
-            &root_session_identity_bytes,
-        );
-        target.add_text(self.fields.source_key, &token);
-        target.add_bytes(self.fields.native_locator, &locator_bytes);
-        target.add_text(self.fields.provider, document.source.provider());
-        target.add_text(self.fields.source_format, document.source.source_format());
-        if let Some(provider_session_id) = document.provider_session_id {
-            target.add_text(self.fields.provider_session_id, provider_session_id);
-        }
-        if let Some(branch) = document.branch {
-            target.add_text(self.fields.branch, branch);
-        }
-        if let Some(source_path) = document.source_path {
-            target.add_text(self.fields.workspace_filter, source_path.to_lowercase());
-            target.add_text(self.fields.source_path, source_path);
-        }
-        target.add_text(self.fields.agent_type, document.agent_type);
-        target.add_u64(self.fields.is_primary, u64::from(document.is_primary));
-        target.add_u64(self.fields.event_sequence, document.event_sequence);
-        if let Some(occurred_at_unix_ms) = document.occurred_at_unix_ms {
-            target.add_i64(self.fields.occurred_at_unix_ms, occurred_at_unix_ms);
-        }
-        target.add_text(self.fields.event_type, document.event_type);
-        if let Some(role) = document.role {
-            target.add_text(self.fields.role, role);
-        }
-        target.add_text(self.fields.body_search, document.body);
-        if let Some(workspace) = document.workspace {
-            target.add_text(self.fields.workspace_filter, workspace.to_lowercase());
-            target.add_text(self.fields.workspace, workspace);
-        }
-        if let Some(cwd) = document.cwd {
-            target.add_text(self.fields.workspace_filter, cwd.to_lowercase());
-            target.add_text(self.fields.cwd, cwd);
-        }
-        for touched_file in document.touched_files {
-            target.add_text(self.fields.touched_file_filter, touched_file.to_lowercase());
-            target.add_text(self.fields.touched_file, touched_file);
-        }
         self.writer_mut()?.add_document(target)?;
         let pending = self
             .pending
-            .get_mut(&token)
+            .get_mut(token)
             .ok_or(IndexError::DocumentSourceNotActive)?;
         pending.staged_documents = pending
             .staged_documents

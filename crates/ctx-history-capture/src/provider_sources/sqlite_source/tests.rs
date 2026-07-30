@@ -4,6 +4,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Seek, SeekFrom, Write},
     path::Path,
+    sync::{Arc, Barrier},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -132,6 +134,14 @@ fn stock_sqlite_initial_snapshot_succeeds_with_idle_wal_writer() {
             SqliteSourceSnapshotStrategy::ImmutableMain
         );
         assert_eq!(snapshot.copied_bytes(), 0);
+        let counters = parent.snapshot_counters();
+        assert_eq!(counters.immutable_snapshot_opens(), 1);
+        assert_eq!(counters.copied_snapshot_opens(), 0);
+        assert_eq!(counters.source_bytes_copied(), 0);
+        assert_eq!(counters.active_snapshots(), 1);
+        assert_eq!(counters.active_snapshot_bytes(), 0);
+        assert_eq!(counters.max_active_snapshots(), 1);
+        assert_eq!(counters.max_active_snapshot_bytes(), 0);
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -142,7 +152,9 @@ fn stock_sqlite_initial_snapshot_succeeds_with_idle_wal_writer() {
         assert!(snapshot.copied_bytes() > 0);
     }
     assert_eq!(snapshot.evidence().wal_length(), None);
-    snapshot.finish().unwrap();
+    let fence = snapshot.seal().unwrap();
+    assert_eq!(fence.evidence().wal_length(), None);
+    fence.revalidate().unwrap();
     assert!(!wal.exists());
     assert!(!database.with_file_name("provider.sqlite-shm").exists());
     assert_eq!(directory_file_bytes(temp.path()), before);
@@ -203,9 +215,30 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
     );
     assert!(snapshot.evidence().wal_length().is_some());
     assert!(snapshot.evidence().shared_memory_length().is_some());
-    snapshot.finish().unwrap();
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.immutable_snapshot_opens(), 0);
+    assert_eq!(counters.copied_snapshot_opens(), 1);
+    assert_eq!(
+        counters.source_bytes_copied(),
+        u64::try_from(before_database.len() + before_wal.len()).unwrap()
+    );
+    assert_eq!(counters.active_snapshots(), 1);
+    assert_eq!(counters.active_snapshot_bytes(), snapshot.copied_bytes());
+    assert_eq!(counters.max_active_snapshots(), 1);
+    assert_eq!(
+        counters.max_active_snapshot_bytes(),
+        snapshot.copied_bytes()
+    );
+    let fence = snapshot.seal().unwrap();
 
     assert!(!snapshot_directory.exists());
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.terminal_fences(), 1);
+    assert_eq!(counters.terminal_revalidations(), 1);
+    assert_eq!(counters.active_snapshots(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), 0);
+    fence.revalidate().unwrap();
+    assert_eq!(parent.snapshot_counters().terminal_revalidations(), 2);
     assert_eq!(fs::read(&database).unwrap(), before_database);
     assert_eq!(fs::read(&wal).unwrap(), before_wal);
     assert_eq!(fs::read(&shared_memory).unwrap(), before_shared_memory);
@@ -217,6 +250,36 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn finish_publishes_retained_terminal_revalidator() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "retained");
+    let parent = retain_parent(temp.path());
+
+    let snapshot =
+        open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
+    let revalidate = snapshot.terminal_revalidator();
+    assert!(matches!(
+        revalidate(),
+        Err(SqliteSourceAccessError::SnapshotNotActive)
+    ));
+
+    snapshot.finish().unwrap();
+    revalidate().unwrap();
+    let counters = parent.snapshot_counters();
+    assert_eq!(
+        counters.immutable_snapshot_opens(),
+        u64::from(cfg!(target_os = "linux"))
+    );
+    assert_eq!(
+        counters.copied_snapshot_opens(),
+        u64::from(!cfg!(target_os = "linux"))
+    );
+    assert_eq!(counters.terminal_fences(), 1);
+    assert_eq!(counters.terminal_revalidations(), 2);
 }
 
 #[test]
@@ -243,11 +306,20 @@ fn copied_wal_snapshot_keeps_missing_provider_shm_missing() {
         snapshot.copied_bytes(),
         u64::try_from(before_database.len() + before_wal.len()).unwrap()
     );
-    snapshot.finish().unwrap();
+    let snapshot_directory = snapshot.snapshot_directory().unwrap().to_path_buf();
+    let evidence = snapshot.finish().unwrap();
+    assert!(evidence.wal_length().is_some());
 
+    assert!(!snapshot_directory.exists());
     assert!(!shared_memory.exists());
     assert_eq!(fs::read(&database).unwrap(), before_database);
     assert_eq!(fs::read(&wal).unwrap(), before_wal);
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.copied_snapshot_opens(), 1);
+    assert_eq!(counters.terminal_fences(), 1);
+    assert_eq!(counters.terminal_revalidations(), 1);
+    assert_eq!(counters.active_snapshots(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), 0);
 }
 
 #[cfg(unix)]
@@ -273,7 +345,8 @@ fn active_wal_snapshot_reads_a_read_only_provider_tree() {
         snapshot.strategy(),
         SqliteSourceSnapshotStrategy::CopiedFamily
     );
-    snapshot.finish().unwrap();
+    let fence = snapshot.seal().unwrap();
+    fence.revalidate().unwrap();
     assert_eq!(directory_file_bytes(temp.path()), before);
 
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
@@ -324,7 +397,7 @@ fn wal_deletion_during_copied_acquisition_is_fail_closed() {
 }
 
 #[test]
-fn bounded_active_wal_copy_has_one_source_byte_pass_and_two_fences() {
+fn bounded_active_wal_copy_has_one_retained_snapshot_lifecycle() {
     const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
     let temp = tempfile::tempdir().unwrap();
@@ -355,23 +428,39 @@ fn bounded_active_wal_copy_has_one_source_byte_pass_and_two_fences() {
     let started = Instant::now();
     let snapshot =
         open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
-    let length: i64 = snapshot
-        .connection()
-        .unwrap()
-        .query_row("SELECT length(body) FROM payloads", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(length, PAYLOAD_BYTES as i64);
+    for _ in 0..2 {
+        let length: i64 = snapshot
+            .connection()
+            .unwrap()
+            .query_row("SELECT length(body) FROM payloads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(length, PAYLOAD_BYTES as i64);
+    }
     assert_eq!(snapshot.copied_bytes(), expected_copied);
     assert_eq!(
         snapshot.family_revalidation_count(),
         2,
         "acquisition keeps only the post-pin and final evidence fences"
     );
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.copied_snapshot_opens(), 1);
+    assert_eq!(counters.source_bytes_copied(), expected_copied);
+    assert_eq!(counters.active_snapshots(), 1);
+    assert_eq!(counters.max_active_snapshots(), 1);
+    assert_eq!(counters.max_active_snapshot_bytes(), expected_copied);
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "an 8 MiB active-WAL snapshot exceeded the focused sanity bound"
     );
-    snapshot.finish().unwrap();
+    let fence = snapshot.seal().unwrap();
+    fence.revalidate().unwrap();
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.copied_snapshot_opens(), 1);
+    assert_eq!(counters.source_bytes_copied(), expected_copied);
+    assert_eq!(counters.terminal_fences(), 1);
+    assert_eq!(counters.terminal_revalidations(), 2);
+    assert_eq!(counters.active_snapshots(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), 0);
 }
 
 #[test]
@@ -448,15 +537,22 @@ fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_wr
     let snapshot =
         open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
     assert_eq!(read_values(&snapshot), ["from-wal"]);
+    let snapshot_directory = snapshot.snapshot_directory().unwrap().to_path_buf();
 
     writer
         .execute("INSERT INTO messages (body) VALUES ('later')", [])
         .unwrap();
     assert_eq!(read_values(&snapshot), ["from-wal"]);
     assert!(matches!(
-        snapshot.finish(),
+        snapshot.seal(),
         Err(SqliteSourceAccessError::SourceChanged)
     ));
+    assert!(!snapshot_directory.exists());
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.copied_snapshot_opens(), 1);
+    assert_eq!(counters.terminal_fences(), 0);
+    assert_eq!(counters.active_snapshots(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), 0);
 
     let replacement =
         open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
@@ -542,6 +638,101 @@ fn direct_database_rewrite_is_fail_closed() {
         snapshot.finish(),
         Err(SqliteSourceAccessError::SourceChanged)
     ));
+}
+
+#[test]
+fn mutation_after_seal_fails_retained_terminal_revalidation() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    let before = directory_file_bytes(temp.path());
+    let parent = retain_parent(temp.path());
+    let snapshot =
+        open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
+    assert_eq!(read_values(&snapshot), ["from-wal"]);
+    let snapshot_directory = snapshot.snapshot_directory().unwrap().to_path_buf();
+    let fence = snapshot.seal().unwrap();
+    assert!(!snapshot_directory.exists());
+    assert_eq!(directory_file_bytes(temp.path()), before);
+
+    writer
+        .execute("INSERT INTO messages (body) VALUES ('after-seal')", [])
+        .unwrap();
+    assert!(matches!(
+        fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.copied_snapshot_opens(), 1);
+    assert_eq!(counters.terminal_fences(), 1);
+    assert_eq!(
+        counters.terminal_revalidations(),
+        1,
+        "failed terminal checks do not count as successful fences"
+    );
+    assert_eq!(counters.active_snapshots(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), 0);
+}
+
+#[test]
+fn authority_local_counters_track_two_overlapping_copied_snapshots() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<super::SqliteSourceTerminalFence>();
+
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let wal = database.with_file_name("provider.sqlite-wal");
+    let expected_bytes = fs::metadata(&database).unwrap().len() + fs::metadata(&wal).unwrap().len();
+    let parent = Arc::new(retain_parent(temp.path()));
+    let independent = retain_parent(temp.path());
+    let opened = Arc::new(Barrier::new(3));
+    let release = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+
+    for _ in 0..2 {
+        let parent = Arc::clone(&parent);
+        let opened = Arc::clone(&opened);
+        let release = Arc::clone(&release);
+        workers.push(thread::spawn(move || {
+            let snapshot =
+                open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                    .unwrap();
+            assert_eq!(read_values(&snapshot), ["from-wal"]);
+            opened.wait();
+            release.wait();
+            snapshot.seal().unwrap()
+        }));
+    }
+
+    opened.wait();
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.copied_snapshot_opens(), 2);
+    assert_eq!(counters.source_bytes_copied(), expected_bytes * 2);
+    assert_eq!(counters.active_snapshots(), 2);
+    assert_eq!(counters.active_snapshot_bytes(), expected_bytes * 2);
+    assert_eq!(counters.max_active_snapshots(), 2);
+    assert_eq!(counters.max_active_snapshot_bytes(), expected_bytes * 2);
+    assert_eq!(
+        independent.snapshot_counters(),
+        super::SqliteSourceSnapshotCounters::default(),
+        "separately retained authorities do not share process-global counters"
+    );
+    release.wait();
+
+    let fences = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.terminal_fences(), 2);
+    assert_eq!(counters.terminal_revalidations(), 2);
+    assert_eq!(counters.active_snapshots(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), 0);
+    for fence in fences {
+        fence.revalidate().unwrap();
+    }
+    assert_eq!(parent.snapshot_counters().terminal_revalidations(), 4);
 }
 
 #[test]

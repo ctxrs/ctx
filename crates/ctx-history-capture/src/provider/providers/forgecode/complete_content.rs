@@ -5,7 +5,7 @@
 //! boundary. NativePath uses only the bounded locator attachment below and
 //! never constructs an ingestion page.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{CaptureProvider, ContentRef, EventType};
 use rusqlite::{Connection, OptionalExtension};
@@ -164,6 +164,60 @@ pub(in crate::provider::providers::forgecode) fn forgecode_logical_record_digest
         }
     }
     digest.finalize().into()
+}
+
+pub(in crate::provider::providers::forgecode) fn load_forgecode_conversation_values_by_ids(
+    conn: &Connection,
+    conversation_ids: &[String],
+) -> Result<BTreeMap<String, Vec<NativeSqliteValue>>> {
+    const BATCH: usize = 128;
+    let columns = conversation_columns(conn)?;
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let context = optional_column_expr(&columns, "context", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let metrics = optional_column_expr(&columns, "metrics", "NULL");
+    let mut values = BTreeMap::new();
+    for chunk in conversation_ids.chunks(BATCH) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "select rowid, cast(conversation_id as blob), cast({title} as blob), \
+                    workspace_id, cast({context} as blob), cast(created_at as blob), \
+                    cast({updated_at} as blob), cast({metrics} as blob) \
+             from conversations \
+             where cast(conversation_id as text) collate binary in ({placeholders})"
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query(rusqlite::params_from_iter(chunk))?;
+        while let Some(row) = rows.next()? {
+            let hydrated = HydratedConversation {
+                rowid: row.get(0)?,
+                conversation_id: row.get(1)?,
+                title: row.get(2)?,
+                workspace_id: row.get(3)?,
+                context: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                metrics: row.get(7)?,
+            };
+            let values_row = hydrated.into_values()?;
+            let conversation_id = match values_row.get(1) {
+                Some(NativeSqliteValue::Text(value)) => value.clone(),
+                _ => {
+                    return Err(CaptureError::InvalidPayload(
+                        "ForgeCode conversation identity is not text-castable".to_owned(),
+                    ));
+                }
+            };
+            if values.insert(conversation_id, values_row).is_some() {
+                return Err(CaptureError::InvalidPayload(
+                    "ForgeCode conversation key is ambiguous".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(values)
 }
 
 fn complete_content_digest(digest: [u8; 32]) -> Result<CompleteContentBodyDigest> {

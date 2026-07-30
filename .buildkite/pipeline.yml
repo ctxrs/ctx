@@ -9,6 +9,7 @@ env:
 steps:
   - label: ":bazel: public smoke gate"
     key: "public-smoke"
+    if: build.source != "schedule" && build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") != "1"
     command: |
       bash scripts/buildkite-public-ci.sh --mode=ci
     agents:
@@ -16,6 +17,38 @@ steps:
     concurrency: 1
     concurrency_group: "ctx/public-smoke/default-hosted"
     timeout_in_minutes: 60
+    artifact_paths:
+      - "bazel-testlogs/**/*.log"
+      - "bazel-testlogs/**/test.outputs/**/*"
+      - "bazel-testlogs/**/*.zip"
+      - "target/ctx-artifacts/check/**"
+
+  - label: ":night_with_stars: public nightly performance and fault gate"
+    key: "public-nightly"
+    if: build.source == "schedule" && build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") != "1"
+    command: |
+      bash scripts/buildkite-public-ci.sh --mode=nightly
+    agents:
+      queue: "default"
+    concurrency: 1
+    concurrency_group: "ctx/public-nightly/default-hosted"
+    timeout_in_minutes: 120
+    artifact_paths:
+      - "bazel-testlogs/**/*.log"
+      - "bazel-testlogs/**/test.outputs/**/*"
+      - "bazel-testlogs/**/*.zip"
+      - "target/ctx-artifacts/check/**"
+
+  - label: ":rocket: public release qualification"
+    key: "public-release"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      bash scripts/buildkite-public-ci.sh --mode=release
+    agents:
+      queue: "default"
+    concurrency: 1
+    concurrency_group: "ctx/public-release/default-hosted"
+    timeout_in_minutes: 120
     artifact_paths:
       - "bazel-testlogs/**/*.log"
       - "bazel-testlogs/**/test.outputs/**/*"

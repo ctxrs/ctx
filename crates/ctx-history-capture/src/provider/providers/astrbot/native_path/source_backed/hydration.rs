@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use ctx_history_core::{
     derive_event_id, BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver,
@@ -16,8 +19,11 @@ use crate::{
 };
 
 use super::super::super::{
-    model::{checkpoint_id, item_is_output, item_text, provider_session_id, PlatformMessageLink},
-    source::{fetch_candidate, hydrate_conversation, hydrate_platform_message, AstrBotSql},
+    model::{
+        checkpoint_id, item_is_output, item_text, provider_session_id, PlatformMessageLink,
+        PlatformMessageRow,
+    },
+    source::{fetch_candidates, visit_conversations, visit_platform_messages, AstrBotSql},
 };
 use super::{
     discovery::{
@@ -109,8 +115,59 @@ impl AstrBotSourceBackedResolverV0 {
                 .then(|| load_checkpoint_links(conn, &sql))
                 .transpose()?
                 .unwrap_or_default();
-            let mut hydrated = Vec::with_capacity(requests.len());
+            let conversation_rowids = coordinates
+                .iter()
+                .filter_map(|coordinate| match coordinate {
+                    AstrBotCoordinate::Conversation { physical_rowid, .. } => Some(*physical_rowid),
+                    AstrBotCoordinate::Platform { .. } => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
             let mut conversations = BTreeMap::new();
+            visit_conversations(
+                conn,
+                &sql.conversation_hydration,
+                &conversation_rowids,
+                |physical_rowid, row| {
+                    conversations.insert(
+                        physical_rowid,
+                        super::super::super::model::conversation_values(row),
+                    );
+                    Ok::<_, CaptureError>(())
+                },
+            )
+            .map_err(map_capture_hydration)?;
+            let platform_rowids = coordinates
+                .iter()
+                .filter_map(|coordinate| match coordinate {
+                    AstrBotCoordinate::Platform { physical_rowid, .. } => Some(*physical_rowid),
+                    AstrBotCoordinate::Conversation { .. } => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut platform_messages = BTreeMap::new();
+            if !platform_rowids.is_empty() {
+                let hydration = sql.platform_message_hydration.as_deref().ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::UnsupportedParserRevision,
+                        "AstrBot source has no supported platform-message relation",
+                    )
+                })?;
+                visit_platform_messages(
+                    conn,
+                    hydration,
+                    &platform_rowids,
+                    |physical_rowid, row| {
+                        platform_messages.insert(physical_rowid, row);
+                        Ok::<_, CaptureError>(())
+                    },
+                )
+                .map_err(map_capture_hydration)?;
+            }
+
+            let mut hydrated = Vec::with_capacity(requests.len());
             for (request, coordinate) in requests.iter().zip(coordinates) {
                 let provider_bytes = match coordinate {
                     AstrBotCoordinate::Conversation {
@@ -119,18 +176,6 @@ impl AstrBotSourceBackedResolverV0 {
                         row_digest,
                         content_kind,
                     } => {
-                        if let std::collections::btree_map::Entry::Vacant(entry) =
-                            conversations.entry(physical_rowid)
-                        {
-                            let row = hydrate_conversation(
-                                conn,
-                                &sql.conversation_hydration,
-                                physical_rowid,
-                            )
-                            .map_err(map_capture_hydration)?;
-                            let values = super::super::super::model::conversation_values(row);
-                            entry.insert(values);
-                        }
                         let values = conversations.get(&physical_rowid).ok_or_else(|| {
                             hydration_failure(
                                 HydrationFailureKind::MissingRecord,
@@ -159,9 +204,12 @@ impl AstrBotSourceBackedResolverV0 {
                     } => hydrate_platform_coordinate(
                         &source.source_key,
                         request,
-                        conn,
-                        &sql,
-                        physical_rowid,
+                        platform_messages.get(&physical_rowid).ok_or_else(|| {
+                            hydration_failure(
+                                HydrationFailureKind::MissingRecord,
+                                "AstrBot platform-message row is missing",
+                            )
+                        })?,
                         logical_id,
                         row_digest,
                         &checkpoint_links,
@@ -418,21 +466,11 @@ fn hydrate_conversation_coordinate(
 fn hydrate_platform_coordinate(
     source: &SourceKey,
     request: &EventHydrationRequest,
-    conn: &rusqlite::Connection,
-    sql: &AstrBotSql,
-    physical_rowid: i64,
+    row: &PlatformMessageRow,
     logical_id: i64,
     row_digest: [u8; 32],
     checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
 ) -> std::result::Result<Vec<u8>, HydrationFailure> {
-    let hydration = sql.platform_message_hydration.as_deref().ok_or_else(|| {
-        hydration_failure(
-            HydrationFailureKind::UnsupportedParserRevision,
-            "AstrBot source has no supported platform-message relation",
-        )
-    })?;
-    let row =
-        hydrate_platform_message(conn, hydration, physical_rowid).map_err(map_capture_hydration)?;
     if row.id != logical_id {
         return Err(hydration_failure(
             HydrationFailureKind::InvalidLocator,
@@ -464,7 +502,7 @@ fn hydrate_platform_coordinate(
         .llm_checkpoint_id
         .as_ref()
         .and_then(|checkpoint| checkpoint_links.get(checkpoint));
-    let session = platform_session_fact(&row, link);
+    let session = platform_session_fact(row, link);
     let session_id =
         stable_session_id(source, &session.provider_session_id).map_err(invalid_locator)?;
     let native_item_key =
@@ -498,33 +536,47 @@ fn load_checkpoint_links(
 ) -> std::result::Result<BTreeMap<String, PlatformMessageLink>, HydrationFailure> {
     let mut links = BTreeMap::new();
     let mut after = None;
-    while let Some(candidate) = fetch_candidate(
-        conn,
-        &sql.conversation_candidate_initial,
-        &sql.conversation_candidate_after,
-        after,
-    )
-    .map_err(map_capture_hydration)?
-    {
-        after = Some(candidate.physical_rowid);
-        if candidate.observed_bytes().map_err(map_capture_hydration)?
-            > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX)
-        {
-            continue;
+    loop {
+        let candidates = fetch_candidates(
+            conn,
+            &sql.conversation_candidate_initial,
+            &sql.conversation_candidate_after,
+            after,
+            64,
+        )
+        .map_err(map_capture_hydration)?;
+        if candidates.is_empty() {
+            break;
         }
-        let row = hydrate_conversation(conn, &sql.conversation_hydration, candidate.physical_rowid)
-            .map_err(map_capture_hydration)?;
-        let provider_session_id = provider_session_id(&row);
-        for item in conversation_items(&row.content).0 {
-            if let Some(checkpoint) = checkpoint_id(&item) {
-                links.insert(
-                    checkpoint,
-                    PlatformMessageLink {
-                        provider_session_id: provider_session_id.clone(),
-                        parent_created_at: row.created_at,
-                    },
-                );
+        let max_row_bytes = u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX);
+        let mut rowids = Vec::with_capacity(candidates.len());
+        for candidate in &candidates {
+            if candidate.observed_bytes().map_err(map_capture_hydration)? <= max_row_bytes {
+                rowids.push(candidate.physical_rowid);
             }
+        }
+        visit_conversations(conn, &sql.conversation_hydration, &rowids, |_, row| {
+            let provider_session_id = provider_session_id(&row);
+            for item in conversation_items(&row.content).0 {
+                if let Some(checkpoint) = checkpoint_id(&item) {
+                    links.insert(
+                        checkpoint,
+                        PlatformMessageLink {
+                            provider_session_id: provider_session_id.clone(),
+                            parent_created_at: row.created_at,
+                        },
+                    );
+                }
+            }
+            Ok::<_, CaptureError>(())
+        })
+        .map_err(map_capture_hydration)?;
+        after = candidates.last().map(|candidate| candidate.physical_rowid);
+        if after.is_none() {
+            return Err(hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "AstrBot checkpoint scan made no progress",
+            ));
         }
     }
     Ok(links)

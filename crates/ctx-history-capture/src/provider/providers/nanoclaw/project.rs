@@ -5,9 +5,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use ctx_history_core::ScannedSourceCounts;
 use rusqlite::Connection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::common::io::{OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot};
 use crate::provider::provider_safe_path_segment;
@@ -20,7 +22,7 @@ use crate::provider_sources::{
 };
 use crate::{CaptureError, ProviderSourceFailureKind, Result};
 
-use super::position::{nanoclaw_ordered_i64, NanoClawMessageSource};
+use super::position::NanoClawMessageSource;
 use super::rows::{
     nanoclaw_observed_bytes, nanoclaw_retained_length_expr, nanoclaw_session_columns,
     nanoclaw_session_projection, NANOCLAW_NATIVE_MAX_RECORD_BYTES,
@@ -29,11 +31,32 @@ use super::{NANOCLAW_CAPTURE_REVISION, NANOCLAW_POLICY_REVISION};
 
 mod helpers;
 
+pub(super) use helpers::NanoClawSelectedProject;
 use helpers::*;
 
 const NANOCLAW_INVENTORY_PAGE_ENTRIES: usize = 64;
 const NANOCLAW_INVENTORY_MIN_INTERVAL: Duration = Duration::from_millis(5);
-const NANOCLAW_INVENTORY_HASH_DOMAIN: &[u8] = b"ctx-nanoclaw-inventory-sha256-v1\0";
+// Every retained session owns two component snapshot routes until source
+// certification finishes; cap that compound metadata independently of row size.
+pub(super) const NANOCLAW_MAX_SESSION_SNAPSHOTS: usize = 4_096;
+
+#[derive(Debug, Error)]
+pub(super) enum NanoClawProjectOpenError {
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
+    #[error(
+        "NanoClaw session snapshot admission limit exceeded: observed {observed}, maximum {maximum}"
+    )]
+    SessionSnapshotLimitExceeded { maximum: usize, observed: usize },
+}
+
+type NanoClawProjectOpenResult<T> = std::result::Result<T, NanoClawProjectOpenError>;
+
+impl From<rusqlite::Error> for NanoClawProjectOpenError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Capture(CaptureError::Sqlite(error))
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct NanoClawFrozenFileMetadata {
@@ -100,10 +123,10 @@ impl NanoClawFrozenFileMetadata {
         })
     }
 
-    fn from_opened(opened: &OpenedProviderSourceFile) -> Result<Self> {
+    fn from_opened(opened: &OpenedProviderSourceFile, is_wal: bool) -> Result<Self> {
         Self::from_metadata(
             opened.metadata(),
-            nanoclaw_root_bound_component_token(opened.metadata()),
+            nanoclaw_root_bound_component_token(opened, is_wal)?,
         )
     }
 
@@ -189,21 +212,21 @@ impl NanoClawOpenedSqliteFamily {
 
     fn snapshot(&self) -> Result<NanoClawSqliteSnapshot> {
         Ok(NanoClawSqliteSnapshot {
-            database: NanoClawFrozenFileMetadata::from_opened(&self.database)?,
+            database: NanoClawFrozenFileMetadata::from_opened(&self.database, false)?,
             wal: self
                 .wal
                 .as_ref()
-                .map(NanoClawFrozenFileMetadata::from_opened)
+                .map(|file| NanoClawFrozenFileMetadata::from_opened(file, true))
                 .transpose()?,
             shared_memory: self
                 .shared_memory
                 .as_ref()
-                .map(NanoClawFrozenFileMetadata::from_opened)
+                .map(|file| NanoClawFrozenFileMetadata::from_opened(file, false))
                 .transpose()?,
             rollback_journal: self
                 .rollback_journal
                 .as_ref()
-                .map(NanoClawFrozenFileMetadata::from_opened)
+                .map(|file| NanoClawFrozenFileMetadata::from_opened(file, false))
                 .transpose()?,
         })
     }
@@ -278,13 +301,6 @@ impl NanoClawSqliteSnapshot {
             Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
             Err(error) => Err(error),
         }
-    }
-
-    fn digest(&self) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(b"ctx-nanoclaw-sqlite-snapshot-sha256-v1\0");
-        self.update_hash(&mut hasher);
-        hasher.finalize().into()
     }
 }
 
@@ -564,7 +580,6 @@ impl NanoClawSessionDatabaseSnapshot {
 
 #[derive(Clone)]
 struct NanoClawProjectInventory {
-    digest: [u8; 32],
     session_count: u64,
     // These remain distinct database observations. The project snapshot coordinates their
     // lifetime and revalidation; it does not merge their connections or read transactions.
@@ -577,8 +592,6 @@ pub(super) struct NanoClawProjectSnapshot {
     central: NanoClawSqliteSnapshot,
     central_root_bound: Option<NanoClawRootBoundDatabase>,
     inventory: NanoClawProjectInventory,
-    root_authority_fingerprint: [u8; 32],
-    sessions_authority_fingerprint: [u8; 32],
 }
 
 pub(super) struct NanoClawSourceBackedProject {
@@ -592,7 +605,7 @@ pub(super) struct NanoClawSourceBackedProject {
 impl NanoClawSourceBackedProject {
     /// Opens exactly the caller-selected project. No parent/default discovery
     /// and no pathname or copy fallback is available on this route.
-    pub(super) fn open(data_root: &Path, path: &Path) -> Result<Self> {
+    pub(super) fn open(data_root: &Path, path: &Path) -> NanoClawProjectOpenResult<Self> {
         let requested_root = nanoclaw_requested_project_root(path)?;
         let root = ProviderSourceRoot::open(&requested_root)?;
         let sessions = root.open_directory(Path::new("data/v2-sessions"))?;
@@ -618,11 +631,9 @@ impl NanoClawSourceBackedProject {
             central: central_snapshot,
             central_root_bound: Some(central_route.clone()),
             inventory,
-            root_authority_fingerprint: root.authority_fingerprint(),
-            sessions_authority_fingerprint: sessions.authority_fingerprint(),
         };
         if !snapshot.revalidate_frozen_inventory()? {
-            return Err(CaptureError::SourceChangedDuringCapture);
+            return Err(CaptureError::SourceChangedDuringCapture.into());
         }
         central_opened.revalidate()?;
         central_route.revalidate_authority()?;
@@ -643,10 +654,6 @@ impl NanoClawSourceBackedProject {
 
     pub(super) fn snapshot(&self) -> &NanoClawProjectSnapshot {
         &self.snapshot
-    }
-
-    pub(super) fn physical_fingerprint(&self) -> [u8; 32] {
-        self.snapshot.physical_fingerprint()
     }
 
     pub(super) fn connection(&self) -> Result<&Connection> {
@@ -686,12 +693,16 @@ impl NanoClawSourceBackedProject {
 impl NanoClawProjectSnapshot {
     pub(super) fn physical_fingerprint(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"ctx-nanoclaw-compound-physical-inventory-v1\0");
-        hasher.update(self.root_authority_fingerprint);
-        hasher.update(self.sessions_authority_fingerprint);
+        hasher.update(b"ctx-nanoclaw-compound-physical-revision-v2\0");
         self.central.update_hash(&mut hasher);
-        hasher.update(self.inventory.digest);
         hasher.update(self.inventory.session_count.to_be_bytes());
+        for session in &self.inventory.session_databases {
+            hasher.update(session.rowid.to_be_bytes());
+            nanoclaw_hash_bytes(&mut hasher, session.agent_group_id.as_bytes());
+            nanoclaw_hash_bytes(&mut hasher, session.session_id.as_bytes());
+            session.inbound.update_hash(&mut hasher);
+            session.outbound.update_hash(&mut hasher);
+        }
         hasher.finalize().into()
     }
 
@@ -699,26 +710,60 @@ impl NanoClawProjectSnapshot {
         &self,
         user_version: i64,
         schema_fingerprint: &str,
+        logical_digest: [u8; 32],
+        counts: ScannedSourceCounts,
     ) -> Result<Vec<u8>> {
-        let component_databases = self
-            .inventory
+        Ok(serde_json::to_vec(&NanoClawCompoundRevisionEvidence {
+            version: 2,
+            capture_revision: NANOCLAW_CAPTURE_REVISION,
+            policy_revision: NANOCLAW_POLICY_REVISION,
+            user_version,
+            schema_fingerprint,
+            logical_sha256: nanoclaw_hex(&logical_digest),
+            sessions: self.inventory.session_count,
+            component_databases: self.component_database_count(),
+            complete_records: counts.complete_records,
+            retained_records: counts.retained_records,
+            rejected_records: counts.rejected_records,
+            ignored_records: counts.ignored_records,
+            indexed_documents: counts.indexed_documents,
+            certified_bytes: counts.certified_bytes,
+        })?)
+    }
+
+    pub(super) fn component_database_count(&self) -> u64 {
+        self.inventory
             .session_databases
             .iter()
             .map(|session| {
                 u64::from(session.inbound.is_present()) + u64::from(session.outbound.is_present())
             })
-            .sum();
-        Ok(serde_json::to_vec(&NanoClawCompoundRevisionEvidence {
-            version: 1,
-            capture_revision: NANOCLAW_CAPTURE_REVISION,
-            policy_revision: NANOCLAW_POLICY_REVISION,
-            user_version,
-            schema_fingerprint,
-            central_sha256: nanoclaw_hex(&self.central.digest()),
-            session_inventory_sha256: nanoclaw_hex(&self.inventory.digest),
-            sessions: self.inventory.session_count,
-            component_databases,
-        })?)
+            .sum()
+    }
+
+    pub(super) fn selected_component_count(&self) -> u64 {
+        u64::try_from(self.inventory.session_databases.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(2)
+    }
+
+    pub(super) fn logical_authority_fingerprint(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ctx-nanoclaw-compound-logical-authority-v1\0");
+        hasher.update(self.inventory.session_count.to_be_bytes());
+        for session in &self.inventory.session_databases {
+            hasher.update(session.rowid.to_be_bytes());
+            nanoclaw_hash_bytes(&mut hasher, session.agent_group_id.as_bytes());
+            nanoclaw_hash_bytes(&mut hasher, session.session_id.as_bytes());
+            nanoclaw_hash_bytes(
+                &mut hasher,
+                &[
+                    u8::from(session.inbound.is_present()),
+                    u8::from(session.outbound.is_present()),
+                ],
+            );
+        }
+        hasher.finalize().into()
     }
 
     pub(super) fn database(
@@ -801,7 +846,7 @@ fn nanoclaw_stream_inventory(
     project_root: &Path,
     conn: &Connection,
     source_root: Option<&ProviderSourceRoot>,
-) -> Result<NanoClawProjectInventory> {
+) -> NanoClawProjectOpenResult<NanoClawProjectInventory> {
     let columns = nanoclaw_session_columns(conn)?;
     let retained = nanoclaw_retained_length_expr(&nanoclaw_session_projection(conn, &columns)?);
     let mut candidates = conn.prepare(&format!(
@@ -811,8 +856,6 @@ fn nanoclaw_stream_inventory(
         "select CAST(id AS TEXT), CAST(agent_group_id AS TEXT) from sessions where rowid = ?1",
     )?;
     let mut rows = candidates.query([])?;
-    let mut hasher = Sha256::new();
-    hasher.update(NANOCLAW_INVENTORY_HASH_DOMAIN);
     let mut count = 0_u64;
     let mut session_databases = Vec::new();
     let mut pacer = NanoClawInventoryPacer::new();
@@ -820,16 +863,18 @@ fn nanoclaw_stream_inventory(
         let rowid: i64 = row.get(0)?;
         let retained_bytes: i64 = row.get(1)?;
         let observed_bytes = nanoclaw_observed_bytes(retained_bytes)?;
-        nanoclaw_hash_u64(&mut hasher, nanoclaw_ordered_i64(rowid));
-        nanoclaw_hash_u64(&mut hasher, observed_bytes);
         if observed_bytes <= NANOCLAW_NATIVE_MAX_RECORD_BYTES {
             let (session_id, agent_group_id): (String, String) =
                 hydrate.query_row([rowid], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            nanoclaw_hash_bytes(&mut hasher, session_id.as_bytes());
-            nanoclaw_hash_bytes(&mut hasher, agent_group_id.as_bytes());
             if provider_safe_path_segment(&agent_group_id)
                 && provider_safe_path_segment(&session_id)
             {
+                if session_databases.len() >= NANOCLAW_MAX_SESSION_SNAPSHOTS {
+                    return Err(NanoClawProjectOpenError::SessionSnapshotLimitExceeded {
+                        maximum: NANOCLAW_MAX_SESSION_SNAPSHOTS,
+                        observed: session_databases.len().saturating_add(1),
+                    });
+                }
                 let session_dir = project_root
                     .join("data")
                     .join("v2-sessions")
@@ -850,8 +895,6 @@ fn nanoclaw_stream_inventory(
                 };
                 let inbound = read_component(NanoClawMessageSource::Inbound)?;
                 let outbound = read_component(NanoClawMessageSource::Outbound)?;
-                inbound.update_hash(&mut hasher);
-                outbound.update_hash(&mut hasher);
                 session_databases.push(NanoClawSessionDatabaseSnapshot {
                     rowid,
                     agent_group_id,
@@ -859,11 +902,7 @@ fn nanoclaw_stream_inventory(
                     inbound,
                     outbound,
                 });
-            } else {
-                nanoclaw_hash_bytes(&mut hasher, b"unsafe-session-path");
             }
-        } else {
-            nanoclaw_hash_bytes(&mut hasher, b"oversize-session-row");
         }
         count = count.checked_add(1).ok_or(CaptureError::SystemInvariant(
             "NanoClaw inventory session count overflowed",
@@ -871,7 +910,6 @@ fn nanoclaw_stream_inventory(
         pacer.observe();
     }
     Ok(NanoClawProjectInventory {
-        digest: hasher.finalize().into(),
         session_count: count,
         session_databases,
     })
@@ -884,10 +922,15 @@ struct NanoClawCompoundRevisionEvidence<'a> {
     policy_revision: u32,
     user_version: i64,
     schema_fingerprint: &'a str,
-    central_sha256: String,
-    session_inventory_sha256: String,
+    logical_sha256: String,
     sessions: u64,
     component_databases: u64,
+    complete_records: u64,
+    retained_records: u64,
+    rejected_records: u64,
+    ignored_records: u64,
+    indexed_documents: u64,
+    certified_bytes: u64,
 }
 
 pub(super) fn nanoclaw_project_root(path: &Path) -> Result<PathBuf> {

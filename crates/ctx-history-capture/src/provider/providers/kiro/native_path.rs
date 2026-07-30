@@ -14,7 +14,8 @@ use crate::{
     provider::sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -33,6 +34,7 @@ pub(crate) use source_backed::{
 #[derive(Debug)]
 struct KiroSqliteDatabase {
     root: ProviderSourceRoot,
+    authority: SqliteSourceDirectoryAuthority,
     snapshot: SqliteSourceReadSnapshot,
 }
 
@@ -68,7 +70,11 @@ impl KiroSqliteDatabase {
             .map_err(|_| CaptureError::SystemInvariant("Kiro SQLite value limit is invalid"))?;
         connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
         connection.busy_timeout(Duration::from_secs(5))?;
-        Ok(Self { root, snapshot })
+        Ok(Self {
+            root,
+            authority,
+            snapshot,
+        })
     }
 
     fn connection(&self, path: &Path) -> Result<&Connection> {
@@ -77,12 +83,34 @@ impl KiroSqliteDatabase {
             .map_err(|error| kiro_sqlite_source_error(path, error))
     }
 
+    fn evidence(&self) -> &SqliteSourceEvidence {
+        self.snapshot.evidence()
+    }
+
+    fn revalidate(&self, path: &Path) -> Result<()> {
+        self.snapshot
+            .revalidate()
+            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        self.root.revalidate()
+    }
+
+    fn terminal_revalidator(
+        &self,
+    ) -> Box<dyn Fn() -> std::result::Result<(), SqliteSourceAccessError> + Send + Sync + 'static>
+    {
+        self.snapshot.terminal_revalidator()
+    }
+
+    fn sqlite_authority(&self) -> SqliteSourceDirectoryAuthority {
+        self.authority.clone()
+    }
+
     fn finish(self, path: &Path) -> Result<SqliteSourceEvidence> {
-        let evidence = self
-            .snapshot
+        let Self { root, snapshot, .. } = self;
+        let evidence = snapshot
             .finish()
             .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        self.root.revalidate()?;
+        root.revalidate()?;
         Ok(evidence)
     }
 }
