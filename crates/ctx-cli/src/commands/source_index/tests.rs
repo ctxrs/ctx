@@ -472,11 +472,9 @@ mod tests {
         assert!(result["citations"][0].get("cursor").is_none());
         let commands = result["suggested_next_commands"].as_array().unwrap();
         assert!(commands.iter().all(|command| {
-            command
-                .as_str()
-                .is_some_and(|command| command.starts_with(
-                    r#"ctx --data-root '/tmp/ctx root/owner'\''s history' "#,
-                ))
+            command.as_str().is_some_and(|command| {
+                command.starts_with(r#"ctx --data-root '/tmp/ctx root/owner'\''s history' "#)
+            })
         }));
         assert_eq!(
             result["suggested_next_commands"][2],
