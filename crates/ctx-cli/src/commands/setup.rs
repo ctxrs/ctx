@@ -320,7 +320,7 @@ fn render_setup_human(
     }
     let history_fields = history_values
         .iter()
-        .map(|(label, value)| Field::new(*label, value.as_str()))
+        .map(|(label, value)| Field::new(label, value.as_str()))
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));

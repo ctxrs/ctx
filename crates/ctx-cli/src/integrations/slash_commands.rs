@@ -828,7 +828,7 @@ fn render_install_results(context: &RenderContext, results: &[InstallResult]) ->
     if !manual_notes.is_empty() {
         let guidance = manual_notes
             .iter()
-            .map(|(agent, note)| Field::new(*agent, *note))
+            .map(|(agent, note)| Field::new(agent, note))
             .collect::<Vec<_>>();
         document.push_blank();
         document.append(section("Manual setup", fields(context, &guidance)));

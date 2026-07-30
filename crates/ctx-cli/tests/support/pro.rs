@@ -77,10 +77,7 @@ pub(crate) fn write_python_helper(path: &Path, body: &str) {
 
 #[cfg(all(
     unix,
-    any(
-        all(test, not(ctx_cli_bazel_test)),
-        ctx_cli_test_support_fixtures
-    )
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
 pub(crate) fn initialize_current_query_store(data_root: &Path) {
     initialize_pro_installation_identity(data_root);

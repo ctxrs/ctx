@@ -189,6 +189,7 @@ pub(crate) struct ProManagePlan {
 /// entitlement proof, and R2 delivery own their formats in separate modules.
 pub(crate) trait ProLifecycleService {
     fn release_trust(&self) -> Result<ReleaseTrust>;
+    #[allow(clippy::too_many_arguments)]
     fn setup(
         &mut self,
         data_root: &Path,
@@ -396,6 +397,7 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_setup(
     data_root: &Path,
     service: &mut dyn ProLifecycleService,

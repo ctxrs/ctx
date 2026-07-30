@@ -161,14 +161,17 @@ fn push_visual_row(document: &mut Document, cells: &[Vec<String>], widths: &[usi
             .map(|(column, _)| column)
             .unwrap_or(0);
         let mut line = Line::new();
-        for column in 0..=last_content.min(widths.len().saturating_sub(1)) {
+        let visible_columns = last_content
+            .min(widths.len().saturating_sub(1))
+            .saturating_add(1);
+        for (column, width) in widths.iter().enumerate().take(visible_columns) {
             let value = cells
                 .get(column)
                 .and_then(|cell| cell.get(visual_line))
                 .map_or("", String::as_str);
             line.push(Span::new(value, token));
             if column < last_content {
-                line.push(Span::text(pad_after(value, widths[column])));
+                line.push(Span::text(pad_after(value, *width)));
                 line.push(Span::text(pad(COLUMN_GAP)));
             }
         }

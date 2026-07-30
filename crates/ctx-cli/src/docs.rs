@@ -365,7 +365,7 @@ fn list_docs(json_output: bool, telemetry: &mut DocsTelemetry, ui: &mut Ui) -> R
         Ok(output.len())
     } else {
         let document = render_docs_list(ui.stdout_context());
-        let output_bytes = canonical_human_output_bytes(|context| render_docs_list(context));
+        let output_bytes = canonical_human_output_bytes(render_docs_list);
         ui.write_stdout(&document)?;
         Ok(output_bytes)
     }

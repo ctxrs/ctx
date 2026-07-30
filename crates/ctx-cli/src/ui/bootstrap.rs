@@ -75,9 +75,9 @@ pub(crate) fn scan_machine_output_hint(arguments: &[OsString]) -> bool {
             {
                 return true;
             }
-        } else if argument.strip_prefix("--progress=") == Some("json") {
-            return true;
-        } else if *argument == "--progress" && arguments.get(index + 1).copied() == Some("json") {
+        } else if argument.strip_prefix("--progress=") == Some("json")
+            || (*argument == "--progress" && arguments.get(index + 1).copied() == Some("json"))
+        {
             return true;
         }
     }

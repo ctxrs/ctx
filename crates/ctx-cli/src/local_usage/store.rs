@@ -471,7 +471,7 @@ fn open_writable_with_migration_hook(
             "delete" => {}
             _ => return Err(UsageStoreError::SchemaIdentity),
         }
-        guard.recheck(&path)?;
+        guard.recheck(path)?;
     }
     migrate_to_current(&mut conn, || {
         guard.recheck(path)?;
