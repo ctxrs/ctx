@@ -1,11 +1,11 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 #[cfg(target_os = "linux")]
 use std::{
-    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -57,6 +57,9 @@ const NANOCLAW_FD_PROBE_TEST: &str =
     "provider::providers::nanoclaw::tests::compound_inventory_peak_fds_are_bounded_independent_of_snapshot_count";
 #[cfg(target_os = "linux")]
 const NANOCLAW_FD_PROBE_OUTPUT: &str = "nanoclaw_fd_peak=";
+const NANOCLAW_ADMISSION_CHILD: &str = "CTX_NANOCLAW_ADMISSION_CHILD";
+const NANOCLAW_ADMISSION_TEST: &str =
+    "provider::providers::nanoclaw::tests::compound_inventory_admits_n_snapshots_and_rejects_n_plus_one_before_projection";
 
 fn create_project(temp: &TempDir, name: &str, sessions: usize) -> PathBuf {
     let root = temp.path().join(name);
@@ -943,6 +946,25 @@ fn compound_inventory_peak_fds_are_bounded_independent_of_snapshot_count() {
 
 #[test]
 fn compound_inventory_admits_n_snapshots_and_rejects_n_plus_one_before_projection() {
+    if std::env::var_os(NANOCLAW_ADMISSION_CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg(NANOCLAW_ADMISSION_TEST)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(NANOCLAW_ADMISSION_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated NanoClaw admission contract failed: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = create_project(
         &temp,
