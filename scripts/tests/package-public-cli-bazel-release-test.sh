@@ -27,7 +27,13 @@ mkdir -p \
   "${repo}/tests/fixtures/custom-history-jsonl" \
   "${repo}/bazel-out/k8-opt/bin/crates/ctx-cli" \
   "${repo}/inputs" \
+  "${runfiles}/_main/scripts" \
   "${route_runfiles}"
+ln -s "${source_root}/scripts/dependency-advisory-gate.py" \
+  "${runfiles}/_main/scripts/dependency-advisory-gate.py"
+ln -s "${TEST_SRCDIR}/_main~_repo_rules~ctx_tomli" \
+  "${runfiles}/_main~_repo_rules~ctx_tomli"
+ln -s "${TEST_SRCDIR}/bazel_tools" "${runfiles}/bazel_tools"
 
 cp "${source_root}/contracts/release-targets-v1.json" "${repo}/contracts/"
 cp "${source_root}/contracts/release-candidate-manifest-v1.schema.json" \
@@ -37,7 +43,6 @@ cp "${source_root}/scripts/public-cli-release-targets.py" "${repo}/scripts/"
 cp "${source_root}/scripts/write-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/check-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/install-public-cli-candidate.py" "${repo}/scripts/"
-cp "${source_root}/scripts/dependency-advisory-gate.py" "${repo}/scripts/"
 cp "${source_root}/scripts/release/public-cli-bazel-build-info.py" \
   "${repo}/scripts/release/"
 cp "${source_root}/scripts/release/linux-bazel-release.Dockerfile" \
@@ -369,6 +374,9 @@ path.write_text(
 )
 PY
 
+test -x "${source_root}/dependency_advisory_gate"
+ln -s "${source_root}/dependency_advisory_gate" \
+  "${route_runfiles}/advisory-gate"
 ln -s "${artifact}" "${route_runfiles}/artifact"
 ln -s "${repo}/inputs/rustc" "${route_runfiles}/rustc"
 cat >"${repo}/inputs/sbom-inventory.txt" <<'EOF'
@@ -396,6 +404,8 @@ package() {
   TEST_WORKSPACE="_main" \
   BUILD_WORKSPACE_DIRECTORY="${repo}" \
     "${source_root}/scripts/package-public-cli-bazel-release.sh" \
+    --declared-advisory-gate-runfile \
+      ctx_release_routes/linux-x64/advisory-gate \
     --declared-artifact-runfile ctx_release_routes/linux-x64/artifact \
     --declared-rustc-runfile ctx_release_routes/linux-x64/rustc \
     --declared-sbom-inventory-runfile \
@@ -467,6 +477,18 @@ if package --output-dir out-duplicate \
 fi
 grep -Fq 'duplicate reserved argument: --declared-artifact-runfile' \
   "${test_root}/duplicate.stderr"
+
+if package --output-dir out-duplicate-advisory \
+  --declared-advisory-gate-runfile \
+    ctx_release_routes/linux-x64/advisory-gate \
+  >"${test_root}/duplicate-advisory.stdout" \
+  2>"${test_root}/duplicate-advisory.stderr"; then
+  echo "duplicate reserved advisory gate unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq \
+  'duplicate reserved argument: --declared-advisory-gate-runfile' \
+  "${test_root}/duplicate-advisory.stderr"
 
 if package --output-dir out-linux-forged-llvm \
   --declared-llvm-readobj-runfile ctx_release_routes/linux-x64/rustc \

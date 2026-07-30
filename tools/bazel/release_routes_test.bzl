@@ -185,6 +185,7 @@ def release_route_analysis_test_suite(name):
         )
         public_cli_release_route(
             name = route_name,
+            advisory_gate = ":_release_route_test_packager",
             artifact = probe_name,
             license_materials = ":_release_route_test_license_materials",
             packager = ":_release_route_test_packager",
@@ -207,6 +208,7 @@ def release_route_analysis_test_suite(name):
     )
     public_cli_release_route(
         name = "_release_route_runfiles_probe",
+        advisory_gate = ":_release_route_test_packager",
         artifact = ":_release_route_probe_linux_x64",
         license_materials = ":_release_route_test_license_materials",
         packager = ":_release_route_runfiles_probe_packager",

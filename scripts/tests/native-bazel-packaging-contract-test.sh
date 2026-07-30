@@ -41,6 +41,8 @@ for required in \
 done
 
 for required in \
+  '--declared-advisory-gate-runfile' \
+  'script = "//:dependency_advisory_gate"' \
   'export RUNFILES_DIR="${{runfiles_root}}"' \
   'export RUNFILES_MANIFEST_FILE="${{manifest}}"'; do
   grep -Fq -- "${required}" "${release_routes}" || {

@@ -102,6 +102,7 @@ if [[ -z "${{RUNFILES_MANIFEST_FILE:-}}" ]]; then
   done
 fi
 exec "${{packager}}" \
+  --declared-advisory-gate-runfile "${{route_root}}/advisory-gate" \
   --declared-artifact-runfile "${{route_root}}/artifact" \
   --declared-rustc-runfile "${{route_root}}/rustc" \
 {llvm_readobj_argument}\
@@ -127,6 +128,7 @@ def _release_route_impl(ctx):
 
     route_root = "ctx_release_routes/{}".format(ctx.attr.target_id)
     files = [
+        ctx.executable.advisory_gate,
         ctx.file.artifact,
         ctx.file.cargo_lock,
         ctx.file.license_materials,
@@ -135,6 +137,7 @@ def _release_route_impl(ctx):
         ctx.file.target_matrix,
     ]
     symlinks = {
+        "{}/advisory-gate".format(route_root): ctx.executable.advisory_gate,
         "{}/Cargo.lock".format(route_root): ctx.file.cargo_lock,
         "{}/artifact".format(route_root): ctx.file.artifact,
         "{}/license-materials.txt".format(route_root): ctx.file.license_materials,
@@ -153,6 +156,7 @@ def _release_route_impl(ctx):
     runfiles = runfiles.merge(
         ctx.attr.license_materials[0][DefaultInfo].default_runfiles,
     )
+    runfiles = runfiles.merge(ctx.attr.advisory_gate[DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.attr.packager[DefaultInfo].default_runfiles)
     return [
         DefaultInfo(executable = launcher, runfiles = runfiles),
@@ -168,6 +172,11 @@ _release_route = rule(
     implementation = _release_route_impl,
     executable = True,
     attrs = {
+        "advisory_gate": attr.label(
+            cfg = "exec",
+            executable = True,
+            mandatory = True,
+        ),
         "artifact": attr.label(
             allow_single_file = True,
             cfg = _route_transition,
@@ -206,6 +215,7 @@ _release_route = rule(
 def public_cli_release_route(
         name,
         target_id,
+        advisory_gate,
         artifact,
         rustc,
         packager,
@@ -217,6 +227,7 @@ def public_cli_release_route(
         llvm_readobj = "@ctx_llvm_mingw//:bin/llvm-readobj.exe"
     _release_route(
         name = name,
+        advisory_gate = advisory_gate,
         artifact = artifact,
         cargo_lock = "//:release_cargo_lock",
         license_materials = license_materials,
@@ -269,11 +280,20 @@ resolve_main_runfile() {{
 }}
 
 route_root="ctx_release_advisory/{target_id}"
-script="$(resolve_main_runfile "${{route_root}}/gate.py")"
+script="$(resolve_main_runfile "${{route_root}}/gate")"
 inventory="$(resolve_main_runfile "${{route_root}}/cargo-inventory.txt")"
 policy="$(resolve_main_runfile "${{route_root}}/policy.json")"
 exceptions="$(resolve_main_runfile "${{route_root}}/exceptions.json")"
-exec python3 -I "${{script}}" \
+export RUNFILES_DIR="${{runfiles_root}}"
+if [[ -z "${{RUNFILES_MANIFEST_FILE:-}}" ]]; then
+  for manifest in "$0.runfiles_manifest" "${{runfiles_root}}/MANIFEST"; do
+    if [[ -f "${{manifest}}" ]]; then
+      export RUNFILES_MANIFEST_FILE="${{manifest}}"
+      break
+    fi
+  done
+fi
+exec "${{script}}" \
   --repo-root "${{BUILD_WORKSPACE_DIRECTORY}}" \
   --policy "${{policy}}" \
   --exceptions "${{exceptions}}" \
@@ -293,23 +313,22 @@ def _release_advisory_gate_impl(ctx):
         is_executable = True,
     )
     route_root = "ctx_release_advisory/{}".format(ctx.attr.target_id)
-    return [DefaultInfo(
-        executable = launcher,
-        runfiles = ctx.runfiles(
-            files = [
-                ctx.file.exceptions,
-                ctx.file.inventory,
-                ctx.file.policy,
-                ctx.file.script,
-            ],
-            symlinks = {
-                "{}/cargo-inventory.txt".format(route_root): ctx.file.inventory,
-                "{}/exceptions.json".format(route_root): ctx.file.exceptions,
-                "{}/gate.py".format(route_root): ctx.file.script,
-                "{}/policy.json".format(route_root): ctx.file.policy,
-            },
-        ),
-    )]
+    runfiles = ctx.runfiles(
+        files = [
+            ctx.file.exceptions,
+            ctx.file.inventory,
+            ctx.file.policy,
+            ctx.executable.script,
+        ],
+        symlinks = {
+            "{}/cargo-inventory.txt".format(route_root): ctx.file.inventory,
+            "{}/exceptions.json".format(route_root): ctx.file.exceptions,
+            "{}/gate".format(route_root): ctx.executable.script,
+            "{}/policy.json".format(route_root): ctx.file.policy,
+        },
+    )
+    runfiles = runfiles.merge(ctx.attr.script[DefaultInfo].default_runfiles)
+    return [DefaultInfo(executable = launcher, runfiles = runfiles)]
 
 _release_advisory_gate = rule(
     implementation = _release_advisory_gate_impl,
@@ -322,7 +341,11 @@ _release_advisory_gate = rule(
             mandatory = True,
         ),
         "policy": attr.label(allow_single_file = True, mandatory = True),
-        "script": attr.label(allow_single_file = True, mandatory = True),
+        "script": attr.label(
+            cfg = "exec",
+            executable = True,
+            mandatory = True,
+        ),
         "target_id": attr.string(mandatory = True, values = sorted(_ROUTES.keys())),
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
@@ -337,7 +360,7 @@ def public_cli_release_advisory_gate(name, target_id, inventory):
         exceptions = "//:release_advisory_exceptions",
         inventory = inventory,
         policy = "//:release_advisory_policy",
-        script = "//:scripts/dependency-advisory-gate.py",
+        script = "//:dependency_advisory_gate",
         target_id = target_id,
         tags = ["manual", "release-gate", "release-tool"],
     )

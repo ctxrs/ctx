@@ -118,6 +118,7 @@ else
   repo_root="${script_repo_root}"
 fi
 
+advisory_gate_runfile=""
 artifact_runfile=""
 rustc_runfile=""
 llvm_readobj_runfile=""
@@ -128,6 +129,7 @@ target_matrix_runfile=""
 target_id=""
 output_dir="target/public-cli-artifacts"
 build_info=""
+seen_advisory_gate=0
 seen_artifact=0
 seen_rustc=0
 seen_llvm_readobj=0
@@ -142,6 +144,14 @@ seen_build_info=0
 while [[ $# -gt 0 ]]; do
   option="$1"
   case "${option}" in
+    --declared-advisory-gate-runfile)
+      seen_advisory_gate=$((seen_advisory_gate + 1))
+      [[ "${seen_advisory_gate}" == "1" ]] \
+        || usage_error "duplicate reserved argument: ${option}"
+      shift
+      [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
+      advisory_gate_runfile="$1"
+      ;;
     --declared-artifact-runfile)
       seen_artifact=$((seen_artifact + 1))
       [[ "${seen_artifact}" == "1" ]] \
@@ -234,9 +244,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ "${seen_artifact}:${seen_rustc}:${seen_sbom_inventory}:${seen_license_materials}:${seen_cargo_lock}:${seen_target_matrix}:${seen_target}" \
-  == "1:1:1:1:1:1:1" ]] || usage_error "release route declarations are incomplete"
+[[ "${seen_advisory_gate}:${seen_artifact}:${seen_rustc}:${seen_sbom_inventory}:${seen_license_materials}:${seen_cargo_lock}:${seen_target_matrix}:${seen_target}" \
+  == "1:1:1:1:1:1:1:1" ]] || usage_error "release route declarations are incomplete"
 
+advisory_gate="$(resolve_declared_runfile "${advisory_gate_runfile}")" \
+  || die "declared dependency-advisory gate runfile is unavailable"
 artifact="$(resolve_declared_runfile "${artifact_runfile}")" \
   || die "declared Bazel artifact runfile is unavailable"
 rustc="$(resolve_declared_runfile "${rustc_runfile}")" \
@@ -376,7 +388,7 @@ cleanup() {
 trap cleanup EXIT
 
 staged_advisory="${stage_dir}/${binary_name}.dependency-advisory.json"
-python3 -I "${repo_root}/scripts/dependency-advisory-gate.py" \
+"${advisory_gate}" \
   --repo-root "${source_repo}" \
   --policy "${repo_root}/security/release-advisory-policy-v1.json" \
   --exceptions "${repo_root}/security/release-advisory-exceptions-v1.json" \
