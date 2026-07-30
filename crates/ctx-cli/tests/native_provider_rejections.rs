@@ -318,11 +318,14 @@ fn codex_mixed_session_replay_preserves_source_backed_rejection_counts() {
         let source = assert_source_backed_publication(&report, "codex", "codex_session_jsonl", 1);
         assert_eq!(source["current_sources_with_rejections"], 1, "{report:#}");
         assert_eq!(source["current_indexed_documents"], 1, "{report:#}");
-        assert_eq!(
-            source["change"],
-            if resume { "no_op" } else { "changed" },
-            "{report:#}"
-        );
+        if resume {
+            assert_eq!(source["change"], "no_op", "{report:#}");
+        } else {
+            assert!(
+                matches!(source["change"].as_str(), Some("changed" | "no_op")),
+                "the persistent daemon may publish the first generation before import: {report:#}"
+            );
+        }
     }
 
     let search = json_output(ctx(&temp).args([

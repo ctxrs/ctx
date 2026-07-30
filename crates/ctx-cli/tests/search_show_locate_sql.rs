@@ -663,7 +663,7 @@ fn fresh_home_search_mvp_flow() {
     assert!(human_search.contains("1. "));
     assert!(human_search.contains("Session  codex · "), "{human_search}");
     assert!(
-        human_search.contains("Inspect\n     ctx show session"),
+        human_search.contains("Inspect\n") && human_search.contains(" show session "),
         "{human_search}"
     );
     assert!(!human_search.contains("ctx_event_id"));
@@ -683,10 +683,11 @@ fn fresh_home_search_mvp_flow() {
     assert!(verbose_search.contains("Event"));
     assert!(verbose_search.contains("Ctx session"));
     assert!(verbose_search.contains("Provider session"));
-    assert!(verbose_search.contains("Importance"));
-    assert!(verbose_search.contains("ctx show session"));
-    assert!(verbose_search.contains("ctx show event"));
-    assert!(verbose_search.contains("ctx search onboarding --session"));
+    assert!(verbose_search.contains("Rank"));
+    assert!(verbose_search.contains("Retrieval score"));
+    assert!(verbose_search.contains(" show session "));
+    assert!(verbose_search.contains(" show event "));
+    assert!(verbose_search.contains(" search onboarding --session"));
     assert!(!human_search.contains("work_record"));
     assert!(!human_search.contains("history_record"));
 

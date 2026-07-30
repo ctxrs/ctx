@@ -434,7 +434,7 @@ cleanup() {
   fi
   if [[ -n "${symbols_install:-}" \
     && -n "${symbols_parent:-}" \
-    && "${symbols_install}" == "${symbols_parent}/.ctx-private-symbols."* \
+    && "${symbols_install}" == "${symbols_parent}/.ctx-detached-symbols."* \
     && -d "${symbols_install}" && ! -L "${symbols_install}" ]]; then
     rm -rf -- "${symbols_install}"
   fi
@@ -741,7 +741,7 @@ python3 -B "${repo_root}/scripts/install-public-cli-candidate.py" \
 
 symbols_parent="$(dirname "${private_symbols_dir}")"
 mkdir -p "${symbols_parent}"
-symbols_install="$(mktemp -d "${symbols_parent}/.ctx-private-symbols.XXXXXX")"
+symbols_install="$(mktemp -d "${symbols_parent}/.ctx-detached-symbols.XXXXXX")"
 chmod 0700 "${symbols_install}"
 install -m 0600 "${staged_symbols}/symbols.tar.gz" "${symbols_install}/symbols.tar.gz"
 install -m 0600 "${staged_symbols}/manifest.json" "${symbols_install}/manifest.json"
