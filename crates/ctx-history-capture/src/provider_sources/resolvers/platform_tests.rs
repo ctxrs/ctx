@@ -257,6 +257,56 @@ fn lingma_vscode_profiles_use_winning_keys_without_waylog_guesses() {
 }
 
 #[test]
+fn lingma_active_wal_probe_uses_the_authorized_ctx_data_root() {
+    let temp = tempdir();
+    let selected = temp.path().join("lingma-active-wal");
+    let database = selected.join("sharedClientCache/cache/db/local.db");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let writer = Connection::open(&database).unwrap();
+    writer
+        .execute_batch(
+            "create table chat_record (
+                session_id text, request_id text, chat_prompt text, summary text,
+                error_result text, gmt_create integer, extra text
+            );",
+        )
+        .unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute(
+            "insert into chat_record (
+                session_id, request_id, chat_prompt, summary,
+                error_result, gmt_create, extra
+            ) values (?1, ?2, ?3, null, null, 1, null)",
+            ("session", "request", "active WAL body"),
+        )
+        .unwrap();
+    write_file(
+        &temp.path().join("platform-config/Code/User/settings.json"),
+        format!(
+            "{{\"QoderCN.LocalMachineStoragePath\":{:?}}}",
+            selected.to_string_lossy()
+        )
+        .as_bytes(),
+    );
+    let context =
+        context(temp.path(), DiscoveryPlatform::Linux).with_data_root(temp.path().join("ctx-data"));
+
+    let report = provider_report(&context, CaptureProvider::Lingma);
+
+    let source = report
+        .sources
+        .iter()
+        .find(|source| source.path == database)
+        .unwrap();
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    assert!(database.with_file_name("local.db-wal").is_file());
+    assert!(database.with_file_name("local.db-shm").is_file());
+    drop(writer);
+}
+
+#[test]
 fn lingma_jetbrains_selects_current_leaf_over_migration_leftover() {
     let temp = tempdir();
     let context = context(temp.path(), DiscoveryPlatform::Linux);

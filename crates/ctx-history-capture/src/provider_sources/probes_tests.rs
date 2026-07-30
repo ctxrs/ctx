@@ -34,7 +34,18 @@ fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     writer
-        .execute_batch("create table conversations (id text primary key);")
+        .execute_batch(
+            "create table conversations (
+                id text primary key,
+                payload text not null
+            );",
+        )
+        .unwrap();
+    writer
+        .execute(
+            "insert into conversations (id, payload) values (?1, ?2)",
+            ("large-live-wal", "x".repeat(384 * 1024)),
+        )
         .unwrap();
     let before = sqlite_component_bytes(&path);
     assert!(before.iter().any(|(path, bytes)| {
@@ -50,6 +61,46 @@ fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
     let staging = data.path().join("tmp/provider-sqlite");
     assert!(staging.is_dir());
     assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+    drop(writer);
+}
+
+#[test]
+fn lingma_probe_reads_large_committed_live_wal_without_mutating_provider_files() {
+    let temp = tempdir();
+    let data = tempdir();
+    let path = temp.path().join("local.db");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "create table chat_record (
+                session_id text not null,
+                request_id text,
+                chat_prompt text,
+                summary text,
+                error_result text,
+                gmt_create integer,
+                extra text
+            );",
+        )
+        .unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute(
+            "insert into chat_record (
+                session_id, request_id, chat_prompt, summary,
+                error_result, gmt_create, extra
+            ) values (?1, ?2, ?3, null, null, 1, null)",
+            ("session", "request", "x".repeat(384 * 1024)),
+        )
+        .unwrap();
+    let before = sqlite_component_bytes(&path);
+
+    assert_eq!(
+        has_lingma_chat_record_table(Some(data.path()), &path),
+        BoundedProbe::Found
+    );
+    assert_eq!(sqlite_component_bytes(&path), before);
     drop(writer);
 }
 
