@@ -47,7 +47,7 @@ if command -v ruby >/dev/null 2>&1; then
     data = YAML.load_file(ARGV.fetch(0))
     abort "pipeline must have steps" unless data.is_a?(Hash) && data["steps"].is_a?(Array)
     steps = data["steps"]
-    abort "pipeline should include public smoke and bounded release matrices" unless steps.length == 16
+    abort "pipeline should include public smoke and bounded release matrices" unless steps.length == 17
     smoke = steps.fetch(0)
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
@@ -67,6 +67,7 @@ if command -v ruby >/dev/null 2>&1; then
       public-cli-macos-x64
       public-cli-macos-x64-native-smoke
       public-cli-windows-x64-native-smoke
+      github-release-candidate
       semantic-model-archives
       semantic-coreml-archive
       semantic-runtime-linux-cuda12
@@ -139,13 +140,6 @@ if command -v ruby >/dev/null 2>&1; then
       abort "#{key} must configure the narrow Infisical signing launcher" unless command.include?("CTX_MACOS_SIGNING_SECRET_SOURCE=infisical")
       abort "#{key} must not access signing secrets before construction" if command.include?("scripts/run-macos-release-signing.sh --preflight")
       abort "#{key} must not inject secrets around a whole build" if command.include?("infisical run")
-      abort "#{key} must gate native smoke explicitly" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX")
-      abort "#{key} must force the CoreML smoke" unless command.include?("--coreml")
-      abort "#{key} must preserve native smoke evidence" unless command.include?("--keep-root")
-      proof = "target/public-cli-native-smoke/#{key.delete_prefix("public-cli-")}/**/packaged-runtime-proof.txt"
-      abort "#{key} must upload native smoke proof" unless Array(step["artifact_paths"]).include?(proof)
-      diagnostics = "target/public-cli-native-smoke/#{key.delete_prefix("public-cli-")}/**/daemon-smoke.log"
-      abort "#{key} must upload native smoke failure diagnostics" unless Array(step["artifact_paths"]).include?(diagnostics)
       evidence = "target/public-cli-artifacts/ctx-#{key.delete_prefix("public-cli-")}.signing.json"
       abort "#{key} must upload CLI signing evidence" unless Array(step["artifact_paths"]).include?(evidence)
       attestation = "target/public-cli-artifacts/ctx-#{key.delete_prefix("public-cli-")}.attestation.cms"
@@ -166,9 +160,8 @@ if command -v ruby >/dev/null 2>&1; then
       abort "#{key} must serialize native construction" unless step["concurrency"] == 1 && step["concurrency_group"] == concurrency_group
     end
     macos_arm64 = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-macos-arm64" }
-    abort "macos-arm64 smoke must require authoritative evidence" unless macos_arm64["command"].to_s.include?("runtime_authority=authoritative")
     macos_x64 = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-macos-x64" }
-    abort "macos-x64 Rosetta smoke must remain explicitly non-authoritative" unless macos_x64["command"].to_s.include?("runtime_authority=non_authoritative")
+    abort "macos-x64 construction lane must not claim native smoke" if macos_x64["command"].to_s.include?("smoke-daemon-semantic-release")
     macos_arm64_paths = Array(macos_arm64["artifact_paths"])
     abort "macos-arm64 must upload runtime signing evidence" unless macos_arm64_paths.include?("target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.signing.json")
     abort "macos-arm64 must upload runtime cryptographic attestation" unless macos_arm64_paths.include?("target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.cms")
@@ -178,26 +171,33 @@ if command -v ruby >/dev/null 2>&1; then
     arm_transcode = arm_command.index("scripts/stage-github-release-assets.sh --transcode-runtime macos-arm64")
     arm_smoke = arm_command.index("--runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz")
     abort "macos-arm64 native runtime smoke must follow signed final packaging" unless arm_runtime_build && arm_transcode && arm_smoke && arm_runtime_build < arm_transcode && arm_transcode < arm_smoke
+    abort "macos-arm64 must run native package smoke" unless arm_command.include?("scripts/run-native-candidate-smoke.sh")
+    abort "macos-arm64 must run CoreML smoke" unless arm_command.include?("--coreml")
+    abort "macos-arm64 smokes must require authoritative execution" unless arm_command.scan("--require-authoritative").length == 2
+    abort "macos-arm64 must upload package smoke result" unless macos_arm64_paths.include?("target/public-cli-native-smoke/macos-arm64/candidate-smoke.json")
+    abort "macos-arm64 must upload daemon diagnostics" unless macos_arm64_paths.include?("target/public-cli-native-smoke/macos-arm64/**/daemon-smoke.log")
     abort "macos-arm64 must allow two bounded notarizations" unless macos_arm64["timeout_in_minutes"].to_i >= 120
-    inline_proofs = {
-      "public-cli-linux-x64" => "ctx-linux-x64.native-runtime-proof.txt",
-      "public-cli-linux-aarch64" => "ctx-linux-aarch64.native-runtime-proof.txt",
-      "public-cli-macos-arm64" => "ctx-macos-arm64.native-runtime-proof.txt",
+    inline_native_smokes = {
+      "public-cli-linux-x64" => "linux-x64",
+      "public-cli-linux-aarch64" => "linux-aarch64",
+      "public-cli-macos-arm64" => "macos-arm64",
+      "public-cli-freebsd-x64" => "freebsd-x64",
     }
-    inline_proofs.each do |key, proof_name|
+    inline_native_smokes.each do |key, platform|
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
       command = step["command"].to_s
       abort "#{key} must gate packaged ONNX smoke" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") && command.include?("--runtime-archive")
-      abort "#{key} must require authoritative proof" unless command.include?("runtime_authority=authoritative")
-      proof_path = "target/public-cli-artifacts/#{proof_name}"
-      abort "#{key} must publish #{proof_name}" unless Array(step["artifact_paths"]).include?(proof_path)
+      abort "#{key} must run the native package smoke" unless command.include?("scripts/run-native-candidate-smoke.sh")
+      abort "#{key} must require authoritative execution" unless command.include?("--require-authoritative")
+      smoke_path = "target/public-cli-native-smoke/#{platform}/candidate-smoke.json"
+      abort "#{key} must publish #{smoke_path}" unless Array(step["artifact_paths"]).include?(smoke_path)
     end
     native_steps = {
-      "public-cli-macos-x64-native-smoke" => ["ctx-mac-gui-shared-x64", "ctx-macos-x64.native-runtime-proof.txt"],
-      "public-cli-windows-x64-native-smoke" => ["windows-x64", "ctx-windows-x64.native-runtime-proof.txt"],
+      "public-cli-macos-x64-native-smoke" => ["ctx-mac-gui-shared-x64", "macos-x64-native"],
+      "public-cli-windows-x64-native-smoke" => ["windows-x64", "windows-x64"],
     }
     native_steps.each do |key, values|
-      queue, proof_name = values
+      queue, smoke_directory = values
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
       abort "missing native semantic smoke step #{key}" unless step
       condition = step["if"].to_s
@@ -205,10 +205,10 @@ if command -v ruby >/dev/null 2>&1; then
       abort "#{key} must use #{queue}" unless step.dig("agents", "queue") == queue
       command = step["command"].to_s
       abort "#{key} must consume or build an ONNX runtime archive" unless command.include?("onnxruntime")
-      abort "#{key} must publish proof directly" unless command.include?("ProofOutput") || command.include?("--proof-output")
-      abort "#{key} must require authoritative execution" unless command.include?("runtime_authority=authoritative") || command.include?("RequireAuthoritative")
-      proof_path = "target/public-cli-artifacts/#{proof_name}"
-      abort "#{key} must publish #{proof_name}" unless Array(step["artifact_paths"]).include?(proof_path)
+      abort "#{key} must run the native package smoke" unless command.include?("run-native-candidate-smoke")
+      abort "#{key} must require authoritative execution" unless command.include?("--require-authoritative") || command.include?("RequireAuthoritative")
+      smoke_path = "target/public-cli-native-smoke/#{smoke_directory}/candidate-smoke.json"
+      abort "#{key} must publish #{smoke_path}" unless Array(step["artifact_paths"]).include?(smoke_path)
     end
     macos_x64_native = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-macos-x64-native-smoke" }
     native_command = macos_x64_native["command"].to_s
@@ -236,30 +236,24 @@ if command -v ruby >/dev/null 2>&1; then
     abort "windows-x64 native lane must run the PowerShell 5 candidate contract" unless windows_native_command.include?("scripts/tests/run-native-candidate-smoke-test.ps1")
     abort "legacy Windows native lane must explicitly select ONNX Runtime" unless windows_native_command.include?("-RuntimeMode onnxruntime")
     abort "legacy Windows native lane must retain its ORT archive" unless windows_native_command.include?("-RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip")
-    legacy_windows_proof = "target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt"
-    abort "legacy Windows native lane must retain the default/with-semantic proof name" unless windows_native_command.include?("-ProofOutput #{legacy_windows_proof}") && Array(windows_native["artifact_paths"]).include?(legacy_windows_proof)
+    abort "windows-x64 native lane must require authoritative execution" unless windows_native_command.include?("-RequireAuthoritative")
 
     windows_ml = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "semantic-runtime-windows-ml" }
     abort "missing Windows ML runtime producer" unless windows_ml
     abort "unsigned Windows ML runtime production must not depend on the CLI candidate" unless windows_ml["depends_on"].nil?
     windows_ml_command = windows_ml["command"].to_s
-    windows_ml_paths = Array(windows_ml["artifact_paths"])
-    windows_ml_proof = "target/public-cli-artifacts/ctx-windows-x64.windowsml-native-runtime-proof.txt"
     abort "Windows ML lane must build the exact native candidate archive" unless windows_ml_command.include?("scripts/build-onnxruntime-sidecar.sh windows-x64-windowsml")
     abort "Windows ML lane must run the PowerShell smoke contract" unless windows_ml_command.include?("scripts/test-windows-semantic-smoke-contract.ps1")
-    abort "unsigned Windows ML runtime lane must not claim a production proof" if windows_ml_command.include?("scripts/smoke-daemon-semantic-release.ps1") || windows_ml_command.include?(windows_ml_proof) || windows_ml_paths.include?(windows_ml_proof)
-    legacy_command_producers = steps.select { |step| step.is_a?(Hash) && step["command"].to_s.include?(legacy_windows_proof) }
-    abort "#{legacy_windows_proof} must have exactly one command producer" unless legacy_command_producers == [windows_native]
-    legacy_artifact_uploaders = steps.select { |step| step.is_a?(Hash) && Array(step["artifact_paths"]).include?(legacy_windows_proof) }
-    abort "#{legacy_windows_proof} must have exactly one artifact uploader" unless legacy_artifact_uploaders == [windows_native]
-    windows_ml_command_producers = steps.select { |step| step.is_a?(Hash) && step["command"].to_s.include?(windows_ml_proof) }
-    windows_ml_artifact_uploaders = steps.select { |step| step.is_a?(Hash) && Array(step["artifact_paths"]).include?(windows_ml_proof) }
-    abort "Windows ML native proof must be produced only after private signed provisioning" unless windows_ml_command_producers.empty? && windows_ml_artifact_uploaders.empty?
+    abort "unsigned Windows ML runtime lane must not claim native product qualification" if windows_ml_command.include?("scripts/smoke-daemon-semantic-release.ps1")
+    all_commands = steps.filter_map { |step| step["command"].to_s if step.is_a?(Hash) }
+    all_paths = steps.flat_map { |step| step.is_a?(Hash) ? Array(step["artifact_paths"]).map(&:to_s) : [] }
+    abort "pipeline must not emit retired native proof artifacts" if all_commands.any? { |value| value.match?(/proof-output|ProofOutput|native-runtime-proof/) } || all_paths.any? { |value| value.match?(/packaged-runtime-proof|native-runtime-proof/) }
     runtime_builds = {
       "public-cli-linux-x64" => "linux-x64",
       "public-cli-linux-aarch64" => "linux-aarch64",
       "public-cli-windows-x64" => "windows-x64",
       "public-cli-macos-arm64" => "macos-arm64",
+      "public-cli-freebsd-x64" => "freebsd-x64",
     }
     runtime_builds.each do |key, platform|
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
@@ -280,6 +274,33 @@ if command -v ruby >/dev/null 2>&1; then
     abort "legacy windows-x64 invocation changed" unless legacy_windows_command.include?("bash scripts/build-onnxruntime-sidecar.sh windows-x64")
     legacy_windows_paths = Array(legacy_windows["artifact_paths"])
     abort "legacy windows-x64 archive must remain staged" unless legacy_windows_paths.include?("target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip")
+    candidate = steps.find { |step| step.is_a?(Hash) && step["key"] == "github-release-candidate" }
+    candidate_dependencies = %w[
+      public-cli-linux-x64
+      public-cli-linux-aarch64
+      public-cli-freebsd-x64
+      public-cli-macos-arm64
+      public-cli-macos-x64-native-smoke
+      public-cli-windows-x64-native-smoke
+    ]
+    abort "release candidate staging has the wrong native dependency set" unless Array(candidate["depends_on"]) == candidate_dependencies
+    candidate_condition = candidate["if"].to_s
+    abort "release candidate staging must require artifact and native matrices" unless candidate_condition.include?("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") && candidate_condition.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX")
+    abort "release candidate staging must be restricted to trusted main" unless candidate_condition.include?(%q{build.branch == "main"}) && candidate_condition.include?("build.pull_request.id == null")
+    candidate_command = candidate["command"].to_s
+    %w[
+      public-cli-linux-x64
+      public-cli-linux-aarch64
+      public-cli-freebsd-x64
+      public-cli-macos-arm64
+      public-cli-macos-x64
+      public-cli-macos-x64-native-smoke
+      public-cli-windows-x64
+    ].each do |producer|
+      abort "release candidate staging does not bind artifacts from #{producer}" unless candidate_command.include?("--step #{producer}")
+    end
+    abort "release candidate staging must run exact-byte public assembly" unless candidate_command.include?("scripts/stage-github-release-assets.sh") && candidate_command.include?("target/github-release-assets")
+    abort "release candidate staging must upload the immutable manifest" unless Array(candidate["artifact_paths"]).include?("target/github-release-assets/*")
     semantic_assets = %w[
       ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
       ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz
@@ -314,6 +335,7 @@ if command -v ruby >/dev/null 2>&1; then
     end
     gather = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "semantic-release-handoff" }
     expected_dependencies = %w[
+      github-release-candidate
       public-cli-linux-x64
       public-cli-linux-aarch64
       public-cli-freebsd-x64
@@ -325,6 +347,7 @@ if command -v ruby >/dev/null 2>&1; then
       semantic-runtime-macos-x64
     ]
     abort "Semantic gather has the wrong bounded producer set" unless Array(gather["depends_on"]) == expected_dependencies
+    abort "Semantic gather must require native qualification" unless gather["if"].to_s.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX")
     gather_command = gather["command"].to_s
     semantic_assets.each do |artifact|
       stem = artifact.sub(/\.(tar\.xz|tar\.zst|zip)\z/, "")
@@ -342,7 +365,7 @@ else
       END { print count + 0 }
     ' "${pipeline}"
   )"
-  if [[ "${top_level_steps}" != "16" ]]; then
+  if [[ "${top_level_steps}" != "17" ]]; then
     printf 'pipeline should include public smoke and gated artifact/native smoke matrices\n' >&2
     exit 1
   fi
@@ -356,12 +379,13 @@ for required in \
   'concurrency_group: "ctx/public-smoke/default-hosted"' \
   'CTX_RUST_TOOLCHAIN: "1.97.1"' \
   'CTX_BAZELISK_VERSION: "v1.29.0"' \
-  'CTX_GO_VERSION: "1.22.12"' \
   'BUILDKITE_JOB_ID' \
   'CTX_PUBLIC_CI_TOOL_ROOT' \
+  'CTX_PUBLIC_CI_REPOSITORY_CACHE' \
+  '.buildkite-cache/bazel-repository' \
+  'CTX_BAZEL_REPOSITORY_CACHE' \
+  'dpkg-query' \
   'default-jdk-headless' \
-  'install_go' \
-  'go${CTX_GO_VERSION}.linux-${go_arch}.tar.gz' \
   'sha256sum -c -' \
   'python3-build' \
   'python3-venv' \
@@ -384,6 +408,8 @@ for required in \
   '.candidate.json' \
   'scripts/build-onnxruntime-sidecar.sh windows-x64-windowsml' \
   'scripts/build-onnxruntime-sidecar.sh linux-x64-cuda12' \
+  'key: "github-release-candidate"' \
+  'target/github-release-assets/*' \
   'scripts/stage-semantic-release-handoff.sh' \
   'target/semantic-release-handoff/*' \
   'CTX_MACOS_RELEASE_SIGNING=required' \
@@ -519,6 +545,10 @@ for source, label in ((cli, "CLI"), (runtime, "runtime")):
         raise SystemExit(f"macOS {label} release matrix must fail closed into required signing")
 if "scripts/verify-macos-release-attestation.sh" not in staging:
     raise SystemExit("final release assembly must cryptographically verify macOS attestations")
+if '--source-commit "${source_commit}"' not in staging:
+    raise SystemExit("final release assembly must bind every build-info record to the checkout commit")
+if "native-candidate" in staging or "validate_runtime_proof" in staging:
+    raise SystemExit("release staging must not re-collect native proof artifacts")
 require_order(
     "native macOS final-transcode verification",
     staging,
@@ -590,8 +620,8 @@ if grep -Fq 'minimal_env+=("${secret_name}=' "${macos_launcher_script}" \
   exit 1
 fi
 
-if grep -F -q 'golang-go' "${public_ci_script}"; then
-  printf 'Buildkite hosted public CI must install pinned Go instead of Ubuntu golang-go\n' >&2
+if grep -E -q 'install_go|go\.dev/dl|\.local/go' "${public_ci_script}"; then
+  printf 'Buildkite hosted public CI must use Bazel-managed Go without a local bootstrap\n' >&2
   exit 1
 fi
 

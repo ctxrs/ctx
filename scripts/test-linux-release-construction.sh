@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
+export CTX_PUBLIC_RELEASE_SOURCE_COMMIT
+CTX_PUBLIC_RELEASE_SOURCE_COMMIT="$(git rev-parse --verify HEAD^{commit})"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
@@ -76,6 +78,18 @@ test "$(
     --matrix "${release_target_matrix}" \
     --platform linux-x64
 )" = "$(sha256sum "${tmp_dir}/artifact.build-info.json" | awk '{ print $1 }')"
+if python3 -I scripts/check-public-cli-build-info.py \
+  --artifact "${tmp_dir}/artifact" \
+  --build-info "${tmp_dir}/artifact.build-info.json" \
+  --matrix "${release_target_matrix}" \
+  --platform linux-x64 \
+  --source-commit "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" \
+  >"${tmp_dir}/source-mismatch.out" 2>"${tmp_dir}/source-mismatch.err"; then
+  echo "build-info validator accepted an artifact from another source commit" >&2
+  exit 1
+fi
+grep -Fq 'build-info does not bind the clean exact artifact' \
+  "${tmp_dir}/source-mismatch.err"
 
 python3 scripts/write-public-cli-build-info.py \
   --output "${tmp_dir}/cross-artifact.build-info.json" \
@@ -355,199 +369,6 @@ grep -Fq \
   'ctx-onnxruntime-macos-x64.tar.gz' \
   "${tmp_dir}/partial-runtime.err"
 
-complete_runtime_matrix="${tmp_dir}/complete-runtime-matrix"
-mkdir -p "${complete_runtime_matrix}"
-touch \
-  "${complete_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz" \
-  "${complete_runtime_matrix}/ctx-onnxruntime-linux-aarch64.tar.gz" \
-  "${complete_runtime_matrix}/ctx-onnxruntime-macos-arm64.tar.gz" \
-  "${complete_runtime_matrix}/ctx-onnxruntime-macos-x64.tar.gz" \
-  "${complete_runtime_matrix}/ctx-onnxruntime-windows-x64.zip" \
-  "${complete_runtime_matrix}/ctx-onnxruntime-freebsd-x64.tar.gz"
-if "${stage_release_assets}" \
-  "${complete_runtime_matrix}" "${tmp_dir}/unproven-release" \
-  >"${tmp_dir}/unproven-runtime.out" 2>"${tmp_dir}/unproven-runtime.err"; then
-  echo "release staging accepted runtimes without native exact-binary proof" >&2
-  exit 1
-fi
-grep -Fq \
-  'required authoritative runtime proof missing:' \
-  "${tmp_dir}/unproven-runtime.err"
-grep -Fq \
-  'ctx-linux-x64.native-runtime-proof.txt' \
-  "${tmp_dir}/unproven-runtime.err"
-
-# shellcheck source=scripts/test-linux-release-construction/provenance-fixtures.sh
-source scripts/test-linux-release-construction/provenance-fixtures.sh
-
-expect_provenance_rejection dirty-linux-build \
-  'linux-x64 release build-info does not bind the clean exact artifact' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_linux_build_info dirty
-expect_provenance_rejection non-authoritative-linux-build \
-  'Linux release build-info does not record an authoritative runtime gate' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_linux_build_info non-authoritative
-expect_provenance_rejection mismatched-linux-builder \
-  'linux-x64 release build-info does not match the matrix build contract' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_linux_build_info builder
-expect_provenance_rejection mismatched-linux-rust-sysroot \
-  'linux-x64 release build-info does not match the matrix build contract' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_linux_build_info rust-sysroot
-expect_provenance_rejection missing-linux-static-abi \
-  'linux-x64 release build-info does not record passed static ABI gates' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_linux_build_info static-abi
-expect_provenance_rejection mismatched-linux-artifact \
-  'linux-x64 release build-info does not bind the clean exact artifact' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_linux_build_info artifact
-expect_provenance_rejection mismatched-build-info-proof \
-  'runtime proof does not bind the validated build info:' \
-  "${missing_windows_dependency_matrix}" \
-  corrupt_build_info_proof_binding
-
-expect_provenance_rejection dirty-windows-build \
-  'windows-x64 release build-info does not bind the clean exact artifact' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_platform_build_info ctx.exe dirty
-expect_provenance_rejection mismatched-windows-artifact \
-  'windows-x64 release build-info does not bind the clean exact artifact' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_platform_build_info ctx.exe artifact
-expect_provenance_rejection mismatched-windows-matrix \
-  'windows-x64 release build-info does not match the matrix build contract' \
-  "${missing_windows_dependency_matrix}" \
-  mutate_platform_build_info ctx.exe matrix
-expect_provenance_rejection mismatched-windows-build-info-proof \
-  'runtime proof does not bind the validated build info:' \
-  "${missing_windows_dependency_matrix}" \
-  corrupt_platform_build_info_proof ctx-windows-x64.native-runtime-proof.txt
-
-freebsd_provenance_matrix="${tmp_dir}/freebsd-provenance-matrix"
-cp -R "${missing_windows_dependency_matrix}" "${freebsd_provenance_matrix}"
-cat >> "${freebsd_provenance_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
-runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
-runtime_dependency_msvcp140=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\msvcp140.dll
-runtime_dependency_msvcp140_1=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\msvcp140_1.dll
-runtime_dependency_vcruntime140=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\vcruntime140.dll
-runtime_dependency_vcruntime140_1=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\vcruntime140_1.dll
-EOF
-expect_provenance_rejection dirty-freebsd-build \
-  'freebsd-x64 release build-info does not bind the clean exact artifact' \
-  "${freebsd_provenance_matrix}" \
-  mutate_platform_build_info ctx-freebsd-x64 dirty
-expect_provenance_rejection mismatched-freebsd-artifact \
-  'freebsd-x64 release build-info does not bind the clean exact artifact' \
-  "${freebsd_provenance_matrix}" \
-  mutate_platform_build_info ctx-freebsd-x64 artifact
-expect_provenance_rejection mismatched-freebsd-matrix \
-  'freebsd-x64 release build-info does not match the matrix build contract' \
-  "${freebsd_provenance_matrix}" \
-  mutate_platform_build_info ctx-freebsd-x64 matrix
-expect_provenance_rejection mismatched-freebsd-build-info-proof \
-  'runtime proof does not bind the validated build info:' \
-  "${freebsd_provenance_matrix}" \
-  corrupt_platform_build_info_proof ctx-freebsd-x64.native-runtime-proof.txt
-
-preview_macos_matrix="${tmp_dir}/preview-macos-matrix"
-cp -R "${missing_windows_dependency_matrix}" "${preview_macos_matrix}"
-sed -i \
-  -e 's/^runtime_authority=authoritative$/runtime_authority=non_authoritative/' \
-  "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
-printf 'ctx 0.25.0\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
-preview_macos_sha="$(cat "${preview_macos_matrix}/ctx-macos-x64.sha256")"
-cat > "${preview_macos_matrix}/ctx-macos-x64.build-info.json" <<EOF
-{"schema_version":1,"artifact_sha256":"${preview_macos_sha}","platform":"macos-x64","target":"x86_64-apple-darwin","source":{"commit":"228e05fa0fd058822be7a362acd65cacdad24356","clean":true}}
-EOF
-if "${stage_release_assets}" \
-  "${preview_macos_matrix}" "${tmp_dir}/preview-macos-default-release" \
-  >"${tmp_dir}/preview-macos-default.out" 2>"${tmp_dir}/preview-macos-default.err"; then
-  echo "release staging accepted macOS x64 preview proof without explicit opt-in" >&2
-  exit 1
-fi
-grep -Fq \
-  'runtime proof has the wrong authority classification:' \
-  "${tmp_dir}/preview-macos-default.err" || {
-    cat "${tmp_dir}/preview-macos-default.err" >&2
-    exit 1
-  }
-
-printf 'ctx 0.25.1\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
-if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  "${stage_release_assets}" \
-    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-version-release" \
-    >"${tmp_dir}/preview-macos-wrong-version.out" \
-    2>"${tmp_dir}/preview-macos-wrong-version.err"; then
-  echo "release staging accepted the macOS x64 preview exception for another version" >&2
-  exit 1
-fi
-grep -Fq \
-  'macOS x64 preview proof exception is restricted to ctx 0.25.0' \
-  "${tmp_dir}/preview-macos-wrong-version.err"
-
-printf 'ctx 0.25.0\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
-sed -i \
-  's/228e05fa0fd058822be7a362acd65cacdad24356/0000000000000000000000000000000000000000/' \
-  "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
-if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  "${stage_release_assets}" \
-    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-source-release" \
-    >"${tmp_dir}/preview-macos-wrong-source.out" \
-    2>"${tmp_dir}/preview-macos-wrong-source.err"; then
-  echo "release staging accepted preview proof for another source commit" >&2
-  exit 1
-fi
-grep -Fq \
-  'macOS x64 preview exception is restricted to the reviewed 0.25.0 source commit' \
-  "${tmp_dir}/preview-macos-wrong-source.err"
-sed -i \
-  's/0000000000000000000000000000000000000000/228e05fa0fd058822be7a362acd65cacdad24356/' \
-  "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
-
-if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  "${stage_release_assets}" \
-    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-release" \
-    >"${tmp_dir}/preview-macos.out" 2>"${tmp_dir}/preview-macos.err"; then
-  echo "release staging unexpectedly passed an incomplete synthetic matrix" >&2
-  exit 1
-fi
-grep -Fq \
-  'Windows runtime proof is missing runtime_dylib:' \
-  "${tmp_dir}/preview-macos.err"
-
-sed -i \
-  -e 's/^host_native_arch=x86_64$/host_native_arch=arm64/' \
-  -e 's/^process_translated=0$/process_translated=1/' \
-  "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
-if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
-  "${stage_release_assets}" \
-    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-rosetta-release" \
-    >"${tmp_dir}/preview-macos-rosetta.out" 2>"${tmp_dir}/preview-macos-rosetta.err"; then
-  echo "release staging accepted Rosetta-shaped proof as preview evidence" >&2
-  exit 1
-fi
-grep -Fq \
-  'runtime proof has wrong native host architecture:' \
-  "${tmp_dir}/preview-macos-rosetta.err"
-
-cat >> \
-  "${missing_windows_dependency_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
-runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
-EOF
-if "${stage_release_assets}" \
-  "${missing_windows_dependency_matrix}" "${tmp_dir}/missing-windows-dependency-release" \
-  >"${tmp_dir}/missing-windows-dependency.out" \
-  2>"${tmp_dir}/missing-windows-dependency.err"; then
-  echo "release staging accepted Windows proof without app-local VC runtime evidence" >&2
-  exit 1
-fi
-grep -Fq \
-  'Windows runtime proof is missing runtime_dependency_msvcp140:' \
-  "${tmp_dir}/missing-windows-dependency.err"
-
 multiline_cross_output='cross 0.2.5
 rustup 1.28.2
 cargo 1.97.1'
@@ -735,11 +556,13 @@ if grep -Eq 'CTX_LLVM_(READOBJ|OBJDUMP):-' \
 fi
 grep -F 'flock -n' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/null
-grep -F 'build_info_sha256=' scripts/smoke-daemon-semantic-release.sh >/dev/null
 grep -F 'linux-*|freebsd-x64)' scripts/smoke-daemon-semantic-release.sh >/dev/null
-grep -F 'runtime proof does not bind the validated build info' \
+grep -F 'require_authoritative=1' scripts/smoke-daemon-semantic-release.sh >/dev/null
+grep -F 'semantic smoke requires authoritative native' \
+  scripts/smoke-daemon-semantic-release.sh >/dev/null
+grep -F -- '--source-commit "${source_commit}"' \
   scripts/stage-github-release-assets.sh >/dev/null
-grep -F 'linux-*|windows-x64|freebsd-x64)' \
+grep -F 'verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64' \
   scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
@@ -785,11 +608,17 @@ grep -F '"${inspector_image_id}"' scripts/build-public-cli-artifact.sh >/dev/nul
 grep -F 'timeout --signal=KILL 120s' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'x86_64-unknown-freebsd:0.2.5@sha256:' Cross.toml >/dev/null
 grep -F '[System.IO.File]::WriteAllText(' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
-grep -F '($runtimeProofLines -join "`n") + "`n"' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F 'function Get-BoundWindowsBuildInfoSha256' \
   scripts/smoke-daemon-semantic-release.ps1 >/dev/null
-grep -F '"build_info_sha256=$buildInfoSha"' \
+grep -F 'if ($RequireAuthoritative -and $runtimeAuthority -cne "authoritative")' \
   scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+if grep -Eq 'ProofOutput|native-runtime-proof|packaged-runtime-proof' \
+  scripts/smoke-daemon-semantic-release.ps1 \
+  scripts/smoke-daemon-semantic-release.sh \
+  scripts/stage-github-release-assets.sh; then
+  echo 'retired proof output remains in native release scripts' >&2
+  exit 1
+fi
 grep -F 'param([string[]]$CommandArgs)' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F '@CommandArgs' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' .buildkite/pipeline.yml >/dev/null

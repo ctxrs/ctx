@@ -5,7 +5,6 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR]
        scripts/stage-github-release-assets.sh --with-semantic [ARTIFACT_DIR] [OUT_DIR]
-       scripts/stage-github-release-assets.sh --native-candidate [ARTIFACT_DIR] [OUT_DIR]
        scripts/stage-github-release-assets.sh --transcode-runtime PLATFORM [ARTIFACT_DIR]
 
 Stages public GitHub Release assets from built public CLI artifacts.
@@ -19,10 +18,6 @@ platform runtime is absent.
 The additive --with-semantic mode validates and stages the ten signed Semantic
 assets after preserving the six legacy runtime assets.
 
-The --native-candidate mode stages exactly six CLI/runtime pairs. It preserves
-the installer-owned .tar.gz runtime transports on Unix and selects Windows ML
-on Windows.
-
 The transcode mode converts a validated builder-owned Unix .tar.zst sidecar
 to the deterministic .tar.gz transport consumed by release installers.
 USAGE
@@ -30,7 +25,6 @@ USAGE
 
 mode="stage"
 include_semantic="0"
-staging_mode="legacy"
 case "${1:-}" in
   --transcode-runtime)
     [[ "$#" -ge 2 && "$#" -le 3 ]] || {
@@ -48,16 +42,6 @@ case "${1:-}" in
       exit 2
     }
     include_semantic="1"
-    staging_mode="with-semantic"
-    artifact_dir="${2:-target/public-cli-artifacts}"
-    out_dir="${3:-target/github-release-assets}"
-    ;;
-  --native-candidate)
-    [[ "$#" -le 3 ]] || {
-      usage
-      exit 2
-    }
-    staging_mode="native-candidate"
     artifact_dir="${2:-target/public-cli-artifacts}"
     out_dir="${3:-target/github-release-assets}"
     ;;
@@ -88,6 +72,14 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
+source_commit="${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}"
+if [[ -z "${source_commit}" ]]; then
+  source_commit="$(git rev-parse --verify HEAD^{commit})"
+fi
+if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == "0000000000000000000000000000000000000000" ]]; then
+  printf 'could not resolve the exact public source commit\n' >&2
+  exit 1
+fi
 
 sha256_file() {
   local path="$1"
@@ -245,8 +237,15 @@ stage_asset() {
 verify_and_stage_cli_evidence() {
   local source_name="$1"
   local dest_name="$2"
+  local platform="$3"
   local source_path="${artifact_dir%/}/${source_name}"
 
+  python3 -I scripts/check-public-cli-build-info.py \
+    --artifact "${source_path}" \
+    --build-info "${source_path}.build-info.json" \
+    --matrix contracts/release-targets-v1.json \
+    --platform "${platform}" \
+    --source-commit "${source_commit}" >/dev/null
   python3 -I scripts/release-sbom.py verify-bundle \
     --artifact "${source_path}" \
     --build-info "${source_path}.build-info.json" \
@@ -336,248 +335,21 @@ PY
   stage_asset "${asset_name}" "${asset_name}" 0644
 }
 
-stage_windowsml_runtime_asset() {
-  local asset_name="ctx-windowsml-windows-x64.zip"
-  bash scripts/build-onnxruntime-sidecar.sh --validate \
-    windows-x64-windowsml "${artifact_dir%/}/${asset_name}"
-  stage_asset "${asset_name}" "${asset_name}" 0644
-}
-
-if [[ "${staging_mode}" == "native-candidate" ]]; then
-  required_runtime_assets=(
-    ctx-onnxruntime-linux-x64.tar.gz
-    ctx-onnxruntime-linux-aarch64.tar.gz
-    ctx-onnxruntime-macos-arm64.tar.gz
-    ctx-onnxruntime-macos-x64.tar.gz
-    ctx-windowsml-windows-x64.zip
-    ctx-onnxruntime-freebsd-x64.tar.gz
-  )
-else
-  required_runtime_assets=(
-    ctx-onnxruntime-linux-x64.tar.gz
-    ctx-onnxruntime-linux-aarch64.tar.gz
-    ctx-onnxruntime-macos-arm64.tar.gz
-    ctx-onnxruntime-macos-x64.tar.gz
-    ctx-onnxruntime-windows-x64.zip
-    ctx-onnxruntime-freebsd-x64.tar.gz
-  )
-fi
+required_runtime_assets=(
+  ctx-onnxruntime-linux-x64.tar.gz
+  ctx-onnxruntime-linux-aarch64.tar.gz
+  ctx-onnxruntime-macos-arm64.tar.gz
+  ctx-onnxruntime-macos-x64.tar.gz
+  ctx-onnxruntime-windows-x64.zip
+  ctx-onnxruntime-freebsd-x64.tar.gz
+)
 for required_runtime_asset in "${required_runtime_assets[@]}"; do
   if [[ ! -f "${artifact_dir%/}/${required_runtime_asset}" ]]; then
-    if [[ "${staging_mode}" == "native-candidate" ]]; then
-      printf 'required native candidate runtime missing: %s\n' \
-        "${artifact_dir%/}/${required_runtime_asset}" >&2
-    else
-      printf 'required ONNX Runtime sidecar missing: %s\n' \
-        "${artifact_dir%/}/${required_runtime_asset}" >&2
-    fi
+    printf 'required ONNX Runtime sidecar missing: %s\n' \
+      "${artifact_dir%/}/${required_runtime_asset}" >&2
     exit 1
   fi
 done
-
-validate_runtime_proof() {
-  local platform="$1"
-  local binary_name="$2"
-  local proof_name="$3"
-  local runtime="$4"
-  local host_system="$5"
-  local host_arch="$6"
-  local host_native_arch="$7"
-  local runtime_asset="${8:-}"
-  local native_arch_probe="$9"
-  local expected_process_translated="${10:-0}"
-  local expected_runtime_authority="${11:-authoritative}"
-  local binary_sha_path="${artifact_dir%/}/${binary_name}.sha256"
-  local proof_path="${artifact_dir%/}/${proof_name}"
-  local expected_sha runtime_sha_path runtime_path expected_runtime_sha actual_runtime_sha duplicate_key
-  local build_info_path expected_build_info_sha
-
-  [[ -s "${proof_path}" ]] || {
-    printf 'required authoritative runtime proof missing: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  [[ -s "${binary_sha_path}" ]] || {
-    printf 'required binary checksum missing for runtime proof: %s\n' "${binary_sha_path}" >&2
-    exit 1
-  }
-  duplicate_key="$(sed -n 's/^\([^=][^=]*\)=.*/\1/p' "${proof_path}" | sort | uniq -d | head -n 1)"
-  [[ -z "${duplicate_key}" ]] || {
-    printf 'runtime proof contains duplicate field %s: %s\n' "${duplicate_key}" "${proof_path}" >&2
-    exit 1
-  }
-  expected_sha="$(tr -d '[:space:]' < "${binary_sha_path}")"
-  [[ "${expected_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
-    printf 'invalid binary checksum for runtime proof: %s\n' "${binary_sha_path}" >&2
-    exit 1
-  }
-
-  grep -Fxq "runtime=${runtime}" "${proof_path}" || {
-    printf 'runtime proof has wrong runtime: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  case "${runtime}" in
-    onnxruntime)
-      grep -Fxq 'embedding_backend=cpu' "${proof_path}" || {
-        printf 'runtime proof did not exercise the ONNX CPU backend: %s\n' "${proof_path}" >&2
-        exit 1
-      }
-      ;;
-    windows-ml)
-      grep -Fxq 'embedding_backend=windows-ml' "${proof_path}" || {
-        printf 'runtime proof did not exercise the Windows ML backend: %s\n' "${proof_path}" >&2
-        exit 1
-      }
-      ;;
-    *)
-      printf 'unsupported runtime proof kind: %s\n' "${runtime}" >&2
-      exit 2
-      ;;
-  esac
-  grep -Fxq "platform=${platform}" "${proof_path}" || {
-    printf 'runtime proof has wrong platform: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "host_system=${host_system}" "${proof_path}" || {
-    printf 'runtime proof has wrong host system: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "host_arch=${host_arch}" "${proof_path}" || {
-    printf 'runtime proof has wrong host architecture: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "host_native_arch=${host_native_arch}" "${proof_path}" || {
-    printf 'runtime proof has wrong native host architecture: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "process_translated=${expected_process_translated}" "${proof_path}" || {
-    printf 'runtime proof has the wrong process translation status: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "native_arch_probe=${native_arch_probe}" "${proof_path}" || {
-    printf 'runtime proof used the wrong native architecture probe: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "runtime_authority=${expected_runtime_authority}" "${proof_path}" || {
-    printf 'runtime proof has the wrong authority classification: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  grep -Fxq "artifact_sha256=${expected_sha}" "${proof_path}" || {
-    printf 'runtime proof does not match the exact release binary: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-  case "${platform}" in
-    linux-*|windows-x64|freebsd-x64)
-      build_info_path="${artifact_dir%/}/${binary_name}.build-info.json"
-      expected_build_info_sha="$(python3 -I scripts/check-public-cli-build-info.py \
-        --artifact "${artifact_dir%/}/${binary_name}" \
-        --build-info "${build_info_path}" \
-        --matrix contracts/release-targets-v1.json \
-        --platform "${platform}")" || exit $?
-      grep -Fxq "build_info_sha256=${expected_build_info_sha}" "${proof_path}" || {
-        printf 'runtime proof does not bind the validated build info: %s\n' \
-          "${proof_path}" >&2
-        exit 1
-      }
-      ;;
-  esac
-  if [[ -n "${runtime_asset}" ]]; then
-    runtime_sha_path="${artifact_dir%/}/${runtime_asset}.sha256"
-    runtime_path="${artifact_dir%/}/${runtime_asset}"
-    [[ -s "${runtime_sha_path}" ]] || {
-      printf 'required runtime checksum missing for runtime proof: %s\n' "${runtime_sha_path}" >&2
-      exit 1
-    }
-    expected_runtime_sha="$(tr -d '[:space:]' < "${runtime_sha_path}")"
-    [[ "${expected_runtime_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
-      printf 'invalid runtime checksum for runtime proof: %s\n' "${runtime_sha_path}" >&2
-      exit 1
-    }
-    actual_runtime_sha="$(sha256_file "${runtime_path}")"
-    if [[ "$(printf '%s' "${actual_runtime_sha}" | tr 'A-F' 'a-f')" != \
-      "$(printf '%s' "${expected_runtime_sha}" | tr 'A-F' 'a-f')" ]]; then
-      printf 'runtime archive checksum mismatch for proof: %s\n' "${runtime_path}" >&2
-      exit 1
-    fi
-    grep -Fxiq "runtime_archive_sha256=${actual_runtime_sha}" "${proof_path}" || {
-      printf 'runtime proof does not match the exact runtime sidecar: %s\n' "${proof_path}" >&2
-      exit 1
-    }
-  fi
-  if [[ "${platform}" == "windows-x64" && "${runtime}" == "onnxruntime" ]]; then
-    local runtime_dylib windows_runtime_lib dependency dependency_path normalized_path expected_path
-    runtime_dylib="$(sed -n 's/^runtime_dylib=//p' "${proof_path}")"
-    [[ -n "${runtime_dylib}" ]] || {
-      printf 'Windows runtime proof is missing runtime_dylib: %s\n' "${proof_path}" >&2
-      exit 1
-    }
-    normalized_path="${runtime_dylib//\\//}"
-    [[ "${normalized_path,,}" == */lib/onnxruntime.dll ]] || {
-      printf 'Windows runtime proof has an invalid runtime_dylib: %s\n' "${proof_path}" >&2
-      exit 1
-    }
-    windows_runtime_lib="${normalized_path%/*}"
-    for dependency in msvcp140 msvcp140_1 vcruntime140 vcruntime140_1; do
-      dependency_path="$(sed -n "s/^runtime_dependency_${dependency}=//p" "${proof_path}")"
-      [[ -n "${dependency_path}" ]] || {
-        printf 'Windows runtime proof is missing runtime_dependency_%s: %s\n' \
-          "${dependency}" "${proof_path}" >&2
-        exit 1
-      }
-      normalized_path="${dependency_path//\\//}"
-      expected_path="${windows_runtime_lib}/${dependency}.dll"
-      [[ "${normalized_path,,}" == "${expected_path,,}" ]] || {
-        printf 'Windows runtime proof has an invalid runtime_dependency_%s path: %s\n' \
-          "${dependency}" "${proof_path}" >&2
-        exit 1
-      }
-    done
-  elif [[ "${platform}" == "windows-x64" && "${runtime}" == "windows-ml" ]]; then
-    grep -Fxq 'semantic_contract_canary=passed' "${proof_path}" || {
-      printf 'Windows ML runtime proof did not pass the semantic contract canary: %s\n' \
-        "${proof_path}" >&2
-      exit 1
-    }
-  fi
-  grep -Fxq 'semantic_search=passed' "${proof_path}" || {
-    printf 'runtime proof does not record semantic search success: %s\n' "${proof_path}" >&2
-    exit 1
-  }
-}
-
-validate_macos_x64_preview_candidate() {
-  local version_path="${artifact_dir%/}/ctx-macos-x64.version"
-  local build_info_path="${artifact_dir%/}/ctx-macos-x64.build-info.json"
-  local binary_sha_path="${artifact_dir%/}/ctx-macos-x64.sha256"
-  local expected_source_commit="228e05fa0fd058822be7a362acd65cacdad24356"
-  local expected_binary_sha
-
-  grep -Fxq 'ctx 0.25.0' "${version_path}" || {
-    printf 'macOS x64 preview proof exception is restricted to ctx 0.25.0\n' >&2
-    exit 1
-  }
-  [[ -s "${build_info_path}" ]] || {
-    printf 'macOS x64 preview proof requires candidate build info: %s\n' "${build_info_path}" >&2
-    exit 1
-  }
-  expected_binary_sha="$(tr -d '[:space:]' < "${binary_sha_path}")"
-  python3 - "${build_info_path}" "${expected_binary_sha}" "${expected_source_commit}" <<'PY'
-import json
-import sys
-
-path, expected_sha, expected_commit = sys.argv[1:]
-with open(path, encoding="utf-8") as source:
-    payload = json.load(source)
-if payload.get("schema_version") != 1:
-    raise SystemExit("macOS x64 preview candidate has unsupported build-info schema")
-if payload.get("platform") != "macos-x64" or payload.get("target") != "x86_64-apple-darwin":
-    raise SystemExit("macOS x64 preview candidate has wrong build-info platform")
-if payload.get("artifact_sha256") != expected_sha:
-    raise SystemExit("macOS x64 preview candidate build info does not bind the release binary")
-source = payload.get("source", {})
-if source.get("commit") != expected_commit or source.get("clean") is not True:
-    raise SystemExit("macOS x64 preview exception is restricted to the reviewed 0.25.0 source commit")
-PY
-}
 
 validate_macos_signing_evidence() (
   set -euo pipefail
@@ -671,45 +443,6 @@ PY
     "${release_attestation}" "${release_attestation_cms}"
 )
 
-validate_runtime_proof \
-  linux-x64 ctx ctx-linux-x64.native-runtime-proof.txt \
-  onnxruntime Linux x86_64 x86_64 ctx-onnxruntime-linux-x64.tar.gz uname
-validate_runtime_proof \
-  linux-aarch64 ctx-linux-aarch64 ctx-linux-aarch64.native-runtime-proof.txt \
-  onnxruntime Linux aarch64 aarch64 ctx-onnxruntime-linux-aarch64.tar.gz uname
-validate_runtime_proof \
-  macos-arm64 ctx-macos-arm64 ctx-macos-arm64.native-runtime-proof.txt \
-  onnxruntime Darwin arm64 arm64 ctx-onnxruntime-macos-arm64.tar.gz sysctl
-case "${CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF:-0}" in
-  0)
-    validate_runtime_proof \
-      macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
-      onnxruntime Darwin x86_64 x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl
-    ;;
-  1)
-    validate_macos_x64_preview_candidate
-    validate_runtime_proof \
-      macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
-      onnxruntime Darwin x86_64 x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl \
-      0 non_authoritative
-    ;;
-  *)
-    printf 'CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF must be 0 or 1\n' >&2
-    exit 2
-    ;;
-esac
-if [[ "${staging_mode}" == "native-candidate" ]]; then
-  validate_runtime_proof \
-    windows-x64 ctx.exe ctx-windows-x64.windowsml-native-runtime-proof.txt \
-    windows-ml Windows_NT AMD64 AMD64 ctx-windowsml-windows-x64.zip iswow64process2
-else
-  validate_runtime_proof \
-    windows-x64 ctx.exe ctx-windows-x64.native-runtime-proof.txt \
-    onnxruntime Windows_NT AMD64 AMD64 ctx-onnxruntime-windows-x64.zip iswow64process2
-fi
-validate_runtime_proof \
-  freebsd-x64 ctx-freebsd-x64 ctx-freebsd-x64.native-runtime-proof.txt \
-  onnxruntime FreeBSD amd64 amd64 ctx-onnxruntime-freebsd-x64.tar.gz uname
 validate_macos_signing_evidence macos-arm64
 validate_macos_signing_evidence macos-x64
 
@@ -751,26 +484,22 @@ rm -f \
   "${out_dir%/}/SHA256SUMS"
 
 stage_asset ctx ctx-linux-x64
-verify_and_stage_cli_evidence ctx ctx-linux-x64
+verify_and_stage_cli_evidence ctx ctx-linux-x64 linux-x64
 stage_asset ctx-linux-aarch64 ctx-linux-aarch64
-verify_and_stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64
+verify_and_stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64 linux-aarch64
 stage_asset ctx-macos-arm64 ctx-macos-arm64
-verify_and_stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64
+verify_and_stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64 macos-arm64
 stage_asset ctx-macos-x64 ctx-macos-x64
-verify_and_stage_cli_evidence ctx-macos-x64 ctx-macos-x64
+verify_and_stage_cli_evidence ctx-macos-x64 ctx-macos-x64 macos-x64
 stage_asset ctx.exe ctx-windows-x64.exe
-verify_and_stage_cli_evidence ctx.exe ctx-windows-x64.exe
+verify_and_stage_cli_evidence ctx.exe ctx-windows-x64.exe windows-x64
 stage_asset ctx-freebsd-x64 ctx-freebsd-x64
-verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64
+verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64
 stage_runtime_asset linux-x64
 stage_runtime_asset linux-aarch64
 stage_runtime_asset macos-arm64
 stage_runtime_asset macos-x64
-if [[ "${staging_mode}" == "native-candidate" ]]; then
-  stage_windowsml_runtime_asset
-else
-  stage_runtime_asset windows-x64
-fi
+stage_runtime_asset windows-x64
 stage_runtime_asset freebsd-x64
 
 if [[ "${include_semantic}" == "1" ]]; then
