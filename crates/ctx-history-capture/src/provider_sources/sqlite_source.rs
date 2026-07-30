@@ -262,6 +262,27 @@ impl SqliteSourceSnapshotContext {
         Ok(())
     }
 
+    fn record_physical_revision_bytes(
+        &self,
+        database_bytes_read: u64,
+        wal_bytes_read: u64,
+    ) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        let mut next = *counters;
+        next.physical_database_bytes_read = checked_counter_add(
+            next.physical_database_bytes_read,
+            database_bytes_read,
+            "physical database bytes read",
+        )?;
+        next.physical_wal_bytes_read = checked_counter_add(
+            next.physical_wal_bytes_read,
+            wal_bytes_read,
+            "physical WAL bytes read",
+        )?;
+        *counters = next;
+        Ok(())
+    }
+
     fn record_logical_rows_scanned(&self, rows: u64) -> SqliteSourceAccessResult<()> {
         let mut counters = self.lock();
         counters.logical_rows_scanned =
@@ -519,8 +540,8 @@ struct SqliteSourcePhysicalRevisionInner {
 /// Retained DB/WAL physical authority for a certified exact replay.
 ///
 /// Opening this fence performs no SQLite call and reads at most the first and
-/// last 64 bytes of each retained content component. Terminal revalidation is
-/// metadata-only and deliberately ignores SHM.
+/// last 64 bytes of each retained content component. Terminal revalidation
+/// rereads those bounded tokens and deliberately ignores volatile SHM state.
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSourcePhysicalRevision {
     inner: Arc<SqliteSourcePhysicalRevisionInner>,
@@ -556,7 +577,11 @@ impl SqliteSourcePhysicalRevision {
     }
 
     pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
-        self.inner.family.revalidate(&self.inner.evidence)?;
+        let (database_bytes_read, wal_bytes_read) =
+            self.inner.family.revalidate(&self.inner.evidence)?;
+        self.inner
+            .snapshot_context
+            .record_physical_revision_bytes(database_bytes_read, wal_bytes_read)?;
         self.inner.snapshot_context.record_terminal_revalidation()
     }
 }
