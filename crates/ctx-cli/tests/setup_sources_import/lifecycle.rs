@@ -1,5 +1,5 @@
 use super::{
-    assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
+    assert_daemon_process_running, assert_no_daemon_autostart_mutation, ctx, support, support::*,
     wait_for_daemon_status, write_codex_setup_session,
 };
 use rusqlite::OpenFlags;
@@ -38,7 +38,8 @@ fn setup_does_not_migrate_legacy_shim_directory() {
 #[test]
 fn setup_does_not_write_default_config_and_preserves_existing_config() {
     let temp = tempdir();
-    let config_path = temp.path().join("config.toml");
+    let config_path = data_root(&temp).join("config.toml");
+    fs::create_dir_all(data_root(&temp)).unwrap();
 
     ctx(&temp).arg("setup").assert().success();
     assert!(
@@ -61,15 +62,14 @@ fn setup_does_not_write_default_config_and_preserves_existing_config() {
 fn setup_without_semantic_flag_preserves_explicit_search_setting() {
     for enabled in [false, true] {
         let temp = tempdir();
-        let config_path = temp.path().join("config.toml");
+        let config_path = data_root(&temp).join("config.toml");
+        fs::create_dir_all(data_root(&temp)).unwrap();
         let original = format!("[search]\nsemantic = {enabled}\n");
         fs::write(&config_path, &original).unwrap();
 
-        let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-        assert_eq!(
-            setup["background_indexing"]["semantic_enabled"], enabled,
-            "{setup:#}"
-        );
+        let setup =
+            json_output(support::ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
+        assert_eq!(setup["semantic"]["enabled"], enabled, "{setup:#}");
         assert_eq!(fs::read_to_string(config_path).unwrap(), original);
         assert_no_daemon_autostart_mutation(&temp);
     }
@@ -80,28 +80,31 @@ fn setup_semantic_persists_opt_in_when_autostart_is_explicitly_disabled() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
-    let setup = json_output(ctx(&temp).args([
+    let setup = json_output(support::ctx(&temp).args([
         "setup",
         "--semantic",
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(setup["background_indexing"]["semantic_enabled"], true);
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["reason"],
-        "autostart_disabled"
-    );
+    assert_eq!(setup["semantic"]["enabled"], true);
+    assert_eq!(setup["daemon_autostart"]["reason"], "autostart_disabled");
     assert_no_daemon_autostart_mutation(&temp);
 
-    let config_path = temp.path().join("config.toml");
+    let config_path = data_root(&temp).join("config.toml");
     let once = fs::read_to_string(&config_path).unwrap();
     assert!(once.contains("[search]\nsemantic = true\n"), "{once}");
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["semantic"]["enabled"], true);
     assert_eq!(status["semantic"]["config_source"], "config");
 
-    json_output(ctx(&temp).args(["setup", "--semantic", "--format=json", "--progress", "none"]));
+    json_output(support::ctx(&temp).args([
+        "setup",
+        "--semantic",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(fs::read_to_string(config_path).unwrap(), once);
     assert_no_daemon_autostart_mutation(&temp);
 }
@@ -109,7 +112,8 @@ fn setup_semantic_persists_opt_in_when_autostart_is_explicitly_disabled() {
 #[test]
 fn setup_semantic_rejects_disabled_daemon_without_mutating_source_epoch() {
     let temp = tempdir();
-    let config_path = temp.path().join("config.toml");
+    let config_path = data_root(&temp).join("config.toml");
+    fs::create_dir_all(data_root(&temp)).unwrap();
     let original = "[daemon]\nenabled = false\n";
     fs::write(&config_path, original).unwrap();
 
@@ -122,9 +126,9 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_source_epoch() {
     ]));
     assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
     assert_eq!(fs::read_to_string(config_path).unwrap(), original);
-    assert!(!temp.path().join("search").exists());
-    assert!(!temp.path().join("relational.sqlite").exists());
-    assert!(!temp.path().join("catalogs").exists());
+    assert!(!data_root(&temp).join("search").exists());
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
+    assert!(!data_root(&temp).join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&temp);
 
     let explicit_opt_out = tempdir();
@@ -137,10 +141,12 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_source_epoch() {
         "none",
     ]));
     assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
-    assert!(!explicit_opt_out.path().join("config.toml").exists());
-    assert!(!explicit_opt_out.path().join("search").exists());
-    assert!(!explicit_opt_out.path().join("relational.sqlite").exists());
-    assert!(!explicit_opt_out.path().join("catalogs").exists());
+    assert!(!data_root(&explicit_opt_out).join("config.toml").exists());
+    assert!(!data_root(&explicit_opt_out).join("search").exists());
+    assert!(!data_root(&explicit_opt_out)
+        .join("relational.sqlite")
+        .exists());
+    assert!(!data_root(&explicit_opt_out).join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&explicit_opt_out);
 }
 
@@ -157,8 +163,7 @@ fn setup_semantic_clean_cache_queues_daemon_without_foreground_download() {
             .env("CTX_SEMANTIC_CACHE_DIR", &semantic_cache),
     );
 
-    assert_eq!(setup["background_indexing"]["semantic_enabled"], true);
-    assert_eq!(setup["background_indexing"]["semantic_supported"], true);
+    assert_eq!(setup["semantic"]["enabled"], true);
     assert_eq!(setup["network_required"], false);
     assert!(
         !semantic_cache.exists(),
@@ -229,8 +234,9 @@ fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
     let temp = tempdir();
     let state = temp.path().join("state");
     let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(data_root(&temp)).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root(&temp).join("config.toml"),
         "[analytics]\nenabled = flase\n",
     )
     .unwrap();
@@ -248,15 +254,15 @@ fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
         );
 
     assert!(
-        !temp.path().join("search").exists(),
+        !data_root(&temp).join("search").exists(),
         "setup must not create search projections after config load fails"
     );
     assert!(
-        !temp.path().join("relational.sqlite").exists(),
+        !data_root(&temp).join("relational.sqlite").exists(),
         "setup must not create the relational projection after config load fails"
     );
     assert!(
-        !temp.path().join("catalogs").exists(),
+        !data_root(&temp).join("catalogs").exists(),
         "setup must not create source catalogs after config load fails"
     );
     assert!(
@@ -313,13 +319,9 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
         .stdout
         .clone();
     let output = String::from_utf8(output).unwrap();
-    assert!(output.contains("initialized: false"), "{output}");
-    assert!(output.contains("local_only: true"), "{output}");
-    assert!(output.contains("read_only: true"), "{output}");
-    assert!(
-        output.contains("history_epoch_status: unavailable"),
-        "{output}"
-    );
+    assert!(output.contains("History status: failed"), "{output}");
+    assert!(output.contains("generation not published"), "{output}");
+    assert!(output.contains("ctx setup"), "{output}");
 
     assert!(
         !data_root.exists(),
@@ -345,7 +347,7 @@ fn status_existing_relational_projection_does_not_mutate_database() {
         wait_for_relational_projection(&temp, &generation);
         generation
     };
-    let relational_path = temp.path().join("relational.sqlite");
+    let relational_path = data_root(&temp).join("relational.sqlite");
     let relational_before = fs::read(&relational_path).unwrap();
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
@@ -367,7 +369,8 @@ fn status_existing_relational_projection_does_not_mutate_database() {
 #[test]
 fn status_reports_unsupported_relational_schema_without_migrating_it() {
     let temp = tempdir();
-    let db_path = temp.path().join("relational.sqlite");
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    let db_path = data_root(&temp).join("relational.sqlite");
     let conn = Connection::open(&db_path).unwrap();
     conn.pragma_update(None, "user_version", 1).unwrap();
     drop(conn);
@@ -393,9 +396,9 @@ fn status_reports_unsupported_relational_schema_without_migrating_it() {
     assert_eq!(user_version, 1);
     drop(conn);
     assert_eq!(fs::read(&db_path).unwrap(), before);
-    assert!(!temp.path().join("config.toml").exists());
-    assert!(!temp.path().join("search").exists());
-    assert!(!temp.path().join("catalogs").exists());
+    assert!(!data_root(&temp).join("config.toml").exists());
+    assert!(!data_root(&temp).join("search").exists());
+    assert!(!data_root(&temp).join("catalogs").exists());
 }
 
 #[test]
@@ -412,7 +415,7 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
         wait_for_relational_projection(&temp, &generation);
         generation
     };
-    let lexical_root = temp.path().join("search/lexical");
+    let lexical_root = data_root(&temp).join("search/lexical");
     let publication_pointer = lexical_root.join("meta.json");
     assert!(publication_pointer.is_file());
     let manifest_path = lexical_root
@@ -422,7 +425,7 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
     fs::remove_file(&publication_pointer).unwrap();
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["initialized"], true);
+    assert_eq!(status["initialized"], false);
     assert_eq!(status["read_only"], true);
     assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
     assert!(!publication_pointer.exists());
@@ -430,92 +433,52 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
 }
 
 #[test]
-fn setup_catalog_only_catalogs_codex_sessions_without_import() {
+fn deprecated_catalog_only_is_ignored_and_wait_publishes_codex() {
     let temp = tempdir();
-    let sessions = temp
-        .path()
-        .join(".codex")
-        .join("sessions")
-        .join("2026/06/24");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(
-        sessions.join("rollout-2026-06-24T10-00-00-codex-session-setup.jsonl"),
-        r#"{"timestamp":"2026-06-24T10:00:00.000Z","type":"session_meta","payload":{"id":"codex-session-setup","timestamp":"2026-06-24T10:00:00.000Z","cwd":"/repo/app","originator":"codex-cli","cli_version":"0.200.0","source":"cli","model_provider":"openai"}}"#,
-    )
-    .unwrap();
+    write_codex_setup_session(&temp);
 
-    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--format=json"]));
-    assert_eq!(setup["inventory"]["sources"], 1);
-    assert_eq!(setup["inventory"]["units"], 1);
-    assert_eq!(setup["inventory"]["codex_catalog_sessions"], 1);
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 1);
-    assert_eq!(setup["catalog"]["source_files"], 1);
-    assert_eq!(setup["catalog"]["failed_sessions"], 0);
-    assert_eq!(setup["import"]["ran"], false);
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["status"],
-        "not_needed"
+    let setup = json_output(ctx(&temp).args([
+        "setup",
+        "--catalog-only",
+        "--wait",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["deprecated_catalog_only_ignored"], true, "{setup:#}");
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
+    assert!(
+        setup["lexical"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{setup:#}"
     );
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["reason"],
-        "catalog_only"
-    );
-
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["inventory_units"], 1);
-    assert_eq!(status["pending_inventory_units"], 1);
-    assert_eq!(status["cataloged_sessions"], 1);
-    assert_eq!(status["indexed_catalog_sessions"], 0);
-    assert_eq!(
-        status["inventory_source_bytes"],
-        setup["background_indexing"]["source_bytes"]
-    );
-    let source_bytes = setup["background_indexing"]["source_bytes"]
-        .as_u64()
-        .unwrap();
-    assert_eq!(
-        status["lexical_index_estimate_seconds"],
-        source_bytes.div_ceil(16 * 1024 * 1024).max(1)
-    );
-    assert_eq!(status["indexed_items"], 0);
-    assert_eq!(status["read_only"], true);
-
-    let human_setup = ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let human_setup = String::from_utf8(human_setup).unwrap();
-    assert!(human_setup.contains("ctx local history inventory is ready; import is still pending"));
-    assert!(human_setup.contains("Catalog-only setup does not autostart daemon maintenance."));
-    assert!(human_setup.contains("  ctx import --all"));
-    assert!(!human_setup.contains("ctx search \"test failure\""));
 }
 
 #[test]
-fn setup_catalog_only_reports_pending_non_codex_inventory() {
+fn deprecated_catalog_only_is_ignored_for_non_codex_sources() {
     let temp = tempdir();
     install_default_claude_fixture(&temp, "catalog-only claude inventory");
 
-    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--format=json"]));
-    assert_eq!(setup["inventory"]["sources"], 1);
-    assert_eq!(setup["inventory"]["source_import_files"], 1);
-    assert_eq!(setup["inventory"]["pending_source_import_files"], 1);
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 0);
-    assert_eq!(setup["import"]["ran"], false);
-
-    let human_setup = ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let human_setup = String::from_utf8(human_setup).unwrap();
-    assert!(human_setup.contains("ctx local history inventory is ready; import is still pending"));
-    assert!(human_setup.contains("  ctx import --all"));
+    let setup = json_output(ctx(&temp).args([
+        "setup",
+        "--catalog-only",
+        "--wait",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(setup["deprecated_catalog_only_ignored"], true, "{setup:#}");
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
+    assert!(
+        setup["lexical"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{setup:#}"
+    );
 }
 
 #[test]
@@ -551,8 +514,8 @@ fn quiet_setup_suppresses_success_output_but_not_json() {
         "--progress",
         "none",
     ]));
-    assert_eq!(setup["schema_version"], 1);
-    assert_eq!(setup["mode"], "catalog_only");
+    assert_eq!(setup["schema_version"], 2);
+    assert_eq!(setup["deprecated_catalog_only_ignored"], true);
 }
 
 #[test]
@@ -582,82 +545,47 @@ fn quiet_status_suppresses_success_output_but_not_json() {
         .env("CTX_QUIET", "0")
         .assert()
         .success()
-        .stdout(predicate::str::contains("initialized: false"));
+        .stdout(predicate::str::contains("History status: failed"));
 
     let status = json_output(ctx(&temp).args(["--quiet", "status", "--format=json"]));
-    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["schema_version"], 2);
     assert_eq!(status["initialized"], false);
     assert!(status["inventory_source_bytes"].is_null());
     assert!(status["lexical_index_estimate_seconds"].is_null());
 }
 
 #[test]
-fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
+fn setup_background_refresh_and_wait_publish_the_same_codex_source() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["mode"], "background");
-    assert_eq!(setup["inventory"]["sources"], 1);
-    assert_eq!(setup["inventory"]["units"], 1);
-    assert_eq!(setup["inventory"]["codex_catalog_sessions"], 1);
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 1);
-    assert_eq!(setup["import"]["ran"], false);
-    assert_eq!(setup["import"]["reason"], "background");
-    assert_eq!(setup["background_indexing"]["enabled"], true);
-    assert_eq!(setup["background_indexing"]["units"], 1);
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["status"],
-        "not_needed"
-    );
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["reason"],
-        "autostart_disabled"
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
+    assert!(
+        matches!(
+            setup["refresh_request"]["status"].as_str(),
+            Some("queued" | "pending" | "published")
+        ),
+        "{setup:#}"
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["inventory_units"], 1);
-    assert_eq!(status["pending_inventory_units"], 1);
-    assert_eq!(status["cataloged_sessions"], 1);
-    assert_eq!(status["indexed_catalog_sessions"], 0);
-    assert_eq!(status["pending_catalog_sessions"], 1);
-    assert_eq!(status["daemon"]["status"], "unknown");
-    assert!(status["daemon"]["reason"].is_null());
-    assert!(status["daemon"]["start_mode"].is_null());
-    assert!(status["daemon"]["trigger_command"].is_null());
+    assert_eq!(status["daemon"]["running"], true, "{status:#}");
 
     let ready =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(ready["mode"], "ready");
-    assert_eq!(ready["inventory"]["sources"], 1);
-    assert_eq!(ready["inventory"]["units"], 1);
-    assert_eq!(ready["inventory"]["codex_catalog_sessions"], 1);
-    assert_eq!(ready["catalog"]["cataloged_sessions"], 1);
-    assert_eq!(ready["import"]["ran"], true);
-    assert_eq!(ready["import"]["totals"]["failed_sources"], 0);
-    assert_eq!(ready["import"]["totals"]["imported_sessions"], 1);
-    assert_eq!(
-        ready["background_indexing"]["daemon_autostart"]["status"],
-        "not_needed"
-    );
-    assert_eq!(
-        ready["background_indexing"]["daemon_autostart"]["reason"],
-        "autostart_disabled"
-    );
     assert!(
-        ready["import"]["totals"]["imported_events"]
+        ready["lexical"]["indexed_documents"]
             .as_u64()
-            .unwrap()
-            >= 1
+            .is_some_and(|count| count >= 1),
+        "{ready:#}"
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["inventory_units"], 1);
-    assert_eq!(status["pending_inventory_units"], 0);
-    assert_eq!(status["cataloged_sessions"], 1);
-    assert_eq!(status["indexed_catalog_sessions"], 1);
-    assert_eq!(status["pending_catalog_sessions"], 0);
-    assert!(status["indexed_items"].as_u64().unwrap() > 0);
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert!(status["lexical"]["indexed_documents"].as_u64().unwrap() > 0);
     assert_eq!(status["read_only"], true);
 
     let human_temp = tempdir();
@@ -670,10 +598,7 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
         .stdout
         .clone();
     let human_setup = String::from_utf8(human_setup).unwrap();
-    assert!(human_setup.contains("ctx local agent history search is ready"));
-    assert!(human_setup.contains("from 1 source."));
-    assert!(human_setup
-        .contains("Daemon autostart is disabled for this process; setup ran in the foreground."));
+    assert!(human_setup.contains("History is ready to search"));
     assert!(human_setup.contains("  ctx search \"test failure\""));
 }
 
@@ -694,11 +619,8 @@ fn setup_wait_imports_discovered_codex_prompt_history() {
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["mode"], "ready");
-    assert_eq!(setup["inventory"]["sources"], 1);
-    assert_eq!(setup["inventory"]["units"], 1);
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
-    assert_eq!(setup["import"]["totals"]["imported_sessions"], 1);
-    assert_eq!(setup["import"]["totals"]["imported_events"], 1);
+    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
+    assert_eq!(setup["lexical"]["indexed_documents"], 1, "{setup:#}");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -750,7 +672,7 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
     assert_eq!(status["daemon"]["enabled"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
-    assert!(!temp.path().join("config.toml").exists());
+    assert!(!data_root(&temp).join("config.toml").exists());
 
     let human_setup = ctx(&temp)
         .args(["setup", "--no-daemon", "--progress", "none"])
@@ -760,7 +682,10 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         .stdout
         .clone();
     let human_setup = String::from_utf8(human_setup).unwrap();
-    assert!(human_setup.contains("Daemon refresh was skipped because --no-daemon was used."));
+    assert!(
+        human_setup.contains("Background  skipped because --no-daemon was used"),
+        "{human_setup}"
+    );
 }
 
 #[test]
@@ -776,42 +701,30 @@ fn setup_import_isolates_empty_codex_session_file() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["inventory"]["sources"], 1, "{setup:#}");
-    assert_eq!(setup["inventory"]["units"], 2, "{setup:#}");
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 2, "{setup:#}");
-    assert_eq!(
-        setup["import"]["outcome"], "completed_with_rejections",
-        "{setup:#}"
-    );
-    assert_eq!(setup["import"]["failure_scope"], "record", "{setup:#}");
-    assert_eq!(
-        setup["import"]["failure_type"], "record_rejection",
-        "{setup:#}"
-    );
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0, "{setup:#}");
-    assert_eq!(
-        setup["import"]["totals"]["imported_sessions"], 1,
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["certified_sources"], 2, "{setup:#}");
+    assert!(
+        setup["lexical"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
         "{setup:#}"
     );
     assert_eq!(
-        setup["import"]["totals"]["rejected_records"], 1,
+        setup["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
+            ["current_rejected_records"],
+        0,
         "{setup:#}"
     );
     assert_eq!(
-        setup["import"]["sources"][0]["rejections"][0],
-        json!({
-            "line": 0,
-            "error": "Codex NativePath source has no valid session owner",
-        }),
+        setup["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
+            ["current_ignored_records"],
+        1,
         "{setup:#}"
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["cataloged_sessions"], 2, "{status:#}");
-    assert_eq!(status["indexed_catalog_sessions"], 1, "{status:#}");
-    assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
-    assert_eq!(status["pending_catalog_sessions"], 1, "{status:#}");
-    assert!(status["indexed_items"].as_u64().unwrap() > 0);
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert!(status["lexical"]["indexed_documents"].as_u64().unwrap() > 0);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -820,23 +733,11 @@ fn setup_import_isolates_empty_codex_session_file() {
         "codex",
         "--format=json",
     ]));
-    assert_eq!(
-        search["freshness"]["status"], "daemon_background",
-        "{search:#}"
-    );
-    assert_eq!(
-        search["freshness"]["totals"]["rejected_records"], 0,
-        "{search:#}"
-    );
-    assert_eq!(
-        search["freshness"]["totals"]["failed_sources"], 0,
-        "{search:#}"
-    );
     assert_search_provider_oracle(&search, "codex", "setup should import", 1, "message");
 }
 
 #[test]
-fn setup_all_failed_foreground_import_prints_json_and_exits_nonzero() {
+fn setup_all_invalid_source_publishes_a_verified_empty_generation() {
     let temp = tempdir();
     let sessions = temp
         .path()
@@ -846,23 +747,12 @@ fn setup_all_failed_foreground_import_prints_json_and_exits_nonzero() {
     fs::create_dir_all(&sessions).unwrap();
     fs::write(sessions.join("rollout-empty-only.jsonl"), "").unwrap();
 
-    let output = ctx(&temp)
-        .args(["setup", "--wait", "--format=json", "--progress", "none"])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert_eq!(setup["schema_version"], 1, "{setup:#}");
-    assert_eq!(setup["import"]["ran"], true, "{setup:#}");
-    assert_eq!(setup["import"]["outcome"], "failure", "{setup:#}");
-    assert_eq!(setup["import"]["failure_scope"], "source", "{setup:#}");
-    assert_eq!(
-        setup["import"]["totals"]["imported_sources"], 0,
-        "{setup:#}"
-    );
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 1, "{setup:#}");
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
+    assert_eq!(setup["lexical"]["indexed_documents"], 0, "{setup:#}");
 }
 
 #[test]
@@ -983,25 +873,14 @@ fn human_setup_without_sources_starts_daemon_without_claiming_background_indexin
         .get_output()
         .clone();
     let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("History is ready to search"), "{stdout}");
     assert!(
-        stdout.contains("ctx is initialized; no local history was indexed"),
+        stdout.contains("Sources     0 sources")
+            && stdout.contains("Events      0 searchable events"),
         "{stdout}"
     );
-    assert!(
-        stdout.contains("background maintenance handoff is verified"),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("indexing is queued"), "{stdout}");
-    assert!(
-        !stdout.contains("queued your local agent history"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("  ctx sources"), "{stdout}");
-    assert!(stdout.contains("  ctx import --all"), "{stdout}");
-    assert!(
-        !stdout.contains("  ctx search \"test failure\""),
-        "{stdout}"
-    );
+    assert!(stdout.contains("Refresh     in progress"), "{stdout}");
+    assert!(stdout.contains("  ctx search \"test failure\""), "{stdout}");
 
     let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(running["daemon"]["status"], "running", "{running:#}");
@@ -1015,7 +894,8 @@ fn human_setup_without_sources_starts_daemon_without_claiming_background_indexin
     assert_eq!(completed["daemon"]["pid"], pid, "{completed:#}");
     assert!(completed["daemon"]["last_error"].is_null(), "{completed:#}");
     let lock: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(data_root(&temp).join("daemon/daemon.lock")).unwrap())
+            .unwrap();
     assert_eq!(lock["pid"], pid, "{lock:#}");
     assert_eq!(lock["released"], true, "{lock:#}");
 }
@@ -1058,15 +938,18 @@ fn daemon_once_rejections_complete_and_preserve_diagnostics() {
 
     assert_eq!(daemon["status"], "completed", "{daemon:#}");
     assert_eq!(
-        daemon["jobs"]["history_refresh"]["status"], "completed",
+        daemon["jobs"]["source_backed_refresh"]["status"], "completed",
         "{daemon:#}"
     );
     assert_eq!(
-        daemon["jobs"]["history_refresh"]["totals"]["rejected_records"], 1,
+        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]["current_rejected_records"],
+        1,
         "{daemon:#}"
     );
     assert_eq!(
-        daemon["jobs"]["history_refresh"]["totals"]["failed_sources"], 0,
+        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]
+            ["current_sources_with_rejections"],
+        1,
         "{daemon:#}"
     );
     assert!(daemon["last_error"].is_null(), "{daemon:#}");
@@ -1089,12 +972,13 @@ fn daemon_once_rejections_complete_and_preserve_diagnostics() {
         .success();
 
     let lock: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(data_root(&temp).join("daemon/daemon.lock")).unwrap())
+            .unwrap();
     assert_eq!(lock["released"], true, "{lock:#}");
 }
 
 #[test]
-fn daemon_rejection_diagnostics_survive_a_later_healthy_source_cycle() {
+fn daemon_rejection_diagnostics_survive_a_noop_source_cycle() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let sessions = temp
@@ -1127,45 +1011,37 @@ fn daemon_rejection_diagnostics_survive_a_later_healthy_source_cycle() {
         .assert()
         .success();
 
-    let mut saw_rejection = false;
-    let mut saw_later_healthy_cycle = false;
-    for _ in 0..4 {
+    let mut generation = None;
+    for cycle in 0..2 {
         let report = json_output(
             ctx_from_binary(&temp, &binary)
                 .args(["daemon", "run", "--once", "--force", "--format=json"])
                 .env("CTX_UPGRADE_AUTO", "off"),
         );
-        let rejected = report["jobs"]["history_refresh"]["totals"]["rejected_records"]
+        let refresh = &report["jobs"]["source_backed_refresh"];
+        let rejected = refresh["receipt"]["current"]["current_rejected_records"]
             .as_u64()
             .unwrap_or(0);
-        let preserved = report["jobs"]["history_refresh"]["rejection_diagnostics"]
-            ["rejected_records"]
-            .as_u64()
-            .unwrap_or(0);
-        if rejected > 0 {
-            assert_eq!(rejected, 1, "{report:#}");
-            assert_eq!(preserved, 1, "{report:#}");
-            saw_rejection = true;
-        } else if saw_rejection {
-            assert_eq!(preserved, 1, "{report:#}");
-            saw_later_healthy_cycle = true;
-            break;
+        assert_eq!(rejected, 1, "{report:#}");
+        assert_eq!(
+            refresh["receipt"]["current"]["current_sources_with_rejections"], 1,
+            "{report:#}"
+        );
+        let published = refresh["published_generation"].as_str().unwrap();
+        if cycle == 0 {
+            assert_eq!(refresh["generation_changed"], true, "{report:#}");
+            generation = Some(published.to_owned());
+        } else {
+            assert_eq!(refresh["generation_changed"], false, "{report:#}");
+            assert_eq!(Some(published), generation.as_deref(), "{report:#}");
         }
     }
-    assert!(saw_rejection, "malformed source was never selected");
-    assert!(
-        saw_later_healthy_cycle,
-        "healthy source was not selected after the malformed source"
-    );
 
-    let doctor = json_output(ctx_from_binary(&temp, &binary).args([
-        "doctor",
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
+    let doctor = json_output(ctx_from_binary(&temp, &binary).args(["doctor", "--format=json"]));
     assert_eq!(
-        doctor["daemon"]["jobs"]["history_refresh"]["rejection_diagnostics"]["rejected_records"], 1,
+        doctor["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
+            ["current_rejected_records"],
+        1,
         "{doctor:#}"
     );
 }
@@ -1202,18 +1078,20 @@ fn daemon_once_refreshes_discovered_codex_prompt_history() {
     );
     assert_eq!(daemon["status"], "completed", "{daemon:#}");
     assert_eq!(
-        daemon["jobs"]["history_refresh"]["status"], "completed",
+        daemon["jobs"]["source_backed_refresh"]["status"], "completed",
         "{daemon:#}"
     );
     assert_eq!(
-        daemon["jobs"]["history_refresh"]["totals"]["imported_sessions"], 1,
+        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]["current_source_count"], 1,
         "{daemon:#}"
     );
     assert_eq!(
-        daemon["jobs"]["history_refresh"]["totals"]["imported_events"], 1,
+        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]["current_indexed_documents"],
+        1,
         "{daemon:#}"
     );
 
+    let _daemon = start_full_source_refresh_daemon(&temp);
     let search = json_output(ctx_from_binary(&temp, &binary).args([
         "search",
         "prompt history daemon refresh oracle",
@@ -1250,19 +1128,9 @@ fn human_wait_setup_starts_daemon_after_foreground_import() {
         .get_output()
         .clone();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("ctx local agent history search is ready"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("background maintenance handoff is verified"),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("indexing is queued"), "{stdout}");
-    assert!(
-        !stdout.contains("queued your local agent history"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("History is ready to search"), "{stdout}");
+    assert!(stdout.contains("Refresh     ready"), "{stdout}");
+    assert!(stdout.contains("  ctx search \"test failure\""), "{stdout}");
 
     let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(running["daemon"]["status"], "running", "{running:#}");
@@ -1277,7 +1145,8 @@ fn human_wait_setup_starts_daemon_after_foreground_import() {
     assert!(completed["daemon"]["finished_at_ms"].as_i64().unwrap() > 0);
     assert!(completed["daemon"]["last_error"].is_null(), "{completed:#}");
     let lock: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("daemon/daemon.lock")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(data_root(&temp).join("daemon/daemon.lock")).unwrap())
+            .unwrap();
     assert_eq!(lock["pid"], pid, "{lock:#}");
     assert_eq!(lock["released"], true, "{lock:#}");
 }
@@ -1300,37 +1169,19 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["inventory"]["sources"], 1);
-    assert_eq!(setup["inventory"]["units"], 1);
-    assert_eq!(setup["inventory"]["source_import_files"], 1);
-    assert_eq!(setup["inventory"]["indexed_source_import_files"], 1);
-    assert_eq!(setup["inventory"]["pending_source_import_files"], 0);
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 0);
-    assert_eq!(setup["import"]["outcome"], "success");
-    assert_eq!(setup["import"]["failure_scope"], "none");
-    assert_eq!(setup["import"]["failure_type"], "none");
-    assert_eq!(setup["import"]["totals"]["imported_sources"], 1);
-    assert_eq!(setup["import"]["totals"]["imported_sessions"], 1);
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
+    assert!(
+        setup["lexical"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "{setup:#}"
+    );
+    assert_eq!(setup["relational"]["session_count"], 1, "{setup:#}");
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["inventory_units"], 1);
-    assert_eq!(status["source_import_files"], 1);
-    assert_eq!(status["indexed_source_import_files"], 1);
-    assert_eq!(status["pending_inventory_units"], 0);
-    assert_eq!(status["indexed_catalog_sessions"], 0);
-    assert_eq!(
-        status["inventory_source_bytes"],
-        setup["background_indexing"]["source_bytes"]
-    );
-    let source_bytes = setup["background_indexing"]["source_bytes"]
-        .as_u64()
-        .unwrap();
-    assert_eq!(
-        status["lexical_index_estimate_seconds"],
-        source_bytes.div_ceil(16 * 1024 * 1024).max(1)
-    );
-    assert!(status["indexed_items"].as_u64().unwrap() > 0);
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
 }
 
 #[test]
@@ -1340,20 +1191,18 @@ fn setup_inventories_whole_source_sqlite_providers() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["inventory"]["sources"], 1);
-    assert_eq!(setup["inventory"]["units"], 1);
-    assert_eq!(setup["inventory"]["source_import_files"], 1);
-    assert_eq!(setup["inventory"]["indexed_source_import_files"], 1);
-    assert_eq!(setup["inventory"]["pending_source_import_files"], 0);
-    assert_eq!(setup["catalog"]["cataloged_sessions"], 0);
-    assert_eq!(setup["import"]["totals"]["imported_sources"], 1);
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
+    assert!(
+        setup["lexical"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "{setup:#}"
+    );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["inventory_units"], 1);
-    assert_eq!(status["source_import_files"], 1);
-    assert_eq!(status["indexed_source_import_files"], 1);
-    assert_eq!(status["pending_inventory_units"], 0);
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
 }
 
 #[test]
@@ -1362,8 +1211,8 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
     write_large_codex_setup_sessions(&temp, 40, 4, 4 * 1024);
     write_large_hermes_setup_db(&temp, 130, 8 * 1024);
     let _daemon = start_full_source_refresh_daemon(&temp);
-    let db_path = temp.path().join("relational.sqlite");
-    let wal_path = temp.path().join("relational.sqlite-wal");
+    let db_path = data_root(&temp).join("relational.sqlite");
+    let wal_path = data_root(&temp).join("relational.sqlite-wal");
 
     let running = Arc::new(AtomicBool::new(true));
     let peak_wal_bytes = Arc::new(AtomicU64::new(0));
@@ -1405,7 +1254,7 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
         peak_wal_bytes.load(Ordering::Acquire)
     );
     assert!(
-        fs::metadata(temp.path().join("relational.sqlite-wal"))
+        fs::metadata(data_root(&temp).join("relational.sqlite-wal"))
             .map(|metadata| metadata.len())
             .unwrap_or(0)
             <= 4 * 1024 * 1024,
