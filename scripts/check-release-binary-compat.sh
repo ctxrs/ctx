@@ -318,13 +318,15 @@ check_macos() {
   minimum="$(macho_min_version)"
   [[ -n "${minimum}" ]] || fail "missing macOS minimum version load command"
   version_le "${minimum}" 13.0 || fail "minimum macOS ${minimum} is newer than 13.0"
-  # Core ML support and the native Keychain credential adapter are compiled
-  # into both macOS artifacts. Security.framework is the exact native API
-  # dependency of that adapter. Keep the complete reviewed system-library set
-  # exact so an accidental third-party dylib or new framework still fails.
+  # Core ML support, the native Keychain credential adapter, and the persistent
+  # daemon's FSEvents watcher are compiled into both macOS artifacts.
+  # Security.framework and CoreServices.framework are the exact native API
+  # dependencies of those adapters. Keep the complete reviewed system-library
+  # set exact so an accidental third-party dylib or new framework still fails.
   assert_exact_lines "Mach-O dylibs" "$(macho_dylibs)" "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
 /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
 /System/Library/Frameworks/CoreML.framework/Versions/A/CoreML
+/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
 /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
 /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
 /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
