@@ -466,9 +466,11 @@ def run_container_gates(
                 "pipefail",
                 "-c",
                 (
+                    "install -d -m 0700 /tmp/candidate && "
+                    "install -m 0755 /candidate/ctx /tmp/candidate/ctx && "
                     "timeout --signal=KILL 120s "
                     "bash scripts/run-native-candidate-smoke.sh "
-                    "/candidate/ctx "
+                    "/tmp/candidate/ctx "
                     "tests/fixtures/custom-history-jsonl/basic.jsonl "
                     '"$1" /tmp/native-smoke.json '
                     "&& grep -Fq '\"status\":\"passed\"' /tmp/native-smoke.json"
