@@ -194,6 +194,9 @@ struct WorkingScan {
     logical_snapshot: SqliteLogicalSnapshot,
 }
 
+// Documents intentionally move through this short-lived scanner enum by value.
+// Boxing them would add an allocation to every indexed event on the hot path.
+#[allow(clippy::large_enum_variant)]
 enum OpenCodeScanOutput {
     Begin(SourceKey),
     Document(LexicalDocument),

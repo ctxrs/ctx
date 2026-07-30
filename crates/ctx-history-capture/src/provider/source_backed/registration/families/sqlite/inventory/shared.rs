@@ -96,6 +96,9 @@ where
         )
     }
 
+    // The arguments are the complete declarative route contract; grouping them
+    // would only introduce another provider-registration wrapper type.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn register_replacement_document_tree_route_with_authority(
         registry: &mut SourceBackedProviderRegistry,
         source: ProviderSource,

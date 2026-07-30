@@ -93,9 +93,10 @@ fn watch_writes_through_the_ui_selected_stdout_adapter() {
     let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
     let mut ui = Ui::with_writers(stdout, stdout_context, Vec::new(), stderr_context);
 
-    let mut output = index_watch_output(&mut ui);
-    output.print_human(&watch_status(4, 12, true)).unwrap();
-    drop(output);
+    {
+        let mut output = index_watch_output(&mut ui);
+        output.print_human(&watch_status(4, 12, true)).unwrap();
+    }
 
     let rendered = captured.text();
     assert!(rendered.contains("\u{1b}["));

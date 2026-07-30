@@ -336,7 +336,7 @@ mod native {
             let retained_manifest = snapshot_file(&retained_manifest_path);
             let sessions_root = harness.home().join(".codex/sessions");
             let original_mode = fs::metadata(&sessions_root).unwrap().permissions().mode();
-            fs::set_permissions(&sessions_root, fs::Permissions::from_mode(0)).unwrap();
+            fs::set_permissions(&sessions_root, fs::Permissions::from_mode(0o0)).unwrap();
             let failed_job =
                 wait_for_job(&harness, "failed refresh with retained generation", |job| {
                     (job["request_state"] == "failed"
@@ -1331,7 +1331,7 @@ mod native {
                 .and_then(|arg| std::str::from_utf8(arg).ok())
                 .and_then(|arg| fs::canonicalize(arg).ok())
                 .is_some_and(|binary| binary == expected_binary);
-            let root_matches = args.iter().any(|arg| *arg == expected_root);
+            let root_matches = args.contains(&expected_root);
             let daemon_run = args
                 .windows(2)
                 .any(|args| args[0] == b"daemon" && args[1] == b"run");

@@ -287,7 +287,7 @@ fn scan_nanoclaw_project(
                     ..
                 } => {
                     let document = nanoclaw_lexical_document(
-                        &source,
+                        source,
                         source_revision_digest,
                         ordinal,
                         message_source.label(),

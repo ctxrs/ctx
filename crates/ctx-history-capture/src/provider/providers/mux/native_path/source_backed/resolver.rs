@@ -308,17 +308,17 @@ fn read_mux_payload(
             "Mux locator byte range is no longer present",
         ));
     }
-    if coordinate.stream_kind == MuxStreamKind::Chat && coordinate.byte_start > 0 {
-        if source
+    if coordinate.stream_kind == MuxStreamKind::Chat
+        && coordinate.byte_start > 0
+        && source
             .read_exact_range(coordinate.byte_start - 1, 1, 1)
             .map_err(unavailable)?
             != b"\n"
-        {
-            return Err(failure(
-                HydrationFailureKind::StaleRecordEvidence,
-                "Mux chat record start boundary changed",
-            ));
-        }
+    {
+        return Err(failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Mux chat record start boundary changed",
+        ));
     }
     let length = usize::try_from(byte_length).map_err(|_| {
         failure(

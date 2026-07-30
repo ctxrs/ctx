@@ -30,15 +30,19 @@ fn record_success(
 #[test]
 fn aggregates_many_source_and_record_results_once_per_provider() {
     let mut collector = ProviderRefreshCollector::default();
-    let mut first = ProviderImportSummary::default();
-    first.imported_sessions = 1;
-    first.imported_events = 2;
-    first.skipped = 40;
-    let mut second = ProviderImportSummary::default();
-    second.imported_sessions = 2;
-    second.imported_events = 5;
-    second.imported_edges = 1;
-    second.work_remaining = true;
+    let first = ProviderImportSummary {
+        imported_sessions: 1,
+        imported_events: 2,
+        skipped: 40,
+        ..ProviderImportSummary::default()
+    };
+    let second = ProviderImportSummary {
+        imported_sessions: 2,
+        imported_events: 5,
+        imported_edges: 1,
+        work_remaining: true,
+        ..ProviderImportSummary::default()
+    };
     record_success(
         &mut collector,
         CaptureProvider::Codex,
@@ -96,8 +100,10 @@ fn aggregates_many_source_and_record_results_once_per_provider() {
 #[test]
 fn distinguishes_no_op_from_changed() {
     let mut collector = ProviderRefreshCollector::default();
-    let mut no_op = ProviderImportSummary::default();
-    no_op.skipped = 3;
+    let no_op = ProviderImportSummary {
+        skipped: 3,
+        ..ProviderImportSummary::default()
+    };
     record_success(
         &mut collector,
         CaptureProvider::Codex,
@@ -122,8 +128,10 @@ fn distinguishes_no_op_from_changed() {
 #[test]
 fn exact_provider_durations_are_independent_in_multi_provider_batches() {
     let mut collector = ProviderRefreshCollector::default();
-    let mut codex_summary = ProviderImportSummary::default();
-    codex_summary.imported_events = 1;
+    let codex_summary = ProviderImportSummary {
+        imported_events: 1,
+        ..ProviderImportSummary::default()
+    };
     collector.record_success_with_facts(
         CaptureProvider::Codex,
         ProviderRefreshTrigger::Import,
@@ -139,8 +147,10 @@ fn exact_provider_durations_are_independent_in_multi_provider_batches() {
             Some(0),
         ),
     );
-    let mut claude_summary = ProviderImportSummary::default();
-    claude_summary.imported_events = 1;
+    let claude_summary = ProviderImportSummary {
+        imported_events: 1,
+        ..ProviderImportSummary::default()
+    };
     collector.record_success_with_facts(
         CaptureProvider::Claude,
         ProviderRefreshTrigger::Import,
@@ -188,8 +198,10 @@ fn exact_provider_durations_are_independent_in_multi_provider_batches() {
 
 #[test]
 fn observed_fact_seam_keeps_unavailable_dimensions_unknown() {
-    let mut summary = ProviderImportSummary::default();
-    summary.imported_events = 1;
+    let summary = ProviderImportSummary {
+        imported_events: 1,
+        ..ProviderImportSummary::default()
+    };
     let success = ProviderRefreshRuntimeFacts::observed_success(Duration::from_secs(3), &summary);
     assert_eq!(success.duration, Duration::from_secs(3));
     assert_eq!(success.work_kind, None);
@@ -202,8 +214,10 @@ fn observed_fact_seam_keeps_unavailable_dimensions_unknown() {
 #[test]
 fn pro_lag_makes_refresh_partial_without_falsifying_core_result() {
     let mut collector = ProviderRefreshCollector::default();
-    let mut summary = ProviderImportSummary::default();
-    summary.imported_events = 1;
+    let summary = ProviderImportSummary {
+        imported_events: 1,
+        ..ProviderImportSummary::default()
+    };
     collector.record_success_with_facts(
         CaptureProvider::Codex,
         ProviderRefreshTrigger::Search,

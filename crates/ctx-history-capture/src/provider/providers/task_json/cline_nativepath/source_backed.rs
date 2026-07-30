@@ -297,13 +297,13 @@ impl TaskJsonSourceBackedResolver {
         for task in discovery.task_routes() {
             let source = task_source_key(self.dialect, task)
                 .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-            if source.exact_descriptor_eq(first.locator().source()) {
-                if matched.replace((task, source)).is_some() {
-                    return Err(hydration_failure(
-                        HydrationFailureKind::InvalidLocator,
-                        "task source identity matched more than one retained leaf",
-                    ));
-                }
+            if source.exact_descriptor_eq(first.locator().source())
+                && matched.replace((task, source)).is_some()
+            {
+                return Err(hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    "task source identity matched more than one retained leaf",
+                ));
             }
         }
         let (task, source) = matched.ok_or_else(|| {
@@ -858,14 +858,10 @@ fn task_route_error(error: TaskJsonSourceBackedError) -> SourceBackedRouteError 
         | TaskJsonSourceBackedError::TaskChanged { .. } => {
             SourceBackedRouteErrorKind::SourceChanged
         }
-        TaskJsonSourceBackedError::Native(ClineNativePathError::SourceIo { kind, .. })
-            if matches!(
-                kind,
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            SourceBackedRouteErrorKind::Unavailable
-        }
+        TaskJsonSourceBackedError::Native(ClineNativePathError::SourceIo {
+            kind: std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied,
+            ..
+        }) => SourceBackedRouteErrorKind::Unavailable,
         TaskJsonSourceBackedError::MissingRoot { .. } => SourceBackedRouteErrorKind::Unavailable,
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };

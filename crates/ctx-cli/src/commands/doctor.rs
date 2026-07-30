@@ -196,7 +196,7 @@ mod ui_tests {
         let finding = "ctx Pro key store is unavailable; unlock or repair the already selected secure key store, then run `ctx pro`".to_owned();
         for width in [32, 48, 80, 120] {
             let context = context(width);
-            let document = render_doctor_human(&context, "off", &[finding.clone()]);
+            let document = render_doctor_human(&context, "off", std::slice::from_ref(&finding));
             let rendered = document.render_plain();
             assert!(rendered.starts_with("! ctx found 1 issue\n"));
             assert!(rendered.contains("Issues\n[1]"));

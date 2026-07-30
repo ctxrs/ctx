@@ -20,6 +20,7 @@ fn definition(report: &Value, version: i64) -> &Value {
         .unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_row(
     connection: &Connection,
     definition_version: i64,
