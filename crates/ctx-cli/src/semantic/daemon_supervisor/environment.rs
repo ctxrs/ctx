@@ -134,13 +134,13 @@ pub(super) fn supervisor_environment_contract_report() -> Value {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 pub(super) fn linux_systemd_unit(executable: &Path, data_root: &Path) -> Result<String> {
     let snapshot = supervisor_environment_snapshot()?;
     linux_systemd_unit_with_environment(executable, data_root, &snapshot)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 pub(super) fn linux_systemd_unit_with_environment(
     executable: &Path,
     data_root: &Path,
@@ -162,7 +162,7 @@ pub(super) fn linux_systemd_unit_with_environment(
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 fn systemd_quote_text(value: &str) -> String {
     let value = value.replace('%', "%%");
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
