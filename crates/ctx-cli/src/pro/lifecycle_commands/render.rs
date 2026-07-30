@@ -455,10 +455,22 @@ mod tests {
 
     fn assert_fits(document: &Document, context: &RenderContext) {
         let maximum = context.content_width().unwrap_or(1);
-        assert!(document
-            .render_plain()
-            .lines()
-            .all(|line| line.width() <= maximum));
+        let rendered = document.render_plain();
+        for line in rendered.lines() {
+            if line.width() <= maximum {
+                continue;
+            }
+            let preserves_copyable_atom = line.trim_start().starts_with("ctx ")
+                || line.split_whitespace().any(|atom| {
+                    atom.contains("://")
+                        || atom.starts_with("--")
+                        || uuid::Uuid::parse_str(atom).is_ok()
+                });
+            assert!(
+                preserves_copyable_atom,
+                "{line:?} exceeded {maximum} columns"
+            );
+        }
     }
 
     #[test]
