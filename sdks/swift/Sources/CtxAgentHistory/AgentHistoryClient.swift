@@ -427,7 +427,16 @@ private func normalizeSearch(_ raw: JSONValue) -> JSONValue {
     search["freshness"] = (object["freshness"] ?? .object([:])).camelizedPublicJSON()
     search["generatedAt"] = object["generated_at"] ?? object["generatedAt"] ?? search["generatedAt"] ?? .null
     search["results"] = .array((object["results"]?.arrayValue ?? []).map { normalizeSearchHit($0) })
-    search["pagination"] = (object["pagination"] ?? .object([:])).camelizedPublicJSON()
+    if let pagination = object["pagination"] {
+        search["pagination"] = pagination.camelizedPublicJSON()
+    } else if let resultWindow = search["resultWindow"]?.objectValue {
+        var pagination: [String: JSONValue] = [:]
+        pagination["limit"] = resultWindow["limit"]
+        pagination["hasMore"] = resultWindow["moreAvailable"]
+        search["pagination"] = .object(pagination)
+    } else {
+        search["pagination"] = .object([:])
+    }
     search["truncation"] = (object["truncation"] ?? .object([:])).camelizedPublicJSON()
     return .object(search).droppingNulls()
 }

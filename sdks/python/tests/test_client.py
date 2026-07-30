@@ -189,6 +189,11 @@ class LocalCliAdapterTests(unittest.TestCase):
                         "citations": [{"target_type": "event", "label": "codex event"}],
                     }
                 ],
+                "result_window": {
+                    "limit": 1,
+                    "returned": 1,
+                    "more_available": True,
+                },
             }
         )
         client = AgentHistoryClient(adapter)
@@ -210,6 +215,12 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertNotIn("itemType", hit)
         self.assertEqual(hit["resultType"], "event")
         self.assertEqual(hit["citations"][0]["targetType"], "event")
+        self.assertEqual(
+            result["search"]["resultWindow"],
+            {"limit": 1, "returned": 1, "moreAvailable": True},
+        )
+        self.assertEqual(result["search"]["pagination"], {"limit": 1, "hasMore": True})
+        self.assertNotIn("nextCursor", result["search"]["pagination"])
 
     def test_versioning_reports_sdk_api_transport_and_ctx_version(self) -> None:
         with fake_ctx() as cli:
@@ -346,6 +357,10 @@ class DogfoodExampleTests(unittest.TestCase):
         self.assertEqual(snapshot.event_location["operation"], "locateEvent")
         self.assertEqual(snapshot.session_location["operation"], "locateSession")
         self.assertEqual(snapshot.search["search"]["results"][0]["resultScope"], "event")
+        self.assertEqual(
+            snapshot.search["search"]["resultWindow"],
+            {"limit": 1, "returned": 1, "moreAvailable": True},
+        )
 
 
 class RecordingSearchAdapter(LocalCliAdapter):
@@ -536,7 +551,11 @@ def assert_agent_history_v1_envelope(test: unittest.TestCase, payload: object) -
     elif operation in {"import", "sync"}:
         _assert_required_keys(test, value, {"resume", "totals"})
     elif operation == "search":
-        _assert_required_keys(test, value, {"query", "results"})
+        _assert_required_keys(test, value, {"query", "results", "resultWindow", "pagination"})
+        test.assertEqual(value["resultWindow"]["returned"], len(value["results"]))
+        test.assertEqual(value["resultWindow"]["limit"], value["pagination"]["limit"])
+        test.assertEqual(value["resultWindow"]["moreAvailable"], value["pagination"]["hasMore"])
+        test.assertNotIn("nextCursor", value["pagination"])
         for hit in value["results"]:
             _assert_required_keys(test, hit, {"resultScope"})
     elif operation == "showEvent":

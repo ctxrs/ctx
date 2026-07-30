@@ -159,6 +159,12 @@ class SearchRetrieval(TypedDict, total=False):
     diagnostics: JsonObject
 
 
+class SearchResultWindow(TypedDict):
+    limit: int
+    returned: int
+    moreAvailable: bool
+
+
 class _SearchResultRequired(TypedDict):
     query: Optional[str]
     results: list[SearchHit]
@@ -169,6 +175,7 @@ class SearchResult(_SearchResultRequired, total=False):
     freshness: Freshness
     retrieval: SearchRetrieval
     generatedAt: Optional[str]
+    resultWindow: SearchResultWindow
     pagination: JsonObject
     truncation: JsonObject
 

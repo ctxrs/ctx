@@ -58,6 +58,15 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		return fmt.Errorf("search: %w", err)
 	}
 	fmt.Fprintf(stdout, "search results=%d\n", len(search.Search.Results))
+	if search.Search.ResultWindow != nil {
+		fmt.Fprintf(
+			stdout,
+			"search window=%d/%d more=%t\n",
+			search.Search.ResultWindow.Returned,
+			search.Search.ResultWindow.Limit,
+			search.Search.ResultWindow.MoreAvailable,
+		)
+	}
 	if len(search.Search.Results) > 0 {
 		if eventID == "" {
 			eventID = search.Search.Results[0].CtxEventID
@@ -180,7 +189,12 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 					"whyMatched":   []string{"text"},
 				},
 			},
-			"pagination": map[string]any{"limit": 5},
+			"resultWindow": map[string]any{
+				"limit":         1,
+				"returned":      1,
+				"moreAvailable": true,
+			},
+			"pagination": map[string]any{"limit": 1, "hasMore": true},
 			"truncation": map[string]any{"truncated": false},
 		}
 	case "showEvent":

@@ -357,9 +357,12 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
     case "sync":
       envelope.import = camelizeKeys(raw);
       break;
-    case "search":
-      envelope.search = camelizeKeys(raw);
+    case "search": {
+      const search = camelizeKeys(raw);
+      bridgeSearchPagination(search);
+      envelope.search = search;
       break;
+    }
     case "showEvent":
       envelope.event = {
         event: camelizeKeys(raw?.event ?? null),
@@ -410,6 +413,24 @@ function camelizeKeys(value) {
     out[camelKey] = camelizeKeys(item);
   }
   return out;
+}
+
+function bridgeSearchPagination(search) {
+  if (!search || typeof search !== "object" || Array.isArray(search) || "pagination" in search) {
+    return;
+  }
+  const resultWindow = search.resultWindow;
+  if (!resultWindow || typeof resultWindow !== "object" || Array.isArray(resultWindow)) {
+    return;
+  }
+  const pagination = {};
+  if ("limit" in resultWindow) {
+    pagination.limit = resultWindow.limit;
+  }
+  if ("moreAvailable" in resultWindow) {
+    pagination.hasMore = resultWindow.moreAvailable;
+  }
+  search.pagination = pagination;
 }
 
 function appendImportArgs(args, options) {

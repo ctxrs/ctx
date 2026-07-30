@@ -9,6 +9,7 @@ public final class SearchResult {
     private final SearchFilters filters;
     private final Freshness freshness;
     private final List<SearchHit> results;
+    private final SearchResultWindow resultWindow;
     private final SearchPagination pagination;
     private final SearchTruncation truncation;
 
@@ -17,6 +18,7 @@ public final class SearchResult {
         this.filters = SearchFilters.from(fields.get("filters"));
         this.freshness = Freshness.from(fields.get("freshness"));
         this.results = AgentHistoryValue.objectList(fields.get("results"), SearchHit::new);
+        this.resultWindow = SearchResultWindow.from(fields.get("resultWindow"));
         this.pagination = SearchPagination.from(fields.get("pagination"));
         this.truncation = SearchTruncation.from(fields.get("truncation"));
     }
@@ -71,6 +73,14 @@ public final class SearchResult {
 
     public List<SearchHit> results() {
         return results;
+    }
+
+    public SearchResultWindow getResultWindow() {
+        return resultWindow;
+    }
+
+    public SearchResultWindow resultWindow() {
+        return resultWindow;
     }
 
     public SearchPagination getPagination() {

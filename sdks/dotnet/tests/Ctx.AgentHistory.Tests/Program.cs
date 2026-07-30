@@ -198,7 +198,8 @@ internal static class Program
                   "result_scope": "event",
                   "citations": [{"target_type":"event","label":"codex event"}]
                 }
-              ]
+              ],
+              "result_window": {"limit":1,"returned":1,"more_available":true}
             }
             """);
         var client = new AgentHistoryClient(transport);
@@ -219,6 +220,12 @@ internal static class Program
         True(!response.Search.Results[0].ToJsonObject().ContainsKey("itemType"), "search hit leaked itemType");
         Equal("event", response.Search.Results[0].ResultType ?? "");
         Equal("event", response.Search.Results[0].Citations[0].TargetType ?? "");
+        Equal(1, response.Search.ResultWindow!.Limit);
+        Equal(1, response.Search.ResultWindow.Returned);
+        Equal(true, response.Search.ResultWindow.MoreAvailable);
+        Equal(1, response.Search.Pagination["limit"]!.GetValue<int>());
+        Equal(true, response.Search.Pagination["hasMore"]!.GetValue<bool>());
+        True(!response.Search.Pagination.ContainsKey("nextCursor"), "search pagination invented a cursor");
     }
 
     private static async Task RejectsSearchWithoutIntent()
@@ -340,7 +347,10 @@ internal static class Program
                     }
                     break;
                 case "search":
-                    _ = (await ClientFor(node["search"]).SearchAsync(new SearchOptions { Query = "fixture search" })).Search.Results;
+                    var search = (await ClientFor(node["search"]).SearchAsync(new SearchOptions { Query = "fixture search" })).Search;
+                    Equal(search.Results.Count, search.ResultWindow!.Returned);
+                    Equal(search.ResultWindow.Limit, search.Pagination["limit"]!.GetValue<int>());
+                    Equal(search.ResultWindow.MoreAvailable, search.Pagination["hasMore"]!.GetValue<bool>());
                     break;
                 case "showEvent":
                     _ = (await ClientFor(node["event"]).ShowEventAsync("event-1")).Event.Events;

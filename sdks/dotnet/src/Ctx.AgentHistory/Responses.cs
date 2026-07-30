@@ -351,6 +351,7 @@ public sealed record SearchResult
         GeneratedAt = JsonHelpers.GetString(json, "generatedAt");
         Retrieval = JsonHelpers.Clone(json["retrieval"]);
         Results = JsonHelpers.GetObjectArray(json, "results", SearchHit.FromJson);
+        ResultWindow = SearchResultWindow.FromJson(json["resultWindow"] as JsonObject);
         Pagination = JsonHelpers.CloneObject(json["pagination"] as JsonObject);
         Truncation = JsonHelpers.CloneObject(json["truncation"] as JsonObject);
     }
@@ -361,12 +362,35 @@ public sealed record SearchResult
     public string? GeneratedAt { get; }
     public JsonNode? Retrieval { get; }
     public IReadOnlyList<SearchHit> Results { get; }
+    public SearchResultWindow? ResultWindow { get; }
     public JsonObject Pagination { get; }
     public JsonObject Truncation { get; }
 
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
 
     internal static SearchResult FromJson(JsonObject? json) => new(json ?? new JsonObject());
+}
+
+public sealed record SearchResultWindow
+{
+    private readonly JsonObject _json;
+
+    private SearchResultWindow(JsonObject json)
+    {
+        _json = JsonHelpers.CloneObject(json);
+        Limit = JsonHelpers.GetInt(json, "limit") ?? 0;
+        Returned = JsonHelpers.GetInt(json, "returned") ?? 0;
+        MoreAvailable = JsonHelpers.GetBool(json, "moreAvailable") ?? false;
+    }
+
+    public int Limit { get; }
+    public int Returned { get; }
+    public bool MoreAvailable { get; }
+
+    public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
+
+    internal static SearchResultWindow? FromJson(JsonObject? json) =>
+        json is null ? null : new SearchResultWindow(json);
 }
 
 public sealed record SearchHit

@@ -172,6 +172,11 @@ def _fake_ctx_script() -> str:
                             "snippet": "local agent history search result",
                         }}
                     ],
+                    "result_window": {{
+                        "limit": 1,
+                        "returned": 1,
+                        "more_available": True,
+                    }},
                 }}
             )
         elif args[:2] == ["show", "event"]:

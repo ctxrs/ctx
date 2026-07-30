@@ -83,7 +83,12 @@ public final class AgentHistoryClientTest {
         assertEquals("/tmp/ctx-sdk-fixture", response.getBackend().getDataRoot());
         assertEquals("local agent history", response.getSearch().getQuery());
         assertEquals("codex", response.getSearch().getFilters().getProvider());
+        assertEquals(Integer.valueOf(20), response.getSearch().getResultWindow().getLimit());
+        assertEquals(Integer.valueOf(1), response.getSearch().getResultWindow().getReturned());
+        assertEquals(Boolean.FALSE, response.getSearch().getResultWindow().getMoreAvailable());
         assertEquals(Integer.valueOf(20), response.getSearch().getPagination().getLimit());
+        assertEquals(Boolean.FALSE, response.getSearch().getPagination().getHasMore());
+        assertEquals(null, response.getSearch().getPagination().getNextCursor());
         assertEquals(Boolean.FALSE, response.getSearch().getTruncation().getTruncated());
         assertEquals(Integer.valueOf(1), Integer.valueOf(response.getSearch().getResults().size()));
         SearchHit hit = response.getSearch().getResults().get(0);
@@ -109,7 +114,8 @@ public final class AgentHistoryClientTest {
                         + "\"coverage\":{\"embedded_items\":4,\"indexed_now\":1},"
                         + "\"diagnostics\":{\"query_embed_ms\":2}"
                         + "},"
-                        + "\"results\":[{\"result_scope\":\"event\"}]"
+                        + "\"results\":[{\"result_scope\":\"event\"}],"
+                        + "\"result_window\":{\"limit\":1,\"returned\":1,\"more_available\":true}"
                         + "}"));
 
         SearchResponse response = client.search(AgentHistoryOptions.search().query("agent history"));
@@ -124,6 +130,12 @@ public final class AgentHistoryClientTest {
         assertEquals(Integer.valueOf(1), AgentHistoryValue.integer(coverage.get("indexedNow")));
         Map<String, Object> diagnostics = AgentHistoryValue.object(retrieval.get("diagnostics"));
         assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(diagnostics.get("queryEmbedMs")));
+        assertEquals(Integer.valueOf(1), response.getSearch().getResultWindow().getLimit());
+        assertEquals(Integer.valueOf(1), response.getSearch().getResultWindow().getReturned());
+        assertEquals(Boolean.TRUE, response.getSearch().getResultWindow().getMoreAvailable());
+        assertEquals(Integer.valueOf(1), response.getSearch().getPagination().getLimit());
+        assertEquals(Boolean.TRUE, response.getSearch().getPagination().getHasMore());
+        assertEquals(null, response.getSearch().getPagination().getNextCursor());
     }
 
     private static void normalizesRawShowAndLocateResponses() {
