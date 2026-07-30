@@ -844,6 +844,63 @@ fn logical_snapshot_leaf_scans_once_and_discards_identical_staging() {
 }
 
 #[test]
+fn logical_snapshot_four_worker_noop_retains_and_changed_leaf_replays() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let adapter = SyntheticAdapter::new(
+        (0_u8..8)
+            .map(|id| SyntheticLeaf {
+                physical_id: id,
+                logical_id: id,
+                revision: 1,
+                body: format!("logical leaf {id}"),
+            })
+            .collect(),
+    );
+    adapter.use_logical_snapshot_scans();
+    let worker_count = adapter.use_independent_leaf_scans(4);
+    let registry = fixture_registry(temp.path(), adapter.clone());
+
+    let cold = publish(&index_root, &registry);
+    assert_eq!(adapter.total_scans(), 8);
+    assert_eq!(adapter.peak_scans(), worker_count);
+
+    for id in 0_u8..8 {
+        adapter.touch_physical_revision(id, 2);
+    }
+    adapter.reset_scan_counts();
+    let logical_noop = publish(&index_root, &registry);
+    assert_eq!(logical_noop.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(logical_noop.commit.opstamp, cold.commit.opstamp);
+    assert_eq!(adapter.total_scans(), 8);
+    assert_eq!(adapter.peak_scans(), worker_count);
+
+    adapter.replace(3, 3, "logical leaf 3 changed");
+    adapter.reset_scan_counts();
+    let changed = publish(&index_root, &registry);
+    assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(adapter.total_scans(), 8);
+    assert_eq!(adapter.peak_scans(), worker_count);
+
+    let source = adapter.source(3);
+    let item = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(&source, None, 8)
+        .unwrap()
+        .items
+        .remove(0);
+    let hydration = EventHydrationRequest::new(item.event_id, item.locator).unwrap();
+    assert_eq!(
+        registry
+            .resolver_registry()
+            .hydrate_event(&hydration)
+            .unwrap()
+            .provider_bytes,
+        b"logical leaf 3 changed"
+    );
+}
+
+#[test]
 fn active_source_family_contract_document_replacement_tree_rejects_races_duplicates_and_replaces_on_parser_change(
 ) {
     let temp = crate::test_support_paths::tempdir().unwrap();
