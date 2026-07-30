@@ -49,6 +49,7 @@ impl DocumentLeafFingerprint {
 #[derive(Debug)]
 pub(crate) struct ObservedDocumentLeaf<L> {
     pub(crate) fingerprint: DocumentLeafFingerprint,
+    replay_from_frontier: bool,
     pub(crate) provider_leaf: L,
 }
 
@@ -56,6 +57,25 @@ impl<L> ObservedDocumentLeaf<L> {
     pub(crate) fn new(fingerprint: DocumentLeafFingerprint, provider_leaf: L) -> Self {
         Self {
             fingerprint,
+            replay_from_frontier: true,
+            provider_leaf,
+        }
+    }
+
+    /// Admits one source that must be scanned once into the staged generation.
+    ///
+    /// This is the logical-snapshot path for sources such as SQLite: physical
+    /// DB/WAL evidence can cheaply fence the read, but it is not durable
+    /// logical replay identity. If the resulting logical certificate matches
+    /// the base generation, the index writer discards the identical staging
+    /// run without publishing metadata or advancing the generation.
+    pub(crate) fn always_scan(
+        physical_fingerprint: DocumentLeafFingerprint,
+        provider_leaf: L,
+    ) -> Self {
+        Self {
+            fingerprint: physical_fingerprint,
+            replay_from_frontier: false,
             provider_leaf,
         }
     }
@@ -95,22 +115,27 @@ pub(crate) struct DocumentSourceTerminal {
 impl DocumentSourceTerminal {
     fn certify(
         self,
-        fingerprint: DocumentLeafFingerprint,
+        replay_fingerprint: Option<DocumentLeafFingerprint>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
-        let frontier = SourceFrontier::new(
-            DOCUMENT_FRONTIER_KIND,
-            TypedKey::bytes(fingerprint.as_bytes().to_vec()).map_err(document_contract_error)?,
-            self.counts.certified_bytes,
-            self.content_digest,
-        )
-        .map_err(document_contract_error)?;
+        let frontier = replay_fingerprint
+            .map(|fingerprint| {
+                SourceFrontier::new(
+                    DOCUMENT_FRONTIER_KIND,
+                    TypedKey::bytes(fingerprint.as_bytes().to_vec())
+                        .map_err(document_contract_error)?,
+                    self.counts.certified_bytes,
+                    self.content_digest,
+                )
+                .map_err(document_contract_error)
+            })
+            .transpose()?;
         CertifiedSource::certify_with_frontier(
             self.opening,
             self.closing,
             self.parser_revision,
             self.content_digest,
             self.counts,
-            Some(frontier),
+            frontier,
         )
         .map_err(document_contract_error)
     }
@@ -182,7 +207,7 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
     fn certify(
         self,
         terminal: DocumentSourceTerminal,
-        fingerprint: DocumentLeafFingerprint,
+        replay_fingerprint: Option<DocumentLeafFingerprint>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
         let source = self.source()?;
         if !terminal.source.exact_descriptor_eq(source)
@@ -198,7 +223,7 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 "document terminal indexed count did not match forwarded documents",
             ));
         }
-        let certificate = terminal.certify(fingerprint)?;
+        let certificate = terminal.certify(replay_fingerprint)?;
         self.sink
             .certify_source(certificate.clone())
             .map_err(route_coordinator_error)?;
@@ -335,7 +360,11 @@ where
     let mut current_sources = HashMap::<[u8; 32], SourceKey>::new();
     let mut certificates = Vec::with_capacity(tree.leaves.len());
     for observed in &tree.leaves {
-        let certificate = if let Some(base) = replayable.remove(&observed.fingerprint) {
+        let replay = observed
+            .replay_from_frontier
+            .then(|| replayable.remove(&observed.fingerprint))
+            .flatten();
+        let certificate = if let Some(base) = replay {
             stage_exact_document_replay(sink, &base)?;
             base
         } else {
@@ -353,7 +382,12 @@ where
                     "complete document tree produced a duplicate logical source",
                 ));
             }
-            changed.certify(terminal, observed.fingerprint)?
+            changed.certify(
+                terminal,
+                observed
+                    .replay_from_frontier
+                    .then_some(observed.fingerprint),
+            )?
         };
         let source = certificate.observation().source().clone();
         if !adapter.owns_source(&source) {
