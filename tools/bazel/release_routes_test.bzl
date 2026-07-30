@@ -55,6 +55,26 @@ _plain_executable = rule(
     executable = True,
 )
 
+def _runfiles_probe_packager_impl(ctx):
+    output = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.write(
+        output,
+        """#!/usr/bin/env bash
+set -euo pipefail
+: "${RUNFILES_DIR:?release route did not forward its derived runfiles root}"
+workspace="${TEST_WORKSPACE:-_main}"
+test -e "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/artifact"
+test -e "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/rustc"
+""",
+        is_executable = True,
+    )
+    return [DefaultInfo(executable = output)]
+
+_runfiles_probe_packager = rule(
+    implementation = _runfiles_probe_packager_impl,
+    executable = True,
+)
+
 def _route_analysis_test_impl(ctx):
     info = ctx.attr.route[ReleaseRouteInfo]
     if info.target_id != ctx.attr.target_id:
@@ -180,6 +200,27 @@ def release_route_analysis_test_suite(name):
             target_triple = spec.triple,
         )
         tests.append(test_name)
+
+    _runfiles_probe_packager(
+        name = "_release_route_runfiles_probe_packager",
+        tags = ["manual", "release-gate"],
+    )
+    public_cli_release_route(
+        name = "_release_route_runfiles_probe",
+        artifact = ":_release_route_probe_linux_x64",
+        license_materials = ":_release_route_test_license_materials",
+        packager = ":_release_route_runfiles_probe_packager",
+        rustc = ":_release_route_probe_linux_x64",
+        sbom_inventory = ":_release_route_test_inventory",
+        target_id = "linux-x64",
+    )
+    native.sh_test(
+        name = "_release_route_runfiles_runtime_test",
+        srcs = ["release_route_runfiles_test.sh"],
+        data = [":_release_route_runfiles_probe"],
+        tags = ["release-gate"],
+    )
+    tests.append("_release_route_runfiles_runtime_test")
 
     native.test_suite(
         name = name,

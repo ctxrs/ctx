@@ -641,6 +641,7 @@ sh_test(
         "scripts/release/build-linux-x64-bazel-dogfood.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
         "scripts/stage-github-release-assets.sh",
+        "//tools/bazel:release_routes.bzl",
     ],
     tags = ["release-gate"],
 )

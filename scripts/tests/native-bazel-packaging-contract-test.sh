@@ -13,6 +13,7 @@ recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
 matrix="${source_root}/contracts/release-targets-v1.json"
 staging="${source_root}/scripts/stage-github-release-assets.sh"
+release_routes="${source_root}/tools/bazel/release_routes.bzl"
 
 for required in \
   'route_target=//:ctx_release_linux_x64' \
@@ -35,6 +36,16 @@ for required in \
   'c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b'; do
   grep -Fq -- "${required}" "${wrapper}" || {
     printf 'native Linux Bazel wrapper missing contract: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+
+for required in \
+  'export RUNFILES_DIR="${{runfiles_root}}"' \
+  'export RUNFILES_MANIFEST_FILE="${{manifest}}"'; do
+  grep -Fq -- "${required}" "${release_routes}" || {
+    printf 'native release launcher does not forward runfiles: %s\n' \
+      "${required}" >&2
     exit 1
   }
 done
