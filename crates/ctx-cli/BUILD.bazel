@@ -261,9 +261,11 @@ ctx_rust_test(
     srcs = [
         "tests/raw_output_policy.rs",
         "tests/raw_output_policy/allowlist.rs",
+        "tests/raw_output_policy/output_origins.rs",
         "tests/raw_output_policy/owning_test.rs",
         "tests/raw_output_policy/self_tests.rs",
         "tests/raw_output_policy/sink_analysis.rs",
+        "tests/raw_output_policy/source_analysis.rs",
     ],
     crate_name = "raw_output_policy_tests",
     crate_root = "tests/raw_output_policy.rs",

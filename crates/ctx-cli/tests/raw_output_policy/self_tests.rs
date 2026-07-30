@@ -16,7 +16,11 @@ fn exact_allowed_site_is_accepted() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::MachineProtocol,
         rationale: "synthetic JSON protocol",
-        owning_test: "tests/raw_output_policy/self_tests.rs::exact_allowed_site_is_accepted",
+        owning_test: TestOwner::behavioral(
+            "tests/raw_output_policy/self_tests.rs::exact_allowed_site_is_accepted",
+            &["src/example.rs"],
+            &["compare_policy"],
+        ),
     };
     assert!(compare_policy(sites, &[entry]).is_closed());
 }
@@ -37,7 +41,11 @@ fn stale_allowlist_entry_is_rejected() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::JustifiedPlainHuman,
         rationale: "synthetic fallback",
-        owning_test: "tests/raw_output_policy/self_tests.rs::stale_allowlist_entry_is_rejected",
+        owning_test: TestOwner::behavioral(
+            "tests/raw_output_policy/self_tests.rs::stale_allowlist_entry_is_rejected",
+            &["src/example.rs"],
+            &["compare_policy"],
+        ),
     };
     let diff = compare_policy(Vec::new(), &[entry]);
     assert_eq!(diff.stale.len(), 1);
@@ -58,7 +66,11 @@ fn classified_violation_is_rejected() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::Violation,
         rationale: "synthetic policy violation",
-        owning_test: "tests/raw_output_policy/self_tests.rs::classified_violation_is_rejected",
+        owning_test: TestOwner::behavioral(
+            "tests/raw_output_policy/self_tests.rs::classified_violation_is_rejected",
+            &["src/example.rs"],
+            &["compare_policy"],
+        ),
     };
     let diff = compare_policy(sites, &[entry]);
     assert_eq!(diff.violations.len(), 1);
@@ -158,6 +170,9 @@ fn scanner_covers_direct_macros_and_writer_methods_through_a_raw_wrapper() {
                 write!(self.destination, "one");
                 writeln!(self.destination, "two");
                 self.destination.write_all(b"three");
+                let chunks = [io::IoSlice::new(b"four")];
+                self.destination.write_vectored(&chunks);
+                self.destination.write_all_vectored(&mut chunks.as_slice());
             }
         }
     "#;
@@ -166,7 +181,7 @@ fn scanner_covers_direct_macros_and_writer_methods_through_a_raw_wrapper() {
         .iter()
         .filter(|site| site.key.primitive == Primitive::DirectWrite)
         .collect::<Vec<_>>();
-    assert_eq!(direct_writes.len(), 3, "{sites:#?}");
+    assert_eq!(direct_writes.len(), 5, "{sites:#?}");
 
     let entries = direct_writes
         .into_iter()
@@ -176,8 +191,11 @@ fn scanner_covers_direct_macros_and_writer_methods_through_a_raw_wrapper() {
             primitive: Primitive::DirectWrite,
             class: OutputClass::Infrastructure,
             rationale: "synthetic specialized raw writer",
-            owning_test:
+            owning_test: TestOwner::behavioral(
                 "tests/raw_output_policy/self_tests.rs::scanner_covers_direct_macros_and_writer_methods_through_a_raw_wrapper",
+                &["src/example.rs"],
+                &["compare_policy"],
+            ),
         })
         .collect::<Vec<_>>();
     let direct_sites = sites
@@ -236,9 +254,157 @@ fn scanner_ignores_format_buffers_and_non_document_renderers() {
             let marker = Glyph::Success;
             let _ = glyph.render(&context);
             let _ = marker.render(&context);
+            let template = Template::new();
+            let _ = template.render(&context);
+        }
+
+        struct Template;
+        impl Template {
+            fn new() -> Self { Self }
+            fn render(&self, context: &RenderContext) -> String {
+                context.to_string()
+            }
         }
     "#;
     assert!(scan_source("src/example.rs", source).is_empty());
+}
+
+#[test]
+fn scanner_resolves_imported_output_helpers_and_io_aliases() {
+    let source = r#"
+        use crate::output::{self as raw_output, write_stdout, write_stdout_line as emit_line};
+        use std::io::{self as terminal_io, stderr as diagnostics, stdout as terminal, Write};
+
+        fn emit() {
+            write_stdout(format_args!("one"));
+            emit_line(format_args!("two"));
+            raw_output::write_stderr_line(format_args!("three"));
+            terminal().write_all(b"four");
+            diagnostics().write_fmt(format_args!("five"));
+            terminal_io::stdout().write(b"six");
+        }
+    "#;
+    let sites = scan_source("src/example.rs", source);
+    assert_eq!(
+        sites
+            .iter()
+            .filter(|site| site.key.primitive == Primitive::OutputRawHelper)
+            .count(),
+        3,
+        "{sites:#?}"
+    );
+    assert_eq!(
+        sites
+            .iter()
+            .filter(|site| matches!(
+                site.key.primitive,
+                Primitive::StdoutConstructor | Primitive::StderrConstructor
+            ))
+            .count(),
+        3,
+        "{sites:#?}"
+    );
+    assert_eq!(
+        sites
+            .iter()
+            .filter(|site| site.key.primitive == Primitive::DirectWrite)
+            .count(),
+        3,
+        "{sites:#?}"
+    );
+}
+
+#[test]
+fn scanner_covers_every_byte_writing_write_method_and_ufcs_alias() {
+    let source = r#"
+        use std::io::{self, Write as ByteSink};
+
+        fn run(ui: &mut Ui) {
+            let destination = ui.stdout_writer();
+            destination.write(b"one");
+            destination.write_vectored(&[io::IoSlice::new(b"two")]);
+            destination.write_all(b"three");
+            destination.write_all_vectored(&mut [io::IoSlice::new(b"four")].as_slice());
+            destination.write_fmt(format_args!("five"));
+            ByteSink::write_vectored(destination, &[io::IoSlice::new(b"six")]);
+        }
+    "#;
+    let sites = scan_source("src/example.rs", source);
+    assert_eq!(
+        sites
+            .iter()
+            .filter(|site| site.key.primitive == Primitive::DirectWrite)
+            .count(),
+        6,
+        "{sites:#?}"
+    );
+}
+
+#[test]
+fn fingerprints_include_enclosing_machine_eligibility_guards() {
+    let machine = scan_source(
+        "src/example.rs",
+        r#"fn emit(json: bool) { if json { println!("{}", payload()); } }"#,
+    );
+    let human = scan_source(
+        "src/example.rs",
+        r#"fn emit(json: bool) { if !json { println!("{}", payload()); } }"#,
+    );
+    assert_eq!(machine.len(), 1);
+    assert_eq!(human.len(), 1);
+    assert_ne!(machine[0].key, human[0].key);
+
+    let owner = TestOwner::behavioral(
+        "tests/raw_output_policy/self_tests.rs::fingerprints_include_enclosing_machine_eligibility_guards",
+        &["src/example.rs"],
+        &["compare_policy"],
+    );
+    let allowlist = [AllowEntry {
+        path: "src/example.rs",
+        fingerprint: Box::leak(machine[0].key.fingerprint.clone().into_boxed_str()),
+        primitive: Primitive::PrintMacro,
+        class: OutputClass::MachineProtocol,
+        rationale: "synthetic guarded protocol",
+        owning_test: owner,
+    }];
+    let diff = compare_policy(human, &allowlist);
+    assert_eq!(diff.unmatched.len(), 1);
+    assert_eq!(diff.stale.len(), 1);
+}
+
+#[test]
+fn owning_test_requires_exact_test_attribute_and_behavioral_contract() {
+    let names = owning_test::runnable_test_function_names(
+        r#"
+            #[cfg(test)]
+            fn helper_only() { assert!(true); }
+            #[test]
+            fn runnable() { assert!(true); }
+            #[test]
+            #[ignore]
+            fn ignored() { assert!(true); }
+        "#,
+    );
+    assert_eq!(names, vec!["runnable"]);
+
+    let sites = scan_source("src/example.rs", "fn emit() { println!(\"value\"); }");
+    let unrelated = AllowEntry {
+        path: "src/example.rs",
+        fingerprint: Box::leak(sites[0].key.fingerprint.clone().into_boxed_str()),
+        primitive: Primitive::PrintMacro,
+        class: OutputClass::MachineProtocol,
+        rationale: "synthetic protocol",
+        owning_test: TestOwner::behavioral(
+            "tests/raw_output_policy/self_tests.rs::normalized_fingerprint_ignores_whitespace_and_comments",
+            &["src/example.rs"],
+            &["protocol_receipt"],
+        ),
+    };
+    let diff = compare_policy(sites, &[unrelated]);
+    assert_eq!(diff.invalid_metadata.len(), 1);
+    assert!(diff.invalid_metadata[0]
+        .1
+        .contains("missing behavioral evidence"));
 }
 
 #[test]
@@ -251,10 +417,18 @@ fn owning_test_requires_a_resolvable_source_identity() {
         primitive: Primitive::PrintMacro,
         class: OutputClass::MachineProtocol,
         rationale: "synthetic protocol",
-        owning_test: "some nonempty prose",
+        owning_test: TestOwner::behavioral(
+            "some nonempty prose",
+            &["src/example.rs"],
+            &["compare_policy"],
+        ),
     };
     let missing = AllowEntry {
-        owning_test: "tests/raw_output_policy/self_tests.rs::not_a_real_test",
+        owning_test: TestOwner::behavioral(
+            "tests/raw_output_policy/self_tests.rs::not_a_real_test",
+            &["src/example.rs"],
+            &["compare_policy"],
+        ),
         ..arbitrary
     };
     let arbitrary_diff = compare_policy(sites.clone(), &[arbitrary]);

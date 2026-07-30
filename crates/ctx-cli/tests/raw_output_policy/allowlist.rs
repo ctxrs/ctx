@@ -1,4 +1,4 @@
-use super::{AllowEntry, OutputClass, Primitive};
+use super::{AllowEntry, OutputClass, Primitive, TestOwner};
 
 // This list is intentionally exact. Do not add a directory-wide or file-wide
 // exception. Every entry expands to one normalized source statement plus its
@@ -17,37 +17,123 @@ macro_rules! allow {
     };
 }
 
-const GATE: &str = "tests/raw_output_policy.rs::production_raw_output_inventory_is_closed";
-const UNIT: &str = "src/ui/tests.rs::ui_owns_independent_injectable_streams_and_capabilities";
-const ANALYTICS: &str =
-    "src/analytics/tests.rs::selected_telemetry_contract_inventory_hashes_match_the_running_public_source";
-const INDEX: &str =
-    "src/commands/index_dashboard.rs::styled_rendering_strips_to_the_exact_plain_bytes";
-const SEARCH_SQL: &str = "src/commands/sql.rs::csv_and_raw_cells_keep_their_machine_contracts";
-const STATS: &str = "src/commands/stats.rs::stats_plain_output_matches_ansi_stripped_output";
-const STATUS: &str =
-    "src/commands/status/usage.rs::usage_machine_receipts_keep_the_exact_public_schema";
-const PUBLIC_HELP: &str = "src/docs.rs::docs_plain_output_matches_ansi_stripped_output";
-const MCP: &str =
-    "src/integrations/mcp/operation.rs::status_output_is_responsive_control_safe_and_style_equivalent";
-const MCP_SERVER: &str =
-    "src/mcp/response_bound/tests.rs::final_mcp_serialization_is_bounded_after_json_expansion";
-const PRO: &str = "src/pro/referral.rs::create_and_status_json_preserve_the_exact_machine_contract";
-const SKILL: &str =
-    "src/skill/install.rs::skill_output_is_responsive_control_safe_and_style_equivalent";
-const SLASH: &str =
-    "src/integrations/slash_commands/tests.rs::failed_target_details_and_recovery_are_written_to_stderr";
-const UPGRADE: &str =
-    "src/upgrade/command/human.rs::automatic_mode_json_is_one_complete_machine_receipt";
-const DISPATCH_MACHINE_ERROR: &str =
-    "src/dispatch.rs::forced_color_never_decorates_generic_machine_mode_errors";
-const PROGRESS_DELIVERY: &str =
-    "src/progress.rs::progress_propagates_write_and_flush_failures_in_plain_and_json_modes";
+const GATE: TestOwner = TestOwner::behavioral(
+    "tests/raw_output_policy.rs::production_raw_output_inventory_is_closed",
+    &["build.rs"],
+    &["compare_policy", "scan_package", "is_closed"],
+);
+const UNIT: TestOwner = TestOwner::behavioral(
+    "src/ui/tests.rs::ui_owns_independent_injectable_streams_and_capabilities",
+    &[
+        "src/commands/blame.rs",
+        "src/dispatch.rs",
+        "src/dispatch/finalization.rs",
+        "src/main.rs",
+        "src/output.rs",
+        "src/release_build_identity.rs",
+        "src/transcript.rs",
+        "src/ui/",
+    ],
+    &[
+        "Ui",
+        "with_writers",
+        "write_stdout",
+        "write_stderr",
+        "flush",
+    ],
+);
+const ANALYTICS: TestOwner = TestOwner::behavioral(
+    "src/analytics/sender.rs::capability_ack_tracks_the_snapshot_bearing_chunk_not_later_chunks",
+    &["src/analytics/sender.rs"],
+    &["post_event_chunks", "failure_on_post", "is_ok"],
+);
+const INDEX: TestOwner = TestOwner::behavioral(
+    "src/commands/index_dashboard.rs::styled_rendering_strips_to_the_exact_plain_bytes",
+    &["src/commands/index.rs"],
+    &["render_dashboard", "strip_ansi", "render_plain"],
+);
+const SEARCH_SQL: TestOwner = TestOwner::behavioral(
+    "src/commands/sql.rs::csv_and_raw_cells_keep_their_machine_contracts",
+    &["src/commands/sql.rs"],
+    &["csv_escape", "sql_csv_cell", "sql_raw_cell"],
+);
+const STATS: TestOwner = TestOwner::behavioral(
+    "src/commands/stats.rs::stats_plain_output_matches_ansi_stripped_output",
+    &["src/commands/stats.rs"],
+    &["render_stats_human", "strip_ansi", "render_plain"],
+);
+const STATUS: TestOwner = TestOwner::behavioral(
+    "src/commands/status/usage.rs::usage_machine_receipts_keep_the_exact_public_schema",
+    &["src/commands/status/usage.rs"],
+    &["usage_action_json", "usage_action_error_json"],
+);
+const PUBLIC_HELP: TestOwner = TestOwner::behavioral(
+    "src/docs.rs::docs_plain_output_matches_ansi_stripped_output",
+    &["src/dispatch.rs", "src/docs.rs"],
+    &["render_docs_list", "strip_ansi", "render_plain"],
+);
+const MCP: TestOwner = TestOwner::behavioral(
+    "src/integrations/mcp/operation/tests.rs::status_output_is_responsive_control_safe_and_style_equivalent",
+    &["src/integrations/mcp/operation.rs"],
+    &["render_status_results", "render_status_diagnostics", "strip_ansi"],
+);
+const MCP_SERVER: TestOwner = TestOwner::behavioral(
+    "src/mcp/response_bound/tests.rs::final_mcp_serialization_is_bounded_after_json_expansion",
+    &["src/mcp.rs"],
+    &[
+        "bound_complete_content_mcp_response",
+        "serialized_json_line_bytes",
+        "TEST_OUTPUT_LIMIT",
+    ],
+);
+const PRO: TestOwner = TestOwner::behavioral(
+    "src/pro/referral.rs::create_and_status_json_preserve_the_exact_machine_contract",
+    &["src/pro/"],
+    &["create_output", "status_output"],
+);
+const SKILL: TestOwner = TestOwner::behavioral(
+    "src/skill/install.rs::skill_output_is_responsive_control_safe_and_style_equivalent",
+    &["src/skill/"],
+    &[
+        "render_status_results",
+        "render_install_results",
+        "render_install_failures",
+    ],
+);
+const SLASH: TestOwner = TestOwner::behavioral(
+    "src/integrations/slash_commands/tests.rs::failed_target_details_and_recovery_are_written_to_stderr",
+    &["src/integrations/slash_commands.rs"],
+    &["Ui", "with_writers", "stderr_copy"],
+);
+const UPGRADE: TestOwner = TestOwner::behavioral(
+    "src/upgrade/command/human.rs::automatic_mode_json_is_one_complete_machine_receipt",
+    &[
+        "src/upgrade/command/human.rs",
+        "src/upgrade/command/status.rs",
+    ],
+    &["auto_mode_json"],
+);
+const WINDOWS_READINESS: TestOwner = TestOwner::behavioral(
+    "src/upgrade/install/transaction/windows/tests.rs::readiness_receipt_is_exact_and_bounded",
+    &["src/upgrade/install/transaction/windows/helper.rs"],
+    &["ready_receipt", "validate_ready_receipt"],
+);
+const DISPATCH_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
+    "src/dispatch/finalization.rs::forced_color_never_decorates_generic_machine_mode_errors",
+    &["src/dispatch/finalization.rs"],
+    &["render_generic_command_error", "machine_stderr", "contains"],
+);
+const PROGRESS_DELIVERY: TestOwner = TestOwner::behavioral(
+    "src/progress.rs::progress_propagates_write_and_flush_failures_in_plain_and_json_modes",
+    &["src/progress.rs"],
+    &["FailingWriter", "expect_err", "contains"],
+);
 
 const CARGO_DIRECTIVE: &str = "Cargo build-script protocol directive";
 const JSON_PROTOCOL: &str = "documented JSON or JSONL machine-output contract";
 const TEXT_PROTOCOL: &str = "documented plain-text machine-output contract";
-const DEBUG_DIAGNOSTIC: &str = "opt-in analytics debug diagnostic";
+const DEBUG_DIAGNOSTIC: &str =
+    "CTX_ANALYTICS_DEBUG-only delivery-failure diagnostic; the owner injects and asserts the post failure path";
 const TERMINAL_PROBE: &str = "terminal capability probe; emits no bytes";
 const RAW_INFRASTRUCTURE: &str = "central raw-output infrastructure seam";
 const UI_INFRASTRUCTURE: &str = "central Ui/Document rendering infrastructure seam";
@@ -63,6 +149,7 @@ const SQL: &str = "src/commands/sql.rs";
 const STATS_COMMAND: &str = "src/commands/stats.rs";
 const STATUS_USAGE: &str = "src/commands/status/usage.rs";
 const DISPATCH: &str = "src/dispatch.rs";
+const DISPATCH_FINALIZATION: &str = "src/dispatch/finalization.rs";
 const DOCS: &str = "src/docs.rs";
 const MCP_OPERATION: &str = "src/integrations/mcp/operation.rs";
 const SLASH_COMMANDS: &str = "src/integrations/slash_commands.rs";
@@ -152,7 +239,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#9@90a37aff9068bc84",
+        "main#9@7eb64b1c42785964",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -200,7 +287,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         INDEX_COMMAND,
-        "print_human#1@9e176dd4991e94f2",
+        "print_human#1@b96d065e9b4e7c75",
         DirectWrite,
         Infrastructure,
         SPECIALIZED_STREAM,
@@ -208,7 +295,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         INDEX_COMMAND,
-        "print_human#2@fa8dcaeddea22df9",
+        "print_human#2@07261a95602a84f8",
         DirectWrite,
         Infrastructure,
         SPECIALIZED_STREAM,
@@ -232,7 +319,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         INDEX_COMMAND,
-        "print_human#5@8a60a84febfd0d49",
+        "print_human#5@8d6514562387b353",
         DirectWrite,
         Infrastructure,
         SPECIALIZED_STREAM,
@@ -240,7 +327,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         INDEX_COMMAND,
-        "print_human#6@ea4a1a0bd1db8a5d",
+        "print_human#6@852e51f5897711eb",
         DirectWrite,
         Infrastructure,
         SPECIALIZED_STREAM,
@@ -248,7 +335,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         INDEX_COMMAND,
-        "print_human#7@fa8dcaeddea22df9",
+        "print_human#7@ed255c9516703587",
         DirectWrite,
         Infrastructure,
         SPECIALIZED_STREAM,
@@ -272,7 +359,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         SQL,
-        "print_sql_truncation_notice#1@57049f8b574f87f2",
+        "print_sql_truncation_notice#1@ea873e086cbe48d0",
         PrintMacro,
         JustifiedPlainHuman,
         PLAIN_FALLBACK,
@@ -280,7 +367,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         SQL,
-        "print_sql_truncation_notice#2@f71aca3bc751a212",
+        "print_sql_truncation_notice#2@55248d4418defa0d",
         PrintMacro,
         JustifiedPlainHuman,
         PLAIN_FALLBACK,
@@ -304,7 +391,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         STATS_COMMAND,
-        "malformed_config_failure#1@d533fd75ee233f13",
+        "malformed_config_failure#1@5ad0927fe28eedf7",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -312,7 +399,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         STATUS_USAGE,
-        "malformed_config_failure#1@448440e40ccc2c92",
+        "malformed_config_failure#1@3029b1d3e3586d6e",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -320,7 +407,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         STATUS_USAGE,
-        "removed_cloud_config_failure#1@1b71c97045dda36f",
+        "removed_cloud_config_failure#1@d113765ce063d423",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -328,23 +415,23 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         STATUS_USAGE,
-        "usage_action_failure#1@62de96c8050fa336",
+        "usage_action_failure#1@c224d57aeae379ca",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         STATUS
     ),
     allow!(
-        DISPATCH,
-        "render_generic_command_error#1@4fcd3f430927aff6",
+        DISPATCH_FINALIZATION,
+        "render_generic_command_error#1@28450a09db65187b",
         UiRawWriter,
         Infrastructure,
         RAW_INFRASTRUCTURE,
         DISPATCH_MACHINE_ERROR
     ),
     allow!(
-        DISPATCH,
-        "render_generic_command_error#1@48514149721fc11e",
+        DISPATCH_FINALIZATION,
+        "render_generic_command_error#1@9deb49b5ff3a1d05",
         DirectWrite,
         MachineProtocol,
         "generic machine-mode command error",
@@ -352,7 +439,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run#1@e980ea9ca2d818d3",
+        "run#1@095f488efb9fbbd6",
         PrintMacro,
         JustifiedPlainHuman,
         PLAIN_FALLBACK,
@@ -367,48 +454,48 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         PUBLIC_HELP
     ),
     allow!(
-        DISPATCH,
-        "run_cli#1@611edc2f163d9789",
+        DISPATCH_FINALIZATION,
+        "finalize_cli#1@611edc2f163d9789",
         StdoutConstructor,
         Infrastructure,
         "final process stream flush",
         UNIT
     ),
     allow!(
-        DISPATCH,
-        "run_cli#1@93f3ab5dd89cc205",
+        DISPATCH_FINALIZATION,
+        "finalize_cli#1@93f3ab5dd89cc205",
         StderrConstructor,
         Infrastructure,
         "final process stream flush",
         UNIT
     ),
     allow!(
-        DISPATCH,
-        "run_cli#1@34cd62977695262a",
+        DISPATCH_FINALIZATION,
+        "render_result_error#1@34cd62977695262a",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         UNIT
     ),
     allow!(
-        DISPATCH,
-        "run_cli#2@bec3fc86604eb591",
+        DISPATCH_FINALIZATION,
+        "render_result_error#2@bec3fc86604eb591",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         UNIT
     ),
     allow!(
-        DISPATCH,
-        "run_cli#3@bec3fc86604eb591",
+        DISPATCH_FINALIZATION,
+        "render_result_error#3@bec3fc86604eb591",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         UNIT
     ),
     allow!(
-        DISPATCH,
-        "run_cli#4@e980ea9ca2d818d3",
+        DISPATCH_FINALIZATION,
+        "render_result_error#4@e980ea9ca2d818d3",
         PrintMacro,
         JustifiedPlainHuman,
         PLAIN_FALLBACK,
@@ -416,7 +503,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DOCS,
-        "list_docs#1@b952ea61fcba410a",
+        "list_docs#1@56ebd27b8774f7d6",
         PrintMacro,
         MachineProtocol,
         MACHINE_BODY,
@@ -440,7 +527,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DOCS,
-        "search_docs#1@b952ea61fcba410a",
+        "search_docs#1@56ebd27b8774f7d6",
         PrintMacro,
         MachineProtocol,
         MACHINE_BODY,
@@ -448,7 +535,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DOCS,
-        "show_doc#1@e17478699cffefe1",
+        "show_doc#1@84b24dcf8cf5d1c5",
         PrintMacro,
         MachineProtocol,
         MACHINE_BODY,
@@ -528,7 +615,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         MCP_MODULE,
-        "serve_stdio_loop#1@1f4d386a50824806",
+        "serve_stdio_loop#1@0b1e1125489bffc5",
         DirectWrite,
         MachineProtocol,
         "MCP JSON-RPC response framing",
@@ -600,7 +687,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "write_stream#1@4b717bacd3774f81",
+        "write_stream#1@1e41b5c64a14aad7",
         DirectWrite,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -608,7 +695,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "write_stream#2@4b717bacd3774f81",
+        "write_stream#2@1e41b5c64a14aad7",
         DirectWrite,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -616,7 +703,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "write_stream#3@4b717bacd3774f81",
+        "write_stream#3@1e41b5c64a14aad7",
         DirectWrite,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -624,7 +711,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "write_stream#4@4b717bacd3774f81",
+        "write_stream#4@1e41b5c64a14aad7",
         DirectWrite,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -640,7 +727,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "write_stream#1@57e14a2db2574477",
+        "write_stream#1@305f719202f53e59",
         StdoutConstructor,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -648,7 +735,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "write_stream#1@9d99ae52ba0872ab",
+        "write_stream#1@d41377b1caba5395",
         StderrConstructor,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -656,7 +743,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_LIFECYCLE,
-        "emit_uninstall_result#1@75eb9112501374a4",
+        "emit_uninstall_result#1@79342920bb593fd0",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -664,7 +751,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_LIFECYCLE,
-        "run_manage_with_opener#1@75eb9112501374a4",
+        "run_manage_with_opener#1@79342920bb593fd0",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -672,7 +759,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_LIFECYCLE,
-        "run_setup#1@75eb9112501374a4",
+        "run_setup#1@79342920bb593fd0",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -688,7 +775,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_PENDING,
-        "defer_setup#1@9b41fc8d13cd0f7d",
+        "defer_setup#1@a86ba39c2a24c819",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -720,7 +807,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result#1@2048412be04f5f80",
+        "print_blame_result#1@8692675e47437164",
         UiRawWriter,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -728,7 +815,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result#1@2048412be04f5f80",
+        "print_blame_result#1@8692675e47437164",
         DirectWrite,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -736,7 +823,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PROGRESS,
-        "emit_status_at#1@4fcd3f430927aff6",
+        "emit_status_at#1@5dca71adeac9a793",
         UiRawWriter,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -752,7 +839,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PROGRESS,
-        "emit_status_at#1@8a1f6ba42c43c948",
+        "emit_status_at#1@69a8d5465b9270d7",
         DirectWrite,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -808,7 +895,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         TRANSCRIPT,
-        "write_output#1@3b5b225811599fd7",
+        "write_output#1@2954ed28462f771b",
         PrintMacro,
         MachineProtocol,
         MACHINE_BODY,
@@ -816,7 +903,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         TRANSCRIPT,
-        "write_output#2@36628f9ebe42959b",
+        "write_output#2@3e43deb9ab19a3bf",
         PrintMacro,
         MachineProtocol,
         MACHINE_BODY,
@@ -888,7 +975,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         UI_WRITER,
-        "stream_width#1@6cc5fcce618aedb6",
+        "stream_width#1@396d77072ca654e4",
         StdoutConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
@@ -896,7 +983,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         UI_WRITER,
-        "stream_width#1@dadc3930bba5ddb0",
+        "stream_width#1@ce6feac81ccc3c46",
         StderrConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
@@ -920,7 +1007,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         UPGRADE_HUMAN,
-        "render_outcome#1@b515bd1f7b8c527c",
+        "render_outcome#1@fdd8f1dd9ce705c8",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -928,7 +1015,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         UPGRADE_STATUS,
-        "render_status#1@75eb9112501374a4",
+        "render_status#1@79342920bb593fd0",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -939,15 +1026,15 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         "write_ready#1@7412c9b708be0f94",
         StdoutConstructor,
         MachineProtocol,
-        "parent-process readiness protocol",
-        UPGRADE
+        "writes protocol::ready_receipt verbatim; the owner asserts its exact bounded framing",
+        WINDOWS_READINESS
     ),
     allow!(
         WINDOWS_HELPER,
         "write_ready#1@039a802fb7eff38d",
         DirectWrite,
         MachineProtocol,
-        "parent-process readiness protocol",
-        UPGRADE
+        "writes protocol::ready_receipt verbatim; the owner asserts its exact bounded framing",
+        WINDOWS_READINESS
     ),
 ];

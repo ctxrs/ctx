@@ -69,13 +69,34 @@ struct Site {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct TestOwner {
+    identity: &'static str,
+    covered_paths: &'static [&'static str],
+    evidence: &'static [&'static str],
+}
+
+impl TestOwner {
+    const fn behavioral(
+        identity: &'static str,
+        covered_paths: &'static [&'static str],
+        evidence: &'static [&'static str],
+    ) -> Self {
+        Self {
+            identity,
+            covered_paths,
+            evidence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct AllowEntry {
     path: &'static str,
     fingerprint: &'static str,
     primitive: Primitive,
     class: OutputClass,
     rationale: &'static str,
-    owning_test: &'static str,
+    owning_test: TestOwner,
 }
 
 impl AllowEntry {
@@ -98,7 +119,15 @@ use owning_test::validate as validate_owning_test;
 
 #[path = "raw_output_policy/sink_analysis.rs"]
 mod sink_analysis;
-use sink_analysis::{render_receiver_is_glyph, write_method_has_document_argument};
+use sink_analysis::write_method_has_document_argument;
+
+#[path = "raw_output_policy/source_analysis.rs"]
+mod source_analysis;
+use source_analysis::{DocumentCatalog, DocumentOrigins, SourceAliases};
+
+#[path = "raw_output_policy/output_origins.rs"]
+mod output_origins;
+use output_origins::OutputOrigins;
 
 #[derive(Debug, Default)]
 struct PolicyDiff {
@@ -171,7 +200,7 @@ impl PolicyDiff {
                     site.key.primitive.as_str(),
                     site.key.fingerprint,
                     entry.rationale,
-                    entry.owning_test
+                    entry.owning_test.identity
                 ));
             }
         }
@@ -193,7 +222,7 @@ fn compare_policy(sites: Vec<Site>, allowlist: &[AllowEntry]) -> PolicyDiff {
             diff.invalid_metadata
                 .push((*entry, "rationale is empty".to_owned()));
         }
-        if let Err(reason) = validate_owning_test(entry.owning_test) {
+        if let Err(reason) = validate_owning_test(entry) {
             diff.invalid_metadata.push((*entry, reason));
         }
     }
@@ -559,8 +588,10 @@ fn matching_delimiter(
 struct FunctionSpan {
     name: String,
     parameters: Vec<String>,
+    parameter_types: BTreeMap<String, String>,
     document_parameters: BTreeSet<String>,
-    glyph_parameters: BTreeSet<String>,
+    document_factory_parameters: BTreeSet<String>,
+    returns_document: bool,
     impl_type: Option<String>,
     open: usize,
     close: usize,
@@ -656,9 +687,11 @@ fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
         };
         let mut cursor = index + 2;
         let mut parameters = Vec::new();
+        let mut parameter_types = BTreeMap::new();
         let mut document_parameters = BTreeSet::new();
-        let mut glyph_parameters = BTreeSet::new();
+        let mut document_factory_parameters = BTreeSet::new();
         let mut captured_parameters = false;
+        let mut parameter_close = None;
         let mut parens = 0usize;
         let mut brackets = 0usize;
         while cursor < tokens.len() {
@@ -666,9 +699,14 @@ fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
                 "(" => {
                     if !captured_parameters && parens == 0 && brackets == 0 {
                         if let Some(close) = matching_delimiter(tokens, cursor, "(", ")") {
-                            (parameters, document_parameters, glyph_parameters) =
-                                parameter_metadata(&tokens[cursor + 1..close]);
+                            (
+                                parameters,
+                                parameter_types,
+                                document_parameters,
+                                document_factory_parameters,
+                            ) = parameter_metadata(&tokens[cursor + 1..close]);
                             captured_parameters = true;
+                            parameter_close = Some(close);
                         }
                     }
                     parens += 1;
@@ -687,8 +725,12 @@ fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
                         spans.push(FunctionSpan {
                             name,
                             parameters,
+                            parameter_types,
                             document_parameters,
-                            glyph_parameters,
+                            document_factory_parameters,
+                            returns_document: parameter_close.is_some_and(|close| {
+                                signature_returns_document(&tokens[close + 1..cursor])
+                            }),
                             impl_type,
                             open: cursor,
                             close,
@@ -704,10 +746,18 @@ fn function_spans(tokens: &[Token], excluded: &[bool]) -> Vec<FunctionSpan> {
     spans
 }
 
-fn parameter_metadata(tokens: &[Token]) -> (Vec<String>, BTreeSet<String>, BTreeSet<String>) {
+fn parameter_metadata(
+    tokens: &[Token],
+) -> (
+    Vec<String>,
+    BTreeMap<String, String>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+) {
     let mut names = Vec::new();
+    let mut types = BTreeMap::new();
     let mut documents = BTreeSet::new();
-    let mut glyphs = BTreeSet::new();
+    let mut document_factories = BTreeSet::new();
     for (start, end) in split_top_level(tokens, ",") {
         let parameter = &tokens[start..end];
         let Some(colon) = parameter.iter().position(|token| token.text == ":") else {
@@ -725,17 +775,48 @@ fn parameter_metadata(tokens: &[Token]) -> (Vec<String>, BTreeSet<String>, BTree
             .iter()
             .any(|token| token.text == "Document")
         {
-            documents.insert(name.clone());
+            if parameter[colon + 1..]
+                .iter()
+                .any(|token| token.text.starts_with("Fn"))
+            {
+                document_factories.insert(name.clone());
+            } else {
+                documents.insert(name.clone());
+            }
         }
-        if parameter[colon + 1..]
+        if let Some(type_name) = parameter[colon + 1..]
             .iter()
-            .any(|token| token.text == "Glyph")
+            .rev()
+            .find(|token| {
+                is_path_ident(&token.text)
+                    && !matches!(
+                        token.text.as_str(),
+                        "mut" | "dyn" | "impl" | "Send" | "Sync" | "static"
+                    )
+            })
+            .map(|token| token.text.clone())
         {
-            glyphs.insert(name.clone());
+            types.insert(name.clone(), type_name);
         }
         names.push(name);
     }
-    (names, documents, glyphs)
+    (names, types, documents, document_factories)
+}
+
+fn signature_returns_document(tokens: &[Token]) -> bool {
+    let Some(arrow) = tokens
+        .windows(2)
+        .position(|pair| pair[0].text == "-" && pair[1].text == ">")
+    else {
+        return false;
+    };
+    let end = tokens[arrow + 2..]
+        .iter()
+        .position(|token| token.text == "where")
+        .map_or(tokens.len(), |offset| arrow + 2 + offset);
+    tokens[arrow + 2..end]
+        .iter()
+        .any(|token| token.text == "Document")
 }
 
 fn split_top_level(tokens: &[Token], delimiter: &str) -> Vec<(usize, usize)> {
@@ -771,275 +852,6 @@ fn split_top_level(tokens: &[Token], delimiter: &str) -> Vec<(usize, usize)> {
         ranges.push((start, tokens.len()));
     }
     ranges
-}
-
-#[derive(Debug, Default)]
-struct OutputOrigins {
-    bindings: Vec<BTreeSet<String>>,
-    fields: BTreeSet<(String, String)>,
-}
-
-impl OutputOrigins {
-    fn analyze(tokens: &[Token], functions: &[FunctionSpan]) -> Self {
-        let mut origins = Self {
-            bindings: vec![BTreeSet::new(); functions.len()],
-            fields: BTreeSet::new(),
-        };
-        loop {
-            let mut changed = false;
-            for (function_index, function) in functions.iter().enumerate() {
-                changed |= origins.discover_local_bindings(tokens, functions, function_index);
-                changed |= origins.propagate_call_arguments(tokens, functions, function_index);
-                changed |= origins.discover_fields(tokens, functions, function_index);
-                debug_assert!(function.open < function.close);
-            }
-            if !changed {
-                return origins;
-            }
-        }
-    }
-
-    fn discover_local_bindings(
-        &mut self,
-        tokens: &[Token],
-        functions: &[FunctionSpan],
-        function_index: usize,
-    ) -> bool {
-        let function = &functions[function_index];
-        let mut changed = false;
-        let mut index = function.open + 1;
-        while index < function.close {
-            if tokens[index].text != "let" {
-                index += 1;
-                continue;
-            }
-            let Some(equal) = (index + 1..function.close)
-                .find(|cursor| matches!(tokens[*cursor].text.as_str(), "=" | ";"))
-            else {
-                break;
-            };
-            if tokens[equal].text != "=" {
-                index = equal + 1;
-                continue;
-            }
-            let Some(end) = statement_end(tokens, equal + 1, function.close) else {
-                break;
-            };
-            let binding = tokens[index + 1..equal]
-                .iter()
-                .find(|token| is_path_ident(&token.text) && token.text != "mut")
-                .map(|token| token.text.clone());
-            if let Some(binding) = binding {
-                if self.expression_has_origin(tokens, functions, function_index, equal + 1, end) {
-                    changed |= self.bindings[function_index].insert(binding);
-                }
-            }
-            index += 1;
-        }
-        changed
-    }
-
-    fn propagate_call_arguments(
-        &mut self,
-        tokens: &[Token],
-        functions: &[FunctionSpan],
-        caller_index: usize,
-    ) -> bool {
-        let caller = &functions[caller_index];
-        let mut changes = Vec::new();
-        for index in caller.open + 1..caller.close {
-            if !is_path_ident(&tokens[index].text)
-                || tokens.get(index + 1).map(|token| token.text.as_str()) != Some("(")
-                || previous_is(tokens, index, "fn")
-                || previous_is(tokens, index, ".")
-            {
-                continue;
-            }
-            let Some(close) = matching_delimiter(tokens, index + 1, "(", ")") else {
-                continue;
-            };
-            if close > caller.close {
-                continue;
-            }
-            let qualifier = if index >= 3
-                && tokens[index - 1].text == ":"
-                && tokens[index - 2].text == ":"
-                && is_path_ident(&tokens[index - 3].text)
-            {
-                Some(tokens[index - 3].text.as_str())
-            } else {
-                None
-            };
-            let arguments = &tokens[index + 2..close];
-            for (callee_index, callee) in functions.iter().enumerate() {
-                if callee.name != tokens[index].text
-                    || !callee_matches_qualifier(callee, qualifier, caller.impl_type.as_deref())
-                {
-                    continue;
-                }
-                for ((start, end), parameter) in split_top_level(arguments, ",")
-                    .into_iter()
-                    .zip(&callee.parameters)
-                {
-                    if self.expression_has_origin(
-                        tokens,
-                        functions,
-                        caller_index,
-                        index + 2 + start,
-                        index + 2 + end,
-                    ) {
-                        changes.push((callee_index, parameter.clone()));
-                    }
-                }
-            }
-        }
-        let mut changed = false;
-        for (function_index, binding) in changes {
-            changed |= self.bindings[function_index].insert(binding);
-        }
-        changed
-    }
-
-    fn discover_fields(
-        &mut self,
-        tokens: &[Token],
-        functions: &[FunctionSpan],
-        function_index: usize,
-    ) -> bool {
-        let function = &functions[function_index];
-        let Some(impl_type) = function.impl_type.as_deref() else {
-            return false;
-        };
-        let mut changes = Vec::new();
-        for index in function.open + 1..function.close {
-            if tokens[index].text != "Self"
-                || tokens.get(index + 1).map(|token| token.text.as_str()) != Some("{")
-            {
-                continue;
-            }
-            let Some(close) = matching_delimiter(tokens, index + 1, "{", "}") else {
-                continue;
-            };
-            for (start, end) in split_top_level(&tokens[index + 2..close], ",") {
-                let entry_start = index + 2 + start;
-                let entry_end = index + 2 + end;
-                let Some(field) = tokens[entry_start..entry_end]
-                    .iter()
-                    .find(|token| is_path_ident(&token.text))
-                    .map(|token| token.text.clone())
-                else {
-                    continue;
-                };
-                let colon = (entry_start..entry_end).find(|cursor| tokens[*cursor].text == ":");
-                let value_start = colon.map_or(entry_start, |colon| colon + 1);
-                if self.expression_has_origin(
-                    tokens,
-                    functions,
-                    function_index,
-                    value_start,
-                    entry_end,
-                ) {
-                    changes.push(field);
-                }
-            }
-        }
-        let mut changed = false;
-        for field in changes {
-            changed |= self.fields.insert((impl_type.to_owned(), field));
-        }
-        changed
-    }
-
-    fn expression_has_origin(
-        &self,
-        tokens: &[Token],
-        functions: &[FunctionSpan],
-        function_index: usize,
-        start: usize,
-        end: usize,
-    ) -> bool {
-        let function = &functions[function_index];
-        for index in start..end.min(tokens.len()) {
-            if matches!(tokens[index].text.as_str(), "stdout" | "stderr")
-                && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
-                && is_io_path(tokens, index)
-            {
-                return true;
-            }
-            if matches!(
-                tokens[index].text.as_str(),
-                "stdout_writer" | "stderr_writer"
-            ) && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
-                && !previous_is(tokens, index, "fn")
-            {
-                return true;
-            }
-            if self.bindings[function_index].contains(&tokens[index].text) {
-                return true;
-            }
-            if tokens[index].text == "self"
-                && tokens.get(index + 1).map(|token| token.text.as_str()) == Some(".")
-            {
-                if let (Some(impl_type), Some(field)) = (
-                    function.impl_type.as_deref(),
-                    tokens.get(index + 2).map(|token| token.text.as_str()),
-                ) {
-                    if self
-                        .fields
-                        .contains(&(impl_type.to_owned(), field.to_owned()))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    fn write_macro_has_origin(
-        &self,
-        tokens: &[Token],
-        functions: &[FunctionSpan],
-        index: usize,
-    ) -> bool {
-        if tokens.get(index + 1).map(|token| token.text.as_str()) != Some("!")
-            || tokens.get(index + 2).map(|token| token.text.as_str()) != Some("(")
-        {
-            return false;
-        }
-        let Some(close) = matching_delimiter(tokens, index + 2, "(", ")") else {
-            return false;
-        };
-        let Some((start, end)) = split_top_level(&tokens[index + 3..close], ",")
-            .into_iter()
-            .next()
-        else {
-            return false;
-        };
-        let Some(function_index) = innermost_function_index(functions, index) else {
-            return false;
-        };
-        self.expression_has_origin(
-            tokens,
-            functions,
-            function_index,
-            index + 3 + start,
-            index + 3 + end,
-        )
-    }
-
-    fn write_method_has_origin(
-        &self,
-        tokens: &[Token],
-        functions: &[FunctionSpan],
-        index: usize,
-    ) -> bool {
-        let Some(function_index) = innermost_function_index(functions, index) else {
-            return false;
-        };
-        let start = expression_start(tokens, index.saturating_sub(1));
-        self.expression_has_origin(tokens, functions, function_index, start, index - 1)
-    }
 }
 
 fn callee_matches_qualifier(
@@ -1090,8 +902,10 @@ fn expression_start(tokens: &[Token], end: usize) -> usize {
         match tokens[start - 1].text.as_str() {
             ")" => parens += 1,
             "(" if parens > 0 => parens -= 1,
+            "(" if brackets == 0 => break,
             "]" => brackets += 1,
             "[" if brackets > 0 => brackets -= 1,
+            "[" if parens == 0 => break,
             ";" | "," | "{" | "}" | "=" if parens == 0 && brackets == 0 => break,
             _ => {}
         }
@@ -1106,6 +920,8 @@ fn primitive_at(
     index: usize,
     functions: &[FunctionSpan],
     origins: &OutputOrigins,
+    documents: &DocumentOrigins,
+    document_catalog: &DocumentCatalog,
 ) -> Option<Primitive> {
     let text = tokens[index].text.as_str();
     if matches!(text, "print" | "println" | "eprint" | "eprintln" | "dbg")
@@ -1118,13 +934,36 @@ fn primitive_at(
     {
         return Some(Primitive::DirectWrite);
     }
-    if matches!(text, "write" | "write_all" | "write_fmt")
-        && previous_is(tokens, index, ".")
+    if matches!(
+        text,
+        "write" | "write_vectored" | "write_all" | "write_all_vectored" | "write_fmt"
+    ) && previous_is(tokens, index, ".")
         && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
         && !write_method_has_document_argument(tokens, functions, index)
         && origins.write_method_has_origin(tokens, functions, index)
     {
         return Some(Primitive::DirectWrite);
+    }
+    if matches!(
+        text,
+        "write" | "write_vectored" | "write_all" | "write_all_vectored" | "write_fmt"
+    ) && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+        && origins.aliases.is_write_trait_call(tokens, index)
+        && origins.write_associated_has_origin(tokens, functions, index)
+    {
+        return Some(Primitive::DirectWrite);
+    }
+    if let Some(primitive) = origins
+        .aliases
+        .io_constructor(tokens, index)
+        .filter(|_| tokens.get(index + 1).map(|token| token.text.as_str()) == Some("("))
+    {
+        return Some(primitive);
+    }
+    if origins.aliases.is_imported_output_helper(text)
+        && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+    {
+        return Some(Primitive::OutputRawHelper);
     }
     if matches!(text, "stdout" | "stderr")
         && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
@@ -1149,7 +988,7 @@ fn primitive_at(
         if previous_is(tokens, index, ".") {
             return Some(Primitive::UiRawWriter);
         }
-        if path_contains(tokens, index, "output") {
+        if origins.aliases.is_output_helper(tokens, index) {
             return Some(Primitive::OutputRawHelper);
         }
     }
@@ -1159,7 +998,7 @@ fn primitive_at(
     ) && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
     {
         if (path == "src/output.rs" && previous_is(tokens, index, "fn"))
-            || path_contains(tokens, index, "output")
+            || origins.aliases.is_output_helper(tokens, index)
         {
             return Some(Primitive::OutputRawHelper);
         }
@@ -1173,7 +1012,8 @@ fn primitive_at(
     }
     if text == "render_plain" && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
     {
-        if previous_is(tokens, index, ".")
+        if (previous_is(tokens, index, ".")
+            && documents.render_receiver_is_document(tokens, functions, index, document_catalog))
             || (path == "src/ui/document.rs" && previous_is(tokens, index, "fn"))
         {
             return Some(Primitive::DocumentRender);
@@ -1183,7 +1023,7 @@ fn primitive_at(
         let document_call = previous_is(tokens, index, ".")
             && tokens.get(index + 2).map(|token| token.text.as_str()) == Some("&")
             && tokens.get(index + 3).map(|token| token.text.as_str()) != Some("mut")
-            && !render_receiver_is_glyph(tokens, functions, index);
+            && documents.render_receiver_is_document(tokens, functions, index, document_catalog);
         let document_api = path == "src/ui/document.rs" && previous_is(tokens, index, "fn");
         if document_call || document_api {
             return Some(Primitive::DocumentRender);
@@ -1238,7 +1078,31 @@ fn scan_source(path: &str, source: &str) -> Vec<Site> {
     let tokens = lex(source);
     let excluded = test_only_mask(&tokens);
     let functions = function_spans(&tokens, &excluded);
-    let origins = OutputOrigins::analyze(&tokens, &functions);
+    let document_catalog = DocumentCatalog::from_tokens(&tokens, &functions);
+    scan_tokens(path, &tokens, &excluded, &functions, &document_catalog)
+}
+
+fn scan_source_with_catalog(
+    path: &str,
+    source: &str,
+    document_catalog: &DocumentCatalog,
+) -> Vec<Site> {
+    let tokens = lex(source);
+    let excluded = test_only_mask(&tokens);
+    let functions = function_spans(&tokens, &excluded);
+    scan_tokens(path, &tokens, &excluded, &functions, document_catalog)
+}
+
+fn scan_tokens(
+    path: &str,
+    tokens: &[Token],
+    excluded: &[bool],
+    functions: &[FunctionSpan],
+    document_catalog: &DocumentCatalog,
+) -> Vec<Site> {
+    let aliases = SourceAliases::analyze(tokens);
+    let origins = OutputOrigins::analyze(tokens, functions, aliases);
+    let documents = DocumentOrigins::analyze(tokens, functions, document_catalog);
     let mut ordinals: BTreeMap<(String, Primitive), usize> = BTreeMap::new();
     let mut sites = Vec::new();
 
@@ -1246,7 +1110,15 @@ fn scan_source(path: &str, source: &str) -> Vec<Site> {
         if excluded[index] {
             continue;
         }
-        let Some(primitive) = primitive_at(path, &tokens, index, &functions, &origins) else {
+        let Some(primitive) = primitive_at(
+            path,
+            tokens,
+            index,
+            functions,
+            &origins,
+            &documents,
+            document_catalog,
+        ) else {
             continue;
         };
         let owner = functions
@@ -1255,13 +1127,19 @@ fn scan_source(path: &str, source: &str) -> Vec<Site> {
             .min_by_key(|function| function.close - function.open)
             .map(|function| function.name.as_str())
             .unwrap_or("<module>");
-        let statement = normalized_statement(&tokens, index);
+        let statement = normalized_statement(tokens, index);
+        let guard = normalized_enclosing_guards(tokens, functions, index);
+        let fingerprint_source = if guard.is_empty() {
+            statement.clone()
+        } else {
+            format!("{guard} => {statement}")
+        };
         let ordinal = ordinals.entry((owner.to_owned(), primitive)).or_default();
         *ordinal += 1;
         let fingerprint = format!(
             "{owner}#{}@{:016x}",
             *ordinal,
-            fnv1a64(statement.as_bytes())
+            fnv1a64(fingerprint_source.as_bytes())
         );
         sites.push(Site {
             key: SiteKey {
@@ -1270,10 +1148,94 @@ fn scan_source(path: &str, source: &str) -> Vec<Site> {
                 primitive,
             },
             line: tokens[index].line,
-            statement,
+            statement: fingerprint_source,
         });
     }
     sites
+}
+
+fn normalized_enclosing_guards(
+    tokens: &[Token],
+    functions: &[FunctionSpan],
+    index: usize,
+) -> String {
+    let Some(function_index) = innermost_function_index(functions, index) else {
+        return String::new();
+    };
+    let function = &functions[function_index];
+    let mut guards = Vec::new();
+    for open in function.open + 1..index {
+        if tokens[open].text != "{" {
+            continue;
+        }
+        let Some(close) = matching_delimiter(tokens, open, "{", "}") else {
+            continue;
+        };
+        if close <= index {
+            continue;
+        }
+        if let Some(header) = normalized_guard_header(tokens, open) {
+            guards.push(header);
+        }
+    }
+    guards.join(" && ")
+}
+
+fn normalized_guard_header(tokens: &[Token], open: usize) -> Option<String> {
+    if open == 0 {
+        return None;
+    }
+    let start = expression_start(tokens, open - 1);
+    let header = &tokens[start..open];
+    let control = header.iter().any(|token| {
+        matches!(
+            token.text.as_str(),
+            "if" | "else" | "match" | "while" | "for" | "loop"
+        )
+    });
+    let match_arm = header
+        .windows(2)
+        .any(|pair| pair[0].text == "=" && pair[1].text == ">");
+    if !control && !match_arm {
+        return None;
+    }
+
+    let mut normalized = header
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if header.first().is_some_and(|token| token.text == "else")
+        && start > 0
+        && tokens[start - 1].text == "}"
+    {
+        if let Some(previous_open) = reverse_matching_delimiter(tokens, start - 1, "{", "}") {
+            if let Some(previous) = normalized_guard_header(tokens, previous_open) {
+                normalized = format!("{previous} {normalized}");
+            }
+        }
+    }
+    Some(normalized)
+}
+
+fn reverse_matching_delimiter(
+    tokens: &[Token],
+    close_index: usize,
+    open: &str,
+    close: &str,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=close_index).rev() {
+        if tokens[index].text == close {
+            depth += 1;
+        } else if tokens[index].text == open {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
 }
 
 fn normalized_statement(tokens: &[Token], index: usize) -> String {
@@ -1388,7 +1350,7 @@ fn is_test_source_file(path: &Path) -> bool {
 
 fn scan_package() -> Vec<Site> {
     let root = package_root();
-    let mut sites = Vec::new();
+    let mut sources = Vec::new();
     for path in production_source_paths(&root) {
         let relative = path
             .strip_prefix(&root)
@@ -1397,7 +1359,22 @@ fn scan_package() -> Vec<Site> {
             .replace('\\', "/");
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        sites.extend(scan_source(&relative, &source));
+        sources.push((relative, source));
+    }
+    let mut document_catalog = DocumentCatalog::default();
+    for (_, source) in &sources {
+        let tokens = lex(source);
+        let excluded = test_only_mask(&tokens);
+        let functions = function_spans(&tokens, &excluded);
+        document_catalog.absorb(&tokens, &functions);
+    }
+    let mut sites = Vec::new();
+    for (relative, source) in sources {
+        sites.extend(scan_source_with_catalog(
+            &relative,
+            &source,
+            &document_catalog,
+        ));
     }
     sites
 }
