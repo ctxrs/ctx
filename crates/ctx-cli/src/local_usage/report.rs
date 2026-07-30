@@ -39,7 +39,9 @@ pub(crate) struct UsageDefinition {
     pub(crate) last_day_utc: String,
     pub(crate) active_days: u64,
     pub(crate) summary: UsageSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) by_operation: Vec<OperationSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) duration_buckets: Vec<DurationSummary>,
 }
 

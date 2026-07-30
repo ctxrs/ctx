@@ -11,6 +11,10 @@ fn enabled(command: &mut assert_cmd::Command) -> &mut assert_cmd::Command {
     command.env_remove("CTX_LOCAL_USAGE_ENABLED")
 }
 
+fn usage_db_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
+    data_root(temp).join("usage.sqlite")
+}
+
 fn definition(report: &Value, version: i64) -> &Value {
     report["definitions"]
         .as_array()
@@ -76,7 +80,7 @@ fn pristine_disabled_and_malformed_stats_are_truthful_and_create_nothing() {
     assert_eq!(report["state"], "empty");
     assert_eq!(report["definitions"], serde_json::json!([]));
     assert!(report["estimates"].is_null());
-    assert!(!pristine.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&pristine).exists());
 
     let disabled = tempdir();
     let report = json_output(
@@ -87,12 +91,13 @@ fn pristine_disabled_and_malformed_stats_are_truthful_and_create_nothing() {
     assert_eq!(report["enabled"], false);
     assert_eq!(report["state"], "disabled");
     assert!(report.get("definitions").is_none());
-    assert!(!disabled.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&disabled).exists());
 
     let malformed = tempdir();
     let marker = "PRIVATE_STATS_CONFIG_79af";
+    fs::create_dir_all(data_root(&malformed)).unwrap();
     fs::write(
-        malformed.path().join("config.toml"),
+        data_root(&malformed).join("config.toml"),
         format!("[local_usage]\nenabled = nope\n# {marker}\n"),
     )
     .unwrap();
@@ -109,14 +114,14 @@ fn pristine_disabled_and_malformed_stats_are_truthful_and_create_nothing() {
     assert_eq!(report["error"]["code"], "local_usage_config_unavailable");
     assert!(!encoded.contains(marker));
     assert!(!encoded.contains(malformed.path().to_string_lossy().as_ref()));
-    assert!(!malformed.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&malformed).exists());
 }
 
 #[test]
 fn definition_two_math_uses_only_complete_search_context_and_spec_coefficients() {
     let temp = tempdir();
     enabled(ctx(&temp).args(["doctor"])).assert().success();
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
     connection.execute("DELETE FROM daily_usage", []).unwrap();
     insert_row(
         &connection,
@@ -149,6 +154,24 @@ fn definition_two_math_uses_only_complete_search_context_and_spec_coefficients()
     drop(connection);
 
     let report = json_output(enabled(ctx(&temp).args(["stats", "--format=json"])));
+    assert_eq!(
+        report
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "definitions",
+            "enabled",
+            "estimates",
+            "local_only",
+            "read_only",
+            "retention_days",
+            "schema_version",
+            "state",
+        ])
+    );
     let current = definition(&report, 2);
     assert_eq!(current["summary"]["calls"], 2);
     assert_eq!(current["summary"]["delivered_output_bytes"], 760);
@@ -156,6 +179,12 @@ fn definition_two_math_uses_only_complete_search_context_and_spec_coefficients()
     assert_eq!(current["summary"]["matched_normalized_session_bytes"], 59);
     assert_eq!(current["summary"]["complete_context_eligible_calls"], 1);
     assert_eq!(current["summary"]["unavailable_context_eligible_calls"], 1);
+    assert_eq!(current["by_operation"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        current["duration_buckets"][0]["duration_bucket"],
+        "10_to_49_ms"
+    );
+    assert_eq!(current["duration_buckets"][0]["calls"], 2);
 
     let approximate = &report["estimates"]["approximate_context_tokens"];
     assert_eq!(
@@ -201,7 +230,7 @@ fn definition_two_math_uses_only_complete_search_context_and_spec_coefficients()
 fn definitions_are_reported_separately_and_definition_one_never_drives_estimates() {
     let temp = tempdir();
     enabled(ctx(&temp).args(["doctor"])).assert().success();
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
     connection.execute("DELETE FROM daily_usage", []).unwrap();
     insert_row(
         &connection,
@@ -258,7 +287,7 @@ fn definitions_are_reported_separately_and_definition_one_never_drives_estimates
 fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
     let temp = tempdir();
     enabled(ctx(&temp).args(["doctor"])).assert().success();
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
     connection.execute("DELETE FROM daily_usage", []).unwrap();
     insert_row(
         &connection,
@@ -279,7 +308,9 @@ fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
     enabled(ctx(&temp).args(["stats"]))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Measured usage · definition 2"))
+        .stdout(predicate::str::contains(
+            "Measured local facts · definition 2",
+        ))
         .stdout(predicate::str::contains("Approximate token-equivalents"))
         .stdout(predicate::str::contains("Estimated context reduction"))
         .stdout(predicate::str::contains("matched_normalized_sessions_v1"))
@@ -299,7 +330,7 @@ fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
 fn stats_are_self_excluding_and_status_remains_health_only() {
     let temp = tempdir();
     enabled(ctx(&temp).args(["doctor"])).assert().success();
-    let usage_path = temp.path().join("usage.sqlite");
+    let usage_path = usage_db_path(&temp);
     let before = fs::read(&usage_path).unwrap();
     for args in [
         &["stats"][..],

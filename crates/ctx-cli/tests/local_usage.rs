@@ -10,6 +10,10 @@ fn enabled(command: &mut assert_cmd::Command) -> &mut assert_cmd::Command {
     command.env_remove("CTX_LOCAL_USAGE_ENABLED")
 }
 
+fn usage_db_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
+    data_root(temp).join("usage.sqlite")
+}
+
 fn definition(report: &Value, version: i64) -> &Value {
     report["definitions"]
         .as_array()
@@ -27,7 +31,7 @@ fn default_on_usage_is_independent_of_commercial_telemetry_and_reports_definitio
         .assert()
         .success();
 
-    assert!(temp.path().join("usage.sqlite").exists());
+    assert!(usage_db_path(&temp).exists());
     assert!(!temp.path().join("install.json").exists());
 
     let report = json_output(enabled(ctx(&temp).args([
@@ -68,7 +72,7 @@ fn docs_records_the_exact_rendered_stdout_bytes() {
         .stdout
         .clone();
 
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
     let delivered_output_bytes: i64 = connection
         .query_row(
             "SELECT delivered_output_bytes FROM daily_usage \
@@ -160,10 +164,10 @@ fn stats_are_literal_read_only_and_do_not_count_themselves() {
     assert_eq!(empty["read_only"], true);
     assert_eq!(empty["state"], "empty");
     assert_eq!(empty["definitions"], serde_json::json!([]));
-    assert!(!temp.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&temp).exists());
 
     enabled(ctx(&temp).args(["doctor"])).assert().success();
-    let usage_path = temp.path().join("usage.sqlite");
+    let usage_path = usage_db_path(&temp);
     let before_bytes = fs::read(&usage_path).unwrap();
     let before_modified = fs::metadata(&usage_path).unwrap().modified().unwrap();
     for _ in 0..3 {
@@ -180,8 +184,8 @@ fn stats_are_literal_read_only_and_do_not_count_themselves() {
         fs::metadata(&usage_path).unwrap().modified().unwrap(),
         before_modified
     );
-    assert!(!temp.path().join("usage.sqlite-wal").exists());
-    assert!(!temp.path().join("usage.sqlite-shm").exists());
+    assert!(!data_root(&temp).join("usage.sqlite-wal").exists());
+    assert!(!data_root(&temp).join("usage.sqlite-shm").exists());
 }
 
 #[test]
@@ -194,7 +198,7 @@ fn cli_non_search_results_are_not_reclassified_as_value_or_context() {
     ])));
     assert_eq!(sql["rows"], serde_json::json!([[1]]));
 
-    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let connection = Connection::open(usage_db_path(&temp)).unwrap();
     let row: (i64, String, String, i64, i64, i64) = connection
         .query_row(
             "SELECT definition_version, value_class, context_coverage, result_count, \
@@ -229,6 +233,7 @@ fn cli_non_search_results_are_not_reclassified_as_value_or_context() {
 #[test]
 fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
     let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
     enabled(ctx(&temp).args(["pro", "--referral", "agent-smith", "setup", "--format=json"]))
         .assert()
         .failure();
@@ -243,7 +248,8 @@ fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
     assert_eq!(current["by_operation"][0]["operation"], "pro_setup");
 
     let unavailable = tempdir();
-    fs::create_dir(unavailable.path().join("usage.sqlite")).unwrap();
+    fs::create_dir_all(data_root(&unavailable)).unwrap();
+    fs::create_dir(usage_db_path(&unavailable)).unwrap();
     enabled(ctx(&unavailable).args(["doctor"]))
         .assert()
         .success()
@@ -261,15 +267,16 @@ fn protocol_control_and_cli_control_paths_do_not_record() {
     enabled(ctx(&temp).args(["status", "--usage", "reset", "--format=json"]))
         .assert()
         .success();
-    assert!(!temp.path().join("usage.sqlite").exists());
+    assert!(!usage_db_path(&temp).exists());
 }
 
 #[test]
 fn malformed_store_is_an_explicit_content_free_report_error() {
     let temp = tempdir();
     let marker = "SECRET_PATH_TOKEN_7f98";
+    fs::create_dir_all(data_root(&temp)).unwrap();
     fs::write(
-        temp.path().join("usage.sqlite"),
+        usage_db_path(&temp),
         format!("not sqlite: /tmp/{marker}/bearer-secret"),
     )
     .unwrap();

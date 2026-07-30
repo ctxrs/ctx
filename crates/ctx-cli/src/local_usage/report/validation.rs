@@ -385,8 +385,14 @@ fn reconcile_summary(summary: &UsageSummary) -> Result<(), UsageStoreError> {
     Ok(())
 }
 
-pub(super) fn reconcile_definition(definition: &UsageDefinition) -> Result<(), UsageStoreError> {
+pub(super) fn reconcile_definition(
+    definition: &UsageDefinition,
+    detailed: bool,
+) -> Result<(), UsageStoreError> {
     reconcile_summary(&definition.summary)?;
+    if !detailed {
+        return Ok(());
+    }
     for operation in &definition.by_operation {
         if checked_sum([operation.successful_calls, operation.failed_calls])? != operation.calls
             || checked_sum([

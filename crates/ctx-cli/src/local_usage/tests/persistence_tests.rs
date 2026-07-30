@@ -28,6 +28,31 @@ fn stats_read_is_byte_for_byte_self_excluding() {
 }
 
 #[test]
+fn compact_report_omits_operation_and_duration_details_without_changing_totals() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+
+    let detailed = read_report(root.path(), true, true);
+    let compact = read_report(root.path(), true, false);
+    let detailed_definition = &detailed.definitions.as_ref().unwrap()[0];
+    let compact_definition = &compact.definitions.as_ref().unwrap()[0];
+
+    assert_eq!(
+        compact_definition.summary.calls,
+        detailed_definition.summary.calls
+    );
+    assert!(!detailed_definition.by_operation.is_empty());
+    assert!(!detailed_definition.duration_buckets.is_empty());
+    assert!(compact_definition.by_operation.is_empty());
+    assert!(compact_definition.duration_buckets.is_empty());
+
+    let encoded = serde_json::to_value(compact).unwrap();
+    let definition = &encoded["definitions"][0];
+    assert!(definition.get("by_operation").is_none());
+    assert!(definition.get("duration_buckets").is_none());
+}
+
+#[test]
 fn reset_removes_aggregates_without_recreating_usage() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();

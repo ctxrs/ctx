@@ -291,6 +291,11 @@ impl CompletedOperation {
     }
 
     #[cfg(test)]
+    pub(crate) const fn duration_bucket_for_test(self) -> &'static str {
+        self.duration.as_str()
+    }
+
+    #[cfg(test)]
     pub(crate) const fn target_type_for_test(self) -> TargetType {
         self.target_type
     }

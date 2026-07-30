@@ -9,7 +9,7 @@ use super::{
 
 pub(super) fn query_report(
     conn: &mut Connection,
-    _detailed: bool,
+    detailed: bool,
 ) -> Result<(Vec<UsageDefinition>, EstimateFacts), UsageStoreError> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
     super::super::store::verify_report_dates(&transaction, std::time::SystemTime::now())?;
@@ -25,7 +25,7 @@ pub(super) fn query_report(
     let mut definitions = Vec::with_capacity(versions.len());
     let mut estimate_facts = EstimateFacts::default();
     for definition_version in versions {
-        let definition = query_definition(&transaction, definition_version)?;
+        let definition = query_definition(&transaction, definition_version, detailed)?;
         if definition_version == DEFINITION_VERSION {
             estimate_facts = EstimateFacts {
                 complete_calls: definition.summary.complete_context_eligible_calls,
@@ -45,6 +45,7 @@ pub(super) fn query_report(
 fn query_definition(
     conn: &Transaction<'_>,
     definition_version: i64,
+    detailed: bool,
 ) -> Result<UsageDefinition, UsageStoreError> {
     let (first_day_utc, last_day_utc, active_days) = conn.query_row(
         r#"
@@ -129,8 +130,14 @@ fn query_definition(
         unavailable_context_eligible_calls: checked_count(raw.12)?,
         pro_blame: query_pro_blame(conn, definition_version)?,
     };
-    let by_operation = query_operations(conn, definition_version)?;
-    let duration_buckets = query_durations(conn, definition_version)?;
+    let (by_operation, duration_buckets) = if detailed {
+        (
+            query_operations(conn, definition_version)?,
+            query_durations(conn, definition_version)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let definition = UsageDefinition {
         definition_version,
         ctx_versions,
@@ -141,7 +148,7 @@ fn query_definition(
         by_operation,
         duration_buckets,
     };
-    reconcile_definition(&definition)?;
+    reconcile_definition(&definition, detailed)?;
     Ok(definition)
 }
 
