@@ -33,7 +33,7 @@ pub(super) struct DaemonLock {
 
 impl DaemonLock {
     pub(super) fn acquire(data_root: &Path) -> Result<Option<Self>> {
-        create_private_dir_all(data_root)?;
+        ctx_history_core::platform_security::establish_private_data_root(data_root)?;
         let root = daemon_root_path(data_root);
         create_private_dir_all(&root)?;
         let payload = pid_lock_payload(json!({

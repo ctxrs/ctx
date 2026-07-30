@@ -89,6 +89,7 @@ pub(crate) type ForgeCodeSourceBackedResultV0<T> = Result<T, ForgeCodeSourceBack
 #[derive(Debug, Clone)]
 pub(crate) struct ForgeCodeSourceSelectionV0 {
     path: PathBuf,
+    data_root: PathBuf,
     authority: ForgeCodeSourceAuthorityV0,
 }
 
@@ -99,16 +100,22 @@ enum ForgeCodeSourceAuthorityV0 {
 }
 
 impl ForgeCodeSourceSelectionV0 {
-    pub(crate) fn selected(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn selected(data_root: &Path, path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            data_root: data_root.to_path_buf(),
             authority: ForgeCodeSourceAuthorityV0::Selected,
         }
     }
 
-    pub(crate) fn explicit(path: impl Into<PathBuf>, catalog_lineage: [u8; 32]) -> Self {
+    pub(crate) fn explicit(
+        data_root: &Path,
+        path: impl Into<PathBuf>,
+        catalog_lineage: [u8; 32],
+    ) -> Self {
         Self {
             path: path.into(),
+            data_root: data_root.to_path_buf(),
             authority: ForgeCodeSourceAuthorityV0::ExplicitCatalogLineage(catalog_lineage),
         }
     }
@@ -194,7 +201,7 @@ pub(crate) fn open_forgecode_source_backed_v0(
     selection: ForgeCodeSourceSelectionV0,
 ) -> ForgeCodeSourceBackedResultV0<ForgeCodeSourceBackedDiscoveryV0> {
     let source = selection.source_key()?;
-    let native_source = match discover_forgecode_source(&selection.path)? {
+    let native_source = match discover_forgecode_source(&selection.data_root, &selection.path)? {
         ForgeCodeDiscovery::Missing => {
             return Ok(ForgeCodeSourceBackedDiscoveryV0::Missing {
                 preferred_path: selection.path,
@@ -536,13 +543,15 @@ fn checked_add(left: u64, right: u64) -> ForgeCodeSourceBackedResultV0<u64> {
         .ok_or(ForgeCodeSourceBackedErrorV0::CountOverflow)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ForgeCodeSourceBackedResolverV0 {
+    data_root: PathBuf,
     sources: Vec<ForgeCodeSourceBackedSourceV0>,
 }
 
 impl ForgeCodeSourceBackedResolverV0 {
     pub(crate) fn new(
+        data_root: &Path,
         sources: impl IntoIterator<Item = ForgeCodeSourceBackedSourceV0>,
     ) -> ForgeCodeSourceBackedResultV0<Self> {
         let mut registered = Vec::<ForgeCodeSourceBackedSourceV0>::new();
@@ -556,6 +565,7 @@ impl ForgeCodeSourceBackedResolverV0 {
             registered.push(source);
         }
         Ok(Self {
+            data_root: data_root.to_path_buf(),
             sources: registered,
         })
     }
@@ -584,40 +594,41 @@ impl ForgeCodeSourceBackedResolverV0 {
             }
             coordinates.push(decode_locator(request.locator())?);
         }
-        let (_, cached_rows) = ForgeCodeSqliteDatabase::open(&route.canonical_path, |connection| {
-            let mut rows = BTreeMap::new();
-            for chunk in coordinates.chunks(FORGECODE_HYDRATION_NATIVE_KEY_BATCH) {
-                for coordinate in chunk {
-                    if rows.contains_key(&coordinate.conversation_id) {
-                        continue;
-                    }
-                    let mut statement = connection.prepare(
-                        "select rowid from conversations \
+        let (_, cached_rows) =
+            ForgeCodeSqliteDatabase::open(&self.data_root, &route.canonical_path, |connection| {
+                let mut rows = BTreeMap::new();
+                for chunk in coordinates.chunks(FORGECODE_HYDRATION_NATIVE_KEY_BATCH) {
+                    for coordinate in chunk {
+                        if rows.contains_key(&coordinate.conversation_id) {
+                            continue;
+                        }
+                        let mut statement = connection.prepare(
+                            "select rowid from conversations \
                              where cast(conversation_id as text) = ?1 collate binary limit 2",
-                    )?;
-                    let mut matches = statement.query([&coordinate.conversation_id])?;
-                    let rowid = matches
-                        .next()?
-                        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
-                        .get(0)?;
-                    if matches.next()?.is_some() {
-                        return Err(CaptureError::InvalidPayload(
-                            "ForgeCode conversation key is ambiguous".to_owned(),
-                        ));
+                        )?;
+                        let mut matches = statement.query([&coordinate.conversation_id])?;
+                        let rowid = matches
+                            .next()?
+                            .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                            .get(0)?;
+                        if matches.next()?.is_some() {
+                            return Err(CaptureError::InvalidPayload(
+                                "ForgeCode conversation key is ambiguous".to_owned(),
+                            ));
+                        }
+                        let values = load_forgecode_conversation_values(connection, rowid)?;
+                        let digest = forgecode_logical_record_digest(&values);
+                        rows.insert(coordinate.conversation_id.clone(), (values, digest));
                     }
-                    let values = load_forgecode_conversation_values(connection, rowid)?;
-                    let digest = forgecode_logical_record_digest(&values);
-                    rows.insert(coordinate.conversation_id.clone(), (values, digest));
                 }
-            }
-            Ok(rows)
-        })
-        .map_err(|error| match error {
-            CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                hydration_failure(HydrationFailureKind::MissingRecord)
-            }
-            _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
-        })?;
+                Ok(rows)
+            })
+            .map_err(|error| match error {
+                CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    hydration_failure(HydrationFailureKind::MissingRecord)
+                }
+                _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
+            })?;
         let mut hydrated = Vec::with_capacity(requests.len());
         for (request, coordinate) in requests.iter().zip(coordinates) {
             let (values, digest) = cached_rows
@@ -759,15 +770,16 @@ impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
-        let native = match discover_forgecode_source(&self.path).map_err(route_error)? {
-            ForgeCodeDiscovery::Live(native) => native,
-            ForgeCodeDiscovery::Missing => {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    "selected ForgeCode database is missing",
-                ));
-            }
-        };
+        let native =
+            match discover_forgecode_source(&self.data_root, &self.path).map_err(route_error)? {
+                ForgeCodeDiscovery::Live(native) => native,
+                ForgeCodeDiscovery::Missing => {
+                    return Err(SourceBackedRouteError::new(
+                        SourceBackedRouteErrorKind::Unavailable,
+                        "selected ForgeCode database is missing",
+                    ));
+                }
+            };
         let fingerprint = DocumentLeafFingerprint::new(*native.database.evidence().revision());
         let leaf = ForgeCodeSourceBackedSourceV0 {
             source: self.source_key().map_err(route_error)?,
@@ -892,9 +904,12 @@ impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
             .map_err(|_| forgecode_internal("ForgeCode terminal fence lock was poisoned"))?
             .clone()
             .ok_or_else(|| forgecode_changed("ForgeCode scan has no terminal fence"))?;
-        let (current, ()) =
-            ForgeCodeSqliteDatabase::open(&tree.authority.native.canonical_path, |_| Ok(()))
-                .map_err(route_error)?;
+        let (current, ()) = ForgeCodeSqliteDatabase::open(
+            &self.data_root,
+            &tree.authority.native.canonical_path,
+            |_| Ok(()),
+        )
+        .map_err(route_error)?;
         if current.evidence() == &expected {
             Ok(tree.tree_fingerprint)
         } else {
@@ -918,7 +933,7 @@ impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
                 self.path.clone()
             },
         };
-        let resolver = ForgeCodeSourceBackedResolverV0::new([source])
+        let resolver = ForgeCodeSourceBackedResolverV0::new(&self.data_root, [source])
             .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
         resolver.hydrate_batch(request)
     }

@@ -25,7 +25,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     assert_eq!(initial_job["generation_changed"], true, "{initial_job:#}");
     let initial_current = initial_job["receipt"]["current"].clone();
 
-    let index_root = temp.path().join("search/lexical");
+    let index_root = search_refresh_data_root(&temp).join("search/lexical");
     let meta_path = index_root.join("meta.json");
     let manifest_path = index_root
         .join("ctx-generations")
@@ -46,6 +46,14 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
         "wait",
         "--format=json",
     ]));
+    assert_eq!(
+        unchanged["results"][0]["source_exists"], true,
+        "exact no-op must retain truthful current-source availability: {unchanged:#}"
+    );
+    assert_eq!(
+        unchanged["results"][0]["citations"][0]["source_exists"], true,
+        "exact no-op citation must retain truthful current-source availability: {unchanged:#}"
+    );
     assert_eq!(generation_id(&unchanged), initial_generation);
     assert_eq!(
         unchanged["retrieval"]["indexed_documents"], initial_documents,
@@ -278,15 +286,19 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
             && stderr.contains("No such file"),
         "{stderr}"
     );
-    let autostart_status: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("daemon/status.json")).unwrap()).unwrap();
+    let autostart_status: Value = serde_json::from_slice(
+        &fs::read(search_refresh_data_root(&temp).join("daemon/status.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(autostart_status["status"], "failed", "{autostart_status:#}");
     assert_eq!(
         autostart_status["reason"], "spawn_failed",
         "{autostart_status:#}"
     );
-    assert!(!temp.path().join("search/lexical/meta.json").exists());
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(!search_refresh_data_root(&temp)
+        .join("search/lexical/meta.json")
+        .exists());
+    assert!(!search_refresh_data_root(&temp).join("work.sqlite").exists());
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(
@@ -349,7 +361,7 @@ fn persistent_daemon_passively_publishes_appended_source_without_foreground_comm
 
     // Observe publication only through the daemon-owned receipt. No ctx
     // command is run between the append and the new verified generation.
-    let job_path = temp.path().join("daemon/jobs/core-refresh.json");
+    let job_path = search_refresh_data_root(&temp).join("daemon/jobs/core-refresh.json");
     let deadline = Instant::now() + Duration::from_secs(10);
     let passive_generation = loop {
         let job = fs::read(&job_path)
@@ -366,7 +378,7 @@ fn persistent_daemon_passively_publishes_appended_source_without_foreground_comm
         assert!(
             Instant::now() < deadline,
             "daemon did not passively publish appended source: job={job:#?}, wakeup={:#?}",
-            fs::read(temp.path().join("daemon/wakeup.json"))
+            fs::read(search_refresh_data_root(&temp).join("daemon/wakeup.json"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         );
@@ -418,7 +430,8 @@ fn live_daemon_prepare_uninstall_disables_stops_and_removes_coordination() {
         .expect("wait for uninstalled daemon");
     assert!(exit.success(), "daemon {daemon_pid} exit status: {exit}");
     daemon.child = None;
-    let config = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    let data_root = search_refresh_data_root(&temp);
+    let config = fs::read_to_string(data_root.join("config.toml")).unwrap();
     assert!(config.contains("enabled = false"), "{config}");
     for relative in [
         "daemon/daemon.lock",
@@ -430,7 +443,7 @@ fn live_daemon_prepare_uninstall_disables_stops_and_removes_coordination() {
         "daemon/supervisor.json",
     ] {
         assert!(
-            !temp.path().join(relative).exists(),
+            !data_root.join(relative).exists(),
             "uninstall retained {relative}"
         );
     }
@@ -446,7 +459,8 @@ fn interrupted_prepare_uninstall_is_retry_safe() {
         .env("CTX_DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_FOR_TESTS", "1")
         .assert()
         .code(89);
-    let config_after_interrupt = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    let config_after_interrupt =
+        fs::read_to_string(search_refresh_data_root(&temp).join("config.toml")).unwrap();
     assert!(
         config_after_interrupt.contains("enabled = false"),
         "{config_after_interrupt}"
@@ -652,16 +666,11 @@ fn search_refresh_off_serves_published_generation_without_refreshing_sources() {
 #[test]
 fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     let temp = tempdir();
-    let sessions = temp
-        .path()
-        .join(".codex")
-        .join("sessions")
-        .join("2026/07/12");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(sessions.join("rollout-empty-session.jsonl"), "").unwrap();
+    let overlapping_codex_home = search_refresh_data_root(&temp).join("overlapping-codex");
+    fs::create_dir_all(&overlapping_codex_home).unwrap();
     let query = "pi-later-good-refresh-oracle";
     install_default_pi_fixture(&temp, query);
-    let _daemon = start_source_refresh_daemon(&temp);
+    let _daemon = start_source_refresh_daemon_with_codex_home(&temp, Some(&overlapping_codex_home));
 
     let stderr =
         failure_stderr(ctx(&temp).args(["search", query, "--refresh", "wait", "--format=json"]));
@@ -670,16 +679,15 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("source-backed scan failed for codex"),
+        stderr.contains("provider source root")
+            && stderr.contains("overlaps or contains the ctx data root"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("Codex source certificate has no NativePath checkpoint frontier"),
-        "{stderr}"
-    );
-    assert!(
-        temp.path().join("search/lexical/meta.json").is_file(),
-        "a failed cold scan may initialize disposable Tantivy metadata"
+        !search_refresh_data_root(&temp)
+            .join("search/lexical/meta.json")
+            .exists(),
+        "overlap rejection must happen before Tantivy initialization"
     );
     assert!(
         generation_manifest_paths(&temp).is_empty(),
@@ -699,14 +707,14 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
             .contains("the source-backed index does not exist; retry with daemon refresh enabled"),
         "{uncommitted}"
     );
-    let failed = assert_daemon_refresh_failure(&temp, 2, None);
+    let failed = assert_daemon_refresh_failure(&temp, 0, None);
     assert_eq!(
         failed["history_epoch"]["reason"], "source_refresh_failed",
         "{failed:#}"
     );
     assert_eq!(failed["lexical"]["status"], "unavailable", "{failed:#}");
 
-    fs::remove_dir_all(temp.path().join(".codex")).unwrap();
+    fs::remove_dir_all(&overlapping_codex_home).unwrap();
     let recovered_output = ctx(&temp)
         .args([
             "search",
@@ -795,9 +803,10 @@ fn source_refresh_daemon_stop_start_resumes_exact_generation() {
 #[test]
 fn search_refresh_invalid_source_failure_retains_last_published_generation() {
     let temp = tempdir();
+    let overlapping_codex_home = search_refresh_data_root(&temp).join("overlapping-codex");
     let query = "pi-retained-generation-oracle";
     install_default_pi_fixture(&temp, query);
-    let _daemon = start_source_refresh_daemon(&temp);
+    let _daemon = start_source_refresh_daemon_with_codex_home(&temp, Some(&overlapping_codex_home));
 
     let initial = json_output(ctx(&temp).args([
         "search",
@@ -811,13 +820,7 @@ fn search_refresh_invalid_source_failure_retains_last_published_generation() {
     let initial_generation = assert_published_generation(&initial, "wait");
     assert_daemon_publication(&temp, &initial_generation, 1, &["pi"]);
 
-    let sessions = temp
-        .path()
-        .join(".codex")
-        .join("sessions")
-        .join("2026/07/12");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(sessions.join("rollout-empty-session.jsonl"), "").unwrap();
+    fs::create_dir_all(&overlapping_codex_home).unwrap();
     let stderr = failure_stderr(ctx(&temp).args([
         "search",
         "anything",
@@ -828,13 +831,14 @@ fn search_refresh_invalid_source_failure_retains_last_published_generation() {
         "--format=json",
     ]));
     assert!(
-        stderr.contains("source-backed scan failed for codex"),
+        stderr.contains("provider source root")
+            && stderr.contains("overlaps or contains the ctx data root"),
         "{stderr}"
     );
     assert!(stderr.contains("retained generation"), "{stderr}");
     assert!(stderr.contains(&initial_generation), "{stderr}");
 
-    let failed = assert_daemon_refresh_failure(&temp, 2, Some(&initial_generation));
+    let failed = assert_daemon_refresh_failure(&temp, 0, Some(&initial_generation));
     assert_eq!(failed["history_epoch"]["status"], "ready", "{failed:#}");
     assert_eq!(failed["lexical"]["status"], "ready", "{failed:#}");
     assert!(failed["lexical"]["reason"].is_null(), "{failed:#}");
@@ -932,5 +936,5 @@ fn search_refresh_imports_fresh_work_after_large_source_backed_generation() {
         "{fresh:#}"
     );
     assert_daemon_publication(&temp, &fresh_generation, 2, &["codex", "codex", "codex"]);
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(!search_refresh_data_root(&temp).join("work.sqlite").exists());
 }

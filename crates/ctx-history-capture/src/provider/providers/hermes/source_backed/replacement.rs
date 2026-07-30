@@ -43,7 +43,8 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
                 "selected Hermes database is unavailable",
             ));
         }
-        let (root, snapshot) = open_root_authorized_snapshot(self.path()).map_err(route_error)?;
+        let (root, snapshot) =
+            open_root_authorized_snapshot(&self.data_root, self.path()).map_err(route_error)?;
         let evidence = snapshot.finish().map_err(route_error)?;
         root.revalidate().map_err(route_error)?;
         let fingerprint = DocumentLeafFingerprint::new(*evidence.revision());
@@ -126,7 +127,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             .map_err(|_| hermes_internal("Hermes terminal fence lock was poisoned"))?
             .clone()
             .ok_or_else(|| hermes_changed("Hermes scan has no terminal fence"))?;
-        if terminal_fence_matches(self.path(), &fence).map_err(route_error)? {
+        if terminal_fence_matches(&self.data_root, self.path(), &fence).map_err(route_error)? {
             Ok(tree.tree_fingerprint)
         } else {
             Err(hermes_changed(
@@ -144,9 +145,13 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             .iter()
             .map(|event| event.locator())
             .collect::<Vec<_>>();
-        let hydrated = HermesLocatorResolver::new(self.path.clone(), self.source.clone())
-            .hydrate_locators(&locators)
-            .map_err(hermes_hydration_failure)?;
+        let hydrated = HermesLocatorResolver::new(
+            self.data_root.clone(),
+            self.path.clone(),
+            self.source.clone(),
+        )
+        .hydrate_locators(&locators)
+        .map_err(hermes_hydration_failure)?;
         let records = request
             .events()
             .iter()

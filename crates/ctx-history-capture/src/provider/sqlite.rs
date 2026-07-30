@@ -219,20 +219,25 @@ fn hex_token(token: &[u8; 32]) -> String {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct ProviderSqliteSourceSnapshot {
+    data_root: std::path::PathBuf,
     evidence: SqliteSourceEvidence,
     source_invalid_reason: &'static str,
     sidecar_invalid_reason: &'static str,
 }
 
+#[cfg(test)]
 impl ProviderSqliteSourceSnapshot {
     pub(crate) fn read(
+        data_root: &Path,
         path: &Path,
         source_invalid_reason: &'static str,
         sidecar_invalid_reason: &'static str,
     ) -> Result<Self> {
         Ok(Self {
-            evidence: read_sqlite_source_evidence(path)?,
+            data_root: data_root.to_path_buf(),
+            evidence: read_sqlite_source_evidence(data_root, path)?,
             source_invalid_reason,
             sidecar_invalid_reason,
         })
@@ -250,6 +255,7 @@ impl ProviderSqliteSourceSnapshot {
 
     pub(crate) fn revalidate(&self, path: &Path) -> Result<bool> {
         match Self::read(
+            &self.data_root,
             path,
             self.source_invalid_reason,
             self.sidecar_invalid_reason,
@@ -264,8 +270,9 @@ impl ProviderSqliteSourceSnapshot {
     }
 }
 
-fn read_sqlite_source_evidence(path: &Path) -> Result<SqliteSourceEvidence> {
-    RootAuthorizedProviderSqliteSnapshot::open(path)?.finish()
+#[cfg(test)]
+fn read_sqlite_source_evidence(data_root: &Path, path: &Path) -> Result<SqliteSourceEvidence> {
+    RootAuthorizedProviderSqliteSnapshot::open(data_root, path)?.finish()
 }
 
 struct RootAuthorizedProviderSqliteSnapshot {
@@ -274,13 +281,13 @@ struct RootAuthorizedProviderSqliteSnapshot {
 }
 
 impl RootAuthorizedProviderSqliteSnapshot {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(data_root: &Path, path: &Path) -> Result<Self> {
         let (parent_path, database_name) = sqlite_parent_and_leaf(path)?;
         let admission_root = ProviderSourceRoot::open(parent_path)?;
         let parent = admission_root.directory()?;
         let parent_handle = parent.try_clone_authority_handle()?;
         let sqlite_authority =
-            retain_sqlite_source_directory_authority(&parent_handle, parent_path)
+            retain_sqlite_source_directory_authority(data_root, &parent_handle, parent_path)
                 .map_err(map_sqlite_source_access_error)?;
         let snapshot = open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_name)
             .map_err(map_sqlite_source_access_error)?;
@@ -417,8 +424,11 @@ impl Drop for ReadOnlySqliteConnection {
     }
 }
 
-pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<ReadOnlySqliteConnection> {
-    let conn = open_sqlite_readonly_source(path)?;
+pub(crate) fn open_provider_sqlite_readonly(
+    data_root: &Path,
+    path: &Path,
+) -> Result<ReadOnlySqliteConnection> {
+    let conn = open_sqlite_readonly_source(data_root, path)?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
         CaptureError::InvalidPayload(format!(
             "provider SQLite value byte limit is unrepresentable: {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
@@ -431,8 +441,11 @@ pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<ReadOnlySqlit
     Ok(conn)
 }
 
-pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
-    let snapshot = RootAuthorizedProviderSqliteSnapshot::open(path)?;
+pub(crate) fn open_sqlite_readonly_source(
+    data_root: &Path,
+    path: &Path,
+) -> Result<ReadOnlySqliteConnection> {
+    let snapshot = RootAuthorizedProviderSqliteSnapshot::open(data_root, path)?;
     Ok(ReadOnlySqliteConnection {
         snapshot: Some(snapshot),
     })
@@ -541,7 +554,8 @@ mod tests {
         path: &Path,
         before_finish: impl FnOnce(),
     ) -> Result<(String, SqliteSourceEvidence)> {
-        let connection = open_provider_sqlite_readonly(path)?;
+        let connection =
+            open_provider_sqlite_readonly(crate::test_provider_sqlite_data_root(), path)?;
         let body = connection.query_row("SELECT body FROM messages", [], |row| row.get(0))?;
         before_finish();
         let evidence = connection.finish()?;
@@ -612,6 +626,7 @@ mod tests {
         drop(writer);
 
         let snapshot = ProviderSqliteSourceSnapshot::read(
+            crate::test_provider_sqlite_data_root(),
             &database,
             "test database must be regular",
             "test sidecar must be regular",
@@ -643,7 +658,9 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        let connection = open_provider_sqlite_readonly(&database).unwrap();
+        let connection =
+            open_provider_sqlite_readonly(crate::test_provider_sqlite_data_root(), &database)
+                .unwrap();
         assert!(
             !connection.is_autocommit(),
             "the root-authorized guard must keep its read snapshot pinned"
@@ -699,6 +716,7 @@ mod tests {
         let before_directory = directory_file_bytes(temp.path());
 
         let source_snapshot = ProviderSqliteSourceSnapshot::read(
+            crate::test_provider_sqlite_data_root(),
             &database,
             "test database must be regular",
             "test sidecar must be regular",

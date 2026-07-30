@@ -191,15 +191,26 @@ pub(super) fn source_from_parts(
     source_format: &'static str,
     source_kind: ProviderSourceKind,
 ) -> ProviderSource {
+    source_from_parts_with_data_root(None, spec, path, source_format, source_kind)
+}
+
+pub(super) fn source_from_parts_with_data_root(
+    data_root: Option<&Path>,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    source_format: &'static str,
+    source_kind: ProviderSourceKind,
+) -> ProviderSource {
     let location = ProviderDefaultLocation {
         path_components: &[],
         source_format,
         source_kind,
     };
-    source_from_location(spec, &location, path)
+    source_from_location(data_root, spec, &location, path)
 }
 
 pub(super) fn source_from_location(
+    data_root: Option<&Path>,
     spec: &ProviderSourceSpec,
     location: &ProviderDefaultLocation,
     path: PathBuf,
@@ -221,7 +232,7 @@ pub(super) fn source_from_location(
                     Some(UNSUPPORTED_SOURCE_ROOT_REASON),
                 ),
                 PathPresence::Present => {
-                    match default_location_import_probe(spec.provider, location, &path) {
+                    match default_location_import_probe(data_root, spec.provider, location, &path) {
                         BoundedProbe::Found => {
                             (ProviderSourceStatus::Available, spec.unsupported_reason)
                         }

@@ -123,16 +123,19 @@ impl GooseSourceRouteV0 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GooseSourceBackedSelectionV0 {
+    data_root: PathBuf,
     selected: GooseSourceRouteV0,
     retained: Vec<GooseSourceRouteV0>,
 }
 
 impl GooseSourceBackedSelectionV0 {
     pub(crate) fn exact(
+        data_root: impl Into<PathBuf>,
         selected_database: impl Into<PathBuf>,
         platform_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
+            data_root: data_root.into(),
             selected: GooseSourceRouteV0::exact(selected_database, platform_root),
             retained: Vec::new(),
         }
@@ -213,8 +216,11 @@ impl ReplacementDocumentTree for GooseSourceBackedAdapterV0 {
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
-        let retained = RetainedGooseDirectory::open(self.selection.selected().selected_database())
-            .map_err(route_error)?;
+        let retained = RetainedGooseDirectory::open(
+            &self.selection.data_root,
+            self.selection.selected().selected_database(),
+        )
+        .map_err(route_error)?;
         let Some(snapshot) = retained.open_snapshot()? else {
             let fingerprint = missing_tree_fingerprint(&self.source);
             return Ok(CompleteDocumentTree::new(
@@ -340,7 +346,7 @@ pub(crate) struct RetainedGooseDirectory {
 }
 
 impl RetainedGooseDirectory {
-    fn open(path: &Path) -> GooseSourceBackedResultV0<Self> {
+    fn open(data_root: &Path, path: &Path) -> GooseSourceBackedResultV0<Self> {
         let parent = path.parent().ok_or_else(|| {
             CaptureError::InvalidPayload("Goose SQLite source has no parent directory".to_owned())
         })?;
@@ -350,7 +356,7 @@ impl RetainedGooseDirectory {
         let root = ProviderSourceRoot::open(parent)?;
         let directory = root.directory()?;
         let authority = directory.try_clone_authority_handle()?;
-        let sqlite = retain_sqlite_source_directory_authority(&authority, parent)
+        let sqlite = retain_sqlite_source_directory_authority(data_root, &authority, parent)
             .map_err(sqlite_access_error)?;
         Ok(Self {
             root,

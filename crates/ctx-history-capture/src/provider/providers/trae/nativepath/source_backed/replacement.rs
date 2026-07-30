@@ -16,12 +16,16 @@ use crate::provider::source_backed::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraeReplacementTree {
+    data_root: PathBuf,
     path: PathBuf,
 }
 
 impl TraeReplacementTree {
-    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    pub(crate) fn new(data_root: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: data_root.into(),
+            path: path.into(),
+        }
     }
 }
 
@@ -52,8 +56,12 @@ impl ReplacementDocumentTree for TraeReplacementTree {
         let canonical_path = explicit_trae_leaf(&self.path).map_err(|error| {
             SourceBackedRouteError::new(SourceBackedRouteErrorKind::Unavailable, error.to_string())
         })?;
-        let authority =
-            acquire_source(&canonical_path, DateTime::<Utc>::UNIX_EPOCH).map_err(route_error)?;
+        let authority = acquire_source(
+            &self.data_root,
+            &canonical_path,
+            DateTime::<Utc>::UNIX_EPOCH,
+        )
+        .map_err(route_error)?;
         let source = source_key(&authority).map_err(route_error)?;
         let fingerprint = DocumentLeafFingerprint::new(*authority.database.evidence().revision());
         Ok(CompleteDocumentTree::new(
@@ -135,8 +143,12 @@ impl ReplacementDocumentTree for TraeReplacementTree {
             .map_err(|_| trae_internal("Trae terminal fence lock was poisoned"))?
             .clone()
             .ok_or_else(|| trae_changed("Trae scan has no terminal fence"))?;
-        let current = acquire_source(&tree.authority.canonical_path, DateTime::<Utc>::UNIX_EPOCH)
-            .map_err(route_error)?;
+        let current = acquire_source(
+            &self.data_root,
+            &tree.authority.canonical_path,
+            DateTime::<Utc>::UNIX_EPOCH,
+        )
+        .map_err(route_error)?;
         current.database.revalidate().map_err(route_error)?;
         if current.database.evidence() == &fence.evidence {
             Ok(tree.tree_fingerprint)
@@ -154,7 +166,7 @@ impl ReplacementDocumentTree for TraeReplacementTree {
             .iter()
             .map(|event| event.locator())
             .collect::<Vec<_>>();
-        let hydrated = TraeLocatorResolverV0::new(self.path.clone())
+        let hydrated = TraeLocatorResolverV0::new(self.data_root.clone(), self.path.clone())
             .hydrate_locators(&locators)
             .map_err(trae_hydration_failure)?;
         let records = request

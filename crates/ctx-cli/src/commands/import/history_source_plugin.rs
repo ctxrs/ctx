@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Instant};
 
 use anyhow::{bail, Context, Result};
 use ctx_history_capture::ProviderImportSummary;
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{platform_security::establish_private_data_root, CaptureProvider};
 use serde_json::json;
 
 use crate::{
@@ -59,6 +59,8 @@ pub(crate) fn run_history_source_plugin_import(
     );
 
     let started = Instant::now();
+    establish_private_data_root(&context.data_root)
+        .context("protect ctx data root before history-source export")?;
     let prepared = prepare_source_backed_history_source(
         source,
         &context.data_root,

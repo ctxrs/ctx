@@ -84,13 +84,18 @@ pub(crate) struct ZedHydratedRecordV0 {
 
 #[derive(Debug)]
 pub(crate) struct ZedLocatorResolverV0 {
+    data_root: PathBuf,
     selected_database_path: PathBuf,
     source: ctx_history_core::SourceKey,
 }
 
 impl ZedLocatorResolverV0 {
-    pub(crate) fn new(selected_database_path: impl Into<PathBuf>) -> ZedSourceBackedResultV0<Self> {
+    pub(crate) fn new(
+        data_root: impl Into<PathBuf>,
+        selected_database_path: impl Into<PathBuf>,
+    ) -> ZedSourceBackedResultV0<Self> {
         Ok(Self {
+            data_root: data_root.into(),
             selected_database_path: selected_database_path.into(),
             source: zed_source_key()?,
         })
@@ -101,7 +106,7 @@ impl ZedLocatorResolverV0 {
         locator: &SourceRecordLocator,
     ) -> ZedSourceBackedResultV0<ZedHydratedRecordV0> {
         let coordinate = validate_zed_locator(&self.source, locator)?;
-        let mut snapshot = acquire_snapshot(&self.selected_database_path)?;
+        let mut snapshot = acquire_snapshot(&self.data_root, &self.selected_database_path)?;
         verify_snapshot_revision(&snapshot.snapshot_revision, &coordinate)?;
         let hydrated = hydrate_coordinate(snapshot.connection()?, &coordinate)?;
         snapshot.finish()?;
@@ -142,8 +147,8 @@ impl ContentSourceResolver for ZedLocatorResolverV0 {
             return Err(hydration_failure(ZedSourceBackedErrorV0::InvalidZedLocator));
         }
 
-        let mut snapshot =
-            acquire_snapshot(&self.selected_database_path).map_err(hydration_failure)?;
+        let mut snapshot = acquire_snapshot(&self.data_root, &self.selected_database_path)
+            .map_err(hydration_failure)?;
         for coordinate in &coordinates {
             verify_snapshot_revision(&snapshot.snapshot_revision, coordinate)
                 .map_err(hydration_failure)?;
@@ -461,9 +466,10 @@ pub(crate) fn snapshot_revision_digest(snapshot_revision: &str) -> [u8; 32] {
 }
 
 pub(crate) fn acquire_snapshot(
+    data_root: &Path,
     path: &Path,
 ) -> ZedSourceBackedResultV0<super::ZedImmutableSqliteSnapshot> {
-    match acquire_immutable_snapshot(path)? {
+    match acquire_immutable_snapshot(data_root, path)? {
         ZedSnapshotAcquisition::Acquired(snapshot) => Ok(*snapshot),
         ZedSnapshotAcquisition::Incomplete => Err(ZedSourceBackedErrorV0::SnapshotAcquisitionRace),
     }
@@ -681,7 +687,8 @@ mod tests {
                 row_version: Some(TypedKey::Composite(_)),
             } if logical_relation == "threads" && thread_id == "thread-1"
         ));
-        let resolver = ZedLocatorResolverV0::new(&database).unwrap();
+        let resolver =
+            ZedLocatorResolverV0::new(crate::test_provider_sqlite_data_root(), &database).unwrap();
         let hydrated = resolver.hydrate(&event.locator).unwrap();
         assert_eq!(hydrated.decoded_display_text, "cold exact sentinel");
         assert_eq!(hydrated.provider_bytes, b"cold exact sentinel");
@@ -697,9 +704,10 @@ mod tests {
         assert_eq!(replacement_event.event_id, cold_event_id);
         assert_eq!(replacement_event.session_id, cold_session_id);
         assert_eq!(replacement_event.body, "replacement exact sentinel");
-        let hydrated = ZedLocatorResolverV0::new(&database)
-            .unwrap()
-            .hydrate(&replacement_event.locator);
+        let hydrated =
+            ZedLocatorResolverV0::new(crate::test_provider_sqlite_data_root(), &database)
+                .unwrap()
+                .hydrate(&replacement_event.locator);
         assert_eq!(
             hydrated.unwrap().decoded_display_text,
             "replacement exact sentinel"
@@ -761,7 +769,8 @@ mod tests {
         create_database(&database, "root lineage sentinel");
         insert_child_thread(&database, "child lineage sentinel");
 
-        let snapshot = acquire_snapshot(&database).unwrap();
+        let snapshot =
+            acquire_snapshot(crate::test_provider_sqlite_data_root(), &database).unwrap();
         let mut lineage = ZedThreadLineageResolver::new(snapshot.connection().unwrap()).unwrap();
         let child = lineage.resolve("a-child").unwrap().unwrap();
         assert_eq!(child.parent_thread_id.as_deref(), Some("thread-1"));
@@ -838,7 +847,7 @@ mod tests {
     }
 
     fn project_root_document(path: &Path) -> LexicalDocument {
-        let mut snapshot = acquire_snapshot(path).unwrap();
+        let mut snapshot = acquire_snapshot(crate::test_provider_sqlite_data_root(), path).unwrap();
         let revision = snapshot.snapshot_revision.clone();
         let physical_locator = snapshot.physical_locator.clone();
         let mut sink = CollectingSink::default();

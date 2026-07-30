@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use ctx_history_core::platform_security::establish_private_data_root;
 
 mod durable_write;
 
@@ -447,7 +448,7 @@ impl AppConfig {
 }
 
 pub fn write_default_config(data_root: &Path) -> Result<()> {
-    fs::create_dir_all(data_root)?;
+    establish_private_data_root(data_root)?;
     Ok(())
 }
 
@@ -692,7 +693,7 @@ fn decode_basic_key_unicode_escape(
 }
 
 fn set_config_bool(data_root: &Path, section: &str, key: &str, enabled: bool) -> Result<()> {
-    fs::create_dir_all(data_root)?;
+    establish_private_data_root(data_root)?;
     let path = AppConfig::config_path(data_root);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,

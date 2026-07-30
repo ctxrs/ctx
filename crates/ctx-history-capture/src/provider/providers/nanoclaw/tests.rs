@@ -187,6 +187,7 @@ fn registry(root: &Path) -> SourceBackedProviderRegistry {
     crate::register_nanoclaw_source_backed_route(
         &mut registry,
         route_source(root),
+        crate::test_provider_sqlite_data_root(),
         SOURCE_BACKED_LINEAGE,
     )
     .unwrap();
@@ -194,8 +195,12 @@ fn registry(root: &Path) -> SourceBackedProviderRegistry {
 }
 
 fn direct_registry(root: &Path) -> SourceBackedProviderRegistry {
-    let adapter =
-        NanoClawDocumentTreeAdapter::new(root.to_path_buf(), SOURCE_BACKED_LINEAGE).unwrap();
+    let adapter = NanoClawDocumentTreeAdapter::new(
+        crate::test_provider_sqlite_data_root(),
+        root.to_path_buf(),
+        SOURCE_BACKED_LINEAGE,
+    )
+    .unwrap();
     let mut registry = SourceBackedProviderRegistry::new();
     register_replacement_document_tree_route_with_authority(
         &mut registry,
@@ -236,6 +241,7 @@ fn compound_locator_recovers_exact_inbound_and_outbound_content_without_paths() 
     let inbound_locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
     let outbound_locator = nanoclaw_message_locator(1, NanoClawMessageSource::Outbound, 1).unwrap();
     let project = NanoClawCompleteProject::open(
+        crate::test_provider_sqlite_data_root(),
         &root,
         &[inbound_locator.clone(), outbound_locator.clone()],
         CompleteContentSqliteQueryBudget::new(),
@@ -485,7 +491,8 @@ fn compound_inventory_is_metadata_only_across_many_databases() {
     for index in 0..64 {
         create_message_stores(&root, &format!("session-{index:04}"));
     }
-    let mut project = NanoClawSourceBackedProject::open(&root).unwrap();
+    let mut project =
+        NanoClawSourceBackedProject::open(crate::test_provider_sqlite_data_root(), &root).unwrap();
     assert_ne!(project.physical_fingerprint(), [0_u8; 32]);
     project.finish().unwrap();
 }
@@ -652,7 +659,7 @@ fn source_root_safety_nanoclaw_snapshot_stays_exact_after_live_leaf_rewrite() {
     let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
     let source_locator = complete_content_locator(&locator);
     let event_id = Uuid::new_v4();
-    let access = SourceAccessBroker::new()
+    let access = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit_for_source_locators(
             nanoclaw_broker_route(&root),
             std::slice::from_ref(&source_locator),
@@ -713,7 +720,7 @@ fn source_root_safety_nanoclaw_broker_rejects_concurrent_root_swap() {
         }
     });
 
-    let error = SourceAccessBroker::new()
+    let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit_for_source_locators(route, &[source_locator], event_id)
         .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
@@ -753,7 +760,7 @@ fn source_root_safety_nanoclaw_broker_rejects_concurrent_leaf_swap() {
         }
     });
 
-    let error = SourceAccessBroker::new()
+    let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit_for_source_locators(route, &[source_locator], event_id)
         .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);

@@ -47,6 +47,24 @@ pub fn register_landed_source_backed_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
+    register_landed_source_backed_route_inner(registry, source, selection, None)
+}
+
+pub fn register_landed_source_backed_route_with_data_root(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+) -> SourceBackedCoordinatorResult<()> {
+    register_landed_source_backed_route_inner(registry, source, selection, Some(data_root))
+}
+
+fn register_landed_source_backed_route_inner(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: Option<&Path>,
+) -> SourceBackedCoordinatorResult<()> {
     match source.provider {
         CaptureProvider::Codex
         | CaptureProvider::Claude
@@ -74,7 +92,15 @@ pub fn register_landed_source_backed_route(
         | CaptureProvider::DeepAgents
         | CaptureProvider::Hermes
         | CaptureProvider::Trae
-        | CaptureProvider::MiMoCode => sqlite::register_route(registry, source, selection),
+        | CaptureProvider::MiMoCode => {
+            let data_root = data_root.ok_or_else(|| {
+                invalid_route(
+                    source.provider,
+                    "provider SQLite registration requires the selected ctx data root",
+                )
+            })?;
+            sqlite::register_route(registry, source, selection, data_root)
+        }
         CaptureProvider::Auggie
         | CaptureProvider::RovoDev
         | CaptureProvider::Continue

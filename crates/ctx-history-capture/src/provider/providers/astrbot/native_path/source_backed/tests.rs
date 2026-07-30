@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -85,10 +84,14 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
     create_database(&path, "expected", "expected");
     create_database(&attacker, "attacker", "attacker");
 
-    let result = open_root_authorized_snapshot_with_hook(&path, || {
-        fs::rename(&path, &original).unwrap();
-        fs::rename(&attacker, &path).unwrap();
-    });
+    let result = open_root_authorized_snapshot_with_hook(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        },
+    );
     assert!(matches!(
         result,
         Err(AstrBotSourceBackedErrorV0::SqliteSource(
@@ -174,17 +177,19 @@ fn selected_source(path: &Path) -> AstrBotSourceBackedSourceV0 {
 }
 
 fn resolver_for(source: &AstrBotSourceBackedSourceV0) -> AstrBotSourceBackedResolverV0 {
-    AstrBotSourceBackedResolverV0 {
-        sources: BTreeMap::from([(source.source_key.identity().digest(), source.clone())]),
-    }
+    AstrBotSourceBackedResolverV0::from_source(source.clone())
 }
 
 fn scan_documents(source: &AstrBotSourceBackedSourceV0) -> Vec<LexicalDocument> {
     let mut documents = Vec::new();
-    scan_astrbot_source_backed_v0(source, &mut |document| {
-        documents.push(document);
-        Ok(())
-    })
+    scan_astrbot_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source,
+        &mut |document| {
+            documents.push(document);
+            Ok(())
+        },
+    )
     .unwrap();
     documents
 }
@@ -262,10 +267,14 @@ fn astrbot_source_backed_multi_instance_cold_scan_has_stable_ids_and_inventory()
     let mut first_ids = Vec::new();
     for source in opening.sources() {
         let mut documents = Vec::new();
-        let certificate = scan_astrbot_source_backed_v0(source, &mut |document| {
-            documents.push(document);
-            Ok(())
-        })
+        let certificate = scan_astrbot_source_backed_v0(
+            crate::test_provider_sqlite_data_root(),
+            source,
+            &mut |document| {
+                documents.push(document);
+                Ok(())
+            },
+        )
         .expect("cold source scan");
         assert_eq!(certificate.counts().complete_records, 1);
         assert_eq!(certificate.counts().retained_records, 1);
@@ -284,10 +293,14 @@ fn astrbot_source_backed_multi_instance_cold_scan_has_stable_ids_and_inventory()
     let mut second_ids = Vec::new();
     for source in closing.sources() {
         let mut documents = Vec::new();
-        scan_astrbot_source_backed_v0(source, &mut |document| {
-            documents.push(document);
-            Ok(())
-        })
+        scan_astrbot_source_backed_v0(
+            crate::test_provider_sqlite_data_root(),
+            source,
+            &mut |document| {
+                documents.push(document);
+                Ok(())
+            },
+        )
         .expect("repeat source scan");
         second_ids.push((
             source.source_key().identity().digest(),
@@ -351,10 +364,14 @@ fn astrbot_source_backed_reopens_full_conversation_and_platform_text_exactly() {
         AstrBotSourceBackedInventoryV0::discover(&context(&home, &cwd)).expect("inventory");
     let source = inventory.sources().first().expect("selected source");
     let mut documents = Vec::new();
-    scan_astrbot_source_backed_v0(source, &mut |document| {
-        documents.push(document);
-        Ok(())
-    })
+    scan_astrbot_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source,
+        &mut |document| {
+            documents.push(document);
+            Ok(())
+        },
+    )
     .expect("source scan");
     assert_eq!(documents.len(), 3);
 
@@ -396,7 +413,11 @@ fn astrbot_source_backed_reopens_full_conversation_and_platform_text_exactly() {
             [TypedKey::I64(1), TypedKey::U64(0)]
         ) && row_digest.len() == 32
     ));
-    let resolver = AstrBotSourceBackedResolverV0::from_inventory(&inventory).expect("resolver");
+    let resolver = AstrBotSourceBackedResolverV0::from_inventory(
+        crate::test_provider_sqlite_data_root(),
+        &inventory,
+    )
+    .expect("resolver");
     let request = event_request(conversation);
     let hydrated = resolver
         .hydrate_event(&request)

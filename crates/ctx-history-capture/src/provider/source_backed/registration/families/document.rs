@@ -61,9 +61,10 @@ pub(super) fn register_task_json_route(
 pub fn register_nanoclaw_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
+    data_root: &Path,
     catalog_lineage: [u8; 32],
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = NanoClawDocumentTreeAdapter::new(source.path.clone(), catalog_lineage)
+    let adapter = NanoClawDocumentTreeAdapter::new(data_root, source.path.clone(), catalog_lineage)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     crate::provider::source_backed::family::document::register_replacement_document_tree_route_with_authority(
         registry,

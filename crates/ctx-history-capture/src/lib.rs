@@ -13,14 +13,15 @@ pub use provider_sources::{
     discover_provider_sources_with_context, discover_provider_sources_with_projects,
     discover_warp_sources_with_authority, observe_ordinary_file, provider_source_for_path,
     provider_source_spec, provider_source_specs, resolve_lingma_discovery_authority,
-    resolve_warp_discovery_authority, DiscoveredLingmaDatabase, DiscoveredWarpSource,
-    DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs,
-    DiscoveryReport, LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory,
-    LingmaDiscoveryUnavailable, LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile,
-    OrdinaryFileObservation, ProviderCatalogSupport, ProviderDefaultLocation,
-    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
-    ProviderSourceStatus, WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey,
-    WarpReleaseChannel, WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
+    resolve_warp_discovery_authority, validate_provider_source_roots_outside_data_root,
+    DiscoveredLingmaDatabase, DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue,
+    DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs, DiscoveryReport,
+    LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory, LingmaDiscoveryUnavailable,
+    LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation,
+    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
+    ProviderSourceKind, ProviderSourceRootBoundaryError, ProviderSourceSpec, ProviderSourceStatus,
+    WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel,
+    WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -99,6 +100,15 @@ pub(crate) use common::identity::{default_machine_id, fnv1a64};
 #[cfg(test)]
 mod test_support_paths;
 
+#[cfg(test)]
+pub(crate) fn test_provider_sqlite_data_root() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+
+    static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    ROOT.get_or_init(|| crate::test_support_paths::tempdir().expect("provider SQLite test root"))
+        .path()
+}
+
 pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::codex::{
@@ -110,13 +120,14 @@ pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
 };
 pub use provider::source_backed::{
-    build_automatic_source_backed_registry, refresh_source_backed_generation,
-    refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,
-    register_codex_prompt_history_source_backed_route, register_crush_source_backed_route,
-    register_cursor_source_backed_route, register_custom_history_source_backed_route,
-    register_forgecode_explicit_source_backed_route, register_gemini_source_backed_route,
-    register_goose_source_backed_route, register_hermes_explicit_source_backed_route,
-    register_landed_source_backed_route, register_lingma_source_backed_route,
+    build_automatic_source_backed_registry, build_automatic_source_backed_registry_from_report,
+    refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
+    register_astrbot_source_backed_route, register_codex_prompt_history_source_backed_route,
+    register_crush_source_backed_route, register_cursor_source_backed_route,
+    register_custom_history_source_backed_route, register_forgecode_explicit_source_backed_route,
+    register_gemini_source_backed_route, register_goose_source_backed_route,
+    register_hermes_explicit_source_backed_route, register_landed_source_backed_route,
+    register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
     register_nanoclaw_source_backed_route, register_shelley_source_backed_route,
     register_warp_source_backed_route, source_backed_route_constructor,
     source_backed_route_inventory, CrushProjectDatabaseV0, CrushProjectInventoryObservationV0,

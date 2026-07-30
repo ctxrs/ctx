@@ -128,6 +128,7 @@ impl DiscoveryPlatformDirs {
 pub struct DiscoveryContext {
     home: PathBuf,
     cwd: Option<PathBuf>,
+    data_root: Option<PathBuf>,
     platform: DiscoveryPlatform,
     platform_dirs: DiscoveryPlatformDirs,
     inherited_env: BTreeMap<&'static str, OsString>,
@@ -142,6 +143,7 @@ impl DiscoveryContext {
         Self {
             home: home.into(),
             cwd: env::current_dir().ok(),
+            data_root: None,
             platform: DiscoveryPlatform::current(),
             platform_dirs: DiscoveryPlatformDirs::from_process(),
             inherited_env,
@@ -157,6 +159,7 @@ impl DiscoveryContext {
         Self {
             home: home.into(),
             cwd: Some(cwd.into()),
+            data_root: None,
             platform,
             platform_dirs,
             inherited_env: BTreeMap::new(),
@@ -171,6 +174,7 @@ impl DiscoveryContext {
         Self {
             home: home.into(),
             cwd: None,
+            data_root: None,
             platform,
             platform_dirs,
             inherited_env: BTreeMap::new(),
@@ -185,12 +189,24 @@ impl DiscoveryContext {
         self.cwd.as_deref()
     }
 
+    pub fn data_root(&self) -> Option<&Path> {
+        self.data_root.as_deref()
+    }
+
     /// Returns the same bounded process snapshot scoped to one authorized activity locator.
     ///
     /// Passing `None` suppresses all project-relative resolver behavior while retaining the
     /// already captured platform directories and allowlisted environment.
     pub fn with_cwd(mut self, cwd: Option<PathBuf>) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    /// Supplies the caller-selected ctx authority for transient provider
+    /// SQLite snapshots. Discovery without this authority remains read-only
+    /// and reports live-WAL structural probes as unavailable.
+    pub fn with_data_root(mut self, data_root: impl Into<PathBuf>) -> Self {
+        self.data_root = Some(data_root.into());
         self
     }
 

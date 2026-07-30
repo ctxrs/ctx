@@ -70,10 +70,14 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
     let attacker = create_fixture(&temp.path().join("attacker"), "attacker");
     let original = temp.path().join("original.db");
 
-    let result = open_root_authorized_snapshot_with_hook(&path, || {
-        fs::rename(&path, &original).unwrap();
-        fs::rename(&attacker, &path).unwrap();
-    });
+    let result = open_root_authorized_snapshot_with_hook(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        },
+    );
     assert!(matches!(
         result,
         Err(ShelleySourceBackedError::Capture(
@@ -101,9 +105,12 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         )
         .unwrap();
     let before = sqlite_persistent_bytes(&path);
-    let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
-        .unwrap()
-        .unwrap();
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
     let (documents, _) = drain(&adapter);
     assert!(documents
         .iter()
@@ -142,9 +149,12 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let original = format!("{}shelley-tail", "x".repeat(4_096));
     let database = create_fixture(temp.path(), &original);
-    let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
-        .unwrap()
-        .unwrap();
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
 
     let (cold_documents, cold_receipt) = drain(&adapter);
     assert_eq!(cold_documents.len(), 1);
@@ -274,9 +284,12 @@ fn shelley_source_backed_lineage_uses_native_parent_and_root_threads() {
     .unwrap();
     drop(conn);
 
-    let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
-        .unwrap()
-        .unwrap();
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
     let (documents, _) = drain(&adapter);
     let root = documents
         .iter()
@@ -302,9 +315,12 @@ fn shelley_source_backed_finishes_before_releasing_first_page() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = create_fixture(temp.path(), "before replacement");
     let original = temp.path().join("original.db");
-    let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
-        .unwrap()
-        .unwrap();
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
     let mut scan = adapter.start_scan().unwrap();
     let page = scan.next_page().unwrap().unwrap();
     assert!(page
@@ -332,13 +348,17 @@ fn shelley_source_backed_inventory_is_exact_cwd_only() {
     create_fixture(parent, "parent");
     fs::create_dir_all(&active).unwrap();
 
-    assert!(discover_shelley_source_backed_exact_cwd(&active)
-        .unwrap()
-        .is_none());
+    assert!(discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        &active
+    )
+    .unwrap()
+    .is_none());
     let active_database = create_fixture(&active, "active");
-    let adapter = discover_shelley_source_backed_exact_cwd(&active)
-        .unwrap()
-        .unwrap();
+    let adapter =
+        discover_shelley_source_backed_exact_cwd(crate::test_provider_sqlite_data_root(), &active)
+            .unwrap()
+            .unwrap();
     assert_eq!(adapter.database_path(), active_database);
     assert_eq!(
         adapter.database_path().parent(),

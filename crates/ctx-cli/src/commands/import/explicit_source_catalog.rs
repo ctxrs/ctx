@@ -11,18 +11,21 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
     provider_source_for_path, register_custom_history_source_backed_route,
     register_forgecode_explicit_source_backed_route, register_goose_source_backed_route,
-    register_hermes_explicit_source_backed_route, register_landed_source_backed_route,
-    register_lingma_source_backed_route, register_nanoclaw_source_backed_route,
-    register_warp_source_backed_route, source_backed_route_constructor,
-    source_backed_route_inventory, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
-    ProviderSourceKind, ProviderSourceStatus, SourceBackedAutomaticRegistryBuild,
-    SourceBackedHydrationSupport, SourceBackedProviderRegistry, SourceBackedRoute,
-    SourceBackedRouteConstructor, SourceBackedRouteDriver, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    register_hermes_explicit_source_backed_route,
+    register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
+    register_nanoclaw_source_backed_route, register_warp_source_backed_route,
+    source_backed_route_constructor, source_backed_route_inventory,
+    validate_provider_source_roots_outside_data_root, ProviderCatalogSupport,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
+    SourceBackedAutomaticRegistryBuild, SourceBackedHydrationSupport, SourceBackedProviderRegistry,
+    SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
+    SourceBackedSelectorAuthority,
 };
 use ctx_history_core::{
-    CaptureProvider, CertifiedSourceDeletion, CertifiedSourceInventory, HydrationFailure,
-    HydrationFailureKind, SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
+    platform_security::establish_private_data_root, CaptureProvider, CertifiedSourceDeletion,
+    CertifiedSourceInventory, HydrationFailure, HydrationFailureKind, SourceAnchor,
+    SourceInventoryObservation, SourceKey, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use fs2::FileExt;
@@ -235,6 +238,8 @@ pub(crate) fn upsert_explicit_source(
 ) -> Result<ExplicitSourceCatalogUpsert> {
     validate_enabled_source(source)?;
     validate_catalog_registration_support(source)?;
+    validate_provider_source_roots_outside_data_root(data_root, std::iter::once(source))?;
+    establish_private_data_root(data_root).context("protect ctx data root for source catalog")?;
     let metadata = route_metadata(source.provider, source.source_format)?;
     let catalog_root = catalog_root(data_root);
     fs::create_dir_all(&catalog_root).with_context(|| {
@@ -382,6 +387,15 @@ pub(crate) fn load_explicit_source_catalog_authority(
     Ok(load_catalog(data_root)?.authority)
 }
 
+pub(crate) fn validate_explicit_source_catalog_roots(data_root: &Path) -> Result<()> {
+    let snapshot = load_catalog(data_root)?;
+    for entry in snapshot.entries.iter().filter(|entry| entry.enabled) {
+        let source = source_from_catalog_entry(entry, true)?;
+        validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn register_explicit_source_catalog_routes(
     data_root: &Path,
     index_root: &Path,
@@ -432,14 +446,20 @@ pub(crate) fn register_explicit_source_catalog_routes(
     for entry in &snapshot.entries {
         if entry.enabled {
             let source = source_from_catalog_entry(entry, true)?;
-            register_enabled_catalog_route(&mut build.registry, source, entry.lineage()?)
-                .with_context(|| {
-                    format!(
-                        "register explicit catalog route {} {}",
-                        entry.provider,
-                        entry.path.display()
-                    )
-                })?;
+            validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))?;
+            register_enabled_catalog_route(
+                data_root,
+                &mut build.registry,
+                source,
+                entry.lineage()?,
+            )
+            .with_context(|| {
+                format!(
+                    "register explicit catalog route {} {}",
+                    entry.provider,
+                    entry.path.display()
+                )
+            })?;
         } else {
             register_disabled_catalog_route(
                 data_root,
@@ -454,6 +474,7 @@ pub(crate) fn register_explicit_source_catalog_routes(
 }
 
 fn register_enabled_catalog_route(
+    data_root: &Path,
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     lineage: [u8; 32],
@@ -470,7 +491,7 @@ fn register_enabled_catalog_route(
                 register_custom_history_source_backed_route(registry, source, lineage)?
             }
             CaptureProvider::NanoClaw => {
-                register_nanoclaw_source_backed_route(registry, source, lineage)?
+                register_nanoclaw_source_backed_route(registry, source, data_root, lineage)?
             }
             provider => bail!(
                 "{} has an unknown catalog-lineage registration",
@@ -479,17 +500,21 @@ fn register_enabled_catalog_route(
         },
         SourceBackedRouteConstructor::ProviderSource => match source.provider {
             CaptureProvider::ForgeCode => {
-                register_forgecode_explicit_source_backed_route(registry, source, lineage)?
+                register_forgecode_explicit_source_backed_route(
+                    registry, source, data_root, lineage,
+                )?
             }
             CaptureProvider::Hermes => register_hermes_explicit_source_backed_route(
                 registry,
                 source,
+                data_root,
                 SourceAnchor::CatalogLineage(lineage),
             )?,
-            _ => register_landed_source_backed_route(
+            _ => register_landed_source_backed_route_with_data_root(
                 registry,
                 source,
                 SourceBackedRouteSelection::ExplicitManual,
+                data_root,
             )?,
         },
         SourceBackedRouteConstructor::FiniteInventory => match source.provider {
@@ -501,6 +526,7 @@ fn register_enabled_catalog_route(
                     registry,
                     source,
                     SourceBackedRouteSelection::ExplicitManual,
+                    data_root,
                     authority,
                     vec![(path, database_lineage)],
                 )?;
@@ -526,6 +552,7 @@ fn register_enabled_catalog_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::ExplicitManual,
+                data_root,
                 format!("ctx-catalog:{}", encode_hex(&lineage)),
             )?;
         }
@@ -535,6 +562,7 @@ fn register_enabled_catalog_route(
                 registry,
                 source,
                 SourceBackedRouteSelection::ExplicitManual,
+                data_root,
                 platform_root,
                 Vec::new(),
             )?;

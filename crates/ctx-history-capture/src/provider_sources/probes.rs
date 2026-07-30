@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ctx_history_core::platform_security::create_private_directory_all;
 use ctx_history_core::CaptureProvider;
 use rusqlite::{limits::Limit as SqliteLimit, Connection, OpenFlags};
 use serde_json::Value;
@@ -19,15 +20,16 @@ use crate::common::io::{
     ensure_regular_provider_transcript_file, provider_metadata_is_link_like,
     read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
 };
-use crate::provider::sqlite::ProviderSqliteSourceSnapshot;
 use crate::provider::{
     provider_safe_path_segment,
     providers::cursor::{discover_cursor_transcripts, CursorDiscoveryIssueKind},
+    sqlite::sqlite_component_change_token,
 };
 use crate::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
 use super::{
-    open_ordinary_file_without_following, selectors::sort_paths, types::ProviderDefaultLocation,
+    observe_ordinary_file, open_ordinary_file_without_following, selectors::sort_paths,
+    types::ProviderDefaultLocation, OrdinaryFileObservation,
 };
 
 const SQLITE_PROBE_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
@@ -41,6 +43,7 @@ std::thread_local! {
 }
 
 pub(super) fn default_location_import_probe(
+    data_root: Option<&Path>,
     provider: CaptureProvider,
     location: &ProviderDefaultLocation,
     path: &Path,
@@ -97,9 +100,9 @@ pub(super) fn default_location_import_probe(
             candidate.extension().and_then(|ext| ext.to_str()) == Some("json")
         }),
         CaptureProvider::Junie => has_junie_session_events(path, 10_000),
-        CaptureProvider::Firebender => has_firebender_chat_sessions_table(path),
-        CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
-        CaptureProvider::DeepAgents => has_deepagents_checkpoint_tables(path),
+        CaptureProvider::Firebender => has_firebender_chat_sessions_table(data_root, path),
+        CaptureProvider::ForgeCode => has_forgecode_conversations_table(data_root, path),
+        CaptureProvider::DeepAgents => has_deepagents_checkpoint_tables(data_root, path),
         CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
                 && candidate.parent().is_some_and(|parent| {
@@ -129,8 +132,8 @@ pub(super) fn default_location_import_probe(
                     | "claude_messages.json"
             )
         }),
-        CaptureProvider::Lingma => has_lingma_chat_record_table(path),
-        CaptureProvider::Trae => has_trae_state_vscdb_chat_history(path, 10_000),
+        CaptureProvider::Lingma => has_lingma_chat_record_table(data_root, path),
+        CaptureProvider::Trae => has_trae_state_vscdb_chat_history(data_root, path, 10_000),
         CaptureProvider::Warp => path_is_file_probe(path),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
         CaptureProvider::Shell
@@ -184,7 +187,7 @@ fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
     has_jsonl_file_under_matching(&tmp, max_entries, |path| path_has_component(path, "chats"))
 }
 
-fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
+fn has_firebender_chat_sessions_table(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     let db_path = match fs::symlink_metadata(path) {
         Ok(metadata) if provider_metadata_is_link_like(&metadata) => {
             return BoundedProbe::NotFound;
@@ -202,7 +205,7 @@ fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    sqlite_structural_probe(&db_path, SqliteProbeLimits::default(), |conn| {
+    sqlite_structural_probe(data_root, &db_path, SqliteProbeLimits::default(), |conn| {
         conn.query_row(
             "select exists(select 1 from sqlite_schema \
              where type = 'table' and name = 'chat_sessions')",
@@ -309,12 +312,12 @@ fn has_junie_session_events(root: &Path, max_entries: usize) -> BoundedProbe {
     BoundedProbe::NotFound
 }
 
-fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
+fn has_forgecode_conversations_table(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     match path_is_file_probe(path) {
         BoundedProbe::Found => {}
         other => return other,
     }
-    sqlite_structural_probe(path, SqliteProbeLimits::default(), |conn| {
+    sqlite_structural_probe(data_root, path, SqliteProbeLimits::default(), |conn| {
         conn.query_row(
             "select exists(select 1 from sqlite_schema \
              where type = 'table' and name = 'conversations')",
@@ -324,12 +327,12 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
     })
 }
 
-fn has_lingma_chat_record_table(path: &Path) -> BoundedProbe {
+fn has_lingma_chat_record_table(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     match path_is_file_probe(path) {
         BoundedProbe::Found => {}
         other => return other,
     }
-    sqlite_structural_probe(path, SqliteProbeLimits::default(), |conn| {
+    sqlite_structural_probe(data_root, path, SqliteProbeLimits::default(), |conn| {
         conn.query_row(
             "select count(*) from pragma_table_info('chat_record') \
              where name in ('session_id', 'request_id', 'chat_prompt', 'summary', \
@@ -341,7 +344,11 @@ fn has_lingma_chat_record_table(path: &Path) -> BoundedProbe {
     })
 }
 
-pub(super) fn has_trae_state_vscdb_chat_history(root: &Path, max_entries: usize) -> BoundedProbe {
+pub(super) fn has_trae_state_vscdb_chat_history(
+    data_root: Option<&Path>,
+    root: &Path,
+    max_entries: usize,
+) -> BoundedProbe {
     match fs::symlink_metadata(root) {
         Ok(metadata) if provider_metadata_is_link_like(&metadata) => {
             return BoundedProbe::NotFound;
@@ -350,7 +357,7 @@ pub(super) fn has_trae_state_vscdb_chat_history(root: &Path, max_entries: usize)
             if root.file_name().and_then(|name| name.to_str()) != Some("state.vscdb") {
                 return BoundedProbe::NotFound;
             }
-            return has_trae_state_vscdb_chat_keys(root);
+            return has_trae_state_vscdb_chat_keys(data_root, root);
         }
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => return BoundedProbe::NotFound,
@@ -360,7 +367,7 @@ pub(super) fn has_trae_state_vscdb_chat_history(root: &Path, max_entries: usize)
 
     let direct = root.join("state.vscdb");
     if path_is_file_probe(&direct) == BoundedProbe::Found {
-        return has_trae_state_vscdb_chat_keys(&direct);
+        return has_trae_state_vscdb_chat_keys(data_root, &direct);
     }
 
     let entries = match sorted_probe_entries(root, max_entries) {
@@ -385,7 +392,7 @@ pub(super) fn has_trae_state_vscdb_chat_history(root: &Path, max_entries: usize)
         if path_is_file_probe(&candidate) != BoundedProbe::Found {
             continue;
         }
-        match has_trae_state_vscdb_chat_keys(&candidate) {
+        match has_trae_state_vscdb_chat_keys(data_root, &candidate) {
             BoundedProbe::Found => return BoundedProbe::Found,
             BoundedProbe::IoError => saw_io_error = true,
             BoundedProbe::NotFound | BoundedProbe::BudgetExhausted => {}
@@ -399,12 +406,12 @@ pub(super) fn has_trae_state_vscdb_chat_history(root: &Path, max_entries: usize)
     }
 }
 
-fn has_trae_state_vscdb_chat_keys(path: &Path) -> BoundedProbe {
+fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     match path_is_file_probe(path) {
         BoundedProbe::Found => {}
         other => return other,
     }
-    sqlite_structural_probe(path, SqliteProbeLimits::default(), |conn| {
+    sqlite_structural_probe(data_root, path, SqliteProbeLimits::default(), |conn| {
         let (table_count, column_count) = conn.query_row(
             "select \
                 (select count(*) from sqlite_schema where type = 'table' and name = 'ItemTable'), \
@@ -433,12 +440,12 @@ fn has_trae_state_vscdb_chat_keys(path: &Path) -> BoundedProbe {
     })
 }
 
-fn has_deepagents_checkpoint_tables(path: &Path) -> BoundedProbe {
+fn has_deepagents_checkpoint_tables(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     match path_is_file_probe(path) {
         BoundedProbe::Found => {}
         other => return other,
     }
-    sqlite_structural_probe(path, SqliteProbeLimits::default(), |conn| {
+    sqlite_structural_probe(data_root, path, SqliteProbeLimits::default(), |conn| {
         conn.query_row(
             "select count(*) = 2 from sqlite_schema \
              where type = 'table' and name in ('checkpoints', 'writes')",
@@ -469,6 +476,8 @@ impl Default for SqliteProbeLimits {
 struct SqliteProbeComponent {
     path: PathBuf,
     len: u64,
+    observation: OrdinaryFileObservation,
+    change_token: [u8; 32],
 }
 
 enum SqliteProbeDatabase {
@@ -488,6 +497,7 @@ impl SqliteProbeDatabase {
 }
 
 fn sqlite_structural_probe(
+    data_root: Option<&Path>,
     path: &Path,
     limits: SqliteProbeLimits,
     query: impl FnOnce(&Connection) -> rusqlite::Result<bool>,
@@ -496,22 +506,7 @@ fn sqlite_structural_probe(
         Ok(components) => components,
         Err(outcome) => return outcome,
     };
-    let before = match ProviderSqliteSourceSnapshot::read(
-        path,
-        "provider SQLite probe source is not an ordinary file",
-        "provider SQLite probe sidecar is not an ordinary file",
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(_) => return BoundedProbe::IoError,
-    };
-    let components = match sqlite_probe_components(path, limits.max_total_bytes) {
-        Ok(components) if components == initial_components => components,
-        Ok(_) | Err(BoundedProbe::IoError | BoundedProbe::NotFound) => {
-            return BoundedProbe::IoError;
-        }
-        Err(outcome) => return outcome,
-    };
-    let database = match open_sqlite_probe_database(path, &components) {
+    let database = match open_sqlite_probe_database(data_root, path, &initial_components) {
         Ok(database) => database,
         Err(_) => return BoundedProbe::IoError,
     };
@@ -535,7 +530,8 @@ fn sqlite_structural_probe(
         configure_sqlite_probe(connection, limits.deadline).and_then(|()| query(connection));
     connection.progress_handler(0, None::<fn() -> bool>);
     drop(database);
-    let stable = before.revalidate(path).unwrap_or(false);
+    let stable = sqlite_probe_components(path, limits.max_total_bytes)
+        .is_ok_and(|closing| closing == initial_components);
     if !stable {
         return BoundedProbe::IoError;
     }
@@ -597,15 +593,24 @@ fn sqlite_probe_components(
         if total > max_total_bytes {
             return Err(BoundedProbe::BudgetExhausted);
         }
+        let observation = observe_ordinary_file(&component).map_err(|_| BoundedProbe::IoError)?;
+        if observation.len() != metadata.len() {
+            return Err(BoundedProbe::IoError);
+        }
+        let change_token = sqlite_component_change_token(&component, &observation)
+            .map_err(|_| BoundedProbe::IoError)?;
         components.push(SqliteProbeComponent {
             path: component,
             len: metadata.len(),
+            observation,
+            change_token,
         });
     }
     Ok(components)
 }
 
 fn open_sqlite_probe_database(
+    data_root: Option<&Path>,
     path: &Path,
     components: &[SqliteProbeComponent],
 ) -> crate::Result<SqliteProbeDatabase> {
@@ -632,9 +637,14 @@ fn open_sqlite_probe_database(
         return Ok(SqliteProbeDatabase::Immutable(connection));
     }
 
+    let Some(data_root) = data_root else {
+        return Err(crate::CaptureError::SourceChangedDuringCapture);
+    };
+    let staging_root = data_root.join("tmp").join("provider-sqlite");
+    create_private_directory_all(&staging_root)?;
     let directory = tempfile::Builder::new()
         .prefix("ctx-provider-probe-sqlite-")
-        .tempdir()?;
+        .tempdir_in(staging_root)?;
     for component in components {
         copy_sqlite_probe_component(component, directory.path())?;
     }

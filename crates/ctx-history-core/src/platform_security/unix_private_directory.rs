@@ -10,15 +10,26 @@ use std::{
         fd::{AsRawFd as _, FromRawFd as _},
         unix::{
             ffi::OsStrExt as _,
-            fs::{FileTypeExt as _, PermissionsExt as _},
+            fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _},
         },
     },
     path::{Component, Path},
 };
 
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+
 const PRIVATE_DIRECTORY_MODE: libc::mode_t = 0o700;
 
 pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
+    walk_private_directory(path, false)
+}
+
+pub(super) fn establish_private_data_root(path: &Path) -> io::Result<()> {
+    walk_private_directory(path, true)
+}
+
+fn walk_private_directory(path: &Path, repair_final: bool) -> io::Result<()> {
     if path.as_os_str().is_empty()
         || path
             .components()
@@ -55,8 +66,11 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
         let is_final = components.peek().is_none();
         let (next, created, raced_existing) = open_or_create_directory(&current, name)?;
         if created {
+            clear_extended_acl(&next)?;
             verify_exact_private_directory(&next.metadata()?)?;
             created_private_ancestor = true;
+        } else if is_final && repair_final {
+            establish_exact_private_directory(&next)?;
         } else if is_final || created_private_ancestor || raced_existing {
             verify_owner_only_directory(&next.metadata()?)?;
         }
@@ -64,8 +78,60 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
     }
 
     if !saw_component {
+        if repair_final {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ctx data root must name a directory below the filesystem root",
+            ));
+        }
         verify_owner_only_directory(&current.metadata()?)?;
     }
+    Ok(())
+}
+
+fn establish_exact_private_directory(directory: &File) -> io::Result<()> {
+    let metadata = directory.metadata()?;
+    verify_directory_type(&metadata)?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "ctx data root is not owned by the current user",
+        ));
+    }
+    directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    clear_extended_acl(directory)?;
+    verify_exact_private_directory(&directory.metadata()?)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_extended_acl(directory: &File) -> io::Result<()> {
+    type Acl = *mut c_void;
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+    unsafe extern "C" {
+        fn acl_init(count: libc::c_int) -> Acl;
+        fn acl_set_fd_np(fd: libc::c_int, acl: Acl, acl_type: libc::c_int) -> libc::c_int;
+        fn acl_free(object: *mut c_void) -> libc::c_int;
+    }
+
+    let acl = unsafe { acl_init(0) };
+    if acl.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let result = unsafe { acl_set_fd_np(directory.as_raw_fd(), acl, ACL_TYPE_EXTENDED) };
+    let set_error = (result != 0).then(io::Error::last_os_error);
+    let free_result = unsafe { acl_free(acl) };
+    if let Some(error) = set_error {
+        return Err(error);
+    }
+    if free_result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clear_extended_acl(_directory: &File) -> io::Result<()> {
     Ok(())
 }
 
@@ -250,5 +316,68 @@ mod tests {
 
         assert!(create_private_directory_all(&link.join("nested")).is_err());
         assert!(!target.join("nested").exists());
+    }
+
+    #[test]
+    fn establishing_data_root_repairs_existing_mode_before_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("data");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+
+        establish_private_data_root(&target).unwrap();
+
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::write(target.join("first-write"), b"private").unwrap();
+    }
+
+    #[test]
+    fn establishing_data_root_rejects_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("data");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(establish_private_data_root(&link).is_err());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn establishing_data_root_removes_extended_acl() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("data");
+        fs::create_dir(&target).unwrap();
+        let user = std::env::var("USER").unwrap();
+        let status = Command::new("/bin/chmod")
+            .args([
+                "+a",
+                &format!("{user} allow read"),
+                target.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        establish_private_data_root(&target).unwrap();
+
+        let output = Command::new("/bin/ls")
+            .args(["-lde", target.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(" 0: "));
     }
 }

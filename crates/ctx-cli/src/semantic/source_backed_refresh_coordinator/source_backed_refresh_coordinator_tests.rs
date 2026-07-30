@@ -7,6 +7,7 @@ use ctx_history_capture::{
     DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport, ProviderImportSupport,
     ProviderSource, ProviderSourceKind,
 };
+use rusqlite::Connection;
 
 use super::*;
 
@@ -135,9 +136,25 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let index_root = source_backed_index_root(&data_root);
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    std::fs::create_dir_all(home.join(".forge")).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let forge = home.join(".forge/.forge.db");
+    let forge_writer = Connection::open(&forge).unwrap();
+    forge_writer
+        .pragma_update(None, "journal_mode", "wal")
+        .unwrap();
+    forge_writer
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
+    forge_writer
+        .execute_batch("create table conversations (id text primary key);")
+        .unwrap();
     let discovery = DiscoveryContext::new(
-        temp.path(),
-        temp.path().join("cwd"),
+        &home,
+        &cwd,
         DiscoveryPlatform::Linux,
         DiscoveryPlatformDirs::default(),
     );
@@ -162,9 +179,22 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     let publication = execute_capture_owned_refresh_with(
         execution,
         &discovery,
-        |observed_discovery, observed_data_root, observed_index_root, progress| {
+        |observed_discovery,
+         observed_report,
+         observed_discovery_duration,
+         observed_data_root,
+         observed_index_root,
+         progress| {
             provider_wide_calls += 1;
-            assert_eq!(observed_discovery, &discovery);
+            assert_eq!(observed_discovery.home(), discovery.home());
+            assert_eq!(observed_discovery.cwd(), discovery.cwd());
+            assert_eq!(observed_discovery.data_root(), Some(data_root.as_path()));
+            assert!(observed_report.sources.iter().any(|source| {
+                source.provider == CaptureProvider::ForgeCode
+                    && source.path == forge
+                    && source.status == ProviderSourceStatus::Available
+            }));
+            assert_ne!(observed_discovery_duration, StdDuration::ZERO);
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
             progress(CaptureSourceBackedRefreshProgress {
@@ -201,6 +231,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         },
     )
     .unwrap();
+    drop(forge_writer);
 
     assert_eq!(provider_wide_calls, 1);
     assert_eq!(publication.generation_id, "all-provider-generation");

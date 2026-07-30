@@ -2,7 +2,9 @@
 mod tests {
     use std::time::Duration;
 
-    use ctx_history_capture::SourceBackedRefreshExecutor;
+    use ctx_history_capture::{
+        register_landed_source_backed_route, SourceBackedRefreshExecutor,
+    };
     use ctx_history_index::WriterOptions;
     use serde_json::json;
     use tempfile::tempdir;

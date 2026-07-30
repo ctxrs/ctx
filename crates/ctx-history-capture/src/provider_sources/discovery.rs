@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ctx_history_core::platform_security::validate_provider_source_outside_data_root;
 use ctx_history_core::CaptureProvider;
+use thiserror::Error;
 
 use super::{
     context::DiscoveryContext,
@@ -13,6 +15,34 @@ use super::{
 };
 
 const MAX_PROJECT_DISCOVERY_LOCATORS: usize = 128;
+
+#[derive(Debug, Error)]
+#[error(
+    "provider source root {source_root:?} is unsafe relative to ctx data root {data_root:?}: {detail}; choose or move ctx --data-root outside every provider root, or correct the explicit provider path"
+)]
+pub struct ProviderSourceRootBoundaryError {
+    pub data_root: PathBuf,
+    pub source_root: PathBuf,
+    pub detail: String,
+}
+
+/// Read-only preflight for provider roots before route handles, watchers, or
+/// persistent ctx state are created.
+pub fn validate_provider_source_roots_outside_data_root<'a>(
+    data_root: &Path,
+    sources: impl IntoIterator<Item = &'a ProviderSource>,
+) -> Result<(), ProviderSourceRootBoundaryError> {
+    for source in sources {
+        validate_provider_source_outside_data_root(data_root, &source.path).map_err(|error| {
+            ProviderSourceRootBoundaryError {
+                data_root: data_root.to_path_buf(),
+                source_root: source.path.clone(),
+                detail: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
 
 mod explicit;
 pub use explicit::provider_source_for_path;
@@ -114,4 +144,21 @@ fn discover_with_projects(
         report.issues.append(&mut next.issues);
     }
     dedupe_report(report)
+}
+
+#[cfg(test)]
+mod boundary_error_tests {
+    use super::*;
+
+    #[test]
+    fn public_boundary_error_names_a_concrete_recovery() {
+        let error = ProviderSourceRootBoundaryError {
+            data_root: PathBuf::from("/ctx-data"),
+            source_root: PathBuf::from("/provider"),
+            detail: "the roots overlap".to_owned(),
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("choose or move ctx --data-root"));
+        assert!(rendered.contains("correct the explicit provider path"));
+    }
 }

@@ -30,7 +30,7 @@ pub(super) struct LingmaRootAuthorizedSource {
 }
 
 impl LingmaRootAuthorizedSource {
-    pub(super) fn retain(path: &Path) -> LingmaSourceBackedResultV0<Self> {
+    pub(super) fn retain(data_root: &Path, path: &Path) -> LingmaSourceBackedResultV0<Self> {
         let parent = path.parent().ok_or_else(|| {
             CaptureError::InvalidPayload("Lingma SQLite source has no parent directory".to_owned())
         })?;
@@ -42,7 +42,8 @@ impl LingmaRootAuthorizedSource {
         let authority_handle = directory
             .try_clone_authority_handle()
             .map_err(CaptureError::from)?;
-        let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle, parent)?;
+        let sqlite_authority =
+            retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)?;
         source_root.revalidate()?;
         Ok(Self {
             source_root,

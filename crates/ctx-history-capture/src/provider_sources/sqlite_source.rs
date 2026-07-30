@@ -17,7 +17,7 @@
 
 use std::{
     ffi::{c_char, c_void, OsStr, OsString},
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{File, Metadata, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     ops::Deref,
     path::{Component, Path, PathBuf},
@@ -25,7 +25,7 @@ use std::{
     sync::Arc,
 };
 
-use ctx_history_core::default_data_root;
+use ctx_history_core::platform_security::create_private_directory_all;
 use rusqlite::{config::DbConfig, ffi, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -160,10 +160,15 @@ pub(crate) struct SqliteSourceDirectoryAuthority {
     directory: Arc<ProviderSourceDirectory>,
     path: PathBuf,
     identity: NativeFileIdentity,
+    data_root: PathBuf,
 }
 
 impl SqliteSourceDirectoryAuthority {
-    fn retain(authorized_parent: &File, approved_path: &Path) -> SqliteSourceAccessResult<Self> {
+    fn retain(
+        data_root: &Path,
+        authorized_parent: &File,
+        approved_path: &Path,
+    ) -> SqliteSourceAccessResult<Self> {
         validate_approved_parent_path(approved_path)?;
         let retained = NativeFileState::read(
             authorized_parent,
@@ -200,7 +205,12 @@ impl SqliteSourceDirectoryAuthority {
             directory: Arc::new(directory),
             path: approved_path.to_path_buf(),
             identity: retained.identity,
+            data_root: data_root.to_path_buf(),
         })
+    }
+
+    fn data_root(&self) -> &Path {
+        &self.data_root
     }
 
     fn revalidate(&self) -> SqliteSourceAccessResult<()> {

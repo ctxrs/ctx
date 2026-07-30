@@ -8,9 +8,10 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
-    build_automatic_source_backed_registry, DiscoveryContext, ProviderSourceStatus,
-    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
-    SourceBackedProviderRegistry,
+    build_automatic_source_backed_registry_from_report, discover_provider_sources_with_context,
+    validate_provider_source_roots_outside_data_root, DiscoveryContext, DiscoveryReport,
+    ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
+    SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
     SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress,
     SourceBackedResolverRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
     SourceBackedRouteResult,
@@ -29,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     commands::import::{
         load_explicit_source_catalog_authority, register_explicit_source_catalog_routes,
-        ExplicitSourceCatalogAuthority,
+        validate_explicit_source_catalog_roots, ExplicitSourceCatalogAuthority,
     },
     compact_json,
     config::{AppConfig, DaemonMode},

@@ -96,6 +96,7 @@ pub(crate) type ShelleySourceBackedResult<T> = Result<T, ShelleySourceBackedErro
 /// The one automatic Shelley source admitted for an invocation.
 #[derive(Debug, Clone)]
 pub(crate) struct ShelleySourceBackedAdapter {
+    data_root: PathBuf,
     exact_cwd: PathBuf,
     database_path: PathBuf,
     source: SourceKey,
@@ -112,7 +113,8 @@ impl ShelleySourceBackedAdapter {
 
     #[cfg(test)]
     pub(crate) fn start_scan(&self) -> ShelleySourceBackedResult<ShelleySourceBackedScan> {
-        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&self.database_path)?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.data_root, &self.database_path)?;
         let scan = self.start_snapshot_scan(sqlite_snapshot)?;
         source_root.revalidate()?;
         Ok(scan)
@@ -182,7 +184,8 @@ impl ShelleySourceBackedAdapter {
         }
         let (parent_bearing, message_rowid, conversation_rowid) = decode_compound_locator(locator)?;
 
-        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&self.database_path)?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.data_root, &self.database_path)?;
         let evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
         let conversation_columns = shelley_conversation_columns(conn)?;
@@ -238,6 +241,7 @@ impl ShelleySourceBackedAdapter {
 
 /// Discovers exactly `<cwd>/shelley.db` and no remembered or recursive roots.
 pub(crate) fn discover_shelley_source_backed_exact_cwd(
+    data_root: &Path,
     cwd: &Path,
 ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedAdapter>> {
     let exact_cwd = fs::canonicalize(cwd).map_err(CaptureError::from)?;
@@ -256,7 +260,7 @@ pub(crate) fn discover_shelley_source_backed_exact_cwd(
         Ok(_) => {}
     }
     // This preflight rejects symlinks and non-files before a source is admitted.
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&database_path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, &database_path)?;
     sqlite_snapshot.finish()?;
     source_root.revalidate()?;
     let anchor = SourceAnchor::provider_native(
@@ -271,6 +275,7 @@ pub(crate) fn discover_shelley_source_backed_exact_cwd(
         anchor,
     )?;
     Ok(Some(ShelleySourceBackedAdapter {
+        data_root: data_root.to_path_buf(),
         exact_cwd,
         database_path,
         source,
@@ -669,12 +674,14 @@ fn shelley_session_identity(
 }
 
 fn open_root_authorized_snapshot(
+    data_root: &Path,
     path: &Path,
 ) -> ShelleySourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(path, || {})
+    open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
 fn open_root_authorized_snapshot_with_hook(
+    data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
 ) -> ShelleySourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
@@ -693,7 +700,8 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();

@@ -104,9 +104,11 @@ use crate::provider_sources::{
     LingmaInventorySelector, WarpDiscoveryUnavailable,
 };
 use crate::{
-    discover_provider_sources_with_context, provider_source_spec, CaptureError, DiscoveryContext,
-    DiscoveryIssue, DiscoveryPlatform, ProviderAdapterContext, ProviderImportSupport,
-    ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
+    discover_provider_sources_with_context, provider_source_spec,
+    validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
+    DiscoveryIssue, DiscoveryPlatform, DiscoveryReport, ProviderAdapterContext,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
+    ProviderSourceStatus,
 };
 
 mod discovery;

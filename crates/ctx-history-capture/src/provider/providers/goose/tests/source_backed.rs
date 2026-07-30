@@ -42,6 +42,7 @@ fn registry(path: &Path) -> SourceBackedProviderRegistry {
         &mut registry,
         source,
         SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
         path.parent().unwrap(),
         Vec::new(),
     )

@@ -8,7 +8,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ctx_history_capture::discover_provider_sources;
+use ctx_history_capture::{
+    discover_provider_sources, validate_provider_source_roots_outside_data_root,
+};
 use notify::{
     event::{AccessKind, AccessMode},
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -439,7 +441,10 @@ fn daemon_watch_targets(data_root: &Path) -> Result<Vec<PathBuf>> {
     let mut targets = BTreeSet::new();
     targets.insert(data_root.join(CONFIG_FILE));
     targets.insert(data_root.join("catalogs").join("explicit-sources"));
-    for source in discover_provider_sources(&home) {
+    let sources = discover_provider_sources(&home);
+    validate_provider_source_roots_outside_data_root(data_root, sources.iter())
+        .context("validate provider roots before daemon watch registration")?;
+    for source in sources {
         targets.insert(source.path);
     }
     Ok(targets.into_iter().collect())

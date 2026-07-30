@@ -64,7 +64,8 @@ fn stock_sqlite_snapshot_finish_rejects_leaf_swap_after_open() {
     drop(create_database(&path));
     drop(create_database(&attacker));
 
-    let authority = LingmaRootAuthorizedSource::retain(&path).unwrap();
+    let authority =
+        LingmaRootAuthorizedSource::retain(crate::test_provider_sqlite_data_root(), &path).unwrap();
     let snapshot = authority.open_snapshot().unwrap();
     std::fs::rename(&path, &original).unwrap();
     std::fs::rename(&attacker, &path).unwrap();
@@ -133,7 +134,11 @@ fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
         database(&second_path, "jetbrains:idea:2026.2"),
     ]);
     let closing = opening.clone();
-    let scan = scan_lingma_source_backed_v0(opening, || Ok(closing.clone())).unwrap();
+    let scan =
+        scan_lingma_source_backed_v0(crate::test_provider_sqlite_data_root(), opening, || {
+            Ok(closing.clone())
+        })
+        .unwrap();
     assert_eq!(scan.databases.len(), 2);
     assert_eq!(all_records(&scan).len(), 4);
     let long_user = all_records(&scan)
@@ -163,7 +168,12 @@ fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
         database(&second_path, "jetbrains:idea:2026.2"),
         database(&first_path, "vscode:stable:default"),
     ]);
-    let replay = scan_lingma_source_backed_v0(reversed.clone(), || Ok(reversed)).unwrap();
+    let replay = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        reversed.clone(),
+        || Ok(reversed),
+    )
+    .unwrap();
     let mut first_ids = all_records(&scan)
         .into_iter()
         .map(|record| record.document.event_id.digest())
@@ -214,16 +224,21 @@ fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
     let opening = inventory(vec![database(&path, "vscode:stable:wal")]);
     let admitted = opening.clone();
     let closing = opening.clone();
-    let scan = scan_lingma_source_backed_v0(opening, || Ok(closing)).unwrap();
+    let scan =
+        scan_lingma_source_backed_v0(crate::test_provider_sqlite_data_root(), opening, || {
+            Ok(closing)
+        })
+        .unwrap();
     let user = all_records(&scan)
         .into_iter()
         .find(|record| record.document.role.as_deref() == Some("user"))
         .unwrap();
     assert_eq!(user.document.body, "committed Lingma WAL prompt");
-    let hydrated = LingmaSourceBackedResolverV0::new(&admitted)
-        .unwrap()
-        .hydrate_record(user)
-        .unwrap();
+    let hydrated =
+        LingmaSourceBackedResolverV0::new(crate::test_provider_sqlite_data_root(), &admitted)
+            .unwrap()
+            .hydrate_record(user)
+            .unwrap();
     assert_eq!(hydrated.provider_bytes, b"committed Lingma WAL prompt");
 }
 
@@ -252,7 +267,10 @@ fn stock_sqlite_snapshot_finish_precedes_source_certification() {
         std::fs::rename(&replacement, &replaced_path).unwrap();
     })));
 
-    let result = scan_lingma_source_backed_v0(inventory, || Ok(closing));
+    let result =
+        scan_lingma_source_backed_v0(crate::test_provider_sqlite_data_root(), inventory, || {
+            Ok(closing)
+        });
     assert!(result.is_err());
 }
 
@@ -297,7 +315,12 @@ fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text()
     drop(connection);
     let inventory = inventory(vec![database(&path, "vscode:profile:exact")]);
     let closing = inventory.clone();
-    let scan = scan_lingma_source_backed_v0(inventory.clone(), || Ok(closing)).unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        inventory.clone(),
+        || Ok(closing),
+    )
+    .unwrap();
     let records = all_records(&scan);
     let user = records
         .iter()
@@ -345,7 +368,9 @@ fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text()
         .certified_source_revision_digest()
         .is_none());
 
-    let resolver = LingmaSourceBackedResolverV0::new(&inventory).unwrap();
+    let resolver =
+        LingmaSourceBackedResolverV0::new(crate::test_provider_sqlite_data_root(), &inventory)
+            .unwrap();
     assert_eq!(
         resolver.hydrate_record(user).unwrap().provider_bytes,
         prompt.as_bytes()
@@ -399,9 +424,12 @@ fn source_backed_hydration_types_stale_row_and_record_digest() {
     );
     drop(connection);
     let stale_inventory = inventory(vec![database(&stale_path, "jetbrains:idea:stale-source")]);
-    let scan =
-        scan_lingma_source_backed_v0(stale_inventory.clone(), || Ok(stale_inventory.clone()))
-            .unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        stale_inventory.clone(),
+        || Ok(stale_inventory.clone()),
+    )
+    .unwrap();
     let stale_record = all_records(&scan)
         .into_iter()
         .find(|record| record.document.role.as_deref() == Some("user"))
@@ -413,10 +441,13 @@ fn source_backed_hydration_types_stale_row_and_record_digest() {
             [],
         )
         .unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(&stale_inventory)
-        .unwrap()
-        .hydrate_record(stale_record)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &stale_inventory,
+    )
+    .unwrap()
+    .hydrate_record(stale_record)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 
     let digest_path = temp.path().join("digest.db");
@@ -430,9 +461,12 @@ fn source_backed_hydration_types_stale_row_and_record_digest() {
     );
     drop(connection);
     let digest_inventory = inventory(vec![database(&digest_path, "vscode:stable:bad-digest")]);
-    let scan =
-        scan_lingma_source_backed_v0(digest_inventory.clone(), || Ok(digest_inventory.clone()))
-            .unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        digest_inventory.clone(),
+        || Ok(digest_inventory.clone()),
+    )
+    .unwrap();
     let digest_record = all_records(&scan)
         .into_iter()
         .find(|record| record.document.role.as_deref() == Some("user"))
@@ -455,20 +489,26 @@ fn source_backed_hydration_types_stale_row_and_record_digest() {
         coordinate,
         *digest_record.document.locator.record_digest(),
     );
-    let failure = LingmaSourceBackedResolverV0::new(&digest_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &digest_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
     let request = request_with_locator_evidence(
         digest_record,
         digest_record.document.locator.coordinate().clone(),
         [0xa5; 32],
     );
-    let failure = LingmaSourceBackedResolverV0::new(&digest_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &digest_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 
     let native_path = temp.path().join("native-key.db");
@@ -482,9 +522,12 @@ fn source_backed_hydration_types_stale_row_and_record_digest() {
     );
     drop(connection);
     let native_inventory = inventory(vec![database(&native_path, "vscode:stable:native-key")]);
-    let scan =
-        scan_lingma_source_backed_v0(native_inventory.clone(), || Ok(native_inventory.clone()))
-            .unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        native_inventory.clone(),
+        || Ok(native_inventory.clone()),
+    )
+    .unwrap();
     let native_record = all_records(&scan)[0];
     let connection = Connection::open(&native_path).unwrap();
     insert_row(
@@ -500,10 +543,13 @@ fn source_backed_hydration_types_stale_row_and_record_digest() {
         native_record.document.locator.coordinate().clone(),
         *native_record.document.locator.record_digest(),
     );
-    let failure = LingmaSourceBackedResolverV0::new(&native_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &native_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
 }
 
@@ -521,9 +567,12 @@ fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_ro
     );
     drop(connection);
     let missing_inventory = inventory(vec![database(&missing_path, "vscode:stable:missing-row")]);
-    let scan =
-        scan_lingma_source_backed_v0(missing_inventory.clone(), || Ok(missing_inventory.clone()))
-            .unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        missing_inventory.clone(),
+        || Ok(missing_inventory.clone()),
+    )
+    .unwrap();
     let record = all_records(&scan)
         .into_iter()
         .find(|record| record.document.role.as_deref() == Some("user"))
@@ -537,10 +586,13 @@ fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_ro
         record.document.locator.coordinate().clone(),
         *record.document.locator.record_digest(),
     );
-    let failure = LingmaSourceBackedResolverV0::new(&missing_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &missing_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::MissingRecord);
 
     let deleted_path = temp.path().join("deleted.db");
@@ -554,15 +606,21 @@ fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_ro
     );
     drop(connection);
     let deleted_inventory = inventory(vec![database(&deleted_path, "vscode:stable:deleted")]);
-    let scan =
-        scan_lingma_source_backed_v0(deleted_inventory.clone(), || Ok(deleted_inventory.clone()))
-            .unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        deleted_inventory.clone(),
+        || Ok(deleted_inventory.clone()),
+    )
+    .unwrap();
     let request = event_request(all_records(&scan)[0]);
     std::fs::remove_file(&deleted_path).unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(&deleted_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &deleted_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::ConfirmedDeleted);
 
     let available_root = temp.path().join("available-root");
@@ -581,16 +639,21 @@ fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_ro
         &unavailable_path,
         "jetbrains:idea:unavailable-root",
     )]);
-    let scan = scan_lingma_source_backed_v0(unavailable_inventory.clone(), || {
-        Ok(unavailable_inventory.clone())
-    })
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        unavailable_inventory.clone(),
+        || Ok(unavailable_inventory.clone()),
+    )
     .unwrap();
     let request = event_request(all_records(&scan)[0]);
     std::fs::rename(&available_root, temp.path().join("offline-root")).unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(&unavailable_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &unavailable_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::TemporarilyUnavailable);
 }
 
@@ -608,9 +671,11 @@ fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
     );
     drop(connection);
     let malformed_inventory = inventory(vec![database(&malformed_path, "vscode:stable:malformed")]);
-    let scan = scan_lingma_source_backed_v0(malformed_inventory.clone(), || {
-        Ok(malformed_inventory.clone())
-    })
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        malformed_inventory.clone(),
+        || Ok(malformed_inventory.clone()),
+    )
     .unwrap();
     let record = all_records(&scan)[0];
     Connection::open(&malformed_path)
@@ -625,10 +690,13 @@ fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
         record.document.locator.coordinate().clone(),
         *record.document.locator.record_digest(),
     );
-    let failure = LingmaSourceBackedResolverV0::new(&malformed_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &malformed_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 
     let unsupported_path = temp.path().join("unsupported.db");
@@ -645,19 +713,24 @@ fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
         &unsupported_path,
         "jetbrains:idea:unsupported",
     )]);
-    let scan = scan_lingma_source_backed_v0(unsupported_inventory.clone(), || {
-        Ok(unsupported_inventory.clone())
-    })
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        unsupported_inventory.clone(),
+        || Ok(unsupported_inventory.clone()),
+    )
     .unwrap();
     let request = event_request(all_records(&scan)[0]);
     Connection::open(&unsupported_path)
         .unwrap()
         .execute_batch("drop table chat_record;")
         .unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(&unsupported_inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure = LingmaSourceBackedResolverV0::new(
+        crate::test_provider_sqlite_data_root(),
+        &unsupported_inventory,
+    )
+    .unwrap()
+    .hydrate_event(&request)
+    .unwrap_err();
     assert_eq!(
         failure.kind,
         HydrationFailureKind::UnsupportedParserRevision
@@ -678,7 +751,12 @@ fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks(
     );
     drop(connection);
     let inventory = inventory(vec![database(&path, "vscode:stable:invalid")]);
-    let scan = scan_lingma_source_backed_v0(inventory.clone(), || Ok(inventory.clone())).unwrap();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        inventory.clone(),
+        || Ok(inventory.clone()),
+    )
+    .unwrap();
     let record = all_records(&scan)[0];
     let malformed_coordinate = NativeRecordCoordinate::ProviderSqlite {
         logical_relation: LOGICAL_RELATION.to_owned(),
@@ -690,10 +768,11 @@ fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks(
         malformed_coordinate,
         *record.document.locator.record_digest(),
     );
-    let failure = LingmaSourceBackedResolverV0::new(&inventory)
-        .unwrap()
-        .hydrate_event(&request)
-        .unwrap_err();
+    let failure =
+        LingmaSourceBackedResolverV0::new(crate::test_provider_sqlite_data_root(), &inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
 
     let provider_source = concat!(

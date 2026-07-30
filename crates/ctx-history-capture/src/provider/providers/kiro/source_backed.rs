@@ -128,6 +128,7 @@ pub(crate) struct KiroSourceBackedScanV0 {
 }
 
 pub(super) fn scan_kiro_source_backed(
+    data_root: &Path,
     source_path: &Path,
     source_format: &str,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> KiroSourceBackedResultV0<()>,
@@ -135,7 +136,7 @@ pub(super) fn scan_kiro_source_backed(
     let source_path = absolute_kiro_path(source_path)?;
     require_legacy_sqlite_format(&source_path, source_format)?;
     let source = kiro_source_key()?;
-    let database = KiroSqliteDatabase::open(&source_path)?;
+    let database = KiroSqliteDatabase::open(data_root, &source_path)?;
     let working = {
         let connection = database.connection(&source_path)?;
         let tables = KiroTables::probe(connection)?;
@@ -167,14 +168,20 @@ pub(super) fn scan_kiro_source_backed(
 
 #[cfg(test)]
 pub(crate) fn scan_kiro_source_backed_v0(
+    data_root: &Path,
     source_path: impl AsRef<Path>,
     source_format: &str,
 ) -> KiroSourceBackedResultV0<KiroSourceBackedScanV0> {
     let mut documents = Vec::new();
-    let scan = scan_kiro_source_backed(source_path.as_ref(), source_format, &mut |page| {
-        documents.extend(page);
-        Ok(())
-    })?;
+    let scan = scan_kiro_source_backed(
+        data_root,
+        source_path.as_ref(),
+        source_format,
+        &mut |page| {
+            documents.extend(page);
+            Ok(())
+        },
+    )?;
     Ok(KiroSourceBackedScanV0 {
         source: scan.source,
         documents,
@@ -189,12 +196,13 @@ pub(crate) fn scan_kiro_source_backed_v0(
 
 #[cfg(test)]
 pub(super) fn terminal_fence_matches(
+    data_root: &Path,
     source_path: &Path,
     expected: &SqliteSourceEvidence,
 ) -> KiroSourceBackedResultV0<bool> {
     let source_path = absolute_kiro_path(source_path)?;
     require_legacy_sqlite_format(&source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
-    let database = KiroSqliteDatabase::open(&source_path)?;
+    let database = KiroSqliteDatabase::open(data_root, &source_path)?;
     let current = database.finish(&source_path)?;
     Ok(&current == expected)
 }

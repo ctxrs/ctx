@@ -43,6 +43,7 @@ pub(crate) struct NanoClawCompleteRecord {
 /// locators. Each request addresses one exact central session row, database
 /// role, and message row; no directory search or best-effort matching occurs.
 pub(crate) struct NanoClawCompleteProject {
+    data_root: PathBuf,
     central_path: PathBuf,
     central_snapshot: NanoClawSqliteSnapshot,
     central: ReadOnlySqliteConnection,
@@ -181,6 +182,7 @@ pub(crate) fn resolve_source_backed_exact(
 
 impl NanoClawCompleteProject {
     pub(crate) fn open(
+        data_root: &Path,
         path: &Path,
         locators: &[NativeLocator],
         query_budget: CompleteContentSqliteQueryBudget,
@@ -188,13 +190,14 @@ impl NanoClawCompleteProject {
         let project_root = fs::canonicalize(nanoclaw_project_root(path)?)?;
         let central_path = project_root.join("data").join("v2.db");
         let central_snapshot = NanoClawSqliteSnapshot::read(&central_path)?;
-        let central = open_provider_sqlite_readonly(&central_path)?;
+        let central = open_provider_sqlite_readonly(data_root, &central_path)?;
         configure_complete_content_sqlite_connection(&central, query_budget)?;
         if !central_snapshot.revalidate(&central_path)? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
         let session_columns = nanoclaw_session_columns(&central)?;
         let mut project = Self {
+            data_root: data_root.to_path_buf(),
             central_path,
             central_snapshot,
             central,
@@ -242,7 +245,11 @@ impl NanoClawCompleteProject {
             .join("v2-sessions")
             .join(&session.agent_group_id)
             .join(&session.id);
-        let database = NanoClawProjectDatabaseSnapshot::read(&session_dir, coordinate.source)?;
+        let database = NanoClawProjectDatabaseSnapshot::read(
+            &self.data_root,
+            &session_dir,
+            coordinate.source,
+        )?;
         if database.is_present() && !fs::canonicalize(database.path())?.starts_with(project_root) {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: database.path().to_path_buf(),
@@ -296,7 +303,7 @@ impl NanoClawCompleteProject {
         if !component.is_present() {
             return Ok(None);
         }
-        let conn = open_provider_sqlite_readonly(component.path())?;
+        let conn = open_provider_sqlite_readonly(&self.data_root, component.path())?;
         configure_complete_content_sqlite_connection(&conn, self.query_budget)?;
         if !component.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture.into());

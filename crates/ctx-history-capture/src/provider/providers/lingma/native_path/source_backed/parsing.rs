@@ -98,6 +98,7 @@ impl LingmaSourceBackedScanV0 {
 
 #[cfg(test)]
 pub(crate) fn scan_lingma_source_backed_v0<F>(
+    data_root: &std::path::Path,
     opening_inventory: LingmaSourceInventoryV0,
     close_inventory: F,
 ) -> LingmaSourceBackedResultV0<LingmaSourceBackedScanV0>
@@ -107,7 +108,7 @@ where
     reject_duplicate_paths(&opening_inventory)?;
     let mut databases = Vec::with_capacity(opening_inventory.databases.len());
     for database in &opening_inventory.databases {
-        let root_authority = LingmaRootAuthorizedSource::retain(&database.path)?;
+        let root_authority = LingmaRootAuthorizedSource::retain(data_root, &database.path)?;
         let sqlite_snapshot = root_authority.open_snapshot()?;
         let mut records = Vec::new();
         let certificate = scan_lingma_snapshot_v0(database, sqlite_snapshot, &mut |document| {

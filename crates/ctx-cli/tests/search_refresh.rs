@@ -8,6 +8,22 @@ use std::{
 };
 use support::*;
 
+fn search_refresh_data_root(temp: &TempDir) -> PathBuf {
+    temp.path().join("ctx-data")
+}
+
+fn ctx(temp: &TempDir) -> Command {
+    let mut command = support::ctx(temp);
+    command.env("CTX_DATA_ROOT", search_refresh_data_root(temp));
+    command
+}
+
+fn ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
+    let mut command = support::ctx_from_binary(temp, binary);
+    command.env("CTX_DATA_ROOT", search_refresh_data_root(temp));
+    command
+}
+
 struct SourceRefreshDaemon {
     child: Option<Child>,
 }
@@ -32,13 +48,22 @@ impl Drop for SourceRefreshDaemon {
 }
 
 fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_with_codex_home(temp, None)
+}
+
+fn start_source_refresh_daemon_with_codex_home(
+    temp: &TempDir,
+    codex_home: Option<&Path>,
+) -> SourceRefreshDaemon {
+    let data_root = search_refresh_data_root(temp);
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
     fs::write(
-        temp.path().join("config.toml"),
+        data_root.join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
     let binary = copied_ctx_binary(temp);
-    launch_source_refresh_daemon(temp, &binary)
+    launch_source_refresh_daemon(temp, &binary, codex_home)
 }
 
 fn restart_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
@@ -52,10 +77,14 @@ fn restart_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
         "source-refresh restart binary is missing: {}",
         binary.display()
     );
-    launch_source_refresh_daemon(temp, &binary)
+    launch_source_refresh_daemon(temp, &binary, None)
 }
 
-fn launch_source_refresh_daemon(temp: &TempDir, binary: &Path) -> SourceRefreshDaemon {
+fn launch_source_refresh_daemon(
+    temp: &TempDir,
+    binary: &Path,
+    codex_home: Option<&Path>,
+) -> SourceRefreshDaemon {
     let prepared = ctx_from_binary(temp, binary);
     let mut command = StdCommand::new(prepared.get_program());
     for (name, value) in prepared.get_envs() {
@@ -73,6 +102,9 @@ fn launch_source_refresh_daemon(temp: &TempDir, binary: &Path) -> SourceRefreshD
         .env("CTX_DAEMON_MODE", "source-refresh-only")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if let Some(codex_home) = codex_home {
+        command.env("CODEX_HOME", codex_home);
+    }
     let spawn_deadline = Instant::now() + Duration::from_secs(1);
     let child = loop {
         match command.spawn() {
@@ -190,7 +222,7 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
     );
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(
-        !temp.path().join("work.sqlite").exists(),
+        !search_refresh_data_root(temp).join("work.sqlite").exists(),
         "source-backed search/status must not create the previous-epoch Store"
     );
     status
@@ -254,11 +286,9 @@ fn assert_source_backed_search_show_oracle(
                 .is_some_and(|snippet| snippet.contains(query)),
             "{result:#}"
         );
-        assert_eq!(
-            result.get("source_exists"),
-            None,
-            "source-backed results must not expose a live-path Store oracle: {result:#}"
-        );
+        let source_exists = result["source_exists"]
+            .as_bool()
+            .expect("source-backed results report current source availability");
         assert_eq!(
             result.get("why_matched"),
             None,
@@ -313,9 +343,9 @@ fn assert_source_backed_search_show_oracle(
         assert_eq!(citation["provider"], provider, "{result:#}");
         assert_eq!(citation["source_path"], result["source_path"], "{result:#}");
         assert_eq!(
-            citation.get("source_exists"),
-            None,
-            "generation-bound citations must not probe the mutable source path: {result:#}"
+            citation["source_exists"].as_bool(),
+            Some(source_exists),
+            "source-backed citations must preserve current source availability: {result:#}"
         );
 
         let shown_event = json_output(ctx(temp).args([
@@ -384,8 +414,7 @@ fn generation_id(search: &Value) -> &str {
 }
 
 fn generation_manifest(temp: &TempDir, generation: &str) -> (GenerationManifest, Value) {
-    let path = temp
-        .path()
+    let path = search_refresh_data_root(temp)
         .join("search/lexical/ctx-generations")
         .join(format!("{generation}.json"));
     let bytes = fs::read(&path)
@@ -402,7 +431,7 @@ fn generation_manifest(temp: &TempDir, generation: &str) -> (GenerationManifest,
 }
 
 fn generation_manifest_paths(temp: &TempDir) -> Vec<PathBuf> {
-    let directory = temp.path().join("search/lexical/ctx-generations");
+    let directory = search_refresh_data_root(temp).join("search/lexical/ctx-generations");
     let Ok(entries) = fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -503,9 +532,17 @@ fn assert_daemon_publication(
     let status = assert_source_generation_ready(temp, expected_generation);
     let job = &status["daemon"]["jobs"]["source_backed_refresh"];
     assert_eq!(job["owner"], "daemon", "{status:#}");
-    assert_eq!(job["daemon_mode"], "source-refresh-only", "{status:#}");
-    assert_eq!(job["trigger"], "search", "{status:#}");
-    assert_eq!(job["trigger_provenance"], "manual", "{status:#}");
+    assert_eq!(
+        status["daemon"]["mode"], "source-refresh-only",
+        "{status:#}"
+    );
+    match job["trigger"].as_str() {
+        Some("search") => assert_eq!(job["trigger_provenance"], "manual", "{status:#}"),
+        Some("periodic") => {
+            assert_eq!(job["trigger_provenance"], "daemon_scheduler", "{status:#}")
+        }
+        trigger => panic!("unexpected source refresh trigger {trigger:?}: {status:#}"),
+    }
     assert_eq!(job["request_state"], "published", "{status:#}");
     assert_eq!(job["status"], "completed", "{status:#}");
     assert_eq!(
@@ -631,7 +668,7 @@ fn assert_daemon_refresh_failure(
     );
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(
-        !temp.path().join("work.sqlite").exists(),
+        !search_refresh_data_root(temp).join("work.sqlite").exists(),
         "failed source-backed refresh must not create the previous-epoch Store"
     );
     status

@@ -123,6 +123,7 @@ impl DeepAgentsDatabaseRouteV0 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeepAgentsDatabaseSelectionV0 {
     path: PathBuf,
+    data_root: PathBuf,
     route: DeepAgentsDatabaseRouteV0,
 }
 
@@ -130,37 +131,42 @@ impl DeepAgentsDatabaseSelectionV0 {
     // Home selection is retained as the authoritative current-over-legacy,
     // fail-closed route policy even when release capture supplies an explicit path.
     #[cfg(test)]
-    pub(crate) fn from_home(home: &Path) -> Self {
+    pub(crate) fn from_home(data_root: &Path, home: &Path) -> Self {
         let current = home.join(".deepagents/.state/sessions.db");
         let legacy = home.join(".deepagents/sessions.db");
         match fs::symlink_metadata(&current) {
             Ok(_) => Self {
                 path: current,
+                data_root: data_root.to_path_buf(),
                 route: DeepAgentsDatabaseRouteV0::Current,
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if fs::symlink_metadata(&legacy).is_ok() {
                     Self {
                         path: legacy,
+                        data_root: data_root.to_path_buf(),
                         route: DeepAgentsDatabaseRouteV0::Legacy,
                     }
                 } else {
                     Self {
                         path: current,
+                        data_root: data_root.to_path_buf(),
                         route: DeepAgentsDatabaseRouteV0::Current,
                     }
                 }
             }
             Err(_) => Self {
                 path: current,
+                data_root: data_root.to_path_buf(),
                 route: DeepAgentsDatabaseRouteV0::Current,
             },
         }
     }
 
-    pub(crate) fn explicit(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn explicit(data_root: &Path, path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            data_root: data_root.to_path_buf(),
             route: DeepAgentsDatabaseRouteV0::Explicit,
         }
     }
@@ -235,7 +241,8 @@ impl DeepAgentsSourceBackedScannerV0 {
         selection: DeepAgentsDatabaseSelectionV0,
         imported_at: DateTime<Utc>,
     ) -> DeepAgentsSourceBackedResultV0<Self> {
-        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(selection.path())?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&selection.data_root, selection.path())?;
         let evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
         deepagents_validate_schema(conn, selection.path())?;
@@ -537,15 +544,15 @@ impl DeepAgentsLocatorResolverV0 {
     // Retain the home-route resolver to enforce the same no-fallback selection
     // policy at the hydration boundary.
     #[cfg(test)]
-    pub(crate) fn from_home(home: &Path) -> Self {
+    pub(crate) fn from_home(data_root: &Path, home: &Path) -> Self {
         Self {
-            selection: DeepAgentsDatabaseSelectionV0::from_home(home),
+            selection: DeepAgentsDatabaseSelectionV0::from_home(data_root, home),
         }
     }
 
-    pub(crate) fn explicit(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn explicit(data_root: &Path, path: impl Into<PathBuf>) -> Self {
         Self {
-            selection: DeepAgentsDatabaseSelectionV0::explicit(path),
+            selection: DeepAgentsDatabaseSelectionV0::explicit(data_root, path),
         }
     }
 
@@ -580,7 +587,8 @@ impl DeepAgentsLocatorResolverV0 {
             addresses.push((address, row_version));
         }
 
-        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(self.selection.path())?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.selection.data_root, self.selection.path())?;
         let evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
         validate_deepagents_content_schema(conn)?;
@@ -610,12 +618,14 @@ impl DeepAgentsLocatorResolverV0 {
 }
 
 fn open_root_authorized_snapshot(
+    data_root: &Path,
     path: &Path,
 ) -> DeepAgentsSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(path, || {})
+    open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
 fn open_root_authorized_snapshot_with_hook(
+    data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
 ) -> DeepAgentsSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
@@ -634,7 +644,8 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();

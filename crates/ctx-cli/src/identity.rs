@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use ctx_history_core::{
     platform_security::{
-        restrict_private_directory, restrict_private_file, verify_private_directory,
+        establish_private_data_root, restrict_private_file, verify_private_directory,
         verify_private_file,
     },
     utc_now,
@@ -74,8 +74,7 @@ fn access_installation_id(data_root: &Path, create: bool) -> Result<Option<Strin
 
 fn prepare_identity_root(data_root: &Path) -> Result<()> {
     validate_identity_root_path(data_root)?;
-    fs::create_dir_all(data_root).context("create installation identity root")?;
-    restrict_private_directory(data_root).context("protect installation identity root")?;
+    establish_private_data_root(data_root).context("protect installation identity root")?;
     validate_identity_root(data_root)
 }
 

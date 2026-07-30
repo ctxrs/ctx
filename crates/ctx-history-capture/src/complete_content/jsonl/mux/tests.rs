@@ -38,7 +38,7 @@ fn message_request(
         size_bytes: Some(fs::metadata(path).unwrap().len()),
         ..SourceSnapshot::default()
     };
-    let source_access = SourceAccessBroker::new()
+    let source_access = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: uuid::Uuid::new_v4(),
@@ -109,7 +109,7 @@ fn chat_message_survives_append_but_not_record_rewrite() {
     writeln!(file, "{}", json!({"id": "later", "role": "user"})).unwrap();
     file.sync_all().unwrap();
     drop(file);
-    request.source_access = SourceAccessBroker::new()
+    request.source_access = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
         .admit(
             AuthorizedSourceRoute {
                 source_id: uuid::Uuid::new_v4(),

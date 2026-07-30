@@ -39,6 +39,7 @@ pub(crate) struct KiroHydratedRecordV0 {
 
 #[derive(Debug)]
 pub(crate) struct KiroLocatorResolverV0 {
+    data_root: PathBuf,
     source_path: PathBuf,
     source: SourceKey,
     snapshot_opens: Cell<u64>,
@@ -47,16 +48,21 @@ pub(crate) struct KiroLocatorResolverV0 {
 
 impl KiroLocatorResolverV0 {
     pub(crate) fn discover(
+        data_root: impl Into<PathBuf>,
         source_path: impl AsRef<Path>,
         source_format: &str,
     ) -> KiroSourceBackedResultV0<Self> {
         let source_path = absolute_kiro_path(source_path.as_ref())?;
         require_legacy_sqlite_format(&source_path, source_format)?;
-        Self::new(source_path)
+        Self::new(data_root, source_path)
     }
 
-    pub(super) fn new(source_path: impl Into<PathBuf>) -> KiroSourceBackedResultV0<Self> {
+    pub(super) fn new(
+        data_root: impl Into<PathBuf>,
+        source_path: impl Into<PathBuf>,
+    ) -> KiroSourceBackedResultV0<Self> {
         Ok(Self {
+            data_root: data_root.into(),
             source_path: source_path.into(),
             source: kiro_source_key()?,
             snapshot_opens: Cell::new(0),
@@ -105,7 +111,7 @@ impl KiroLocatorResolverV0 {
             })
             .collect::<KiroSourceBackedResultV0<Vec<_>>>()?;
 
-        let database = KiroSqliteDatabase::open(&self.source_path)?;
+        let database = KiroSqliteDatabase::open(&self.data_root, &self.source_path)?;
         self.snapshot_opens
             .set(self.snapshot_opens.get().saturating_add(1));
         let resolved = (|| {

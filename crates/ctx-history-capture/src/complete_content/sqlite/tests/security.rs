@@ -14,7 +14,7 @@ fn sidecar_free_scan_and_hydration_leave_missing_sidecars_and_directory_unchange
     let documents = collect_opencode_documents(registration, &path);
     assert_eq!(documents[0].body, body);
     let hydrated = registration
-        .exact_resolver(&path)
+        .exact_resolver(crate::test_provider_sqlite_data_root(), &path)
         .hydrate_event(&event_request(&documents[0]))
         .unwrap();
 
@@ -54,7 +54,7 @@ fn active_wal_scan_and_hydration_are_read_only_and_recover_committed_content() {
     let documents = collect_opencode_documents(registration, &path);
     assert_eq!(documents[0].body, body);
     let hydrated = registration
-        .exact_resolver(&path)
+        .exact_resolver(crate::test_provider_sqlite_data_root(), &path)
         .hydrate_event(&event_request(&documents[0]))
         .unwrap();
     assert_eq!(hydrated.provider_bytes, body.as_bytes());
@@ -71,7 +71,7 @@ fn typed_native_key_row_version_and_digest_are_all_verified() {
     let registration = opencode::opencode_source_backed_registration();
     let documents = collect_opencode_documents(registration, &path);
     let document = &documents[0];
-    let resolver = registration.exact_resolver(&path);
+    let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
     let NativeRecordCoordinate::ProviderSqlite {
         logical_relation,
         primary_key,
@@ -137,7 +137,7 @@ fn mutation_and_concurrent_leaf_replacement_fail_closed() {
     let registration = opencode::opencode_source_backed_registration();
     let documents = collect_opencode_documents(registration, &path);
     let request = event_request(&documents[0]);
-    let resolver = registration.exact_resolver(&path);
+    let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
     let start = std::sync::Arc::new(std::sync::Barrier::new(2));
     let replacement_thread = std::thread::spawn({
         let path = path.clone();

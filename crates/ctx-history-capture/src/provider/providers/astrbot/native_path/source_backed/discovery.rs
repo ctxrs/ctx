@@ -145,12 +145,14 @@ impl AstrBotSourceBackedInventoryV0 {
 }
 
 pub(super) fn open_root_authorized_snapshot(
+    data_root: &Path,
     path: &Path,
 ) -> AstrBotSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(path, || {})
+    open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
 pub(super) fn open_root_authorized_snapshot_with_hook(
+    data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
 ) -> AstrBotSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
@@ -169,7 +171,8 @@ pub(super) fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();

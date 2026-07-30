@@ -43,8 +43,12 @@ fn kiro_source_backed_row_hydrates_each_typed_event_and_rejects_rewrite() {
     .unwrap();
     drop(conn);
 
-    let scan =
-        kiro::native_path::scan_kiro_source_backed_v0(&path, KIRO_SQLITE_SOURCE_FORMAT).unwrap();
+    let scan = kiro::native_path::scan_kiro_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        KIRO_SQLITE_SOURCE_FORMAT,
+    )
+    .unwrap();
     assert_eq!(scan.certificate.counts().indexed_documents, 2);
     assert_eq!(
         scan.documents
@@ -64,9 +68,12 @@ fn kiro_source_backed_row_hydrates_each_typed_event_and_rejects_rewrite() {
         } if logical_relation == "conversations_v2" && parts.len() == 2
     )));
 
-    let resolver =
-        kiro::native_path::KiroLocatorResolverV0::discover(&path, KIRO_SQLITE_SOURCE_FORMAT)
-            .unwrap();
+    let resolver = kiro::native_path::KiroLocatorResolverV0::discover(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        KIRO_SQLITE_SOURCE_FORMAT,
+    )
+    .unwrap();
     for (document, expected) in scan.documents.iter().zip([&user_body, &assistant_body]) {
         let hydrated = resolver.hydrate(&document.locator).unwrap();
         assert_eq!(hydrated.decoded_display_text, *expected);

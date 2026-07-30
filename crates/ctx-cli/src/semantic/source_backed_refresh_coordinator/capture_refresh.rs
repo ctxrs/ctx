@@ -41,11 +41,21 @@ pub(super) fn execute_capture_owned_refresh_with<Refresh>(
 where
     Refresh: FnOnce(
         &DiscoveryContext,
+        DiscoveryReport,
+        StdDuration,
         &Path,
         &Path,
         &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
+    let discovery = discovery.clone().with_data_root(execution.data_root);
+    let discovery_started = StdInstant::now();
+    let report = discover_provider_sources_with_context(&discovery);
+    let discovery_duration = discovery_started.elapsed();
+    validate_provider_source_roots_outside_data_root(execution.data_root, report.sources.iter())
+        .context("validate provider roots before source-refresh state writes")?;
+    validate_explicit_source_catalog_roots(execution.data_root)
+        .context("validate explicit provider roots before source-refresh state writes")?;
     execution.report_progress("discovering", 0, 0, None)?;
     let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
         execution
@@ -63,7 +73,9 @@ where
             })
     };
     refresh_all(
-        discovery,
+        &discovery,
+        report,
+        discovery_duration,
         execution.data_root,
         execution.index_root,
         &mut report_progress,
@@ -72,13 +84,17 @@ where
 
 fn refresh_all_provider_sources(
     discovery: &DiscoveryContext,
+    report: DiscoveryReport,
+    discovery_duration: StdDuration,
     data_root: &Path,
     index_root: &Path,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let mut build = build_automatic_source_backed_registry(discovery);
+    let mut build =
+        build_automatic_source_backed_registry_from_report(discovery, data_root, report);
+    build.discovery_duration = discovery_duration;
     register_explicit_source_catalog_routes(data_root, index_root, &mut build)?;
     let (executor, issues) = build.into_refresh_executor(WriterOptions::default());
     let retained_sources = open_published_generation(data_root)?
@@ -162,6 +178,7 @@ pub(super) fn reject_blocking_automatic_registry_issues(
                 SourceBackedAutomaticUnavailableReason::SourceStatus(
                     ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
                 ) => false,
+                SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. } => true,
                 SourceBackedAutomaticUnavailableReason::SourceStatus(_)
                 | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
                 | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
@@ -238,11 +255,12 @@ fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReas
         SourceBackedAutomaticUnavailableReason::SourceStatus(status) => {
             format!("source status is {}", status.as_str())
         }
+        SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { detail }
+        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
         SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail }
         | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { detail } => {
             (*detail).to_owned()
         }
-        SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
     }
 }
 
