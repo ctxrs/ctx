@@ -49,6 +49,8 @@ class RefreshSnapshot:
     generation_changed: bool
     indexed_documents: int
     current: dict[str, object]
+    status: dict[str, object]
+    job: dict[str, object]
     opstamp: int
     segments: tuple[str, ...]
     meta: PublishedFileState
@@ -397,6 +399,8 @@ def refresh_snapshot(
         generation_changed=job["generation_changed"],
         indexed_documents=indexed_documents,
         current=dict(current),
+        status=dict(status),
+        job=dict(job),
         opstamp=meta_packet["opstamp"],
         segments=segments,
         meta=meta,
