@@ -61,6 +61,7 @@ pub(crate) use resume::read_gemini_transcript_pages_from_frontier;
 
 const BODY_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-retained-body-v1\0";
 const RESULT_STRING_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-string-v1\0";
+const RESULT_UNSUPPORTED_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-unsupported-v1\0";
 const RESULT_FALLBACK_ID_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-fallback-id-v1\0";
 const OUTPUT_UNIT_KEY_DOMAIN: &[u8] = b"ctx-gemini-nativepath-output-unit-key-v1\0";
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-complete-prefix-v1\0";

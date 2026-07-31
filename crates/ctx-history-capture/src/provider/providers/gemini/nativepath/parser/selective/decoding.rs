@@ -16,7 +16,7 @@ pub(in super::super) fn decode_result_record(
     let capture_full_content = profile == GeminiNativePathProfile::CoreAndTransientOutputs;
     #[cfg(test)]
     if capture_full_content {
-        TEST_RESULT_FULL_HYDRATIONS.set(TEST_RESULT_FULL_HYDRATIONS.get().saturating_add(1));
+        TEST_RESULT_FULL_DECODINGS.set(TEST_RESULT_FULL_DECODINGS.get().saturating_add(1));
     }
     // This is the record's sole decoding pass. CoreOnly computes only the
     // bounded transient material needed to recognize the exact released
@@ -24,7 +24,7 @@ pub(in super::super) fn decode_result_record(
     let result = parse_result_record_selectively(payload, capture_full_content)?;
     let occurred_at_unix_ms = result.occurred_at_unix_ms;
     let native_record_id = result.native_record_id;
-    let probed = result.outputs;
+    let mut probed = result.outputs;
     if probed.len() > MAX_GEMINI_NATIVE_PAGE_RECORDS {
         return Err(format!(
             "Gemini result record exceeds the {MAX_GEMINI_NATIVE_PAGE_RECORDS} output limit"
@@ -39,6 +39,19 @@ pub(in super::super) fn decode_result_record(
         failure_previews: 0,
     };
     let mut retained_identities = BTreeSet::new();
+    let mut result_call_counts = BTreeMap::<String, usize>::new();
+    for output in &probed {
+        if let Some(call_id) = output.call_id.as_ref() {
+            *result_call_counts.entry(call_id.clone()).or_default() += 1;
+        }
+    }
+    for output in &mut probed {
+        output.ambiguous_native_fields |= output
+            .call_id
+            .as_ref()
+            .and_then(|call_id| result_call_counts.get(call_id))
+            .is_some_and(|count| *count != 1);
+    }
     for (index, mut probed) in probed.into_iter().enumerate() {
         let content = probed.content.take();
         let retained_failure = !probed.redacted
@@ -46,6 +59,10 @@ pub(in super::super) fn decode_result_record(
                 probed.outcome.outcome,
                 OutputOutcome::Failure | OutputOutcome::Timeout
             );
+        let retained_repository_evidence = probed.command.is_some()
+            || probed.declared_workdir.is_some()
+            || !probed.file_paths.is_empty()
+            || probed.ambiguous_native_fields;
         decoded.decoded_body_bytes = decoded.decoded_body_bytes.saturating_add(
             if profile == GeminiNativePathProfile::CoreAndTransientOutputs {
                 content.as_ref().map_or(0, |content| content.len() as u64)
@@ -80,7 +97,7 @@ pub(in super::super) fn decode_result_record(
                 )?,
             ));
         }
-        if retained_failure {
+        if !probed.redacted && (retained_failure || retained_repository_evidence) {
             let event = decode_output_diagnostic(
                 native_record_id.as_deref(),
                 occurred_at_unix_ms,
@@ -91,9 +108,11 @@ pub(in super::super) fn decode_result_record(
                 event_identity.clone(),
             )?;
             let event_bytes = retained_event_bytes(&event)?;
-            decoded.failure_diagnostics = decoded.failure_diagnostics.saturating_add(1);
-            if probed.released_diagnostic_preview.is_some() {
-                decoded.failure_previews = decoded.failure_previews.saturating_add(1);
+            if retained_failure {
+                decoded.failure_diagnostics = decoded.failure_diagnostics.saturating_add(1);
+                if probed.released_diagnostic_preview.is_some() {
+                    decoded.failure_previews = decoded.failure_previews.saturating_add(1);
+                }
             }
             decoded.events.push((event.event, event_bytes));
         }
@@ -140,6 +159,10 @@ fn decode_output_diagnostic(
     let body = GeminiEventBody::OutputDiagnostic {
         call_id: output.call_id.clone(),
         tool_name: output.tool_name.clone(),
+        command: output.command.clone(),
+        declared_workdir: output.declared_workdir.clone(),
+        file_paths: output.file_paths.clone(),
+        ambiguous_native_fields: output.ambiguous_native_fields,
         outcome,
         exit_code: output.outcome.exit_code,
         duration_ms: output.outcome.duration_ms,

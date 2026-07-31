@@ -24,7 +24,14 @@ pub(crate) enum CursorEventBody {
     ToolCall {
         call_id: Option<String>,
         tool_name: Option<String>,
+        command: Option<String>,
+        declared_workdir: Option<String>,
         input_paths: Vec<String>,
+        ambiguous_native_fields: bool,
+    },
+    ToolOutput {
+        call_id: Option<String>,
+        ambiguous_linkage: bool,
     },
 }
 
@@ -71,14 +78,33 @@ pub(super) fn project_cursor_record(
                     role,
                     call_id,
                     tool_name,
+                    command,
+                    declared_workdir,
                     input_paths,
+                    ambiguous_native_fields,
                 } => (
                     EventType::ToolCall,
                     role,
                     CursorEventBody::ToolCall {
                         call_id,
                         tool_name,
+                        command,
+                        declared_workdir,
                         input_paths,
+                        ambiguous_native_fields,
+                    },
+                    None,
+                ),
+                CursorSafePart::ToolResult {
+                    role,
+                    call_id,
+                    ambiguous_linkage,
+                } => (
+                    EventType::ToolOutput,
+                    role,
+                    CursorEventBody::ToolOutput {
+                        call_id,
+                        ambiguous_linkage,
                     },
                     None,
                 ),

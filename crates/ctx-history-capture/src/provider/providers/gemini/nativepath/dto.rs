@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::{common::io::ProviderSourceRoot, CaptureError};
 
 #[cfg(test)]
-pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 6;
+pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 7;
 #[cfg(test)]
 pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 4;
 
@@ -69,6 +69,7 @@ pub(crate) struct GeminiSession {
     pub(crate) agent_type: AgentType,
     pub(crate) started_at: Option<DateTime<Utc>>,
     pub(crate) cwd: Option<String>,
+    pub(crate) cwd_ambiguous: bool,
     pub(crate) native_kind: Option<String>,
 }
 
@@ -105,6 +106,10 @@ pub(crate) enum GeminiEventBody {
     OutputDiagnostic {
         call_id: Option<String>,
         tool_name: Option<String>,
+        command: Option<String>,
+        declared_workdir: Option<String>,
+        file_paths: Vec<String>,
+        ambiguous_native_fields: bool,
         outcome: String,
         exit_code: Option<i32>,
         duration_ms: Option<u64>,

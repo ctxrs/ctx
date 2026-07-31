@@ -232,15 +232,24 @@ pub(super) fn decode_header(
         } else {
             path_agent_type
         };
+    let mut directories = header
+        .directories
+        .into_iter()
+        .filter(|directory| !directory.trim().is_empty())
+        .collect::<Vec<_>>();
+    directories.dedup();
+    let (cwd, cwd_ambiguous) = match directories.as_slice() {
+        [] => (None, false),
+        [directory] => (Some(directory.clone()), false),
+        _ => (None, true),
+    };
     Ok(GeminiSession {
         native_session_id: native_session_id.to_owned(),
         parent_native_session_id,
         agent_type,
         started_at: header.start_time.as_deref().and_then(parse_timestamp),
-        cwd: header
-            .directories
-            .into_iter()
-            .find(|directory| !directory.trim().is_empty()),
+        cwd,
+        cwd_ambiguous,
         native_kind: header.kind,
     })
 }
@@ -424,12 +433,27 @@ enum GeminiSelectedContent {
     Absent,
     String(GeminiBoundedContent),
     Null,
-    Unsupported,
+    Unsupported {
+        encoded_bytes: usize,
+        sha256: [u8; 32],
+    },
+}
+
+#[derive(Debug, Default)]
+pub(super) struct GeminiRepositoryArgs {
+    command: Option<String>,
+    declared_workdir: Option<String>,
+    file_paths: Vec<String>,
+    ambiguous_native_fields: bool,
 }
 
 struct ProbedGeminiOutput {
     call_id: Option<String>,
     tool_name: Option<String>,
+    command: Option<String>,
+    declared_workdir: Option<String>,
+    file_paths: Vec<String>,
+    ambiguous_native_fields: bool,
     outcome: OutputOutcomeMetadata,
     redacted: bool,
     released_diagnostic_preview: Option<String>,
@@ -456,6 +480,8 @@ pub(super) struct DecodedGeminiResult {
 
 const MAX_GEMINI_STRUCTURAL_DEPTH: usize = 128;
 const MAX_GEMINI_STRUCTURAL_KEY_CHARS: usize = 64;
+const MAX_GEMINI_REPOSITORY_STRING_CHARS: usize = 64 * 1024;
+const MAX_GEMINI_REPOSITORY_PATHS: usize = 256;
 
 struct GeminiRawJson<'a> {
     bytes: &'a [u8],
@@ -712,11 +738,9 @@ impl<'a> GeminiRawJson<'a> {
         self.whitespace();
         if self.peek() == Some(b'"') {
             return self
-                .string(usize::MAX)?
+                .string(MAX_GEMINI_REPOSITORY_STRING_CHARS)?
                 .exact()
-                .ok_or_else(|| {
-                    "Gemini result metadata string exceeded addressable memory".to_owned()
-                })
+                .ok_or_else(|| "Gemini result metadata string exceeded the bound".to_owned())
                 .map(Some);
         }
         self.skip_value(0)?;
