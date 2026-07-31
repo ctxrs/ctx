@@ -672,9 +672,18 @@ fn assert_daemon_refresh_failure(
     assert_eq!(status["refresh"]["request_state"], "failed", "{status:#}");
     let job = &status["daemon"]["jobs"]["source_backed_refresh"];
     assert_eq!(job["owner"], "daemon", "{status:#}");
-    assert_eq!(job["daemon_mode"], "source-refresh-only", "{status:#}");
-    assert_eq!(job["trigger"], "search", "{status:#}");
-    assert_eq!(job["trigger_provenance"], "manual", "{status:#}");
+    assert!(
+        matches!(
+            (
+                job["daemon_mode"].as_str(),
+                job["trigger"].as_str(),
+                job["trigger_provenance"].as_str(),
+            ),
+            (Some("source-refresh-only"), Some("search"), Some("manual"))
+                | (Some("full"), Some("periodic"), Some("daemon_scheduler"))
+        ),
+        "the latest terminal failure must come from the requested source-only refresh or a newer persistent-daemon reconciliation tick: {status:#}"
+    );
     assert_eq!(job["status"], "failed", "{status:#}");
     assert_eq!(job["request_state"], "failed", "{status:#}");
     assert_eq!(job["source_count"], expected_route_count, "{status:#}");
