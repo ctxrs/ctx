@@ -140,6 +140,16 @@ pub(in crate::semantic) fn render_daemon_status_human(
             "Daemon failed but can recover",
             Some("Lifecycle ownership is stale; restarting the daemon is safe."),
         ),
+        DaemonPresentation::Failed if history_failed => (
+            OutcomeState::Error,
+            "History refresh failed",
+            Some("No new history generation was published."),
+        ),
+        DaemonPresentation::Failed if semantic_failed => (
+            OutcomeState::Error,
+            "Semantic indexing failed",
+            Some("Keyword search remains available."),
+        ),
         DaemonPresentation::Failed => (
             OutcomeState::Error,
             "Daemon failed",
@@ -209,7 +219,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
     if let Some(error) = daemon
         .get("last_error")
         .and_then(Value::as_str)
-        .filter(|error| !error.is_empty())
+        .filter(|error| !error.is_empty() && !history_failed && !semantic_failed)
     {
         push_unique_detail(&mut service_details, "Error", error);
     }
@@ -251,11 +261,18 @@ pub(in crate::semantic) fn render_daemon_status_human(
         if rejected_records > 0 {
             history_details.push(("Rejected", counted(rejected_records, "record", "records")));
         }
-        for error in [job_error(source_refresh), job_error(history)]
-            .into_iter()
-            .flatten()
-        {
-            push_unique_detail(&mut history_details, "Error", error);
+        if history_failed {
+            history_details.push((
+                "Issue",
+                "One or more history sources could not be refreshed.".to_owned(),
+            ));
+        } else {
+            for error in [job_error(source_refresh), job_error(history)]
+                .into_iter()
+                .flatten()
+            {
+                push_unique_detail(&mut history_details, "Error", error);
+            }
         }
         append_details(context, &mut history_document, &history_details);
         document.push_blank();
@@ -301,7 +318,9 @@ pub(in crate::semantic) fn render_daemon_status_human(
         {
             semantic_details.push(("Reason", humanize_code(reason)));
         }
-        if let Some(error) = job_error(semantic) {
+        if semantic_failed {
+            semantic_details.push(("Issue", "Semantic indexing could not complete.".to_owned()));
+        } else if let Some(error) = job_error(semantic) {
             push_unique_detail(&mut semantic_details, "Error", error);
         }
         append_details(context, &mut semantic_document, &semantic_details);
@@ -667,7 +686,7 @@ fn recovery_action(
             "ctx daemon enable",
         ));
     }
-    if recoverable || presentation == DaemonPresentation::Failed {
+    if recoverable {
         return Some((
             "Restart the daemon and verify lifecycle ownership.",
             "ctx daemon enable",
@@ -681,6 +700,9 @@ fn recovery_action(
     }
     if semantic_failed || service_issue {
         return Some(("Inspect the affected service.", "ctx doctor"));
+    }
+    if presentation == DaemonPresentation::Failed {
+        return Some(("Inspect the failed daemon service.", "ctx doctor"));
     }
     if history_catching_up {
         return Some(("Watch history refresh progress.", "ctx index watch"));

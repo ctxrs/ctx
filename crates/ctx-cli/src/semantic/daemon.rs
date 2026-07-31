@@ -486,6 +486,9 @@ pub(super) fn run_daemon(
         ui.write_stdout(&document)?;
     }
     if let Some(message) = failure {
+        if !args.format.is_json() {
+            return Err(crate::dispatch::rendered_cli_error());
+        }
         return Err(anyhow!(message));
     }
     Ok(())
