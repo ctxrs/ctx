@@ -124,8 +124,6 @@ pub(super) fn register_zed_route(
     )
 }
 
-const ZED_REPLACEMENT_PARSER_REVISION: &str = "zed-nativepath-source-backed-v0";
-
 #[derive(Debug, Clone)]
 struct ZedReplacementTree {
     data_root: PathBuf,
@@ -159,7 +157,7 @@ impl ReplacementDocumentTree for ZedReplacementTree {
     type TreeAuthority = ZedTreeAuthority;
 
     fn parser_revision(&self) -> &'static str {
-        ZED_REPLACEMENT_PARSER_REVISION
+        ZED_PARSER_REVISION
     }
 
     fn owns_source(&self, source: &SourceKey) -> bool {
@@ -198,34 +196,23 @@ impl ReplacementDocumentTree for ZedReplacementTree {
             .take()
             .ok_or_else(|| zed_internal("Zed snapshot was consumed twice"))?;
         let snapshot_revision = snapshot.snapshot_revision.clone();
-        let physical_locator = snapshot.physical_locator.clone();
         sink.begin_source(source.clone())?;
         let connection = snapshot.connection().map_err(route_error)?;
-        let mut projection = ZedSourceBackedSinkV0::with_emitter(
-            connection,
-            source.clone(),
-            zed_snapshot_revision_digest(&snapshot_revision),
-            self.path.to_string_lossy().into_owned(),
-            |document| {
-                sink.emit_core_record(document)
+        let mut projection =
+            ZedSourceBackedSinkV0::with_emitter(connection, source.clone(), |record| {
+                sink.emit_core_record(record)
                     .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
-            },
-        )
-        .map_err(route_error)?;
-        let scan = scan_zed_native_snapshot(
-            connection,
-            &physical_locator,
-            &snapshot_revision,
-            &mut projection,
-        )
-        .map_err(route_error)?;
+            })
+            .map_err(route_error)?;
+        let scan = scan_zed_native_snapshot(connection, &snapshot_revision, &mut projection)
+            .map_err(route_error)?;
         if let Some(error) = projection.take_failure() {
             return Err(route_error(error));
         }
-        let staged_documents = projection.staged_documents();
+        let staged_core_records = projection.staged_core_records();
         drop(projection);
         snapshot.finish().map_err(route_error)?;
-        if staged_documents != scan.counters.retained_events {
+        if staged_core_records != scan.counters.retained_events {
             return Err(zed_internal("Zed source-backed counts do not reconcile"));
         }
         let complete_records = scan
@@ -238,7 +225,7 @@ impl ReplacementDocumentTree for ZedReplacementTree {
             retained_records: scan.counters.retained_events,
             rejected_records: scan.counters.rejected_threads,
             ignored_records: 0,
-            indexed_documents: staged_documents,
+            indexed_documents: staged_core_records,
             certified_bytes: scan.counters.certified_logical_bytes,
         };
         let observation =
@@ -246,7 +233,7 @@ impl ReplacementDocumentTree for ZedReplacementTree {
         let certificate = CertifiedSource::certify(
             observation.clone(),
             observation,
-            ZED_REPLACEMENT_PARSER_REVISION,
+            ZED_PARSER_REVISION,
             decode_zed_digest(&scan.source_integrity_digest).map_err(route_error)?,
             counts,
         )
@@ -277,7 +264,7 @@ fn zed_document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal
         source: certificate.observation().source().clone(),
         opening: certificate.observation().clone(),
         closing: certificate.observation().clone(),
-        parser_revision: ZED_REPLACEMENT_PARSER_REVISION,
+        parser_revision: ZED_PARSER_REVISION,
         content_digest: *certificate.content_digest(),
         counts: certificate.counts(),
     }

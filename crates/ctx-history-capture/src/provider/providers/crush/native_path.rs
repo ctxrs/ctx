@@ -50,11 +50,11 @@ struct CrushNativeFrontier {
     next_ordinal: u64,
 }
 
-// This is the per-row hydration result. Boxing the 400-byte message row merely
+// This is the per-row load result. Boxing the 400-byte message row merely
 // to approach the 184-byte session variant would add an allocation per row.
 // Non-message variants remain part of the phase-complete query data shape.
 #[allow(clippy::large_enum_variant, dead_code)]
-enum CrushHydratedRow {
+enum CrushLoadedRow {
     Session {
         row: CrushSessionRow,
         retained_bytes: usize,

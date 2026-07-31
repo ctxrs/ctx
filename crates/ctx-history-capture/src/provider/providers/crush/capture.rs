@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::native_source::NativeSqliteValue;
 
-pub(super) const CRUSH_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 13;
+pub(super) const CRUSH_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 22;
 
 pub(crate) fn message_child_values(
     row: &rusqlite::Row<'_>,

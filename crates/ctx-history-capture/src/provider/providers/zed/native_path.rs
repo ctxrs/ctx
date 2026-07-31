@@ -1,4 +1,4 @@
-//! Source-backed Zed discovery, parsing, and exact hydration.
+//! Source-backed Zed discovery, bounded snapshot parsing, and Core projection.
 
 use std::{
     ffi::OsString,
@@ -12,7 +12,6 @@ use thiserror::Error;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot},
-    complete_content::CompleteContentBodyDigest,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceReadSnapshot,
@@ -51,7 +50,7 @@ pub(super) type ZedNativeResult<T> = std::result::Result<T, ZedNativePathError>;
 pub(crate) struct ZedSourceBackedWork {
     pub(crate) logical_observation_passes: u64,
     pub(crate) projection_passes: u64,
-    pub(crate) projected_documents: u64,
+    pub(crate) projected_core_records: u64,
 }
 
 #[cfg(test)]
@@ -90,16 +89,15 @@ fn record_zed_projection_pass() {
 }
 
 #[cfg(test)]
-fn record_zed_projected_document() {
+fn record_zed_projected_core_record() {
     record_zed_work(|work| {
-        work.projected_documents = work.projected_documents.saturating_add(1);
+        work.projected_core_records = work.projected_core_records.saturating_add(1);
     });
 }
 
 pub(crate) struct ZedImmutableSqliteSnapshot {
     observed: Arc<ZedAdmittedSqliteFamily>,
     connection: Option<SqliteSourceReadSnapshot>,
-    pub(crate) physical_locator: String,
     pub(crate) snapshot_revision: String,
 }
 
@@ -178,80 +176,6 @@ struct ZedAdmittedSqliteFamily {
 #[derive(Debug)]
 struct ZedAdmittedSqliteComponent {
     file: OpenedProviderSourceFile,
-}
-
-pub(super) fn decode_complete_message(
-    row: &super::thread::ZedThreadRow,
-    message_ordinal: u64,
-    record_digest: CompleteContentBodyDigest,
-) -> ZedNativeResult<Option<super::ZedNativePathCompleteMessage>> {
-    Ok(
-        decode_complete_message_with_identity(row, message_ordinal, record_digest)?
-            .map(|resolved| resolved.message),
-    )
-}
-
-struct ZedResolvedCompleteMessage {
-    message: super::ZedNativePathCompleteMessage,
-    native_message_id: Option<String>,
-    native_message_ordinal: u64,
-    native_sub_ordinal: u32,
-}
-
-fn decode_complete_message_with_identity(
-    row: &super::thread::ZedThreadRow,
-    message_ordinal: u64,
-    _record_digest: CompleteContentBodyDigest,
-) -> ZedNativeResult<Option<ZedResolvedCompleteMessage>> {
-    let updated_at = super::thread::zed_required_timestamp(&row.updated_at, "updated_at")?;
-    let decoded =
-        match decode::decode_zed_native_payload(&row.id, &row.data_type, &row.data, updated_at)? {
-            decode::ZedDecodeOutcome::Decoded(decoded) => decoded,
-            decode::ZedDecodeOutcome::Rejected(failure) => {
-                return Err(CaptureError::InvalidPayload(failure.reason).into());
-            }
-        };
-    let mut resolved = None;
-    decoded.emit_events(0, &mut |draft| {
-        if draft.message_ordinal != message_ordinal {
-            return Ok(());
-        }
-        let complete_text = draft.body.clone();
-        let provider_event_index =
-            draft
-                .message_ordinal
-                .checked_mul(2)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Zed provider event index overflowed",
-                ))?;
-        let identity = model::event_identity(
-            &row.id,
-            draft.provider_message_id.as_deref(),
-            draft.message_ordinal,
-        );
-        let cursor = model::event_cursor(&identity);
-        let legacy_provider_event_hash = model::legacy_retained_event_hash(&identity, &draft.body);
-        let payload = model::legacy_event_payload(&row.id, provider_event_index, &cursor, &draft)?;
-        let native_message_id = match &identity.message {
-            dto::ZedNativeMessageIdentity::ProviderId { value, .. } => Some(value.clone()),
-            dto::ZedNativeMessageIdentity::MessageOrdinal(_) => None,
-        };
-        resolved = Some(ZedResolvedCompleteMessage {
-            native_message_id,
-            native_message_ordinal: draft.message_ordinal,
-            native_sub_ordinal: 0,
-            message: super::ZedNativePathCompleteMessage {
-                provider_event_index,
-                legacy_provider_event_hash,
-                cursor,
-                event_type: draft.event_type,
-                payload,
-                complete_text,
-            },
-        });
-        Ok(())
-    })?;
-    Ok(resolved)
 }
 
 pub(super) fn into_capture_error(error: ZedNativePathError) -> CaptureError {
@@ -424,7 +348,6 @@ pub(super) fn acquire_immutable_snapshot(
     path: &Path,
 ) -> ZedNativeResult<ZedSnapshotAcquisition> {
     let authority_path = zed_absolute_authority_path(path)?;
-    let fallback_locator = authority_path.display().to_string();
     for _ in 0..ZED_SNAPSHOT_ACQUISITION_ATTEMPTS {
         let observed = match ZedAdmittedSqliteFamily::open(data_root, &authority_path) {
             Ok(observed) => observed,
@@ -460,7 +383,6 @@ pub(super) fn acquire_immutable_snapshot(
             ZedImmutableSqliteSnapshot {
                 observed: Arc::new(observed),
                 connection: Some(connection),
-                physical_locator: fallback_locator.clone(),
                 snapshot_revision,
             },
         )));

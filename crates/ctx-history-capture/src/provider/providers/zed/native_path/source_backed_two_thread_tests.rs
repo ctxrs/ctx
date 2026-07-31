@@ -17,6 +17,7 @@ use crate::provider::source_backed::{
     SourceBackedProviderRegistry, SourceBackedRouteSelection,
 };
 use crate::{
+    complete_content::CompleteContentBodyDigest,
     discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryIssueKind,
     DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport, ProviderImportSupport,
     ProviderSource, ProviderSourceKind, ProviderSourceStatus, ZED_THREADS_SQLITE_SOURCE_FORMAT,
@@ -40,8 +41,11 @@ fn source_backed_zed_preserves_selected_flatpak_platform_root() {
         discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Zed);
     assert_eq!(report.sources.len(), 1);
     assert_eq!(report.sources[0].path, selected);
-    let document = super::tests::project_root_document(&report.sources[0].path);
-    assert_eq!(document.body, "selected flatpak sentinel");
+    let record = super::tests::project_root_record(&report.sources[0].path);
+    assert_eq!(
+        record.content.meaningful_text(),
+        "selected flatpak sentinel"
+    );
 }
 
 #[test]
@@ -79,7 +83,7 @@ fn discovery_context(root: &Path) -> DiscoveryContext {
 }
 
 #[test]
-fn source_backed_zed_two_threads_project_distinct_sessions_with_exact_hydration() {
+fn source_backed_zed_two_threads_project_distinct_sessions_with_complete_core() {
     let temp = tempfile::tempdir().unwrap();
     let source_root = temp.path().join("source");
     fs::create_dir(&source_root).unwrap();
@@ -95,28 +99,21 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_exact_hydration(
     let index_root = temp.path().join("index");
     let mut snapshot = acquire_snapshot(&data_root, &database).unwrap();
     let snapshot_revision = snapshot.snapshot_revision.clone();
-    let physical_locator = snapshot.physical_locator.clone();
     let source = zed_source_key().unwrap();
     let mut writer = GenerationWriter::open(&index_root, WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    let mut sink = ZedSourceBackedSinkV0::new(
-        &mut writer,
-        snapshot.connection().unwrap(),
-        source.clone(),
-        snapshot_revision_digest(&snapshot_revision),
-        database.to_string_lossy().into_owned(),
-    )
-    .unwrap();
+    let mut sink =
+        ZedSourceBackedSinkV0::new(&mut writer, snapshot.connection().unwrap(), source.clone())
+            .unwrap();
     let scan = scan_zed_native_snapshot(
         snapshot.connection().unwrap(),
-        &physical_locator,
         &snapshot_revision,
         &mut sink,
     )
     .unwrap();
     assert_eq!(scan.counters.sessions_retained, 2);
     assert_eq!(scan.counters.retained_events, 5);
-    assert_eq!(sink.staged_documents(), 5);
+    assert_eq!(sink.staged_core_records(), 5);
     assert!(sink.take_failure().is_none());
     drop(sink);
     snapshot.finish().unwrap();
@@ -144,7 +141,7 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_exact_hydration(
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(&index_root).unwrap();
-    let page = index.source_event_page(&source, None, 16).unwrap();
+    let page = index.core_source_event_page(&source, None, 16).unwrap();
     assert!(page.terminal);
     assert_eq!(page.items.len(), 5);
     let sessions = page
@@ -204,19 +201,13 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_exact_hydration(
         "bea728bb-1983-8ac5-9e04-e75259b71e33"
     );
 
-    let resolver = ZedLocatorResolverV0::new(&data_root, &database).unwrap();
-    let hydrated = page
+    let bodies = page
         .items
         .iter()
-        .map(|event| {
-            resolver
-                .hydrate(&event.locator)
-                .unwrap()
-                .decoded_display_text
-        })
+        .map(|event| event.core_record.content.meaningful_text().to_owned())
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        hydrated,
+        bodies,
         BTreeSet::from([
             "zed child oracle answer".to_owned(),
             "zed child oracle prompt".to_owned(),
@@ -225,30 +216,66 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_exact_hydration(
             "zed sqlite oracle prompt".to_owned(),
         ])
     );
+    let tool_call = page
+        .items
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCall.as_str())
+        .expect("fixture contains one retained Zed tool call");
+    assert_eq!(
+        tool_call.role.as_deref(),
+        Some(EventRole::Assistant.as_str())
+    );
+    assert!(tool_call.native_event_id.is_some());
+    let native_parts = tool_call
+        .core_record
+        .content
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/native_message/content/content"))
+        .and_then(serde_json::Value::as_array)
+        .expect("tool call retains its decoded native content");
+    let native_tool = native_parts
+        .iter()
+        .find(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("tool_use"))
+        .expect("tool call retains structured tool input");
+    assert_eq!(
+        native_tool.get("name").and_then(serde_json::Value::as_str),
+        Some("write_file")
+    );
+    assert!(native_tool
+        .get("input")
+        .is_some_and(|value| !value.is_null()));
 }
 
 #[test]
-fn zed_lexical_document_retains_full_tail_beyond_legacy_preview_fields() {
+fn zed_core_record_retains_full_tail_beyond_sixteen_kibibytes() {
     const TAIL: &str = "zedpostsixteenkilobytesentinel";
 
     let source = zed_source_key().unwrap();
     let session_id = zed_session_identity(&source, "thread-full-body").unwrap();
     let context = ZedSessionProjectionContextV0 {
         session: ZedNativeSession {
+            sqlite_rowid: 1,
             thread_id: "thread-full-body".to_owned(),
             parent_thread_id: None,
-            root_thread_id: "thread-full-body".to_owned(),
             title: "Full body".to_owned(),
+            payload_title: Some("Full body".to_owned()),
             summary: String::new(),
             created_at: "2026-07-28T12:00:00Z".parse().unwrap(),
             updated_at: "2026-07-28T12:00:01Z".parse().unwrap(),
+            native_created_at: Some("2026-07-28T12:00:00Z".to_owned()),
+            native_updated_at: "2026-07-28T12:00:01Z".to_owned(),
             cwd: Some("/workspace/zed".to_owned()),
             folder_paths: vec!["/workspace/zed".to_owned()],
+            native_folder_paths: Some("/workspace/zed".to_owned()),
+            native_folder_paths_order: Some("0".to_owned()),
+            native_data_type: "json".to_owned(),
             encoding: super::super::dto::ZedNativeEncoding::Json,
         },
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
+        root_thread_id: "thread-full-body".to_owned(),
     };
     let full_body = format!(
         r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
@@ -267,21 +294,86 @@ fn zed_lexical_document_retains_full_tail_beyond_legacy_preview_fields() {
             occurred_at: "2026-07-28T12:00:01Z".parse().unwrap(),
             kind: "user",
             call_ids: Vec::new(),
+            native_content: serde_json::json!({
+                "kind": "user",
+                "content": [{"type": "text"}],
+            }),
             body: full_body.clone(),
             safe_file_touches: Vec::new(),
         },
         CompleteContentBodyDigest::from_text(&full_body),
     )
     .unwrap();
-    let document =
-        zed_lexical_document(&source, [0x5a; 32], "/tmp/threads.db", &context, event).unwrap();
-    assert_eq!(document.body, full_body);
-    let structured: serde_json::Value = serde_json::from_str(&document.body).unwrap();
+    let record = zed_core_record(&source, &context, event).unwrap();
+    assert_eq!(record.content.meaningful_text(), full_body);
+    assert_eq!(
+        record
+            .content
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/native_message/content/content/0/type"))
+            .and_then(serde_json::Value::as_str),
+        Some("text")
+    );
+    let structured: serde_json::Value =
+        serde_json::from_str(record.content.meaningful_text()).unwrap();
     assert_eq!(
         structured
             .pointer("/arguments/tail")
             .and_then(serde_json::Value::as_str),
         Some(TAIL)
+    );
+    let encoded = String::from_utf8(record.encode_stored().unwrap()).unwrap();
+    assert!(!encoded.contains("\"locator\""));
+    assert!(!encoded.contains("\"source_path\""));
+}
+
+#[test]
+fn pinned_zed_core_survives_source_movement_and_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("threads.db");
+    let moved = temp.path().join("threads-moved.db");
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let full_body = format!("zed-head-{}-zed-tail", "z".repeat(20_000));
+    super::tests::create_database(&database, &full_body);
+    let registry = zed_registry(&database, &data_root);
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+
+    refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
+    let source = zed_source_key().unwrap();
+    let pinned = VerifiedIndex::open(&index_root).unwrap();
+    let page = pinned.core_source_event_page(&source, None, 8).unwrap();
+    assert_eq!(page.items.len(), 1);
+    let event_id = page.items[0].event_id;
+    let session_id = page.items[0].session_id;
+    assert_eq!(
+        page.items[0].core_record.content.meaningful_text(),
+        full_body
+    );
+    assert_eq!(page.items[0].source_path, None);
+
+    fs::rename(&database, &moved).unwrap();
+    assert_pinned_core(&pinned, event_id, &full_body);
+    fs::rename(&moved, &database).unwrap();
+    super::tests::replace_thread(&database, "zed changed source body");
+    assert_pinned_core(&pinned, event_id, &full_body);
+
+    refresh_source_backed_generation(&index_root, &registry, options).unwrap();
+    let rewritten = VerifiedIndex::open(&index_root).unwrap();
+    let rewritten_page = rewritten.core_source_event_page(&source, None, 8).unwrap();
+    assert_eq!(rewritten_page.items.len(), 1);
+    assert_eq!(rewritten_page.items[0].event_id, event_id);
+    assert_eq!(rewritten_page.items[0].session_id, session_id);
+    assert_eq!(
+        rewritten_page.items[0]
+            .core_record
+            .content
+            .meaningful_text(),
+        "zed changed source body"
     );
 }
 
@@ -321,16 +413,18 @@ fn checkpoint_vacuum_and_shm_churn_are_zero_projection_zero_publication_replays(
         ZedSourceBackedWork {
             logical_observation_passes: 1,
             projection_passes: 1,
-            projected_documents: 1,
+            projected_core_records: 1,
         }
     );
     let source = zed_source_key().unwrap();
-    let cold_page = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(&source, None, 8)
-        .unwrap();
+    let pinned = VerifiedIndex::open(&index_root).unwrap();
+    let cold_page = pinned.core_source_event_page(&source, None, 8).unwrap();
     assert_eq!(cold_page.items.len(), 1);
-    let cold_locator = cold_page.items[0].locator.clone();
+    let cold_event_id = cold_page.items[0].event_id;
+    assert_eq!(
+        cold_page.items[0].core_record.content.meaningful_text(),
+        "logical no-op sentinel"
+    );
     let cold_generation = cold.commit.generation_id.clone();
     let cold_opstamp = cold.commit.opstamp;
     let cold_sources = cold.sources.clone();
@@ -344,12 +438,7 @@ fn checkpoint_vacuum_and_shm_churn_are_zero_projection_zero_publication_replays(
     let checkpoint =
         refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
     assert_zed_physical_replay(&checkpoint, &cold_generation, cold_opstamp, &cold_sources);
-    assert_exact_hydration(
-        &data_root,
-        &database,
-        &cold_locator,
-        "logical no-op sentinel",
-    );
+    assert_pinned_core(&pinned, cold_event_id, "logical no-op sentinel");
 
     writer
         .execute("update threads set rowid = 84 where id = 'thread-1'", [])
@@ -368,12 +457,7 @@ fn checkpoint_vacuum_and_shm_churn_are_zero_projection_zero_publication_replays(
     reset_source_backed_work();
     let vacuum = refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
     assert_zed_physical_replay(&vacuum, &cold_generation, cold_opstamp, &cold_sources);
-    assert_exact_hydration(
-        &data_root,
-        &database,
-        &cold_locator,
-        "logical no-op sentinel",
-    );
+    assert_pinned_core(&pinned, cold_event_id, "logical no-op sentinel");
 
     let shm = sqlite_component_path(&database, "-shm");
     let before_shm = fs::read(&shm).unwrap();
@@ -383,12 +467,7 @@ fn checkpoint_vacuum_and_shm_churn_are_zero_projection_zero_publication_replays(
     let shm_replay =
         refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
     assert_zed_physical_replay(&shm_replay, &cold_generation, cold_opstamp, &cold_sources);
-    assert_exact_hydration(
-        &data_root,
-        &database,
-        &cold_locator,
-        "logical no-op sentinel",
-    );
+    assert_pinned_core(&pinned, cold_event_id, "logical no-op sentinel");
 
     super::tests::replace_thread(&database, "logical replacement sentinel");
     reset_source_backed_work();
@@ -402,27 +481,22 @@ fn checkpoint_vacuum_and_shm_churn_are_zero_projection_zero_publication_replays(
         ZedSourceBackedWork {
             logical_observation_passes: 1,
             projection_passes: 1,
-            projected_documents: 1,
+            projected_core_records: 1,
         }
     );
-    let stale = ZedLocatorResolverV0::new(&data_root, &database)
-        .unwrap()
-        .hydrate(&cold_locator)
-        .unwrap_err();
-    assert!(matches!(
-        stale,
-        ZedSourceBackedErrorV0::LocatorSourceRevisionMismatch
-    ));
+    assert_pinned_core(&pinned, cold_event_id, "logical no-op sentinel");
     let replacement_page = VerifiedIndex::open(&index_root)
         .unwrap()
-        .source_event_page(&source, None, 8)
+        .core_source_event_page(&source, None, 8)
         .unwrap();
     assert_eq!(replacement_page.items.len(), 1);
-    assert_exact_hydration(
-        &data_root,
-        &database,
-        &replacement_page.items[0].locator,
-        "logical replacement sentinel",
+    assert_eq!(replacement_page.items[0].event_id, cold_event_id);
+    assert_eq!(
+        replacement_page.items[0]
+            .core_record
+            .content
+            .meaningful_text(),
+        "logical replacement sentinel"
     );
     drop(writer);
 }
@@ -481,23 +555,21 @@ fn assert_zed_physical_replay(
         ZedSourceBackedWork {
             logical_observation_passes: 1,
             projection_passes: 0,
-            projected_documents: 0,
+            projected_core_records: 0,
         }
     );
 }
 
-fn assert_exact_hydration(
-    data_root: &Path,
-    database: &Path,
-    locator: &ctx_history_core::SourceRecordLocator,
+fn assert_pinned_core(
+    index: &VerifiedIndex,
+    event_id: ctx_history_core::StableEntityId,
     expected: &str,
 ) {
-    let hydrated = ZedLocatorResolverV0::new(data_root, database)
+    let record = index
+        .core_record_by_id(event_id.as_uuid())
         .unwrap()
-        .hydrate(locator)
         .unwrap();
-    assert_eq!(hydrated.provider_bytes, expected.as_bytes());
-    assert_eq!(hydrated.decoded_display_text, expected);
+    assert_eq!(record.content.meaningful_text(), expected);
 }
 
 fn sqlite_persistent_evidence(database: &Path) -> Vec<(u64, [u8; 32])> {

@@ -92,6 +92,7 @@ use super::providers::{
         acquire_snapshot as acquire_zed_snapshot, decode_sha256_hex as decode_zed_digest,
         scan_zed_native_snapshot, snapshot_revision_digest as zed_snapshot_revision_digest,
         source_observation as zed_source_observation, zed_source_key, ZedSourceBackedSinkV0,
+        ZED_PARSER_REVISION,
     },
 };
 use crate::provider_sources::{
