@@ -581,6 +581,9 @@ mod tests {
     fn missing_or_non_repository_working_directory_abstains() {
         let git = FileWitness::file(Path::new(&git_program())).unwrap();
         let temp = tempdir().unwrap();
+        // Keep the fixture non-repository even when a Bazel TMPDIR happens to
+        // live below the source checkout.
+        std::fs::write(temp.path().join(".git"), "not a repository\n").unwrap();
         assert_eq!(inspect(&git, temp.path()).unwrap(), None);
     }
 
