@@ -58,16 +58,16 @@ fn durable_state_path_is_purpose_based() {
 }
 
 fn source() -> ctx_history_core::SourceKey {
+    source_with_name("relational-production-writer.jsonl")
+}
+
+fn source_with_name(name: &str) -> ctx_history_core::SourceKey {
     ctx_history_core::SourceKey::derive(
         "codex",
         "codex_session_jsonl",
         "session",
         1,
-        SourceAnchor::provider_native(
-            "session-file",
-            TypedKey::utf8("relational-production-writer.jsonl").unwrap(),
-        )
-        .unwrap(),
+        SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
     )
     .unwrap()
 }
@@ -390,6 +390,54 @@ fn relational_record_stream_closes_an_empty_certified_source_once() {
     assert_eq!(records.page_items_loaded, 0);
     assert_eq!(records.max_page_items, 0);
     assert_eq!(records.max_session_aggregates, 0);
+}
+
+#[test]
+fn bounded_source_subset_projects_events_without_fabricating_external_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let selected_child = source_with_name("selected-child.jsonl");
+    let external_parent = source_with_name("external-parent.jsonl");
+    let parent_session_id = document(&external_parent, 1, "user", &[]).session_id;
+    let mut child = document(&selected_child, 1, "assistant", &["src/subset.rs"]);
+    child.parent_session_id = Some(parent_session_id);
+    child.root_session_id = parent_session_id;
+
+    let generation = replace_generation(temp.path(), &selected_child, 1, vec![child]);
+    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let lexical_page = index.source_event_page(&selected_child, None, 2).unwrap();
+    assert_eq!(lexical_page.items.len(), 1);
+    assert_eq!(
+        lexical_page.items[0].parent_session_id,
+        Some(parent_session_id)
+    );
+    assert_eq!(lexical_page.items[0].root_session_id, parent_session_id);
+
+    let catch_up = run_after_core_publication(temp.path(), &generation).unwrap();
+    assert!(catch_up.did_work);
+    assert_eq!(catch_up.status["status"], "completed");
+    assert_eq!(
+        query(
+            temp.path(),
+            "SELECT parent_ctx_session_id IS NULL, root_ctx_session_id IS NULL
+             FROM ctx_sessions"
+        )[0],
+        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
+    );
+    assert_eq!(
+        query(temp.path(), "SELECT COUNT(*) FROM ctx_events")[0][0],
+        RawSqlValue::Integer(1)
+    );
+    assert_eq!(
+        query(
+            temp.path(),
+            &format!(
+                "SELECT parent_ctx_session_id = '{parent_session_id}',
+                        root_ctx_session_id = '{parent_session_id}'
+                 FROM source_backed_sessions"
+            )
+        )[0],
+        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
+    );
 }
 
 #[test]

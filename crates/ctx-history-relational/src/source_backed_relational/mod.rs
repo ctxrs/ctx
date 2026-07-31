@@ -26,6 +26,12 @@
 //! projector. Rebuild obtains the same records by rereading certified provider
 //! sources; it does not enumerate or hydrate bodies from SQLite.
 //!
+//! Session lineage may name a source outside a bounded committed manifest. The
+//! projection retains that target identity as source evidence but exposes no
+//! parent/root relationship until the target session is present. A missing
+//! target whose source is selected by the same manifest remains an integrity
+//! error; the projection never fabricates a session to satisfy it.
+//!
 //! A normal catch-up stream contains only sources whose certificates changed.
 //! A rebuild stream contains every source in the manifest. Confirmed deletion
 //! is represented by omission from the new certified manifest, so no provider

@@ -28,6 +28,7 @@ enum ValidationScope {
         prior_counts: ProjectionCounts,
         changed_source_ids: BTreeSet<String>,
         affected_source_ids: BTreeSet<String>,
+        relationship_scope_changed: bool,
         old: SourceProjectionSnapshot,
     },
 }
@@ -140,6 +141,12 @@ where
                 })
                 .map(|(source_id, _)| source_id.clone())
                 .collect::<BTreeSet<_>>();
+            // Additions and certified removals both change which lineage
+            // targets the manifest requires, even when no stored row changes.
+            let relationship_scope_changed = changed
+                .iter()
+                .any(|source_id| !prior.contains_key(source_id))
+                || !manifest.removal_ids.is_empty();
             let removed = prior
                 .keys()
                 .filter(|id| !manifest_ids.contains(*id))
@@ -168,6 +175,7 @@ where
                     prior_counts,
                     changed_source_ids: changed,
                     affected_source_ids: affected,
+                    relationship_scope_changed,
                     old,
                 },
             )
@@ -181,6 +189,7 @@ where
             prior_counts,
             changed_source_ids,
             affected_source_ids,
+            relationship_scope_changed,
             old,
         } => {
             let new = source_projection_snapshot(&tx, &affected_source_ids)?;
@@ -191,6 +200,7 @@ where
                 &old,
                 &new,
                 &changed_source_ids,
+                relationship_scope_changed,
             )?
         }
     };
