@@ -165,6 +165,328 @@ fn relational_bytes(data_root: &Path) -> Vec<u8> {
     bytes
 }
 
+fn projection_receipt(
+    generation: &CommittedCoreGeneration,
+    metadata: &RelationalProjectionMetadata,
+) -> RelationalProjectionReceipt {
+    RelationalProjectionReceipt {
+        core_generation_id: generation.generation_id.clone(),
+        relational_schema_version: RELATIONAL_PROJECTION_SCHEMA_VERSION,
+        materializer_revision: RELATIONAL_MATERIALIZER_REVISION,
+        build_generation: metadata.build_generation,
+        source_count: metadata.source_count,
+        session_count: metadata.session_count,
+        event_count: metadata.event_count,
+        repository_binding_count: metadata.repository_binding_count,
+        file_touch_count: metadata.file_touch_count,
+        vcs_observation_count: metadata.vcs_observation_count,
+    }
+}
+
+fn committed_generation_for(data_root: &Path, generation_id: &str) -> CommittedCoreGeneration {
+    let index = VerifiedIndex::open(source_backed_index_root(data_root)).unwrap();
+    assert_eq!(index.generation_id(), generation_id);
+    committed_generation(&index).unwrap()
+}
+
+fn build_candidate(
+    data_root: &Path,
+    generation_id: &str,
+) -> (
+    SourceBackedRelationalProjection,
+    PathBuf,
+    CommittedCoreGeneration,
+    RelationalProjectionReceipt,
+) {
+    let index = VerifiedIndex::open(source_backed_index_root(data_root)).unwrap();
+    assert_eq!(index.generation_id(), generation_id);
+    let generation = committed_generation(&index).unwrap();
+    let destination = sql_compatibility_path(data_root);
+    let PreparedProjection::Candidate {
+        mut projection,
+        path,
+    } = prepare_disposable_projection(&destination, &generation).unwrap()
+    else {
+        panic!("test generation unexpectedly needed no relational work");
+    };
+    let plan = projection.plan_generation(&generation).unwrap();
+    let (rebuild, selection) = match &plan {
+        RelationalProjectionPlan::Rebuild => (true, RelationalSourceSelection::All),
+        RelationalProjectionPlan::CatchUp { changed_source_ids } => (
+            false,
+            RelationalSourceSelection::Changed(changed_source_ids),
+        ),
+        RelationalProjectionPlan::NoOp(_) => panic!("candidate unexpectedly became a no-op"),
+    };
+    let records = RelationalRecordStream::new(&index, selection, MAX_SOURCE_EVENT_PAGE_ITEMS);
+    let receipt = if rebuild {
+        projection.rebuild_stream(&generation, records)
+    } else {
+        projection.catch_up_stream(&generation, records)
+    }
+    .unwrap();
+    (projection, path, generation, receipt)
+}
+
+fn assert_no_sqlite_sidecars(path: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar_path(path, suffix);
+        assert!(!sidecar.exists(), "stale sidecar {}", sidecar.display());
+    }
+}
+
+#[test]
+fn first_publish_seals_syncs_and_reopens_exact_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let generation_id = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![document(
+            &source,
+            1,
+            &temp.path().join("first-publish.jsonl"),
+        )],
+    );
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    assert!(!destination.exists());
+
+    let run = run_after_core_publication(temp.path(), &generation_id).unwrap();
+
+    assert!(run.did_work);
+    assert!(destination.is_file());
+    assert!(!candidate.exists());
+    assert_no_sqlite_sidecars(&destination);
+    assert_no_sqlite_sidecars(&candidate);
+    let generation = committed_generation_for(temp.path(), &generation_id);
+    let projection = SourceBackedRelationalProjection::open_read_only(&destination).unwrap();
+    let metadata = projection.metadata().unwrap();
+    let receipt = projection_receipt(&generation, &metadata);
+    verify_projection_identity(&destination, &generation, &receipt).unwrap();
+}
+
+#[test]
+fn replace_existing_projection_publishes_only_the_new_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("replace-existing.jsonl");
+    let first_generation = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![document(&source, 1, &provider)],
+    );
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let first_bytes = fs::read(&destination).unwrap();
+
+    let replacement_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![document(&source, 2, &provider)],
+    );
+    let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
+
+    assert!(run.did_work);
+    assert_ne!(fs::read(&destination).unwrap(), first_bytes);
+    let metadata = SourceBackedRelationalProjection::open_read_only(&destination)
+        .unwrap()
+        .metadata()
+        .unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(replacement_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 2);
+    assert_eq!(
+        query(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![RawSqlValue::Integer(2)]]
+    );
+    assert!(!candidate_projection_path(&destination).exists());
+    assert_no_sqlite_sidecars(&destination);
+}
+
+#[test]
+fn replacement_removes_stale_destination_and_candidate_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("stale-sidecars.jsonl");
+    let first_generation = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![document(&source, 1, &provider)],
+    );
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    fs::write(sqlite_sidecar_path(&destination, "-wal"), b"stale wal").unwrap();
+    fs::write(sqlite_sidecar_path(&destination, "-shm"), b"stale shm").unwrap();
+    fs::write(&candidate, b"abandoned candidate").unwrap();
+    fs::write(
+        sqlite_sidecar_path(&candidate, "-wal"),
+        b"stale candidate wal",
+    )
+    .unwrap();
+    fs::write(
+        sqlite_sidecar_path(&candidate, "-shm"),
+        b"stale candidate shm",
+    )
+    .unwrap();
+
+    let replacement_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![document(&source, 2, &provider)],
+    );
+    let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
+
+    assert!(run.did_work);
+    assert!(!candidate.exists());
+    assert_no_sqlite_sidecars(&candidate);
+    assert_no_sqlite_sidecars(&destination);
+    assert_eq!(
+        SourceBackedRelationalProjection::open_read_only(&destination)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(replacement_generation.as_str())
+    );
+}
+
+#[test]
+fn prepublication_replacement_failure_keeps_prior_projection_visible() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("injected-replace-failure.jsonl");
+    let first_generation = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![document(&source, 1, &provider)],
+    );
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let replacement_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![document(&source, 2, &provider)],
+    );
+    let (projection, candidate, generation, receipt) =
+        build_candidate(temp.path(), &replacement_generation);
+
+    let error = finish_candidate_publication_with(
+        projection,
+        &candidate,
+        &destination,
+        &generation,
+        &receipt,
+        |_, _| Err(io::Error::other("injected atomic replacement failure")),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedRelationalCatchUpError::Publication(
+            RelationalPublicationError::AtomicReplace { .. }
+        )
+    ));
+    assert_eq!(error.code(), "source_relational_publication_failed");
+    assert!(error
+        .to_string()
+        .contains("prior projection remains visible"));
+    assert!(candidate.is_file());
+    assert_no_sqlite_sidecars(&candidate);
+    assert_no_sqlite_sidecars(&destination);
+    assert_eq!(
+        SourceBackedRelationalProjection::open_read_only(&destination)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(first_generation.as_str())
+    );
+}
+
+#[test]
+fn published_projection_is_reopened_and_wrong_generation_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("reopen-generation.jsonl");
+    let first_generation = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![document(&source, 1, &provider)],
+    );
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let expected_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![document(&source, 2, &provider)],
+    );
+    let (projection, candidate, generation, receipt) =
+        build_candidate(temp.path(), &expected_generation);
+    let destination = sql_compatibility_path(temp.path());
+
+    let impostor_root = tempfile::tempdir().unwrap();
+    let impostor_generation = replace_generation(
+        impostor_root.path(),
+        &source,
+        3,
+        vec![document(
+            &source,
+            3,
+            &impostor_root.path().join("impostor.jsonl"),
+        )],
+    );
+    run_after_core_publication(impostor_root.path(), &impostor_generation).unwrap();
+    let impostor = sql_compatibility_path(impostor_root.path());
+
+    let error = finish_candidate_publication_with(
+        projection,
+        &candidate,
+        &destination,
+        &generation,
+        &receipt,
+        |candidate, destination| {
+            fs::copy(&impostor, candidate)?;
+            fs::File::open(candidate)?.sync_all()?;
+            durable_atomic_replace_file(candidate, destination)
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedRelationalCatchUpError::Publication(
+            RelationalPublicationError::PublishedVerification { .. }
+        )
+    ));
+    assert!(error
+        .to_string()
+        .contains("after replacement became visible"));
+    assert!(error.to_string().contains(&expected_generation));
+    assert_eq!(
+        SourceBackedRelationalProjection::open_read_only(&destination)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(impostor_generation.as_str())
+    );
+}
+
 #[test]
 fn relational_stream_reads_bounded_complete_core_pages() {
     let temp = tempfile::tempdir().unwrap();

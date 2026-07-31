@@ -343,6 +343,31 @@ fn exact_generation_noop_does_not_poll_the_record_stream_or_write() {
 }
 
 #[test]
+fn exact_generation_with_mismatched_core_identity_metadata_is_not_a_noop() {
+    let (_temp, mut projection) = projection();
+    let source = source("identity-mismatch");
+    let metadata = source_metadata(&source, 1, 1);
+    let generation = generation(20, vec![metadata.clone()]);
+    projection
+        .rebuild(&generation, records(metadata, vec![record(&source, 1)]))
+        .unwrap();
+    projection
+        .conn
+        .execute(
+            "UPDATE core_relational_state SET active_policy_schema_hash = 'tampered'",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        projection.plan_generation(&generation).unwrap(),
+        RelationalProjectionPlan::CatchUp {
+            changed_source_ids: Default::default(),
+        }
+    );
+}
+
+#[test]
 fn event_replacement_and_source_deletion_are_atomic_and_deterministic() {
     let (_temp, mut projection) = projection();
     let retained = source("retained");

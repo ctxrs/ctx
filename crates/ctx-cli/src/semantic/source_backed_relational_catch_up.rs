@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     thread,
@@ -10,13 +10,15 @@ use std::{
 use anyhow::{Context, Result};
 use ctx_history_core::{CertifiedSource, SourceKey};
 use ctx_history_index::{
-    CoreSourceEventPage, SourceEventCursor, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    durable_atomic_replace_file, CoreSourceEventPage, SourceEventCursor, VerifiedIndex,
+    MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 use ctx_history_relational::{
     CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionMetadata,
     RelationalProjectionPlan, RelationalProjectionReceipt, RelationalProjectionRecord,
     RelationalProjectionStatus, RelationalSourceHealth, RelationalSourceMetadata,
     SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
+    RELATIONAL_PROJECTION_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -57,6 +59,8 @@ enum SourceBackedRelationalCatchUpError {
     InvalidMetadata(String),
     #[error("source_relational_projection_unavailable: {0}")]
     Projection(String),
+    #[error("source_relational_publication_failed: {0}")]
+    Publication(#[from] RelationalPublicationError),
 }
 
 impl SourceBackedRelationalCatchUpError {
@@ -66,12 +70,102 @@ impl SourceBackedRelationalCatchUpError {
             Self::IndexUnavailable(_) => "source_relational_index_unavailable",
             Self::InvalidMetadata(_) => "source_relational_metadata_invalid",
             Self::Projection(_) => "source_relational_projection_unavailable",
+            Self::Publication(_) => "source_relational_publication_failed",
         }
     }
 
     fn projection(error: impl std::fmt::Display) -> Self {
         Self::Projection(error.to_string())
     }
+}
+
+#[derive(Debug, Error)]
+enum RelationalPublicationError {
+    #[error("inspect relational destination {}: {source}", path.display())]
+    InspectDestination {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("seal prior relational projection {} before snapshot: {source}", path.display())]
+    SealPrior {
+        path: PathBuf,
+        #[source]
+        source: RelationalProjectionError,
+    },
+    #[error("synchronize sealed prior relational projection {}: {source}", path.display())]
+    SyncPrior {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "copy sealed prior relational projection {} to candidate {}: {source}",
+        source_path.display(), candidate_path.display()
+    )]
+    SnapshotPrior {
+        source_path: PathBuf,
+        candidate_path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{operation} {}: {source}", path.display())]
+    RemoveFile {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("seal relational candidate {} before publication: {source}", path.display())]
+    SealCandidate {
+        path: PathBuf,
+        #[source]
+        source: RelationalProjectionError,
+    },
+    #[error("synchronize sealed relational candidate {}: {source}", path.display())]
+    SyncCandidate {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("verify sealed relational candidate {} before publication: {detail}", path.display())]
+    CandidateVerification { path: PathBuf, detail: String },
+    #[error("verify existing relational projection {} before no-op success: {detail}", path.display())]
+    ExistingVerification { path: PathBuf, detail: String },
+    #[error(
+        "atomically replace relational projection {} with {}: {source}; the destination was not replaced, so any prior projection remains visible",
+        destination.display(), candidate.display()
+    )]
+    AtomicReplace {
+        candidate: PathBuf,
+        destination: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "relational replacement of {} became visible but its durability barrier failed: {source}; retry to re-verify and complete publication",
+        destination.display()
+    )]
+    PublishedDurability {
+        destination: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "could not determine whether relational replacement of {} became visible after {replace_error}: {source}; inspect the destination before retrying",
+        destination.display()
+    )]
+    PublicationStateUnknown {
+        destination: PathBuf,
+        replace_error: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "reopen and verify published relational projection {} after replacement became visible: {detail}",
+        path.display()
+    )]
+    PublishedVerification { path: PathBuf, detail: String },
 }
 
 pub(super) struct SourceBackedRelationalCatchUpRun {
@@ -82,6 +176,14 @@ pub(super) struct SourceBackedRelationalCatchUpRun {
 struct ProjectionOutcome {
     receipt: RelationalProjectionReceipt,
     did_work: bool,
+}
+
+enum PreparedProjection {
+    NoOp(RelationalProjectionReceipt),
+    Candidate {
+        projection: SourceBackedRelationalProjection,
+        path: PathBuf,
+    },
 }
 
 struct RelationalCatchUpLock {
@@ -293,7 +395,16 @@ fn project_exact_core_generation(
 
     let generation = committed_generation(&index)?;
     let projection_path = sql_compatibility_path(data_root);
-    let (mut projection, candidate_path) = open_disposable_projection(&projection_path)?;
+    let prepared = prepare_disposable_projection(&projection_path, &generation)?;
+    let (mut projection, candidate_path) = match prepared {
+        PreparedProjection::NoOp(receipt) => {
+            return Ok(ProjectionOutcome {
+                receipt,
+                did_work: false,
+            });
+        }
+        PreparedProjection::Candidate { projection, path } => (projection, path),
+    };
     let plan = projection
         .plan_generation(&generation)
         .map_err(SourceBackedRelationalCatchUpError::projection)?;
@@ -330,13 +441,13 @@ fn project_exact_core_generation(
         });
     }
 
-    if let Some(candidate_path) = candidate_path {
-        projection
-            .seal_for_replacement()
-            .map_err(SourceBackedRelationalCatchUpError::projection)?;
-        drop(projection);
-        publish_candidate(&candidate_path, &projection_path)?;
-    }
+    finish_candidate_publication(
+        projection,
+        &candidate_path,
+        &projection_path,
+        &generation,
+        &receipt,
+    )?;
     Ok(ProjectionOutcome {
         receipt,
         did_work: true,
@@ -381,32 +492,104 @@ fn relational_source_metadata(
     })
 }
 
-fn open_disposable_projection(
+fn prepare_disposable_projection(
     path: &Path,
-) -> std::result::Result<
-    (SourceBackedRelationalProjection, Option<PathBuf>),
-    SourceBackedRelationalCatchUpError,
-> {
-    match SourceBackedRelationalProjection::open(path) {
-        Ok(projection) => Ok((projection, None)),
+    generation: &CommittedCoreGeneration,
+) -> std::result::Result<PreparedProjection, SourceBackedRelationalCatchUpError> {
+    let exists =
+        path.try_exists()
+            .map_err(|source| RelationalPublicationError::InspectDestination {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    if !exists {
+        return open_empty_candidate(path);
+    }
+
+    match SourceBackedRelationalProjection::open_read_only(path) {
+        Ok(projection) => {
+            let plan = projection
+                .plan_generation(generation)
+                .map_err(SourceBackedRelationalCatchUpError::projection)?;
+            if let RelationalProjectionPlan::NoOp(receipt) = plan {
+                drop(projection);
+                verify_projection_identity(path, generation, &receipt).map_err(|detail| {
+                    RelationalPublicationError::ExistingVerification {
+                        path: path.to_path_buf(),
+                        detail,
+                    }
+                })?;
+                return Ok(PreparedProjection::NoOp(receipt));
+            }
+            drop(projection);
+            snapshot_prior_projection(path)
+        }
         Err(
             RelationalProjectionError::MissingSchema
             | RelationalProjectionError::UnsupportedSchema { .. }
             | RelationalProjectionError::IncompatibleState(_)
             | RelationalProjectionError::MissingStableView(_),
-        ) => {
-            let candidate = candidate_projection_path(path);
-            reset_candidate_projection(&candidate)?;
-            SourceBackedRelationalProjection::open(&candidate)
-                .map(|projection| (projection, Some(candidate)))
-                .map_err(SourceBackedRelationalCatchUpError::projection)
-        }
+        ) => open_empty_candidate(path),
         Err(error) => Err(SourceBackedRelationalCatchUpError::projection(error)),
     }
 }
 
+fn open_empty_candidate(
+    destination: &Path,
+) -> std::result::Result<PreparedProjection, SourceBackedRelationalCatchUpError> {
+    let candidate = candidate_projection_path(destination);
+    reset_candidate_projection(&candidate)?;
+    let projection = SourceBackedRelationalProjection::open(&candidate)
+        .map_err(SourceBackedRelationalCatchUpError::projection)?;
+    Ok(PreparedProjection::Candidate {
+        projection,
+        path: candidate,
+    })
+}
+
+fn snapshot_prior_projection(
+    destination: &Path,
+) -> std::result::Result<PreparedProjection, SourceBackedRelationalCatchUpError> {
+    let mut prior = SourceBackedRelationalProjection::open(destination).map_err(|source| {
+        RelationalPublicationError::SealPrior {
+            path: destination.to_path_buf(),
+            source,
+        }
+    })?;
+    prior
+        .seal_for_replacement()
+        .map_err(|source| RelationalPublicationError::SealPrior {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    drop(prior);
+    remove_sqlite_sidecars(destination, "remove sealed prior relational sidecar")?;
+    fs::File::open(destination)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| RelationalPublicationError::SyncPrior {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+
+    let candidate = candidate_projection_path(destination);
+    reset_candidate_projection(&candidate)?;
+    fs::copy(destination, &candidate).map_err(|source| {
+        RelationalPublicationError::SnapshotPrior {
+            source_path: destination.to_path_buf(),
+            candidate_path: candidate.clone(),
+            source,
+        }
+    })?;
+    let projection = SourceBackedRelationalProjection::open(&candidate)
+        .map_err(SourceBackedRelationalCatchUpError::projection)?;
+    Ok(PreparedProjection::Candidate {
+        projection,
+        path: candidate,
+    })
+}
+
 fn candidate_projection_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.core-candidate", path.display()))
+    path_with_suffix(path, ".core-candidate")
 }
 
 fn reset_candidate_projection(
@@ -414,34 +597,286 @@ fn reset_candidate_projection(
 ) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
     for candidate in [
         path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
+        sqlite_sidecar_path(path, "-wal"),
+        sqlite_sidecar_path(path, "-shm"),
     ] {
         match fs::remove_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(SourceBackedRelationalCatchUpError::Projection(format!(
-                    "reset disposable candidate {}: {error}",
-                    candidate.display()
-                )));
+                return Err(RelationalPublicationError::RemoveFile {
+                    operation: "reset disposable relational candidate",
+                    path: candidate,
+                    source: error,
+                }
+                .into());
             }
         }
     }
     Ok(())
 }
 
-fn publish_candidate(
+fn remove_sqlite_sidecars(
+    path: &Path,
+    operation: &'static str,
+) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
+    for sidecar in [
+        sqlite_sidecar_path(path, "-wal"),
+        sqlite_sidecar_path(path, "-shm"),
+    ] {
+        match fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(RelationalPublicationError::RemoveFile {
+                    operation,
+                    path: sidecar,
+                    source,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    path_with_suffix(path, suffix)
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut suffixed = path.as_os_str().to_os_string();
+    suffixed.push(suffix);
+    PathBuf::from(suffixed)
+}
+
+fn finish_candidate_publication(
+    projection: SourceBackedRelationalProjection,
     candidate: &Path,
     destination: &Path,
+    generation: &CommittedCoreGeneration,
+    receipt: &RelationalProjectionReceipt,
 ) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
-    fs::rename(candidate, destination).map_err(|error| {
-        SourceBackedRelationalCatchUpError::Projection(format!(
-            "publish Core relational candidate {} to {}: {error}",
-            candidate.display(),
-            destination.display()
-        ))
+    finish_candidate_publication_with(
+        projection,
+        candidate,
+        destination,
+        generation,
+        receipt,
+        durable_atomic_replace_file,
+    )
+}
+
+fn finish_candidate_publication_with<Replace>(
+    mut projection: SourceBackedRelationalProjection,
+    candidate: &Path,
+    destination: &Path,
+    generation: &CommittedCoreGeneration,
+    receipt: &RelationalProjectionReceipt,
+    replace: Replace,
+) -> std::result::Result<(), SourceBackedRelationalCatchUpError>
+where
+    Replace: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    projection.seal_for_replacement().map_err(|source| {
+        RelationalPublicationError::SealCandidate {
+            path: candidate.to_path_buf(),
+            source,
+        }
+    })?;
+    drop(projection);
+    remove_sqlite_sidecars(candidate, "remove sealed relational candidate sidecar")?;
+    fs::File::open(candidate)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| RelationalPublicationError::SyncCandidate {
+            path: candidate.to_path_buf(),
+            source,
+        })?;
+    verify_projection_identity(candidate, generation, receipt).map_err(|detail| {
+        RelationalPublicationError::CandidateVerification {
+            path: candidate.to_path_buf(),
+            detail,
+        }
+    })?;
+
+    // A sealed prior main file remains complete without its WAL/SHM files. Do
+    // this before the one atomic replacement so stale sidecars can never be
+    // paired with the newly published SQLite header.
+    remove_sqlite_sidecars(
+        destination,
+        "remove prior relational sidecar before publication",
+    )?;
+    if let Err(source) = replace(candidate, destination) {
+        return match candidate.try_exists() {
+            Ok(true) => Err(RelationalPublicationError::AtomicReplace {
+                candidate: candidate.to_path_buf(),
+                destination: destination.to_path_buf(),
+                source,
+            }
+            .into()),
+            Ok(false) => Err(RelationalPublicationError::PublishedDurability {
+                destination: destination.to_path_buf(),
+                source,
+            }
+            .into()),
+            Err(state_source) => Err(RelationalPublicationError::PublicationStateUnknown {
+                destination: destination.to_path_buf(),
+                replace_error: source.to_string(),
+                source: state_source,
+            }
+            .into()),
+        };
+    }
+
+    verify_projection_identity(destination, generation, receipt).map_err(|detail| {
+        RelationalPublicationError::PublishedVerification {
+            path: destination.to_path_buf(),
+            detail,
+        }
+        .into()
     })
+}
+
+fn verify_projection_identity(
+    path: &Path,
+    generation: &CommittedCoreGeneration,
+    receipt: &RelationalProjectionReceipt,
+) -> std::result::Result<(), String> {
+    let projection = SourceBackedRelationalProjection::open_read_only(path)
+        .map_err(|error| format!("open read-only projection: {error}"))?;
+    let metadata = projection
+        .metadata()
+        .map_err(|error| format!("read projection metadata: {error}"))?;
+    let mut mismatches = Vec::new();
+    compare_projection_field(
+        &mut mismatches,
+        "receipt.core_generation_id",
+        &receipt.core_generation_id,
+        &generation.generation_id,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "receipt.relational_schema_version",
+        &receipt.relational_schema_version,
+        &RELATIONAL_PROJECTION_SCHEMA_VERSION,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "receipt.materializer_revision",
+        &receipt.materializer_revision,
+        &RELATIONAL_MATERIALIZER_REVISION,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "status",
+        &metadata.status,
+        &RelationalProjectionStatus::Ready,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_core_generation_id",
+        &metadata.active_core_generation_id.as_deref(),
+        &Some(generation.generation_id.as_str()),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_manifest_version",
+        &metadata.active_manifest_version,
+        &Some(generation.manifest_version),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_core_record_version",
+        &metadata.active_core_record_version,
+        &Some(generation.core_record_version),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_core_record_contract_fingerprint",
+        &metadata.active_core_record_contract_fingerprint.as_deref(),
+        &Some(generation.core_record_contract_fingerprint.as_str()),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_lexical_schema_version",
+        &metadata.active_lexical_schema_version,
+        &Some(generation.lexical_schema_version),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_policy_schema_hash",
+        &metadata.active_policy_schema_hash.as_deref(),
+        &Some(generation.policy_schema_hash.as_str()),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "active_materializer_revision",
+        &metadata.active_materializer_revision,
+        &Some(RELATIONAL_MATERIALIZER_REVISION),
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "target_core_generation_id",
+        &metadata.target_core_generation_id,
+        &None,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "build_generation",
+        &metadata.build_generation,
+        &receipt.build_generation,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "source_count",
+        &metadata.source_count,
+        &receipt.source_count,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "session_count",
+        &metadata.session_count,
+        &receipt.session_count,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "event_count",
+        &metadata.event_count,
+        &receipt.event_count,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "repository_binding_count",
+        &metadata.repository_binding_count,
+        &receipt.repository_binding_count,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "file_touch_count",
+        &metadata.file_touch_count,
+        &receipt.file_touch_count,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "vcs_observation_count",
+        &metadata.vcs_observation_count,
+        &receipt.vcs_observation_count,
+    );
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(mismatches.join("; "))
+    }
+}
+
+fn compare_projection_field<T>(mismatches: &mut Vec<String>, field: &str, actual: &T, expected: &T)
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if actual != expected {
+        mismatches.push(format!("{field} is {actual:?}, expected {expected:?}"));
+    }
 }
 
 #[derive(Clone, Copy)]

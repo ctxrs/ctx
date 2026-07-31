@@ -134,10 +134,26 @@ impl SourceBackedRelationalProjection {
                 "a read-only projection cannot be sealed".to_owned(),
             ));
         }
-        self.conn.execute_batch(
-            "PRAGMA wal_checkpoint(TRUNCATE);
-             PRAGMA journal_mode = DELETE;",
-        )?;
+        let (busy, log_frames, checkpointed_frames) =
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        if busy != 0 {
+            return Err(RelationalProjectionError::WalCheckpointBusy {
+                busy,
+                log_frames,
+                checkpointed_frames,
+            });
+        }
+        let journal_mode: String =
+            self.conn
+                .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("delete") {
+            return Err(RelationalProjectionError::UnexpectedJournalMode {
+                actual: journal_mode,
+            });
+        }
         Ok(())
     }
 
