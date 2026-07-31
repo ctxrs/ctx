@@ -244,11 +244,16 @@ fn all_source_events(index_root: &Path) -> Vec<EventRecord> {
 fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("codebuddy");
+    let cli_body = format!("codebuddy-cli-head-{}-clitailsentinel", "c".repeat(20_000));
+    let extension_body = format!(
+        "codebuddy-extension-head-{}-extensiontailsentinel",
+        "e".repeat(20_000)
+    );
     write_store(
         &root,
-        &[("cli-1", "first cli body"), ("cli-2", "second cli body")],
+        &[("cli-1", &cli_body), ("cli-2", "second cli body")],
         &[
-            ("extension-1", "first extension body"),
+            ("extension-1", &extension_body),
             ("extension-2", "second extension body"),
         ],
     );
@@ -275,6 +280,23 @@ fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
     .unwrap();
     let cli = source_events(&index_root, &cli_source);
     let extension = source_events(&index_root, &extension_source);
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(
+        verified
+            .search_event_candidates("clitailsentinel", 8)
+            .unwrap()
+            .first()
+            .map(|candidate| candidate.event.event_id),
+        Some(cli[0].event_id)
+    );
+    assert_eq!(
+        verified
+            .search_event_candidates("extensiontailsentinel", 8)
+            .unwrap()
+            .first()
+            .map(|candidate| candidate.event.event_id),
+        Some(extension[0].event_id)
+    );
     let resolver = registry.resolver_registry();
     assert_eq!(
         cli.iter()
@@ -287,7 +309,7 @@ fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
                     .provider_bytes
             })
             .collect::<Vec<_>>(),
-        [b"first cli body".to_vec(), b"second cli body".to_vec()]
+        [cli_body.as_bytes().to_vec(), b"second cli body".to_vec()]
     );
     assert_eq!(
         extension
@@ -302,7 +324,7 @@ fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
             })
             .collect::<Vec<_>>(),
         [
-            b"first extension body".to_vec(),
+            extension_body.as_bytes().to_vec(),
             b"second extension body".to_vec(),
         ]
     );
@@ -320,7 +342,7 @@ fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
     let cli_request = EventHydrationRequest::new(cli[0].event_id, cli[0].locator.clone()).unwrap();
     assert_eq!(
         resolver.hydrate_event(&cli_request).unwrap().provider_bytes,
-        b"first cli body"
+        cli_body.as_bytes()
     );
 
     let requests = [1_usize, 0]
@@ -353,7 +375,7 @@ fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
             .collect::<Vec<_>>(),
         [
             b"second extension body".as_slice(),
-            b"first extension body".as_slice()
+            extension_body.as_bytes()
         ]
     );
 

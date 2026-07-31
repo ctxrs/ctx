@@ -69,13 +69,28 @@ fn replace_messages(database: &Path, id: &str, updated_at: i64, messages: Value)
 fn direct_cold_scan_keeps_full_policy_body_and_exact_hydration() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("project");
-    let complete_text = format!("firebender-head-{}-firebender-tail", "x".repeat(3_000));
+    let complete_text = format!("firebender-head-{}-firebender-tail", "x".repeat(20_000));
+    let tool_arguments = json!({
+        "command": format!("{}firebender-structured-tail", "a".repeat(20_000)),
+        "path": "src/main.rs",
+    });
     let messages = (0..61)
         .map(|index| {
             if index == 0 {
                 json!({
                     "role": "user",
                     "content": complete_text,
+                })
+            } else if index == 1 {
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "function": {
+                            "name": "shell",
+                            "arguments": tool_arguments,
+                        }
+                    }],
                 })
             } else {
                 json!({
@@ -163,6 +178,20 @@ fn direct_cold_scan_keeps_full_policy_body_and_exact_hydration() {
         .hydrate_event(&request)
         .unwrap();
     assert_eq!(hydrated.provider_bytes, complete_text.as_bytes());
+
+    let tool = &documents[1];
+    let encoded_arguments = tool
+        .body
+        .lines()
+        .find_map(|line| line.strip_prefix("tool input: "))
+        .expect("complete structured Firebender tool arguments");
+    let decoded_arguments: Value = serde_json::from_str(encoded_arguments).unwrap();
+    assert_eq!(decoded_arguments, tool_arguments);
+    assert!(encoded_arguments.contains("firebender-structured-tail"));
+    let hydrated = source_backed::resolver_for_test(&root)
+        .hydrate_event(&EventHydrationRequest::new(tool.event_id, tool.locator.clone()).unwrap())
+        .unwrap();
+    assert_eq!(hydrated.provider_bytes, tool.body.as_bytes());
 }
 
 #[test]

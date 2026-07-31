@@ -480,10 +480,7 @@ fn resolve_hydrated_message(
             .event
             .as_ref()
             .ok_or(CrushSourceBackedErrorV0::StaleRecordEvidence)?;
-        (
-            event.provider_event_hash.clone(),
-            lexical_body(&projection, event),
-        )
+        (event.provider_event_hash.clone(), lexical_body(&projection))
     };
     Ok(ResolvedCrushMessage {
         provider_session_id: row.session_id,
@@ -850,22 +847,18 @@ fn lexical_document(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: event.role.map(|role| role.as_str().to_owned()),
-        body: lexical_body(projection, event),
+        body: lexical_body(projection),
         workspace: None,
         cwd: None,
         touched_files: touched_paths(projection)?,
     })
 }
 
-fn lexical_body(
-    projection: &CrushMessageProjection,
-    event: &super::super::projection::CrushEventDraft,
-) -> String {
+fn lexical_body(projection: &CrushMessageProjection) -> String {
     let text = if projection.output.is_none() {
-        event
-            .payload
-            .get("text")
-            .and_then(serde_json::Value::as_str)
+        projection
+            .complete_text
+            .as_deref()
             .unwrap_or(projection.event_type.as_str())
             .to_owned()
     } else if let Some(output) = projection.output.as_ref() {

@@ -443,8 +443,7 @@ impl<'connection> HermesRowReader<'connection> {
             rowid: candidate.rowid,
         };
         let hydration_limit_exceeded = observed_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES;
-        let native_page_limit_exceeded =
-            observed_bytes > NATIVE_INGESTION_PAGE_MAX_BYTES && candidate.indivisible;
+        let native_page_limit_exceeded = observed_bytes > NATIVE_INGESTION_PAGE_MAX_BYTES;
         if hydration_limit_exceeded || native_page_limit_exceeded {
             let limit = if hydration_limit_exceeded {
                 MAX_PROVIDER_SQLITE_VALUE_BYTES

@@ -320,7 +320,7 @@ fn concurrent_committed_wal_mutation_during_snapshot_open_fails_closed() {
 fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
-    let text = format!("hermes-head-{}-hermes-tail", "x".repeat(3_000));
+    let text = format!("hermes-head-{}-hermes-tail", "x".repeat(20_000));
     create_state_db(&path, "full", &text);
     let candidate = hermes_source_backed_explicit(
         crate::test_provider_sqlite_data_root(),
@@ -350,6 +350,41 @@ fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     assert_eq!(hydrated.text, text);
     assert_eq!(hydrated.provider_bytes, text.as_bytes());
     assert_eq!(resolver.counters(), (1, 1, 1));
+}
+
+#[test]
+fn oversized_indivisible_message_is_a_typed_rejection_not_a_truncated_document() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let oversized = "x".repeat(NATIVE_INGESTION_PAGE_MAX_BYTES + 1);
+    create_state_db(&path, "oversized", &oversized);
+    let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("oversized").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (certificate, records) = scan_candidate(&candidate);
+    assert_eq!(certificate.counts().complete_records, 3);
+    assert_eq!(certificate.counts().indexed_documents, 0);
+    assert_eq!(certificate.counts().rejected_records, 1);
+    assert!(!records
+        .iter()
+        .any(|record| matches!(record, HermesSourceBackedRecord::Event(_))));
+    let rejection = records
+        .iter()
+        .find_map(|record| match record {
+            HermesSourceBackedRecord::Rejected(rejection) => Some(rejection),
+            HermesSourceBackedRecord::Session(_) | HermesSourceBackedRecord::Event(_) => None,
+        })
+        .expect("typed oversized Hermes rejection");
+    assert!(rejection.reason.contains("indivisible"));
+    assert!(rejection.reason.contains("NativePath page"));
 }
 
 #[test]

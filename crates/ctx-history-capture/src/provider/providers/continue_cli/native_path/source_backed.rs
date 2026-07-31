@@ -48,7 +48,7 @@ use crate::{
             SourceBackedRouteSelection,
         },
     },
-    ProviderSource, CONTINUE_CLI_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    ProviderSource, CONTINUE_CLI_SOURCE_FORMAT,
 };
 
 const CONTINUE_SOURCE_ANCHOR_NAMESPACE: &str = "continue.session";
@@ -558,7 +558,7 @@ fn continue_session_id(
 
 fn continue_lexical_body(event: &ContinueEventRow) -> String {
     if !event.search_text.trim().is_empty() {
-        return bounded_chars(&event.search_text, PROVIDER_MAX_TEXT_CHARS);
+        return event.search_text.clone();
     }
     match event.kind {
         ContinueEventKind::Message => "Continue message".to_owned(),

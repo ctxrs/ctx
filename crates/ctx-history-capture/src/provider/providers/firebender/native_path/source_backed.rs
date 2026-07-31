@@ -19,7 +19,7 @@ use super::{FirebenderRow, FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES};
 use crate::{
     native_source::NativeSqliteValue,
     provider::{
-        normalization::{provider_policy_event_text, provider_timestamp_millis},
+        normalization::provider_timestamp_millis,
         sqlite::{sqlite_table_columns, SqliteLengthPreflightGuard},
     },
     CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
@@ -125,7 +125,7 @@ pub(super) fn firebender_document(
         }
         sparse_output_body(&evidence)
     } else {
-        provider_policy_event_text(event.event_type, &event.text, &event.body).text
+        event.text
     };
     let body = if body.is_empty() {
         format!("Firebender {}", event.event_type.as_str())

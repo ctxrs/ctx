@@ -13,10 +13,7 @@ use crate::provider::normalization::{
     provider_json_text, provider_local_preview, provider_normalized_result_value,
     provider_timestamp_seconds, provider_value_text,
 };
-use crate::{
-    OutputOutcome, OutputOutcomeMetadata, Result, PROVIDER_MAX_PREVIEW_CHARS,
-    PROVIDER_MAX_TEXT_CHARS,
-};
+use crate::{OutputOutcome, OutputOutcomeMetadata, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
 use super::stream::{GooseRetainedContentClass, GooseRetainedMessage};
 
@@ -261,11 +258,6 @@ fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
         Value::Array(items) => {
             for item in items {
                 goose_collect_text(item, parts);
-                if parts.iter().map(|part| part.chars().count()).sum::<usize>()
-                    >= PROVIDER_MAX_TEXT_CHARS
-                {
-                    break;
-                }
             }
         }
         Value::Object(object) => {
@@ -479,8 +471,7 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         } else {
             ("Goose tool response failed".to_owned(), None, None, None)
         };
-    let searchable_text = provider_local_preview(&diagnostic, PROVIDER_MAX_TEXT_CHARS).0;
-    let output_preview = provider_local_preview(&searchable_text, PROVIDER_MAX_PREVIEW_CHARS).0;
+    let output_preview = provider_local_preview(&diagnostic, PROVIDER_MAX_PREVIEW_CHARS).0;
     let body = json!({
         "message_id": message.provider_message_identity,
         "row_id": message.native_order,
@@ -510,7 +501,7 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         kind: GooseNativeEventKind::ToolOutput,
         role: message.role.clone(),
         content: body,
-        searchable_text,
+        searchable_text: diagnostic,
         created_timestamp: message.created_timestamp,
         timestamp: message.timestamp.clone(),
         tokens_json: None,
