@@ -18,6 +18,42 @@ pub(super) fn reusable_setup_access_state(
     Some(account_state.to_owned())
 }
 
+pub(super) fn replay_completed_setup(
+    data_root: &Path,
+    json_output: bool,
+    trial_only: bool,
+    referral_codename: Option<&str>,
+    telemetry: &mut ProLifecycleTelemetryV1,
+    ui: &mut Ui,
+) -> Result<bool> {
+    let Some(account_state) =
+        reusable_setup_access_state(&status(data_root), trial_only, referral_codename)
+    else {
+        return Ok(false);
+    };
+
+    // A completed local setup replay must not depend on commercial endpoint
+    // configuration or availability. Validate and catch up the rebuildable
+    // source projection before constructing the commercial service.
+    telemetry.reconcile = ProReconcileOutcomeV1::Current;
+    telemetry.access_state = ProAccessStateV1::from_safe_name(&account_state);
+    let mut materialization = ProMaterializationTelemetryV1::started();
+    let report = materialize(data_root, &mut materialization);
+    if materialization.helper_connection != ProHelperConnectionOutcomeV1::NotAttempted {
+        telemetry.helper_connection = materialization.helper_connection;
+    }
+    telemetry.materialization = Some(materialization);
+    write_setup_result(
+        data_root,
+        &account_state,
+        false,
+        report.map_err(crate::pro::actionable_error)?,
+        json_output,
+        ui,
+    )?;
+    Ok(true)
+}
+
 pub(super) fn write_setup_result(
     data_root: &Path,
     account_state: &str,

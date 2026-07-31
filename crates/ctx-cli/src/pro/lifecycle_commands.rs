@@ -61,7 +61,9 @@ use render::{
     browser_notice as render_browser_notice, manage as render_manage_human,
     setup as render_setup_human, uninstall as render_uninstall_human,
 };
-use setup_replay::{record_helper_smoke, reusable_setup_access_state, write_setup_result};
+#[cfg(test)]
+use setup_replay::reusable_setup_access_state;
+use setup_replay::{record_helper_smoke, replay_completed_setup, write_setup_result};
 
 #[derive(Debug, Args)]
 pub(crate) struct ProArgs {
@@ -269,6 +271,16 @@ fn run_lifecycle_inner(
         None | Some(ProCommand::Setup(_)) => {
             crate::identity::installation_id(data_root)
                 .context("key_store_unavailable: initialize local Pro installation identity")?;
+            if replay_completed_setup(
+                data_root,
+                json_output,
+                trial_only,
+                referral.as_ref().map(ReferralCodename::as_str),
+                telemetry,
+                ui,
+            )? {
+                return Ok(());
+            }
             let mut service = CommercialLifecycleService::production(data_root)?;
             run_setup(
                 data_root,
@@ -411,27 +423,6 @@ fn run_setup(
     telemetry: &mut ProLifecycleTelemetryV1,
     ui: &mut Ui,
 ) -> Result<()> {
-    if let Some(account_state) =
-        reusable_setup_access_state(&status(data_root), trial_only, referral_codename)
-    {
-        telemetry.reconcile = ProReconcileOutcomeV1::Current;
-        telemetry.access_state = ProAccessStateV1::from_safe_name(&account_state);
-        let mut materialization = ProMaterializationTelemetryV1::started();
-        let report = materialize(data_root, &mut materialization);
-        if materialization.helper_connection != ProHelperConnectionOutcomeV1::NotAttempted {
-            telemetry.helper_connection = materialization.helper_connection;
-        }
-        telemetry.materialization = Some(materialization);
-        return write_setup_result(
-            data_root,
-            &account_state,
-            false,
-            report.map_err(crate::pro::actionable_error)?,
-            json_output,
-            ui,
-        );
-    }
-
     let trust = service.release_trust()?;
     let target = default_helper_path(data_root);
     telemetry.reconcile = ProReconcileOutcomeV1::Failed;
