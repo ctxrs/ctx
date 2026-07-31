@@ -516,6 +516,92 @@ impl MaterializeSourcePageRequest {
     }
 }
 
+/// One atomic, bounded set of distinct-source materialization pages.
+///
+/// Each nested request retains the existing per-source CAS and frontier
+/// contract. Helpers must commit every page or none of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializeSourcePagesRequest {
+    pub pages: Vec<MaterializeSourcePageRequest>,
+}
+
+impl MaterializeSourcePagesRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.pages.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source materialization batch must contain at least one page",
+            ));
+        }
+        if self.pages.len() > MAX_SOURCE_MATERIALIZATION_BATCH_ITEMS {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source materialization batch exceeds its page count bound",
+            ));
+        }
+        let mut core_generation_id = None;
+        let mut prior_source = None;
+        let mut record_count = 0_usize;
+        let mut content_bytes = 0_usize;
+        for page in &self.pages {
+            page.validate()?;
+            if core_generation_id
+                .is_some_and(|generation: &str| generation != page.core_generation_id)
+            {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "source materialization batch mixes Core generations",
+                ));
+            }
+            core_generation_id = Some(page.core_generation_id.as_str());
+            let source_id = page.expected_prior.source.identity().digest();
+            if prior_source.is_some_and(|prior| prior >= source_id) {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "source materialization batch pages must be sorted and unique by source identity",
+                ));
+            }
+            prior_source = Some(source_id);
+            record_count = record_count
+                .checked_add(page.records.len())
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "source materialization batch record count overflowed",
+                    )
+                })?;
+            if record_count > MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS {
+                return Err(ProtocolError::new(
+                    ErrorClass::Bounds,
+                    "source materialization batch exceeds its aggregate record count bound",
+                ));
+            }
+            for record in &page.records {
+                content_bytes = content_bytes
+                    .checked_add(record.validate_and_count_bytes()?)
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorClass::Bounds,
+                            "source materialization batch transient-content byte total overflowed",
+                        )
+                    })?;
+                if content_bytes > MAX_SOURCE_MATERIALIZATION_BATCH_CONTENT_BYTES {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "source materialization batch exceeds its aggregate transient-content byte bound",
+                    ));
+                }
+            }
+        }
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_MATERIALIZATION_BATCH_WIRE_BYTES,
+            "source materialization batch exceeds its encoded byte bound",
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourcePageMaterialized {
@@ -543,6 +629,136 @@ impl SourcePageMaterialized {
                 ErrorClass::Bounds,
                 "source page acknowledgement exceeds its detector-fact count bound",
             ));
+        }
+        Ok(())
+    }
+}
+
+/// Ordered acknowledgements for one atomic distinct-source materialization
+/// batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePagesMaterialized {
+    pub core_generation_id: String,
+    pub pages: Vec<SourcePageMaterialized>,
+}
+
+impl SourcePagesMaterialized {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        if self.pages.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source materialization batch response must contain at least one page",
+            ));
+        }
+        if self.pages.len() > MAX_SOURCE_MATERIALIZATION_BATCH_ITEMS {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source materialization batch response exceeds its page count bound",
+            ));
+        }
+        let mut prior_source = None;
+        let replayed = self.pages[0].replayed;
+        let mut accepted_records = 0_usize;
+        let mut materialized_facts = 0_usize;
+        for page in &self.pages {
+            page.validate()?;
+            if page.core_generation_id != self.core_generation_id {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "source materialization batch response mixes Core generations",
+                ));
+            }
+            if page.replayed != replayed {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "atomic source materialization batch response mixes replay states",
+                ));
+            }
+            let source_id = page.progress.source.identity().digest();
+            if prior_source.is_some_and(|prior| prior >= source_id) {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "source materialization batch responses must be sorted and unique by source identity",
+                ));
+            }
+            prior_source = Some(source_id);
+            accepted_records = accepted_records
+                .checked_add(page.accepted_records as usize)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "source materialization batch response record count overflowed",
+                    )
+                })?;
+            materialized_facts = materialized_facts
+                .checked_add(page.materialized_facts as usize)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "source materialization batch response fact count overflowed",
+                    )
+                })?;
+        }
+        if accepted_records > MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source materialization batch response exceeds its aggregate record count bound",
+            ));
+        }
+        if materialized_facts
+            > MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS
+                .saturating_mul(MAX_SOURCE_FACTS_PER_RECORD)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source materialization batch response exceeds its aggregate detector-fact count bound",
+            ));
+        }
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_MATERIALIZATION_BATCH_WIRE_BYTES,
+            "source materialization batch response exceeds its encoded byte bound",
+        )
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &MaterializeSourcePagesRequest,
+    ) -> Result<(), ProtocolError> {
+        request.validate()?;
+        self.validate_for_validated_request(request)
+    }
+
+    pub fn validate_for_validated_request(
+        &self,
+        request: &MaterializeSourcePagesRequest,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        let Some(first_request) = request.pages.first() else {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source materialization batch response requires a nonempty request",
+            ));
+        };
+        if self.pages.len() != request.pages.len()
+            || self.core_generation_id != first_request.core_generation_id
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source materialization batch response does not match its request topology",
+            ));
+        }
+        for (acknowledged, expected) in self.pages.iter().zip(&request.pages) {
+            if !acknowledged.progress.exact_eq(&expected.next_progress())
+                || acknowledged.accepted_records as usize != expected.records.len()
+            {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "source materialization batch response acknowledged the wrong source page CAS",
+                ));
+            }
         }
         Ok(())
     }

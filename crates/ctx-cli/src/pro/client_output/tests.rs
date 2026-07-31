@@ -4,18 +4,22 @@ use std::fs;
 
 use ctx_history_capture::{ingest_codex_source_backed_v0, CodexLocatorResolverV0};
 use ctx_history_core::{
-    CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, ScannedSourceCounts,
-    SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use ctx_pro_host_protocol::{
     certified_source_revision_sha256, DeleteSourceRequest, FinishAdmittedSourceManifestRequest,
-    FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
-    ReadSourceProgressPageRequest, SourceDeleted, SourceManifestAdmissionBegan,
-    SourceManifestAdmitted, SourceManifestBegan, SourceManifestFinished, SourceManifestHeader,
-    SourceManifestPage, SourceManifestPageAdmitted, SourceMessageFact, SourcePageMaterialized,
-    SourcePrepared, SourceProgressPage, SourceProgressReceipt, SourceRecordMetadata,
-    SourceSessionRelationships, TransientSourceContent, TransientSourceFact,
+    FinishSourceManifestRequest, MaterializeSourcePageRequest, MaterializeSourcePagesRequest,
+    PrepareSourceRequest, ReadSourceProgressPageRequest, SourceDeleted,
+    SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
+    SourceManifestFinished, SourceManifestHeader, SourceManifestPage, SourceManifestPageAdmitted,
+    SourceMessageFact, SourcePageMaterialized, SourcePagesMaterialized, SourcePrepared,
+    SourceProgressPage, SourceProgressReceipt, SourceRecordMetadata, SourceSessionRelationships,
+    TransientSourceContent, TransientSourceFact,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -103,6 +107,9 @@ struct FixtureConsumer {
     deleted_epochs: Vec<u64>,
     finish_called: bool,
     corrupt_page_ack: bool,
+    reverse_batch_ack: bool,
+    wrong_batch_generation: bool,
+    materialization_batches: Vec<MaterializeSourcePagesRequest>,
     admission_header: Option<SourceManifestHeader>,
     admission_cursor: Option<ctx_pro_host_protocol::SourceManifestAdmissionCursor>,
     admission_replayed: Vec<bool>,
@@ -127,6 +134,9 @@ impl FixtureConsumer {
             deleted_epochs: Vec::new(),
             finish_called: false,
             corrupt_page_ack: false,
+            reverse_batch_ack: false,
+            wrong_batch_generation: false,
+            materialization_batches: Vec::new(),
             admission_header: None,
             admission_cursor: None,
             admission_replayed: Vec::new(),
@@ -163,47 +173,87 @@ impl SourceBackedProPageConsumer for FixtureConsumer {
                 (prior.source_epoch.saturating_add(1), None, false)
             }
         };
+        let progress = SourceBackedProProgress {
+            source: request.source.clone(),
+            source_epoch,
+            certified_revision_sha256: request.certified_revision_sha256.clone(),
+            frontier,
+            materializer_revision: request.materializer_revision.clone(),
+            terminal,
+        };
+        self.progress
+            .insert(request.source.identity().digest(), progress.clone());
         Ok(SourcePrepared {
             core_generation_id: request.core_generation_id.clone(),
-            progress: SourceBackedProProgress {
-                source: request.source.clone(),
-                source_epoch,
-                certified_revision_sha256: request.certified_revision_sha256.clone(),
-                frontier,
-                materializer_revision: request.materializer_revision.clone(),
-                terminal,
-            },
+            progress,
             replayed: false,
         })
     }
 
-    fn materialize_source_page(
+    fn materialize_source_pages(
         &mut self,
-        request: &MaterializeSourcePageRequest,
-    ) -> Result<SourcePageMaterialized> {
-        let source_id = request.expected_prior.source.identity().digest();
-        let durable = self.durable_event_ids.entry(source_id).or_default();
-        for record in &request.records {
-            self.transient_record_digests
-                .push(Sha256::digest(serde_json::to_vec(&record.facts).unwrap()).into());
-            durable.insert(record.event_id.digest());
+        request: &MaterializeSourcePagesRequest,
+    ) -> Result<SourcePagesMaterialized> {
+        self.materialization_batches.push(request.clone());
+        let mut staged_progress = self.progress.clone();
+        let mut staged_durable = self.durable_event_ids.clone();
+        let mut staged_digests: Vec<[u8; 32]> = Vec::new();
+        let mut replayed = None;
+        let mut pages = Vec::with_capacity(request.pages.len());
+        for page in &request.pages {
+            let source_id = page.expected_prior.source.identity().digest();
+            let current = staged_progress
+                .get(&source_id)
+                .ok_or_else(|| anyhow!("fixture source was not prepared"))?;
+            let next = page.next_progress();
+            let page_replayed = if current.exact_eq(&page.expected_prior) {
+                let durable = staged_durable.entry(source_id).or_default();
+                for record in &page.records {
+                    staged_digests
+                        .push(Sha256::digest(serde_json::to_vec(&record.facts).unwrap()).into());
+                    durable.insert(record.event_id.digest());
+                }
+                staged_progress.insert(source_id, next.clone());
+                false
+            } else if current.exact_eq(&next) {
+                true
+            } else {
+                bail!("fixture source page CAS mismatch");
+            };
+            if replayed.is_some_and(|prior| prior != page_replayed) {
+                bail!("fixture atomic batch cannot mix replay states");
+            }
+            replayed = Some(page_replayed);
+            let accepted_records = u32::try_from(page.records.len())
+                .expect("fixture page record count fits u32")
+                .saturating_add(u32::from(self.corrupt_page_ack && pages.is_empty()));
+            let materialized_facts = page.records.iter().fold(0_u32, |total, record| {
+                total.saturating_add(
+                    u32::try_from(record.facts.len()).expect("fixture fact count fits u32"),
+                )
+            });
+            pages.push(SourcePageMaterialized {
+                core_generation_id: page.core_generation_id.clone(),
+                progress: next,
+                accepted_records,
+                materialized_facts,
+                replayed: page_replayed,
+            });
         }
-        let progress = request.next_progress();
-        self.progress.insert(source_id, progress.clone());
-        let accepted_records = u32::try_from(request.records.len())
-            .expect("fixture page record count fits u32")
-            .saturating_add(u32::from(self.corrupt_page_ack));
-        let materialized_facts = request.records.iter().fold(0_u32, |total, record| {
-            total.saturating_add(
-                u32::try_from(record.facts.len()).expect("fixture fact count fits u32"),
-            )
-        });
-        Ok(SourcePageMaterialized {
-            core_generation_id: request.core_generation_id.clone(),
-            progress,
-            accepted_records,
-            materialized_facts,
-            replayed: false,
+        self.progress = staged_progress;
+        self.durable_event_ids = staged_durable;
+        self.transient_record_digests.extend(staged_digests);
+        if self.reverse_batch_ack {
+            pages.reverse();
+        }
+        let core_generation_id = if self.wrong_batch_generation {
+            "f".repeat(64)
+        } else {
+            request.pages[0].core_generation_id.clone()
+        };
+        Ok(SourcePagesMaterialized {
+            core_generation_id,
+            pages,
         })
     }
 
@@ -429,10 +479,21 @@ fn public_transport_exposes_only_the_paged_source_manifest_path() {
         "AdmitSourceManifestPage",
         "FinishSourceManifestAdmission",
         "FinishAdmittedSourceManifest",
+        "HostMessage::MaterializeSourcePages",
     ] {
         assert!(
             source.contains(required),
             "public Pro transport is missing {required}"
+        );
+    }
+    for forbidden_hot_path in [
+        "existing.clone()",
+        "page.records.clone()",
+        "accumulated.validate()",
+    ] {
+        assert!(
+            !source.contains(forbidden_hot_path),
+            "source coalescing hot path contains {forbidden_hot_path}"
         );
     }
 }
@@ -627,6 +688,150 @@ fn full_5863_source_lifecycle_pages_progress_through_activation_replay_and_statu
     assert_eq!(replay.reread_pages, 0);
     assert!(replay_provider.requests.is_empty());
     assert_eq!(replay.receipt, first.receipt);
+}
+
+#[test]
+fn sixteen_sources_coalesce_four_provider_pages_into_one_atomic_helper_batch() {
+    let fixture = public_codex_fixture();
+    let (manifest, mut provider) = synthetic_materialization_batch_fixture(&fixture.generation_id);
+    let sources = manifest.sources.clone();
+    let mut consumer = FixtureConsumer::new(Vec::new());
+
+    let report = sync_source_backed_pro_feed_paged(
+        manifest,
+        &fixture.generation_manifest,
+        &mut provider,
+        &mut consumer,
+    )
+    .expect("bounded multi-source materialization batch");
+
+    assert_eq!(report.reread_pages, 16 * 4);
+    assert_eq!(report.reread_records, 16 * 4 * 16);
+    assert_eq!(provider.requests.len(), 16 * 4);
+    assert_eq!(consumer.materialization_batches.len(), 1);
+    let batch = &consumer.materialization_batches[0];
+    batch.validate().expect("bounded helper batch");
+    assert_eq!(batch.pages.len(), 16);
+    assert_eq!(
+        batch
+            .pages
+            .iter()
+            .map(|page| page.records.len())
+            .collect::<Vec<_>>(),
+        vec![64; 16]
+    );
+    assert!(batch.pages.iter().all(|page| page.terminal));
+    assert_eq!(
+        batch
+            .pages
+            .iter()
+            .map(|page| page.records.len())
+            .sum::<usize>(),
+        ctx_pro_host_protocol::MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS
+    );
+    let (item_count, record_count, content_bytes, encoded_bytes) =
+        materialization_batch_accounting(batch).expect("exact running batch accounting");
+    assert_eq!(item_count, 16);
+    assert_eq!(record_count, 1_024);
+    assert!(content_bytes > 0);
+    assert_eq!(encoded_bytes, serde_json::to_vec(batch).unwrap().len());
+    assert!(encoded_bytes <= ctx_pro_host_protocol::MAX_SOURCE_MATERIALIZATION_BATCH_WIRE_BYTES);
+    for source in sources {
+        let progress = consumer
+            .progress
+            .get(&source.observation().source().identity().digest())
+            .expect("final source progress");
+        assert!(progress.terminal);
+        assert_eq!(progress.frontier.as_ref(), source.frontier());
+    }
+}
+
+#[test]
+fn multi_source_batch_response_order_generation_and_cas_fail_closed_before_finish() {
+    let fixture = public_codex_fixture();
+    for corruption in ["order", "generation", "cas"] {
+        let (manifest, mut provider) =
+            synthetic_materialization_batch_fixture(&fixture.generation_id);
+        let mut consumer = FixtureConsumer::new(Vec::new());
+        match corruption {
+            "order" => consumer.reverse_batch_ack = true,
+            "generation" => consumer.wrong_batch_generation = true,
+            "cas" => consumer.corrupt_page_ack = true,
+            _ => unreachable!(),
+        }
+
+        let error = sync_source_backed_pro_feed_paged(
+            manifest,
+            &fixture.generation_manifest,
+            &mut provider,
+            &mut consumer,
+        )
+        .expect_err("corrupt atomic batch response must fail");
+
+        assert!(
+            error.to_string().contains("invalid_response"),
+            "{corruption}: {error:#}"
+        );
+        assert!(!consumer.finish_called);
+        assert_eq!(consumer.materialization_batches.len(), 1);
+    }
+}
+
+#[test]
+fn response_lost_exact_batch_retry_is_idempotent_and_preserves_frontier() {
+    let mut sources = vec![synthetic_source_at(99), synthetic_source_at(100)];
+    sources.sort_by_key(|source| source.observation().source().identity().digest());
+    let mut consumer = FixtureConsumer::new(Vec::new());
+    let request = MaterializeSourcePagesRequest {
+        pages: sources
+            .iter()
+            .map(|source| {
+                let prepare = PrepareSourceRequest {
+                    core_generation_id: "a".repeat(64),
+                    source: source.observation().source().clone(),
+                    certified_revision_sha256: certified_source_revision_sha256(source).unwrap(),
+                    materializer_revision: MATERIALIZER_REVISION.to_owned(),
+                    disposition: SourceBackedProDisposition::NewSource,
+                    expected_prior: None,
+                };
+                let prepared = consumer.prepare_source(&prepare).unwrap();
+                MaterializeSourcePageRequest {
+                    core_generation_id: prepare.core_generation_id,
+                    expected_prior: prepared.progress,
+                    next_frontier: source.frontier().cloned(),
+                    terminal: true,
+                    records: vec![synthetic_record_at(source.observation().source(), 1)],
+                }
+            })
+            .collect(),
+    };
+
+    let first = consumer.materialize_source_pages(&request).unwrap();
+    first.validate_for(&request).unwrap();
+    assert!(first.pages.iter().all(|page| !page.replayed));
+    let durable_after_first = sources
+        .iter()
+        .map(|source| consumer.durable_ids_for(source.observation().source()))
+        .collect::<Vec<_>>();
+    let transient_after_first = consumer.transient_record_digests.len();
+
+    let replay = consumer.materialize_source_pages(&request).unwrap();
+    replay.validate_for(&request).unwrap();
+    assert!(replay.pages.iter().all(|page| page.replayed));
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| consumer.durable_ids_for(source.observation().source()))
+            .collect::<Vec<_>>(),
+        durable_after_first
+    );
+    assert_eq!(
+        consumer.transient_record_digests.len(),
+        transient_after_first
+    );
+    for (page, source) in replay.pages.iter().zip(&sources) {
+        assert_eq!(page.progress.frontier.as_ref(), source.frontier());
+    }
 }
 
 #[test]
@@ -1014,4 +1219,124 @@ fn synthetic_source_at(index: u32) -> CertifiedSource {
         Some(frontier),
     )
     .expect("synthetic certified source")
+}
+
+fn synthetic_materialization_batch_fixture(
+    core_generation_id: &str,
+) -> (SourceBackedProManifest, FixtureProvider) {
+    const SOURCE_COUNT: u32 = 16;
+    const PAGES_PER_SOURCE: u64 = 4;
+    const RECORDS_PER_PROVIDER_PAGE: u64 = 16;
+    let mut sources = (0..SOURCE_COUNT)
+        .map(synthetic_source_at)
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|source| source.observation().source().identity().digest());
+    let mut pages = Vec::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let mut expected_prior_frontier = None;
+        for page_index in 0..PAGES_PER_SOURCE {
+            let terminal = page_index + 1 == PAGES_PER_SOURCE;
+            let next_frontier = if terminal {
+                source.frontier().cloned()
+            } else {
+                let mut digest = [7_u8; 32];
+                digest[..4].copy_from_slice(
+                    &u32::try_from(source_index)
+                        .expect("source index fits u32")
+                        .to_be_bytes(),
+                );
+                digest[4..12].copy_from_slice(&(page_index + 1).to_be_bytes());
+                Some(
+                    SourceFrontier::new(
+                        "fixture-batch-frontier-v1",
+                        TypedKey::U64(page_index + 1),
+                        (page_index + 1) * RECORDS_PER_PROVIDER_PAGE,
+                        digest,
+                    )
+                    .expect("synthetic batch frontier"),
+                )
+            };
+            let first_sequence = page_index * RECORDS_PER_PROVIDER_PAGE + 1;
+            let records = (first_sequence..first_sequence + RECORDS_PER_PROVIDER_PAGE)
+                .map(|sequence| synthetic_record_at(source.observation().source(), sequence))
+                .collect();
+            pages.push(SourceBackedProviderPage {
+                source: source.observation().source().clone(),
+                expected_prior_frontier: expected_prior_frontier.clone(),
+                next_frontier: next_frontier.clone(),
+                terminal,
+                records,
+            });
+            expected_prior_frontier = next_frontier;
+        }
+    }
+    (
+        SourceBackedProManifest::new(core_generation_id.to_owned(), sources, Vec::new())
+            .expect("synthetic batch manifest"),
+        FixtureProvider {
+            pages,
+            requests: Vec::new(),
+        },
+    )
+}
+
+fn synthetic_record_at(source: &SourceKey, event_sequence: u64) -> SourceBackedProRecord {
+    let session_key =
+        NativeSessionKey::native_id("fixture-session", TypedKey::utf8("session-1").unwrap())
+            .unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "fixture-session",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let item_key =
+        NativeItemKey::native_id("fixture-event", TypedKey::U64(event_sequence)).unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "fixture-event",
+        native_item_key: &item_key,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record_digest = [6_u8; 32];
+    record_digest[..8].copy_from_slice(&event_sequence.to_be_bytes());
+    let locator = SourceRecordLocator::new(
+        source.clone(),
+        NativeRecordCoordinate::ProviderNative {
+            namespace: "fixture-record".to_owned(),
+            coordinate: TypedKey::U64(event_sequence),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some([8; 32]),
+        record_digest,
+    )
+    .unwrap();
+    SourceBackedProRecord::new(
+        event_id,
+        session_id,
+        locator,
+        SourceSessionRelationships {
+            direct_session_id: session_id,
+            root_session_id: session_id,
+            parent_session_id: None,
+            provider_session_id: Some("provider-session-1".to_owned()),
+            agent_id: None,
+        },
+        None,
+        SourceRecordMetadata {
+            event_sequence,
+            occurred_at_unix_ms: None,
+            event_type: "message".to_owned(),
+            role: Some("assistant".to_owned()),
+            workspace: None,
+            cwd: None,
+            touched_files: Vec::new(),
+        },
+        vec![TransientSourceFact::Message(SourceMessageFact {
+            content: TransientSourceContent::from_bytes(b"bounded batch fixture").unwrap(),
+        })],
+    )
+    .unwrap()
 }

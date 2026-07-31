@@ -10,12 +10,12 @@ use ctx_pro_host_protocol::{
     certified_source_revision_sha256, AdmitSourceManifestPageRequest,
     BeginSourceManifestAdmissionRequest, DeleteSourceRequest, FinishAdmittedSourceManifestRequest,
     FinishSourceManifestAdmissionRequest, FinishSourceManifestRequest,
-    MaterializeSourcePageRequest, PrepareSourceRequest, ReadSourceProgressPageRequest,
-    SourceDeleted, SourceDisposition, SourceManifest, SourceManifestAdmissionBegan,
-    SourceManifestAdmitted, SourceManifestBegan, SourceManifestFinished, SourceManifestHeader,
-    SourceManifestPage, SourceManifestPageAdmitted, SourceManifestReceipt, SourcePageMaterialized,
-    SourcePrepared, SourceProgress, SourceProgressPage, SourceProgressReceipt, SourceRecord,
-    SourceRemoval,
+    MaterializeSourcePageRequest, MaterializeSourcePagesRequest, PrepareSourceRequest,
+    ReadSourceProgressPageRequest, SourceDeleted, SourceDisposition, SourceManifest,
+    SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
+    SourceManifestFinished, SourceManifestHeader, SourceManifestPage, SourceManifestPageAdmitted,
+    SourceManifestReceipt, SourcePagesMaterialized, SourcePrepared, SourceProgress,
+    SourceProgressPage, SourceProgressReceipt, SourceRecord, SourceRemoval,
 };
 
 const MAX_CANONICAL_SOURCE_PAGES: u64 = 1_000_000;
@@ -70,10 +70,10 @@ pub(super) trait SourceBackedProProvider {
 pub(super) trait SourceBackedProPageConsumer {
     fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared>;
 
-    fn materialize_source_page(
+    fn materialize_source_pages(
         &mut self,
-        request: &MaterializeSourcePageRequest,
-    ) -> Result<SourcePageMaterialized>;
+        request: &MaterializeSourcePagesRequest,
+    ) -> Result<SourcePagesMaterialized>;
 
     fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted>;
 }
@@ -145,19 +145,15 @@ impl SourceBackedProPageConsumer for ProtocolSourceBackedProConsumer {
         }
     }
 
-    fn materialize_source_page(
+    fn materialize_source_pages(
         &mut self,
-        request: &MaterializeSourcePageRequest,
-    ) -> Result<SourcePageMaterialized> {
-        validate_request(request)?;
-        match self.exchange(HostMessage::MaterializeSourcePage(request.clone()))? {
-            HelperMessage::SourcePageMaterialized(result) => {
-                validate_response(&result)?;
-                Ok(result)
-            }
+        request: &MaterializeSourcePagesRequest,
+    ) -> Result<SourcePagesMaterialized> {
+        match self.exchange(HostMessage::MaterializeSourcePages(request.clone()))? {
+            HelperMessage::SourcePagesMaterialized(result) => Ok(result),
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => {
-                bail!("invalid_response: helper returned a non-source-page response")
+                bail!("invalid_response: helper returned a non-source-pages response")
             }
         }
     }
@@ -357,7 +353,8 @@ where
         }
     }
 
-    let mut final_sources = Vec::with_capacity(manifest.sources.len());
+    let mut latest_progress = BTreeMap::new();
+    let mut pending_materialization = MaterializationBatchBuilder::new();
     #[cfg(test)]
     let mut prepared_sources = 0_u64;
     #[cfg(test)]
@@ -394,6 +391,7 @@ where
         let prepared = consumer.prepare_source(&prepare)?;
         validate_prepared_source(&prepare, &prepared)?;
         let mut prepared = prepared.progress;
+        latest_progress.insert(source_id, prepared.clone());
         #[cfg(test)]
         {
             prepared_sources = prepared_sources.saturating_add(1);
@@ -403,50 +401,99 @@ where
         }
 
         let mut source_pages = 0_u64;
+        let mut lookahead = None;
         while !prepared.terminal {
-            source_pages = source_pages.saturating_add(1);
-            if source_pages > MAX_CANONICAL_SOURCE_PAGES {
-                bail!("invalid_response: provider source page count exceeds safety bound");
+            let mut provisional = prepared.clone();
+            let mut coalesced: Option<SourcePageCoalescer> = None;
+            loop {
+                let item = if let Some(item) = lookahead.take() {
+                    item
+                } else {
+                    source_pages = source_pages.saturating_add(1);
+                    if source_pages > MAX_CANONICAL_SOURCE_PAGES {
+                        bail!("invalid_response: provider source page count exceeds safety bound");
+                    }
+                    let page =
+                        provider.reread_source_page(source, provisional.frontier.as_ref())?;
+                    #[cfg(test)]
+                    {
+                        reread_pages = reread_pages.saturating_add(1);
+                        reread_records = reread_records
+                            .saturating_add(u64::try_from(page.records.len()).unwrap_or(u64::MAX));
+                    }
+                    validate_provider_page(source, &provisional, &page)?;
+                    ProviderPageMaterializationItem::new(page, source_key)?
+                };
+                if let Some(accumulated) = coalesced.as_mut() {
+                    if let Some(item) = accumulated.try_append(item)? {
+                        lookahead = Some(item);
+                        break;
+                    }
+                    provisional = accumulated.next_progress();
+                    if accumulated.terminal() {
+                        break;
+                    }
+                } else {
+                    let accumulated = SourcePageCoalescer::new(
+                        manifest.core_generation_id.clone(),
+                        provisional.clone(),
+                        item,
+                    )?;
+                    provisional = accumulated.next_progress();
+                    let terminal = accumulated.terminal();
+                    coalesced = Some(accumulated);
+                    if terminal {
+                        break;
+                    }
+                }
             }
-            let page = provider.reread_source_page(source, prepared.frontier.as_ref())?;
-            validate_provider_page(source, &prepared, &page)?;
-            let accepted_records = u32::try_from(page.records.len())
-                .map_err(|_| anyhow!("invalid_request: source page record count overflow"))?;
-            let request = MaterializeSourcePageRequest {
-                core_generation_id: manifest.core_generation_id.clone(),
-                expected_prior: prepared.clone(),
-                next_frontier: page.next_frontier,
-                terminal: page.terminal,
-                records: page.records,
-            };
-            request
-                .validate()
-                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-            let materialized = consumer.materialize_source_page(&request)?;
-            validate_materialized_page(&request, &materialized, accepted_records)?;
-            prepared = materialized.progress;
-            #[cfg(test)]
-            {
-                reread_pages = reread_pages.saturating_add(1);
-                reread_records = reread_records.saturating_add(u64::from(accepted_records));
+            let item = coalesced
+                .ok_or_else(|| anyhow!("internal: source page coalescing produced no request"))?
+                .finish();
+            let terminal = item.request.terminal;
+            enqueue_materialization_request(
+                consumer,
+                &mut pending_materialization,
+                &mut latest_progress,
+                item,
+            )?;
+            if terminal {
+                break;
             }
+            flush_materialization_batch(
+                consumer,
+                &mut pending_materialization,
+                &mut latest_progress,
+            )?;
+            prepared = latest_progress
+                .get(&source_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("invalid_response: missing materialized source progress"))?;
         }
-        if prepared.frontier.as_ref() != source.frontier() {
-            bail!("invalid_response: Pro terminated at the wrong certified source frontier");
-        }
-        final_sources.push(SourceBackedProProgress {
-            source: source_key.clone(),
-            source_epoch: prepared.source_epoch,
-            certified_revision_sha256,
-            frontier: prepared.frontier,
-            materializer_revision: consumer_state.materializer_revision.clone(),
-            terminal: true,
-        });
     }
     if !progress_by_source.is_empty() {
         bail!("invalid_response: unreconciled Pro source progress remains");
     }
-    final_sources.sort_by_key(|progress| progress.source.identity().digest());
+    flush_materialization_batch(consumer, &mut pending_materialization, &mut latest_progress)?;
+    let mut final_sources = Vec::with_capacity(manifest.sources.len());
+    for source in &manifest.sources {
+        let source_id = source_identity_digest(source);
+        let progress = latest_progress
+            .remove(&source_id)
+            .ok_or_else(|| anyhow!("invalid_response: missing final Pro source progress"))?;
+        if !progress
+            .source
+            .exact_descriptor_eq(source.observation().source())
+            || !progress.terminal
+            || progress.frontier.as_ref() != source.frontier()
+        {
+            bail!("invalid_response: Pro terminated at the wrong certified source frontier");
+        }
+        final_sources.push(progress);
+    }
+    if !latest_progress.is_empty() {
+        bail!("invalid_response: unexpected final Pro source progress remains");
+    }
     let finish = FinishSourceManifestRequest {
         manifest: manifest.clone(),
         expected_progress: final_sources.clone(),
@@ -558,19 +605,447 @@ fn validate_provider_page(
     Ok(())
 }
 
-fn validate_materialized_page(
-    request: &MaterializeSourcePageRequest,
-    materialized: &SourcePageMaterialized,
-    accepted_records: u32,
-) -> Result<()> {
-    materialized
+struct ProviderPageMaterializationItem {
+    next_frontier: Option<SourceFrontier>,
+    terminal: bool,
+    records: Vec<SourceRecord>,
+    record_count: usize,
+    content_bytes: usize,
+    record_payload_bytes: usize,
+    first_order: Option<(u64, [u8; 32])>,
+    last_order: Option<(u64, [u8; 32])>,
+    event_ids: BTreeSet<[u8; 32]>,
+}
+
+impl ProviderPageMaterializationItem {
+    fn new(page: SourceBackedProviderPage, expected_source: &SourceKey) -> Result<Self> {
+        let SourceBackedProviderPage {
+            next_frontier,
+            terminal,
+            records,
+            ..
+        } = page;
+        let mut content_bytes = 0_usize;
+        let mut record_payload_bytes = 0_usize;
+        let mut first_order = None;
+        let mut last_order = None;
+        let mut event_ids = BTreeSet::new();
+        for record in &records {
+            if !record.locator.source().exact_descriptor_eq(expected_source) {
+                bail!("invalid_request: source page record belongs to another source descriptor");
+            }
+            let current = (record.metadata.event_sequence, record.event_id.digest());
+            if last_order.is_some_and(|prior| prior >= current) {
+                bail!("invalid_request: source page records must be in strict stable event order");
+            }
+            if !event_ids.insert(record.event_id.digest()) {
+                bail!("invalid_request: source page contains a duplicate stable event ID");
+            }
+            content_bytes = content_bytes
+                .checked_add(
+                    record
+                        .validate_and_count_bytes()
+                        .map_err(|error| anyhow!("invalid_request: {}", error.message))?,
+                )
+                .ok_or_else(|| {
+                    anyhow!("invalid_request: source page transient-content bytes overflowed")
+                })?;
+            let encoded_bytes = serde_json::to_vec(record)
+                .map_err(|error| anyhow!("internal: encode source record: {error}"))?
+                .len();
+            record_payload_bytes = record_payload_bytes
+                .checked_add(usize::from(last_order.is_some()))
+                .and_then(|bytes| bytes.checked_add(encoded_bytes))
+                .ok_or_else(|| {
+                    anyhow!("invalid_request: source page encoded record bytes overflowed")
+                })?;
+            first_order.get_or_insert(current);
+            last_order = Some(current);
+        }
+        Ok(Self {
+            next_frontier,
+            terminal,
+            record_count: records.len(),
+            records,
+            content_bytes,
+            record_payload_bytes,
+            first_order,
+            last_order,
+            event_ids,
+        })
+    }
+}
+
+#[derive(serde::Serialize)]
+struct MaterializeSourcePageShell<'a> {
+    core_generation_id: &'a str,
+    expected_prior: &'a SourceProgress,
+    next_frontier: &'a Option<SourceFrontier>,
+    terminal: bool,
+    records: &'a [SourceRecord],
+}
+
+fn source_page_shell_encoded_bytes(
+    core_generation_id: &str,
+    expected_prior: &SourceProgress,
+    next_frontier: &Option<SourceFrontier>,
+    terminal: bool,
+) -> Result<usize> {
+    serde_json::to_vec(&MaterializeSourcePageShell {
+        core_generation_id,
+        expected_prior,
+        next_frontier,
+        terminal,
+        records: &[],
+    })
+    .map(|encoded| encoded.len())
+    .map_err(|error| anyhow!("internal: encode source materialization shell: {error}"))
+}
+
+struct SourcePageCoalescer {
+    request: MaterializeSourcePageRequest,
+    record_count: usize,
+    content_bytes: usize,
+    record_payload_bytes: usize,
+    encoded_bytes: usize,
+    last_order: Option<(u64, [u8; 32])>,
+    event_ids: BTreeSet<[u8; 32]>,
+}
+
+impl SourcePageCoalescer {
+    fn new(
+        core_generation_id: String,
+        expected_prior: SourceProgress,
+        item: ProviderPageMaterializationItem,
+    ) -> Result<Self> {
+        let mut coalescer = Self {
+            request: MaterializeSourcePageRequest {
+                core_generation_id,
+                expected_prior,
+                next_frontier: None,
+                terminal: false,
+                records: Vec::new(),
+            },
+            record_count: 0,
+            content_bytes: 0,
+            record_payload_bytes: 0,
+            encoded_bytes: 0,
+            last_order: None,
+            event_ids: BTreeSet::new(),
+        };
+        if coalescer.try_append(item)?.is_some() {
+            bail!("invalid_request: source materialization page exceeds its bounded request");
+        }
+        Ok(coalescer)
+    }
+
+    fn try_append(
+        &mut self,
+        item: ProviderPageMaterializationItem,
+    ) -> Result<Option<ProviderPageMaterializationItem>> {
+        if self
+            .last_order
+            .zip(item.first_order)
+            .is_some_and(|(prior, current)| prior >= current)
+        {
+            bail!("invalid_request: source page records must be in strict stable event order");
+        }
+        if item
+            .event_ids
+            .iter()
+            .any(|event_id| self.event_ids.contains(event_id))
+        {
+            bail!("invalid_request: source page contains a duplicate stable event ID");
+        }
+        let record_count = self
+            .record_count
+            .checked_add(item.record_count)
+            .ok_or_else(|| anyhow!("invalid_request: source page record count overflowed"))?;
+        let content_bytes = self
+            .content_bytes
+            .checked_add(item.content_bytes)
+            .ok_or_else(|| {
+                anyhow!("invalid_request: source page transient-content bytes overflowed")
+            })?;
+        let record_payload_bytes = self
+            .record_payload_bytes
+            .checked_add(usize::from(self.record_count > 0 && item.record_count > 0))
+            .and_then(|bytes| bytes.checked_add(item.record_payload_bytes))
+            .ok_or_else(|| {
+                anyhow!("invalid_request: source page encoded record bytes overflowed")
+            })?;
+        let encoded_bytes = source_page_shell_encoded_bytes(
+            &self.request.core_generation_id,
+            &self.request.expected_prior,
+            &item.next_frontier,
+            item.terminal,
+        )?
+        .checked_add(record_payload_bytes)
+        .ok_or_else(|| anyhow!("invalid_request: source page encoded bytes overflowed"))?;
+        if record_count > ctx_pro_host_protocol::MAX_SOURCE_RECORDS_PER_PAGE
+            || content_bytes > ctx_pro_host_protocol::MAX_SOURCE_CONTENT_BYTES_PER_PAGE
+            || encoded_bytes > ctx_pro_host_protocol::MAX_SOURCE_PAGE_WIRE_BYTES
+        {
+            return Ok(Some(item));
+        }
+
+        let ProviderPageMaterializationItem {
+            next_frontier,
+            terminal,
+            records,
+            last_order,
+            event_ids,
+            ..
+        } = item;
+        self.request.next_frontier = next_frontier;
+        self.request.terminal = terminal;
+        self.request.records.extend(records);
+        self.record_count = record_count;
+        self.content_bytes = content_bytes;
+        self.record_payload_bytes = record_payload_bytes;
+        self.encoded_bytes = encoded_bytes;
+        if last_order.is_some() {
+            self.last_order = last_order;
+        }
+        self.event_ids.extend(event_ids);
+        Ok(None)
+    }
+
+    fn next_progress(&self) -> SourceProgress {
+        self.request.next_progress()
+    }
+
+    fn terminal(&self) -> bool {
+        self.request.terminal
+    }
+
+    fn finish(self) -> MaterializationBatchItem {
+        #[cfg(test)]
+        assert_eq!(
+            self.encoded_bytes,
+            serde_json::to_vec(&self.request)
+                .expect("encode coalesced source materialization request")
+                .len(),
+            "incremental source-page wire accounting diverged from authoritative JSON"
+        );
+        MaterializationBatchItem {
+            request: self.request,
+            record_count: self.record_count,
+            content_bytes: self.content_bytes,
+            encoded_bytes: self.encoded_bytes,
+        }
+    }
+}
+
+const EMPTY_MATERIALIZATION_BATCH_JSON_BYTES: usize = b"{\"pages\":[]}".len();
+
+struct MaterializationBatchItem {
+    request: MaterializeSourcePageRequest,
+    record_count: usize,
+    content_bytes: usize,
+    encoded_bytes: usize,
+}
+
+impl MaterializationBatchItem {
+    #[cfg(test)]
+    fn from_request(request: MaterializeSourcePageRequest) -> Result<Self> {
+        let mut content_bytes = 0_usize;
+        for record in &request.records {
+            content_bytes = content_bytes
+                .checked_add(
+                    record
+                        .validate_and_count_bytes()
+                        .map_err(|error| anyhow!("invalid_request: {}", error.message))?,
+                )
+                .ok_or_else(|| {
+                    anyhow!("invalid_request: source batch transient-content bytes overflowed")
+                })?;
+        }
+        let encoded_bytes = serde_json::to_vec(&request)
+            .map_err(|error| anyhow!("internal: encode source materialization request: {error}"))?
+            .len();
+        Ok(Self {
+            record_count: request.records.len(),
+            request,
+            content_bytes,
+            encoded_bytes,
+        })
+    }
+}
+
+struct MaterializationBatchBuilder {
+    pages: Vec<MaterializeSourcePageRequest>,
+    record_count: usize,
+    content_bytes: usize,
+    encoded_bytes: usize,
+}
+
+impl MaterializationBatchBuilder {
+    fn new() -> Self {
+        Self {
+            pages: Vec::new(),
+            record_count: 0,
+            content_bytes: 0,
+            encoded_bytes: EMPTY_MATERIALIZATION_BATCH_JSON_BYTES,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    fn accepts(&self, item: &MaterializationBatchItem) -> Result<bool> {
+        if let Some(first) = self.pages.first() {
+            if first.core_generation_id != item.request.core_generation_id {
+                bail!("invalid_request: source materialization batch mixes Core generations");
+            }
+        }
+        if let Some(last) = self.pages.last() {
+            if last.expected_prior.source.identity().digest()
+                >= item.request.expected_prior.source.identity().digest()
+            {
+                bail!(
+                    "invalid_request: source materialization batch pages must be sorted and unique by source identity"
+                );
+            }
+        }
+        let item_count = self.pages.len().checked_add(1).ok_or_else(|| {
+            anyhow!("invalid_request: source materialization batch page count overflowed")
+        })?;
+        let record_count = self
+            .record_count
+            .checked_add(item.record_count)
+            .ok_or_else(|| {
+                anyhow!("invalid_request: source materialization batch record count overflowed")
+            })?;
+        let content_bytes = self
+            .content_bytes
+            .checked_add(item.content_bytes)
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid_request: source materialization batch transient-content bytes overflowed"
+                )
+            })?;
+        let separator_bytes = usize::from(!self.pages.is_empty());
+        let encoded_bytes = self
+            .encoded_bytes
+            .checked_add(separator_bytes)
+            .and_then(|bytes| bytes.checked_add(item.encoded_bytes))
+            .ok_or_else(|| {
+                anyhow!("invalid_request: source materialization batch encoded bytes overflowed")
+            })?;
+        Ok(
+            item_count <= ctx_pro_host_protocol::MAX_SOURCE_MATERIALIZATION_BATCH_ITEMS
+                && record_count <= ctx_pro_host_protocol::MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS
+                && content_bytes
+                    <= ctx_pro_host_protocol::MAX_SOURCE_MATERIALIZATION_BATCH_CONTENT_BYTES
+                && encoded_bytes
+                    <= ctx_pro_host_protocol::MAX_SOURCE_MATERIALIZATION_BATCH_WIRE_BYTES,
+        )
+    }
+
+    fn push(&mut self, item: MaterializationBatchItem) -> Result<()> {
+        self.record_count = self
+            .record_count
+            .checked_add(item.record_count)
+            .ok_or_else(|| {
+                anyhow!("invalid_request: source materialization batch record count overflowed")
+            })?;
+        self.content_bytes = self
+            .content_bytes
+            .checked_add(item.content_bytes)
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid_request: source materialization batch transient-content bytes overflowed"
+                )
+            })?;
+        self.encoded_bytes = self
+            .encoded_bytes
+            .checked_add(usize::from(!self.pages.is_empty()))
+            .and_then(|bytes| bytes.checked_add(item.encoded_bytes))
+            .ok_or_else(|| {
+                anyhow!("invalid_request: source materialization batch encoded bytes overflowed")
+            })?;
+        self.pages.push(item.request);
+        Ok(())
+    }
+
+    fn take_request(&mut self) -> MaterializeSourcePagesRequest {
+        let pages = std::mem::take(&mut self.pages);
+        self.record_count = 0;
+        self.content_bytes = 0;
+        self.encoded_bytes = EMPTY_MATERIALIZATION_BATCH_JSON_BYTES;
+        MaterializeSourcePagesRequest { pages }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn materialization_batch_accounting(
+    request: &MaterializeSourcePagesRequest,
+) -> Result<(usize, usize, usize, usize)> {
+    let mut builder = MaterializationBatchBuilder::new();
+    for page in &request.pages {
+        let item = MaterializationBatchItem::from_request(page.clone())?;
+        if !builder.accepts(&item)? {
+            bail!("fixture source materialization batch exceeds its running bounds");
+        }
+        builder.push(item)?;
+    }
+    Ok((
+        builder.pages.len(),
+        builder.record_count,
+        builder.content_bytes,
+        builder.encoded_bytes,
+    ))
+}
+
+fn enqueue_materialization_request<C>(
+    consumer: &mut C,
+    pending: &mut MaterializationBatchBuilder,
+    latest_progress: &mut BTreeMap<[u8; 32], SourceBackedProProgress>,
+    item: MaterializationBatchItem,
+) -> Result<()>
+where
+    C: SourceBackedProPageConsumer,
+{
+    if pending.accepts(&item)? {
+        return pending.push(item);
+    }
+    if !pending.is_empty() {
+        flush_materialization_batch(consumer, pending, latest_progress)?;
+    }
+    if !pending.accepts(&item)? {
+        bail!("invalid_request: source materialization request exceeds aggregate batch bounds");
+    }
+    pending.push(item)
+}
+
+fn flush_materialization_batch<C>(
+    consumer: &mut C,
+    pending: &mut MaterializationBatchBuilder,
+    latest_progress: &mut BTreeMap<[u8; 32], SourceBackedProProgress>,
+) -> Result<()>
+where
+    C: SourceBackedProPageConsumer,
+{
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let request = pending.take_request();
+    request
         .validate()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    let materialized = consumer.materialize_source_pages(&request)?;
+    materialized
+        .validate_for_validated_request(&request)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    if materialized.core_generation_id != request.core_generation_id
-        || !materialized.progress.exact_eq(&request.next_progress())
-        || materialized.accepted_records != accepted_records
-    {
-        bail!("invalid_response: Pro acknowledged the wrong source page CAS");
+    let updates = materialized
+        .pages
+        .into_iter()
+        .map(|page| (page.progress.source.identity().digest(), page.progress))
+        .collect::<Vec<_>>();
+    for (source_id, progress) in updates {
+        latest_progress.insert(source_id, progress);
     }
     Ok(())
 }
@@ -643,12 +1118,6 @@ impl SourceRequestValidation for PrepareSourceRequest {
     }
 }
 
-impl SourceRequestValidation for MaterializeSourcePageRequest {
-    fn validate_request(&self) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
-        self.validate()
-    }
-}
-
 impl SourceRequestValidation for DeleteSourceRequest {
     fn validate_request(&self) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
         self.validate()
@@ -682,7 +1151,7 @@ macro_rules! source_response_validation {
 source_response_validation!(
     SourceManifestBegan,
     SourcePrepared,
-    SourcePageMaterialized,
+    SourcePagesMaterialized,
     SourceDeleted,
     SourceManifestFinished,
 );
