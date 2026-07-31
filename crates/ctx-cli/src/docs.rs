@@ -659,7 +659,6 @@ fn render_unknown_doc_topic(context: &RenderContext, id: &str) -> Document {
                 .with(Span::new(command, Token::Command)),
         );
     }
-    document.push_blank();
     document.append(section("Next", actions));
     document
 }
@@ -897,6 +896,7 @@ mod ui_tests {
             plain.contains("Next\n  ctx docs list\n  ctx docs search cli\n"),
             "{plain}"
         );
+        assert_eq!(plain.lines().count(), 9, "{plain}");
         assert!(!plain.contains("\\n"), "{plain}");
 
         let styled = document.render(&context);
