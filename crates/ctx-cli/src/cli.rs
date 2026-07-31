@@ -492,11 +492,23 @@ pub(crate) struct DaemonDisableArgs {
 pub(crate) struct DaemonRunArgs {
     #[arg(long, hide = true)]
     pub(crate) foreground: bool,
-    #[arg(long, value_parser = parse_daemon_idle_exit_seconds)]
+    #[arg(
+        long,
+        value_parser = parse_daemon_idle_exit_seconds,
+        help = "Exit after this many seconds without maintenance work"
+    )]
     pub(crate) idle_exit_seconds: Option<u64>,
-    #[arg(long, value_parser = parse_daemon_interval_seconds)]
+    #[arg(
+        long,
+        value_parser = parse_daemon_interval_seconds,
+        help = "Wait this many seconds between maintenance passes"
+    )]
     pub(crate) loop_interval_seconds: Option<u64>,
-    #[arg(long, value_parser = parse_semantic_worker_batch)]
+    #[arg(
+        long,
+        value_parser = parse_semantic_worker_batch,
+        help = "Process at most this many semantic chunks per pass"
+    )]
     pub(crate) max_chunks: Option<usize>,
     #[cfg(test)]
     #[arg(skip)]
@@ -649,5 +661,17 @@ mod tests {
         assert_eq!(args.idle_exit_seconds, Some(2));
         assert_eq!(args.loop_interval_seconds, Some(1));
         assert_eq!(args.max_seconds, None);
+
+        let help = Cli::try_parse_from(["ctx", "daemon", "run", "--help"])
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            "Exit after this many seconds without maintenance work",
+            "Wait this many seconds between maintenance passes",
+            "Process at most this many semantic chunks per pass",
+        ] {
+            assert!(help.contains(expected), "{help}");
+        }
+        assert!(!help.contains("--once"), "{help}");
     }
 }
