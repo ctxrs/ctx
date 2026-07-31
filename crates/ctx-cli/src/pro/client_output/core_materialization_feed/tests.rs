@@ -112,6 +112,13 @@ fn add_source_with_count(
         .unwrap();
 }
 
+fn encoded_record_bytes(page: &CoreRecordPage) -> usize {
+    page.records
+        .iter()
+        .map(|record| serde_json::to_vec(record).unwrap().len())
+        .sum()
+}
+
 fn receipt_for(index: &VerifiedIndex, revision: &str) -> CoreMaterializationReceipt {
     let sources = core_source_states(index.manifest()).unwrap();
     let head = core_generation_head(index, &sources).unwrap();
@@ -132,6 +139,8 @@ struct Consumer {
     replay_begin: bool,
     replay_pages: bool,
     wrong_delta_generation: bool,
+    wrong_record_page_index: bool,
+    record_exchanges: u64,
     delta_pages: Vec<CoreSourceDeltaPage>,
     record_pages: Vec<CoreRecordPage>,
     finish: Option<FinishCoreMaterializationRequest>,
@@ -149,11 +158,11 @@ impl Consumer {
 impl CoreMaterializationConsumer for Consumer {
     fn begin(
         &mut self,
-        request: &BeginCoreMaterializationRequest,
+        request: BeginCoreMaterializationRequest,
     ) -> Result<CoreMaterializationBegan> {
         Ok(CoreMaterializationBegan {
             materialization_id: ctx_pro_host_protocol::core_materialization_id(
-                request,
+                &request,
                 &self.revision,
             )
             .map_err(|error| anyhow!(error.message))?,
@@ -166,12 +175,12 @@ impl CoreMaterializationConsumer for Consumer {
 
     fn apply_source_delta(
         &mut self,
-        request: &ApplyCoreSourceDeltaPageRequest,
+        request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied> {
-        self.delta_pages.push(request.page.clone());
+        let page = request.page;
         let mut materialize_sources = Vec::new();
         let mut removed_sources = 0_u32;
-        for delta in &request.page.deltas {
+        for delta in &page.deltas {
             match delta {
                 CoreSourceDelta::Present(state) => {
                     let identity = state.source.identity().digest();
@@ -188,45 +197,53 @@ impl CoreMaterializationConsumer for Consumer {
                 }
             }
         }
-        Ok(CoreSourceDeltaPageApplied {
-            materialization_id: request.page.materialization_id.clone(),
+        let response = CoreSourceDeltaPageApplied {
+            materialization_id: page.materialization_id.clone(),
             core_generation_id: if self.wrong_delta_generation {
                 "f".repeat(64)
             } else {
-                request.page.core_generation_id.clone()
+                page.core_generation_id.clone()
             },
-            page_index: request.page.page_index,
+            page_index: page.page_index,
             changed_sources: u32::try_from(materialize_sources.len()).unwrap(),
             removed_sources,
             materialize_sources,
             replayed: self.replay_pages,
-        })
+        };
+        self.delta_pages.push(page);
+        Ok(response)
     }
 
     fn materialize_records(
         &mut self,
-        request: &MaterializeCoreRecordPageRequest,
+        request: MaterializeCoreRecordPageRequest,
     ) -> Result<CoreRecordPageMaterialized> {
-        self.record_pages.push(request.page.clone());
-        Ok(CoreRecordPageMaterialized {
-            materialization_id: request.page.materialization_id.clone(),
-            core_generation_id: request.page.core_generation_id.clone(),
-            source: request.page.source.source.clone(),
-            source_revision_sha256: request.page.source.source_revision_sha256.clone(),
-            source_index: request.page.source_index,
-            page_index: request.page.page_index,
-            accepted_records: u32::try_from(request.page.records.len()).unwrap(),
-            terminal: request.page.terminal,
+        self.record_exchanges = self.record_exchanges.saturating_add(1);
+        let page = request.page;
+        let response = CoreRecordPageMaterialized {
+            materialization_id: page.materialization_id.clone(),
+            core_generation_id: page.core_generation_id.clone(),
+            source: page.source.source.clone(),
+            source_revision_sha256: page.source.source_revision_sha256.clone(),
+            source_index: page.source_index,
+            page_index: if self.wrong_record_page_index {
+                page.page_index.saturating_add(1)
+            } else {
+                page.page_index
+            },
+            accepted_records: u32::try_from(page.records.len()).unwrap(),
+            terminal: page.terminal,
             replayed: self.replay_pages,
-        })
+        };
+        self.record_pages.push(page);
+        Ok(response)
     }
 
     fn finish(
         &mut self,
-        request: &FinishCoreMaterializationRequest,
+        request: FinishCoreMaterializationRequest,
     ) -> Result<CoreMaterializationFinished> {
-        self.finish = Some(request.clone());
-        Ok(CoreMaterializationFinished {
+        let response = CoreMaterializationFinished {
             receipt: CoreMaterializationReceipt {
                 core_generation_id: request.head.core_generation_id.clone(),
                 core_record_contract_fingerprint: request
@@ -239,7 +256,9 @@ impl CoreMaterializationConsumer for Consumer {
                 event_count: request.head.event_count,
             },
             replayed: self.replay_begin,
-        })
+        };
+        self.finish = Some(request);
+        Ok(response)
     }
 }
 
@@ -338,7 +357,7 @@ fn restarted_staging_replays_pages_and_still_finishes_with_actual_counts() {
 }
 
 #[test]
-fn large_records_make_progress_one_bounded_fetch_at_a_time() {
+fn multi_item_records_share_one_bounded_exchange() {
     let temp = tempdir().unwrap();
     let source = source("large-progress.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -359,15 +378,98 @@ fn large_records_make_progress_one_bounded_fetch_at_a_time() {
     let report = sync_core_feed(&index, None, &mut consumer).unwrap();
     assert_eq!(report.changed_sources, 1);
     assert_eq!(report.materialized_records, 3);
-    assert_eq!(report.record_pages, 3);
-    assert_eq!(consumer.record_pages.len(), 3);
-    assert!(consumer.record_pages.iter().all(|page| {
-        page.records.len() == CORE_RECORD_FETCH_ITEMS
-            && page.content_bytes().unwrap() == 1024 * 1024
-    }));
+    assert_eq!(report.record_pages, 1);
+    assert_eq!(consumer.record_exchanges, 1);
+    assert_eq!(consumer.record_pages.len(), 1);
+    assert_eq!(consumer.record_pages[0].records.len(), 3);
+    assert_eq!(
+        consumer.record_pages[0].content_bytes().unwrap(),
+        3 * 1024 * 1024
+    );
+    assert!(consumer.record_pages[0].terminal);
+}
+
+#[test]
+fn record_page_item_boundary_uses_one_exchange_per_page() {
+    let temp = tempdir().unwrap();
+    let source = source("item-boundary.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source_with_count(
+        &mut writer,
+        &source,
+        1,
+        (0..=MAX_CORE_RECORD_PAGE_ITEMS)
+            .map(|index| format!("body {index}"))
+            .collect(),
+    );
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut consumer = Consumer::new();
+
+    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
+    assert_eq!(
+        report.materialized_records,
+        u64::try_from(MAX_CORE_RECORD_PAGE_ITEMS + 1).unwrap()
+    );
+    assert_eq!(report.record_pages, 2);
+    assert_eq!(consumer.record_exchanges, 2);
+    assert_eq!(consumer.record_pages.len(), 2);
+    assert_eq!(
+        consumer.record_pages[0].records.len(),
+        MAX_CORE_RECORD_PAGE_ITEMS
+    );
+    assert_eq!(consumer.record_pages[1].records.len(), 1);
     assert!(!consumer.record_pages[0].terminal);
-    assert!(!consumer.record_pages[1].terminal);
-    assert!(consumer.record_pages[2].terminal);
+    assert!(consumer.record_pages[1].terminal);
+}
+
+#[test]
+fn encoded_payload_boundary_splits_pages_below_sixteen_mib() {
+    let temp = tempdir().unwrap();
+    let source = source("encoded-boundary.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source_with_count(
+        &mut writer,
+        &source,
+        1,
+        vec!["\"".repeat(5 * 1024 * 1024), "\"".repeat(5 * 1024 * 1024)],
+    );
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut consumer = Consumer::new();
+
+    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
+    assert_eq!(report.materialized_records, 2);
+    assert_eq!(report.record_pages, 2);
+    assert_eq!(consumer.record_exchanges, 2);
+    assert_eq!(
+        consumer
+            .record_pages
+            .iter()
+            .map(|page| page.records.len())
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    assert!(consumer.record_pages.iter().all(|page| {
+        encoded_record_bytes(page) <= MAX_CORE_RECORD_PAGE_CONTENT_BYTES
+            && page.content_bytes().unwrap() <= MAX_CORE_RECORD_PAGE_CONTENT_BYTES
+    }));
+}
+
+#[test]
+fn overlarge_encoded_single_record_fails_before_record_exchange() {
+    let temp = tempdir().unwrap();
+    let source = source("overlarge-encoded.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source_with_count(&mut writer, &source, 1, vec!["\"".repeat(9 * 1024 * 1024)]);
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut consumer = Consumer::new();
+
+    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
+    assert!(error.to_string().contains("encoded-payload bound"));
+    assert_eq!(consumer.record_exchanges, 0);
+    assert!(consumer.record_pages.is_empty());
 }
 
 #[test]
@@ -443,6 +545,22 @@ fn generation_mismatched_delta_ack_fails_closed() {
 }
 
 #[test]
+fn record_page_cas_mismatch_fails_closed_after_one_exchange() {
+    let temp = tempdir().unwrap();
+    let source = source("record-cas-mismatch.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source_with_count(&mut writer, &source, 1, vec!["body".to_owned()]);
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut consumer = Consumer::new();
+    consumer.wrong_record_page_index = true;
+
+    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
+    assert!(error.to_string().contains("acknowledgement"));
+    assert_eq!(consumer.record_exchanges, 1);
+}
+
+#[test]
 fn producer_has_no_provider_resolver_or_hydration_dependency() {
     let source = include_str!("../core_materialization_feed.rs");
     for forbidden in [
@@ -453,5 +571,6 @@ fn producer_has_no_provider_resolver_or_hydration_dependency() {
     ] {
         assert!(!source.contains(forbidden), "producer contains {forbidden}");
     }
-    assert!(source.contains("core_source_event_page"));
+    assert!(source.contains("core_source_event_page_with_budget"));
+    assert!(!source.contains("MaterializeCoreRecordPage(request.clone())"));
 }

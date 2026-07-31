@@ -284,15 +284,65 @@ pub struct BeginCoreMaterializationRequest {
 
 impl BeginCoreMaterializationRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.head.validate()?;
-        if let Some(receipt) = &self.expected_prior_receipt {
-            receipt.validate()?;
-        }
+        self.validate_fields()?;
         validate_encoded_bound(
             self,
             MAX_CORE_CONTROL_WIRE_BYTES,
             "begin Core materialization request exceeds its wire bound",
         )
+    }
+
+    fn validate_fields(&self) -> Result<(), ProtocolError> {
+        self.head.validate()?;
+        if let Some(receipt) = &self.expected_prior_receipt {
+            receipt.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn acknowledgement_identity(
+        &self,
+    ) -> Result<CoreMaterializationBeginAcknowledgementIdentity, ProtocolError> {
+        self.validate_fields()?;
+        let encoded_request = encode_with_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "begin Core materialization request exceeds its wire bound",
+        )?;
+        let mut materialization_id_prefix = Sha256::new();
+        materialization_id_prefix.update(b"[");
+        materialization_id_prefix.update(encoded_request);
+        materialization_id_prefix.update(b",");
+        Ok(CoreMaterializationBeginAcknowledgementIdentity {
+            core_generation_id: self.head.core_generation_id.clone(),
+            expected_prior_receipt: self.expected_prior_receipt.clone(),
+            materialization_id_prefix,
+        })
+    }
+}
+
+/// Pre-transport CAS state for validating a Core materialization begin receipt
+/// without retaining or re-encoding the complete request.
+#[derive(Clone)]
+pub struct CoreMaterializationBeginAcknowledgementIdentity {
+    core_generation_id: String,
+    expected_prior_receipt: Option<CoreMaterializationReceiptIdentity>,
+    materialization_id_prefix: Sha256,
+}
+
+impl CoreMaterializationBeginAcknowledgementIdentity {
+    fn materialization_id(&self, materializer_revision: &str) -> Result<String, ProtocolError> {
+        validate_identity(materializer_revision, "Core materializer revision")?;
+        let encoded_revision = serde_json::to_vec(materializer_revision).map_err(|_| {
+            ProtocolError::new(
+                ErrorClass::Internal,
+                "Core materialization ID encoding failed",
+            )
+        })?;
+        let mut digest = self.materialization_id_prefix.clone();
+        digest.update(encoded_revision);
+        digest.update(b"]");
+        Ok(hex_sha256(digest.finalize()))
     }
 }
 
@@ -311,17 +361,23 @@ impl CoreMaterializationBegan {
         &self,
         request: &BeginCoreMaterializationRequest,
     ) -> Result<(), ProtocolError> {
-        request.validate()?;
+        self.validate_for_identity(&request.acknowledgement_identity()?)
+    }
+
+    pub fn validate_for_identity(
+        &self,
+        identity: &CoreMaterializationBeginAcknowledgementIdentity,
+    ) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
         validate_identity(&self.materializer_revision, "Core materializer revision")?;
         if let Some(receipt) = &self.expected_prior_receipt {
             receipt.validate()?;
         }
-        if self.core_generation_id != request.head.core_generation_id
-            || self.expected_prior_receipt != request.expected_prior_receipt
+        if self.core_generation_id != identity.core_generation_id
+            || self.expected_prior_receipt != identity.expected_prior_receipt
             || self.materialization_id
-                != core_materialization_id(request, &self.materializer_revision)?
+                != identity.materialization_id(&self.materializer_revision)?
         {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
@@ -388,6 +444,43 @@ impl CoreSourceDeltaPage {
             "Core source delta page exceeds its wire bound",
         )
     }
+
+    /// Captures only the fields needed to validate the page acknowledgement.
+    ///
+    /// The page must already have passed [`Self::validate`]. Keeping this
+    /// compact identity lets an internal producer move the owned page into the
+    /// transport without retaining or re-encoding the complete request.
+    pub fn acknowledgement_identity(&self) -> CoreSourceDeltaPageAcknowledgementIdentity {
+        let present_sources = self
+            .deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CoreSourceDelta::Present(source) => Some(source.clone()),
+                CoreSourceDelta::Removed(_) => None,
+            })
+            .collect();
+        let removed_sources = self
+            .deltas
+            .iter()
+            .filter(|delta| matches!(delta, CoreSourceDelta::Removed(_)))
+            .count();
+        CoreSourceDeltaPageAcknowledgementIdentity {
+            materialization_id: self.materialization_id.clone(),
+            core_generation_id: self.core_generation_id.clone(),
+            page_index: self.page_index,
+            present_sources,
+            removed_sources,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSourceDeltaPageAcknowledgementIdentity {
+    materialization_id: String,
+    core_generation_id: String,
+    page_index: u32,
+    present_sources: Vec<CoreSourceState>,
+    removed_sources: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +510,13 @@ pub struct CoreSourceDeltaPageApplied {
 impl CoreSourceDeltaPageApplied {
     pub fn validate_for(&self, page: &CoreSourceDeltaPage) -> Result<(), ProtocolError> {
         page.validate()?;
+        self.validate_for_identity(&page.acknowledgement_identity())
+    }
+
+    pub fn validate_for_identity(
+        &self,
+        identity: &CoreSourceDeltaPageAcknowledgementIdentity,
+    ) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
         if self.materialize_sources.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS {
@@ -425,11 +525,6 @@ impl CoreSourceDeltaPageApplied {
                 "Core source delta acknowledgement exceeds its materialization item bound",
             ));
         }
-        let removed = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreSourceDelta::Removed(_)))
-            .count();
         let mut prior = None;
         for requested in &self.materialize_sources {
             requested.validate()?;
@@ -440,10 +535,10 @@ impl CoreSourceDeltaPageApplied {
                     "requested Core materialization sources must be strictly ordered",
                 ));
             }
-            let exact_changed_state = page.deltas.iter().any(|delta| match delta {
-                CoreSourceDelta::Present(present) => core_source_state_exact_eq(present, requested),
-                CoreSourceDelta::Removed(_) => false,
-            });
+            let exact_changed_state = identity
+                .present_sources
+                .iter()
+                .any(|present| core_source_state_exact_eq(present, requested));
             if !exact_changed_state {
                 return Err(ProtocolError::new(
                     ErrorClass::Sequence,
@@ -452,11 +547,11 @@ impl CoreSourceDeltaPageApplied {
             }
             prior = Some(current);
         }
-        if self.materialization_id != page.materialization_id
-            || self.core_generation_id != page.core_generation_id
-            || self.page_index != page.page_index
+        if self.materialization_id != identity.materialization_id
+            || self.core_generation_id != identity.core_generation_id
+            || self.page_index != identity.page_index
             || usize::try_from(self.changed_sources).ok() != Some(self.materialize_sources.len())
-            || usize::try_from(self.removed_sources).ok() != Some(removed)
+            || usize::try_from(self.removed_sources).ok() != Some(identity.removed_sources)
         {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
@@ -566,6 +661,33 @@ impl CoreRecordPage {
                 })
         })
     }
+
+    /// Captures only the receipt/CAS fields needed to validate the page
+    /// acknowledgement. The page must already have passed [`Self::validate`].
+    pub fn acknowledgement_identity(&self) -> CoreRecordPageAcknowledgementIdentity {
+        CoreRecordPageAcknowledgementIdentity {
+            materialization_id: self.materialization_id.clone(),
+            core_generation_id: self.core_generation_id.clone(),
+            source: self.source.source.clone(),
+            source_revision_sha256: self.source.source_revision_sha256.clone(),
+            source_index: self.source_index,
+            page_index: self.page_index,
+            accepted_records: self.records.len(),
+            terminal: self.terminal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRecordPageAcknowledgementIdentity {
+    materialization_id: String,
+    core_generation_id: String,
+    source: SourceKey,
+    source_revision_sha256: String,
+    source_index: u32,
+    page_index: u32,
+    accepted_records: usize,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,20 +719,27 @@ pub struct CoreRecordPageMaterialized {
 impl CoreRecordPageMaterialized {
     pub fn validate_for(&self, page: &CoreRecordPage) -> Result<(), ProtocolError> {
         page.validate()?;
+        self.validate_for_identity(&page.acknowledgement_identity())
+    }
+
+    pub fn validate_for_identity(
+        &self,
+        identity: &CoreRecordPageAcknowledgementIdentity,
+    ) -> Result<(), ProtocolError> {
         self.source
             .validate_contract()
             .map_err(|error| invalid_contract("Core record acknowledgement source", error))?;
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
         validate_sha256(&self.source_revision_sha256, "Core source revision")?;
-        if self.materialization_id != page.materialization_id
-            || self.core_generation_id != page.core_generation_id
-            || !self.source.exact_descriptor_eq(&page.source.source)
-            || self.source_revision_sha256 != page.source.source_revision_sha256
-            || self.source_index != page.source_index
-            || self.page_index != page.page_index
-            || usize::try_from(self.accepted_records).ok() != Some(page.records.len())
-            || self.terminal != page.terminal
+        if self.materialization_id != identity.materialization_id
+            || self.core_generation_id != identity.core_generation_id
+            || !self.source.exact_descriptor_eq(&identity.source)
+            || self.source_revision_sha256 != identity.source_revision_sha256
+            || self.source_index != identity.source_index
+            || self.page_index != identity.page_index
+            || usize::try_from(self.accepted_records).ok() != Some(identity.accepted_records)
+            || self.terminal != identity.terminal
         {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
@@ -691,12 +820,9 @@ pub fn core_materialization_id(
     request: &BeginCoreMaterializationRequest,
     materializer_revision: &str,
 ) -> Result<String, ProtocolError> {
-    request.validate()?;
-    validate_identity(materializer_revision, "Core materializer revision")?;
-    canonical_sha256(
-        &(request, materializer_revision),
-        "Core materialization ID encoding failed",
-    )
+    request
+        .acknowledgement_identity()?
+        .materialization_id(materializer_revision)
 }
 
 fn validate_source_states(sources: &[CoreSourceState]) -> Result<(), ProtocolError> {
@@ -783,12 +909,20 @@ fn validate_encoded_bound<T: Serialize>(
     maximum: usize,
     message: &'static str,
 ) -> Result<(), ProtocolError> {
+    encode_with_bound(value, maximum, message).map(drop)
+}
+
+fn encode_with_bound<T: Serialize>(
+    value: &T,
+    maximum: usize,
+    message: &'static str,
+) -> Result<Vec<u8>, ProtocolError> {
     let encoded = serde_json::to_vec(value)
         .map_err(|_| ProtocolError::new(ErrorClass::Internal, "protocol encoding failed"))?;
     if encoded.len() > maximum {
         return Err(ProtocolError::new(ErrorClass::Bounds, message));
     }
-    Ok(())
+    Ok(encoded)
 }
 
 fn canonical_sha256<T: Serialize + ?Sized>(
@@ -797,8 +931,15 @@ fn canonical_sha256<T: Serialize + ?Sized>(
 ) -> Result<String, ProtocolError> {
     let encoded =
         serde_json::to_vec(value).map_err(|_| ProtocolError::new(ErrorClass::Internal, message))?;
-    let digest = Sha256::digest(encoded);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(hex_sha256(Sha256::digest(encoded)))
+}
+
+fn hex_sha256(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn invalid_contract(label: &'static str, error: impl std::fmt::Display) -> ProtocolError {
