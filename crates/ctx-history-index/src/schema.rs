@@ -38,6 +38,7 @@ pub(crate) struct Fields {
     pub(crate) touched_file: Field,
     pub(crate) touched_file_filter: Field,
     pub(crate) core_record: Field,
+    pub(crate) source_event_order: Field,
 }
 
 pub(crate) fn validate_schema(schema: &Schema) -> Result<()> {
@@ -125,6 +126,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         touched_file: required_field(schema, "touched_file")?,
         touched_file_filter: required_field(schema, "touched_file_filter")?,
         core_record: required_field(schema, "core_record")?,
+        source_event_order: required_field(schema, "source_event_order")?,
     })
 }
 
