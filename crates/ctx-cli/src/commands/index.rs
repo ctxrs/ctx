@@ -146,7 +146,10 @@ fn run_index_watch(
             break;
         }
         if let Some(message) = index_terminal_error(&status, selection) {
-            return Err(anyhow!(message));
+            return Err(forward_index_terminal_error(
+                message,
+                !jsonl_output && !quiet,
+            ));
         }
         thread::sleep(interval);
     }
@@ -271,7 +274,10 @@ fn run_index_wait(
                     write_index_status_human(ui, &mut dashboard, &status)?;
                 }
             }
-            return Err(anyhow!(message));
+            return Err(forward_index_terminal_error(
+                message,
+                !args.format.is_json() && !quiet,
+            ));
         }
         if args
             .timeout_seconds
@@ -540,6 +546,14 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
         );
     }
     None
+}
+
+fn forward_index_terminal_error(message: String, human_output_rendered: bool) -> anyhow::Error {
+    if human_output_rendered {
+        crate::dispatch::rendered_cli_error()
+    } else {
+        anyhow!(message)
+    }
 }
 
 fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) -> Value {
