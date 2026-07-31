@@ -255,6 +255,43 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
 
 #[cfg(unix)]
 #[test]
+fn missing_blame_resource_matches_cli_json_error_code() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    initialize_current_query_store(&root);
+    let helper = root.join("ctx-pro-blame-missing-resource");
+    write_blame_error_helper(&helper, "resource_not_found");
+    let responses = mcp_roundtrip_with_env(
+        &temp,
+        &[
+            initialize_request(),
+            initialized_notification(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "missing-resource",
+                "method": "tools/call",
+                "params": {
+                    "name": "blame",
+                    "arguments": {
+                        "target": {"kind": "commit", "oid": "0123456789abcdef"}
+                    }
+                }
+            }),
+        ],
+        &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
+    );
+    let result = &responses[1]["result"];
+    assert_eq!(result["isError"], true, "{result:#}");
+    assert_eq!(result["structuredContent"]["error"], "resource_not_found");
+    assert_eq!(
+        result["structuredContent"]["error_code"],
+        "resource_not_found"
+    );
+    assert_eq!(result["content"][0]["text"], "resource_not_found");
+}
+
+#[cfg(unix)]
+#[test]
 fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
     let temp = tempdir();
     let root = data_root(&temp);
