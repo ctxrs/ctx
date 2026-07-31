@@ -684,7 +684,10 @@ ctx_cli_integration_test(
         "src/upgrade/install.rs",
         "//:upgrade_extractor_contract",
     ],
-    extra_srcs = ["tests/support/upgrade/runtime_publication.rs"],
+    extra_srcs = [
+        "tests/support/upgrade/runtime_publication.rs",
+        "tests/upgrade/release_validation.rs",
+    ],
     test_support = [
         "base",
         "upgrade",
