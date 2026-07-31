@@ -104,7 +104,12 @@ pub(super) fn render_status(
         &pro,
     );
     ui.write_stdout(&document)?;
-    if let Some(diagnostics) = &path_diagnostics {
+    let structured_path_shadow = marker.get("managed").and_then(Value::as_bool) == Some(true)
+        && path_shadow_paths(path.as_ref()).is_some();
+    if !structured_path_shadow {
+        let Some(diagnostics) = &path_diagnostics else {
+            return Ok(());
+        };
         for warning in &diagnostics.warnings {
             let warning = outcome(
                 ui.stderr_context(),
