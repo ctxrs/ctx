@@ -141,7 +141,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
         DaemonPresentation::Failed if recoverable => (
             OutcomeState::Error,
             "Daemon failed but can recover",
-            Some("Lifecycle ownership is stale; restarting the daemon is safe."),
+            Some("The previous daemon did not shut down cleanly. Restarting it is safe."),
         ),
         DaemonPresentation::Failed if history_failed => (
             OutcomeState::Error,
@@ -404,7 +404,7 @@ fn render_daemon_enabled_receipt(
         (
             OutcomeState::Warning,
             "Daemon enabled with limited persistence",
-            "It is running now, but native supervisor restart was not verified.",
+            "It is running now, but automatic restart after sign-in or reboot was not verified.",
         )
     } else if enabled {
         (
@@ -701,7 +701,7 @@ fn recovery_action(
     }
     if recoverable {
         return Some((
-            "Restart the daemon and verify lifecycle ownership.",
+            "Restart the daemon and check its health.",
             "ctx daemon enable",
         ));
     }
