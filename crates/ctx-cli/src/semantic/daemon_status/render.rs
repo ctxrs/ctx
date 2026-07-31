@@ -696,6 +696,9 @@ fn recovery_action(
             "ctx daemon enable",
         ));
     }
+    if presentation == DaemonPresentation::NotStarted {
+        return Some(("Check daemon startup and service health.", "ctx doctor"));
+    }
     if recoverable {
         return Some((
             "Restart the daemon and verify lifecycle ownership.",
