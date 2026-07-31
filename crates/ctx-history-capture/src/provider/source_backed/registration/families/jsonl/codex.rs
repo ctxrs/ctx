@@ -51,65 +51,6 @@ struct CodexSessionTreeTerminalEvidence {
     sources: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
 }
 
-#[derive(Debug)]
-struct CodexSessionTreeRuntime {
-    resolver: Mutex<Arc<CodexLocatorResolverV0>>,
-}
-
-impl CodexSessionTreeRuntime {
-    fn new(inventory: &CodexSessionTreeInventoryV0) -> CodexSourceBackedResultV0<Self> {
-        Ok(Self {
-            resolver: Mutex::new(Arc::new(
-                CodexLocatorResolverV0::from_session_tree_inventory(inventory)?,
-            )),
-        })
-    }
-
-    fn install_inventory(
-        &self,
-        inventory: &CodexSessionTreeInventoryV0,
-    ) -> CodexSourceBackedResultV0<()> {
-        let resolver = Arc::new(CodexLocatorResolverV0::from_session_tree_inventory(
-            inventory,
-        )?);
-        *self.resolver.lock().map_err(|_| {
-            CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(
-                "Codex resident resolver lock was poisoned".to_owned(),
-            ))
-        })? = resolver;
-        Ok(())
-    }
-
-    fn resolver(&self) -> CodexSourceBackedResultV0<Arc<CodexLocatorResolverV0>> {
-        self.resolver
-            .lock()
-            .map(|resolver| Arc::clone(&resolver))
-            .map_err(|_| {
-                CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(
-                    "Codex resident resolver lock was poisoned".to_owned(),
-                ))
-            })
-    }
-
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        self.resolver()
-            .and_then(|resolver| resolver.hydrate_event_request(request))
-            .map_err(codex_locator_hydration_failure)
-    }
-
-    fn hydrate_batch(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        self.resolver()
-            .and_then(|resolver| resolver.hydrate_batch_request(request))
-            .map_err(codex_locator_hydration_failure)
-    }
-}
-
 #[derive(Clone, Default)]
 struct CodexSessionTreeOwnership {
     sources: HashMap<[u8; 32], Vec<SourceKey>>,
@@ -267,10 +208,6 @@ fn register_codex_session_tree_route_with_scan_control(
         .collect::<Vec<_>>();
     let initial_inventory = discover_codex_route_inventory(&roots)
         .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?;
-    let runtime = Arc::new(
-        CodexSessionTreeRuntime::new(&initial_inventory)
-            .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?,
-    );
     let mut initial_ownership = CodexSessionTreeOwnership::default();
     for (_, source_key, _) in &initial_inventory.sources {
         initial_ownership.remember(source_key);
@@ -278,9 +215,6 @@ fn register_codex_session_tree_route_with_scan_control(
 
     let capture_roots = Arc::new(roots);
     let complete_inventory_revalidation_roots = Arc::clone(&capture_roots);
-    let capture_runtime = Arc::clone(&runtime);
-    let hydration_runtime = Arc::clone(&runtime);
-    let batch_hydration_runtime = runtime;
     let capture_initial_inventory = Arc::new(Mutex::new(Some(initial_inventory)));
     let ownership = Arc::new(Mutex::new(initial_ownership));
     let capture_ownership = Arc::clone(&ownership);
@@ -310,9 +244,6 @@ fn register_codex_session_tree_route_with_scan_control(
                     || discover_codex_route_inventory(&capture_roots),
                     Ok::<CodexSessionTreeInventoryV0, CodexSourceBackedErrorV0>,
                 )
-                .map_err(route_error)?;
-            capture_runtime
-                .install_inventory(&opening)
                 .map_err(route_error)?;
             sink.certify_complete_inventory(opening.certificate.clone())
                 .map_err(route_coordinator_error)?;
@@ -427,7 +358,6 @@ fn register_codex_session_tree_route_with_scan_control(
                 }
             }
         },
-        move |request| hydration_runtime.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
         let terminal = inventory_terminal_evidence
@@ -454,8 +384,7 @@ fn register_codex_session_tree_route_with_scan_control(
                         && certified.revalidate()
                 })
             })
-    })
-    .with_batch_hydration(move |request| batch_hydration_runtime.hydrate_batch(request));
+    });
     registry.register(executable_route(
         source,
         selection,
@@ -497,8 +426,6 @@ pub(super) fn register_codex_explicit_session_route(
     let owned_source = input.source().clone();
     let scan_input = input.clone();
     let complete_inventory_revalidation_input = input.clone();
-    let hydration_input = input.clone();
-    let batch_hydration_input = input;
     let claimed_source = owned_source.clone();
     let terminal_evidence = Arc::new(Mutex::new(None::<CodexSessionTreeTerminalEvidence>));
     let capture_terminal_evidence = Arc::clone(&terminal_evidence);
@@ -616,7 +543,6 @@ pub(super) fn register_codex_explicit_session_route(
                 }
             }
         },
-        move |request| hydrate_codex_explicit_event(&hydration_input, request),
     )
     .with_complete_inventory_revalidation(move |expected| {
         let terminal = inventory_terminal_evidence
@@ -650,9 +576,6 @@ pub(super) fn register_codex_explicit_session_route(
                         && evidence.revalidate()
                 })
             })
-    })
-    .with_batch_hydration(move |request| {
-        hydrate_codex_explicit_batch(&batch_hydration_input, request)
     });
     registry.register(executable_route(
         source,
@@ -661,86 +584,6 @@ pub(super) fn register_codex_explicit_session_route(
         driver,
     )?);
     Ok(())
-}
-
-fn hydrate_codex_explicit_event(
-    input: &CodexExplicitSessionSourceBackedInputV0,
-    request: &EventHydrationRequest,
-) -> Result<HydratedProviderRecord, HydrationFailure> {
-    codex_explicit_resolver(input)?
-        .hydrate_event_request(request)
-        .map_err(codex_locator_hydration_failure)
-}
-
-fn hydrate_codex_explicit_batch(
-    input: &CodexExplicitSessionSourceBackedInputV0,
-    request: &BatchHydrationRequest,
-) -> Result<BatchHydrationResult, HydrationFailure> {
-    codex_explicit_resolver(input)?
-        .hydrate_batch_request(request)
-        .map_err(codex_locator_hydration_failure)
-}
-
-fn codex_explicit_resolver(
-    input: &CodexExplicitSessionSourceBackedInputV0,
-) -> Result<CodexLocatorResolverV0, HydrationFailure> {
-    let inventory = observe_codex_explicit_session_source_backed_v0(input)
-        .map_err(codex_explicit_observation_hydration_failure)?;
-    inventory
-        .resolver()
-        .map_err(codex_locator_hydration_failure)?
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::ConfirmedDeleted,
-                "the explicit Codex session source is absent",
-            )
-        })
-}
-
-fn codex_explicit_observation_hydration_failure(
-    error: CodexSourceBackedErrorV0,
-) -> HydrationFailure {
-    let kind = match &error {
-        CodexSourceBackedErrorV0::ExplicitSourceIdentityChanged
-        | CodexSourceBackedErrorV0::Capture(
-            CaptureError::InvalidPayload(_) | CaptureError::SourceChangedDuringCapture,
-        ) => HydrationFailureKind::StaleSourceEvidence,
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    hydration_failure(kind, error)
-}
-
-pub(in crate::provider::source_backed) fn codex_locator_hydration_failure(
-    error: CodexSourceBackedErrorV0,
-) -> HydrationFailure {
-    let kind = match &error {
-        CodexSourceBackedErrorV0::LocatorDigestMismatch
-        | CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-        CodexSourceBackedErrorV0::LocatorRangeMissing => HydrationFailureKind::MissingRecord,
-        CodexSourceBackedErrorV0::ExplicitSourceIdentityChanged
-        | CodexSourceBackedErrorV0::Capture(
-            CaptureError::SourceChangedDuringCapture
-            | CaptureError::InvalidProviderTranscriptPath { .. },
-        ) => HydrationFailureKind::StaleSourceEvidence,
-        // A generation-bound locator can outlive a temporarily missing source
-        // between refreshes. Only an authoritative refresh may certify
-        // deletion, so absence from the current provider catalog is
-        // unavailable rather than an invalid locator.
-        CodexSourceBackedErrorV0::LocatorSourceNotFound(_) => {
-            HydrationFailureKind::TemporarilyUnavailable
-        }
-        CodexSourceBackedErrorV0::InvalidCodexLocator
-        | CodexSourceBackedErrorV0::LocatorRangeTooLarge
-        | CodexSourceBackedErrorV0::LocatorEventMismatch => HydrationFailureKind::InvalidLocator,
-        CodexSourceBackedErrorV0::LocatorRecordNotDisplayable => {
-            HydrationFailureKind::UnsupportedParserRevision
-        }
-        CodexSourceBackedErrorV0::Json(_) => HydrationFailureKind::StaleRecordEvidence,
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    hydration_failure(kind, error)
 }
 
 // SHA-256("ctx.codex.prompt-history.default-catalog-lineage.v0"). This is
@@ -752,8 +595,8 @@ pub(in crate::provider::source_backed) const CODEX_PROMPT_HISTORY_DEFAULT_CATALO
 ];
 
 /// Registers Codex's one default prompt-history catalog route while retaining
-/// the opened ordinary-file authority for scanning, revalidation, and exact
-/// hydration. The selected path never participates in public source identity.
+/// the opened ordinary-file authority for scanning and revalidation. The
+/// selected path never participates in public source identity.
 pub fn register_codex_prompt_history_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
@@ -768,10 +611,6 @@ pub fn register_codex_prompt_history_source_backed_route(
     let owned_source = retained.source().clone();
     let capture_source = retained.clone();
     let terminal_source = retained.clone();
-    let hydration_resolver = Arc::new(
-        CodexPromptHistorySourceBackedResolverV0::new([retained])
-            .map_err(|error| invalid_route(source.provider, error.to_string()))?,
-    );
     let claimed_source = owned_source.clone();
     let capture_route = source.clone();
     let terminal_route = source.clone();
@@ -810,7 +649,7 @@ pub fn register_codex_prompt_history_source_backed_route(
                         }
                         let _retained_page_bytes = page.retained_bytes;
                         for document in page.documents {
-                            sink.add_document(document)
+                            sink.add_core_record(document)
                                 .map_err(capture_coordinator_error)?;
                         }
                         Ok(())
@@ -902,7 +741,7 @@ pub fn register_codex_prompt_history_source_backed_route(
                             }
                             let _retained_page_bytes = page.retained_bytes;
                             for document in page.documents {
-                                sink.add_document(document)
+                                sink.add_core_record(document)
                                     .map_err(capture_coordinator_error)?;
                             }
                             Ok(())
@@ -955,7 +794,6 @@ pub fn register_codex_prompt_history_source_backed_route(
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
         move |target| bind_codex_prompt_target(&source_terminal_evidence, target),
-        move |request| hydration_resolver.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
         revalidate_codex_prompt_inventory(

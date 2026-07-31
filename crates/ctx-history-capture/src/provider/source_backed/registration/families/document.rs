@@ -67,18 +67,11 @@ pub(super) fn register_task_json_route(
 ) -> SourceBackedCoordinatorResult<()> {
     let selected = vec![source.clone()];
     let provider = source.provider;
-    let resolver = match provider {
-        CaptureProvider::Cline => cline_task_json_source_backed_resolver(&selected),
-        CaptureProvider::RooCode => roo_task_json_source_backed_resolver(&selected),
-        _ => unreachable!("caller restricts task JSON providers"),
-    }
-    .map_err(|error| invalid_route(provider, error.to_string()))?;
     let adapter = match provider {
         CaptureProvider::Cline => cline_task_json_source_backed_adapter(&selected),
         CaptureProvider::RooCode => roo_task_json_source_backed_adapter(&selected),
         _ => unreachable!("caller restricts task JSON providers"),
-    }
-    .with_resolver(resolver);
+    };
     crate::provider::source_backed::family::document::register_replacement_document_tree_route(
         registry, source, selection, adapter,
     )

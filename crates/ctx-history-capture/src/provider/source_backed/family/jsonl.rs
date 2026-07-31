@@ -13,26 +13,20 @@ use crate::{
     common::io::OpenedProviderSourceFile, CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
-mod hydration;
 mod identity;
 mod revalidation;
 mod route;
 
-#[cfg(test)]
-pub(crate) use hydration::set_after_jsonl_hydration_observation_hook;
-pub(crate) use hydration::{visit_verified_ranges, JsonlHydrationRange};
 use identity::observe_metadata;
 use revalidation::hash_prefix;
 #[cfg(test)]
 pub(crate) use revalidation::{
     jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_jsonl_prefix_hash_hook,
 };
-pub(crate) use revalidation::{
-    observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
-};
+pub(crate) use revalidation::{observe_opened_file, revalidate_frozen_prefix};
 pub(crate) use route::{
-    jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
-    JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
+    jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
+    JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
 };
 #[cfg(test)]
 pub(crate) use route::{

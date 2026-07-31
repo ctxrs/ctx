@@ -160,7 +160,7 @@ impl SourceBackedGenerationSink<'_> {
         thread::scope(|scope| {
             // A shared zero-capacity channel bounds the whole transport to one
             // accepted message while preserving each worker's FIFO job and
-            // document order. Cross-worker arrival order is intentionally not
+            // Core-record order. Cross-worker arrival order is intentionally not
             // generation identity: the writer stages by exact source and its
             // manifest canonicalizes sources before deriving the generation
             // ID. The focused 1-vs-N regression locks down that invariant.

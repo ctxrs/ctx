@@ -11,22 +11,19 @@ use std::{
 };
 
 use crate::provider::source_backed::{
-    executable_route, hydration_failure, route_coordinator_error, source_backed_base_sources,
-    ParallelLeafScanBegin, ParallelLeafScanCancelled, ParallelLeafScanComplete,
-    ParallelLeafScanEmitter, ParallelLeafScanError, ParallelLeafScanJob,
-    ParallelLeafScanWorkerError, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
-    SourceBackedProviderRegistry, SourceBackedRevalidationTarget, SourceBackedRouteDriver,
-    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
-    SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    executable_route, route_coordinator_error, source_backed_base_sources, ParallelLeafScanBegin,
+    ParallelLeafScanCancelled, ParallelLeafScanComplete, ParallelLeafScanEmitter,
+    ParallelLeafScanError, ParallelLeafScanJob, ParallelLeafScanWorkerError,
+    SourceBackedCoordinatorResult, SourceBackedGenerationSink, SourceBackedProviderRegistry,
+    SourceBackedRevalidationTarget, SourceBackedRouteDriver, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedRouteSelection,
+    SourceBackedSelectorAuthority,
 };
 use crate::ProviderSource;
 use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, EventHydrationRequest,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, ScannedSourceCounts,
-    SourceFrontier, SourceKey, SourceObservation, TypedKey,
+    CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
+    CoreRecord, ScannedSourceCounts, SourceFrontier, SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 const DOCUMENT_FRONTIER_KIND: &str = "ctx-document-full-snapshot-v1";
 
 mod inventory;
@@ -286,10 +283,6 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]>;
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure>;
     fn after_successful_publication(
         &self,
         _tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
@@ -361,8 +354,6 @@ where
     let inventory_state = Arc::clone(&state);
     let publication_adapter = Arc::clone(&adapter);
     let publication_state = Arc::clone(&state);
-    let single_adapter = Arc::clone(&adapter);
-    let batch_adapter = adapter;
     let has_successful_publication_work = publication_adapter.has_successful_publication_work();
 
     let driver = SourceBackedRouteDriver::new(
@@ -382,15 +373,9 @@ where
         },
         move |source| owns_adapter.owns_source(source),
         move |target| revalidate_document_target(&source_state, target),
-        move |request| hydrate_one_document_group(single_adapter.as_ref(), request),
     )
     .with_complete_inventory_revalidation(move |inventory| {
         revalidate_document_inventory(inventory_adapter.as_ref(), &inventory_state, inventory)
-    })
-    .with_batch_hydration(move |request| {
-        let result = batch_adapter.hydrate_group(request)?;
-        result.validate_for_request(request)?;
-        Ok(result)
     });
     if !has_successful_publication_work {
         return driver;
@@ -770,29 +755,6 @@ pub(crate) fn document_frontier_fingerprint(
     };
     let fingerprint = <[u8; 32]>::try_from(bytes.as_slice()).ok()?;
     Some(DocumentLeafFingerprint::new(fingerprint))
-}
-
-fn hydrate_one_document_group<A>(
-    adapter: &A,
-    request: &EventHydrationRequest,
-) -> Result<HydratedProviderRecord, HydrationFailure>
-where
-    A: ReplacementDocumentTree,
-{
-    let batch = BatchHydrationRequest::new(vec![request.clone()]).map_err(|error| {
-        hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!("invalid one-record document hydration group: {error}"),
-        )
-    })?;
-    let result = adapter.hydrate_group(&batch)?;
-    result.validate_for_request(&batch)?;
-    result.into_records().into_iter().next().ok_or_else(|| {
-        hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            "document hydration returned no record",
-        )
-    })
 }
 
 struct DocumentCommitState<L, A> {

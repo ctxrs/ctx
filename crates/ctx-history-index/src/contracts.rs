@@ -1,8 +1,7 @@
 use ctx_history_core::{
     core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation, CoreRecordError,
-    NativeRecordCoordinate, ProjectionContractError, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, CORE_RECORD_VERSION, IDENTITY_VERSION,
+    CertifiedSourceInventory, CoreRecordError, ProjectionContractError, SourceKey,
+    CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -10,8 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     policy::{
-        current_source_generation_policy_hash, LexicalIndexedBodyLimit, LEXICAL_INDEXED_BODY_LIMIT,
-        LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
+        current_source_generation_policy_hash, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
     },
     sha256_hex, source_sort_key,
 };
@@ -24,7 +22,6 @@ pub(crate) const MANIFEST_DIRECTORY: &str = "ctx-generations";
 pub(crate) const COMMIT_PAYLOAD_VERSION: u32 = 1;
 pub(crate) const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
 pub(crate) const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_TOUCHED_FILES: usize = 4_096;
 
 /// Comparable lexical segments are coalesced after this many accumulate.
 ///
@@ -43,8 +40,6 @@ pub enum IndexError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     ProjectionContract(#[from] ProjectionContractError),
-    #[error(transparent)]
-    SourceResolverContract(#[from] SourceResolverContractError),
     #[error(transparent)]
     CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
@@ -290,156 +285,6 @@ impl Default for WriterOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LexicalDocument {
-    pub event_id: StableEntityId,
-    pub session_id: StableEntityId,
-    pub parent_session_id: Option<StableEntityId>,
-    pub root_session_id: StableEntityId,
-    pub source: SourceKey,
-    pub locator: SourceRecordLocator,
-    pub provider_session_id: Option<String>,
-    pub branch: Option<String>,
-    pub source_path: Option<String>,
-    pub agent_type: String,
-    pub is_primary: bool,
-    pub event_sequence: u64,
-    pub occurred_at_unix_ms: Option<i64>,
-    pub event_type: String,
-    pub role: Option<String>,
-    /// Full policy-selected meaningful text. P0 indexes it and explicitly
-    /// retains it as the normalized body in the stored Core bridge.
-    pub body: String,
-    pub workspace: Option<String>,
-    pub cwd: Option<String>,
-    pub touched_files: Vec<String>,
-}
-
-impl LexicalDocument {
-    /// Validates all provider-neutral lexical document bounds and identity
-    /// relationships before a document enters temporary or Tantivy staging.
-    pub fn validate_contract(&self) -> Result<()> {
-        self.validate().map(|_| ())
-    }
-
-    /// Explicit P0 bridge from the current provider-neutral lexical claim to
-    /// the complete Core contract. Provider adapters can replace this with
-    /// direct `CoreRecord` production without changing stored/query semantics.
-    pub fn to_core_record(&self) -> Result<CoreRecord> {
-        self.to_core_record_with_annotation(CoreRecordAnnotation::default())
-    }
-
-    pub fn to_core_record_with_annotation(
-        &self,
-        annotation: CoreRecordAnnotation,
-    ) -> Result<CoreRecord> {
-        self.validate()?;
-        let mut record = CoreRecord::new_selected(
-            self.event_id,
-            self.session_id,
-            self.root_session_id,
-            self.source.clone(),
-            self.event_sequence,
-            self.event_type.clone(),
-            self.agent_type.clone(),
-            self.is_primary,
-            "lexical_document_bridge_v1",
-            self.body.clone(),
-        )?;
-        record.parent_session_id = self.parent_session_id;
-        record.provider_session_id = self.provider_session_id.clone();
-        record.native_event_id = match self.locator.coordinate() {
-            NativeRecordCoordinate::Jsonl {
-                native_session_key: Some(native_session_key),
-                ..
-            } if self.source.provider() == "custom" => Some(native_session_key.clone()),
-            NativeRecordCoordinate::Jsonl {
-                native_event_key, ..
-            } => native_event_key.clone(),
-            NativeRecordCoordinate::ProviderSqlite { primary_key, .. } => Some(primary_key.clone()),
-            NativeRecordCoordinate::Document { object_key, .. } => Some(object_key.clone()),
-            NativeRecordCoordinate::TreeRecord {
-                record_coordinate, ..
-            }
-            | NativeRecordCoordinate::ProviderNative {
-                coordinate: record_coordinate,
-                ..
-            } => Some(record_coordinate.clone()),
-        };
-        record.occurred_at_unix_ms = self.occurred_at_unix_ms;
-        record.role = self.role.clone();
-        record.workspace = self.workspace.clone();
-        record.branch = self.branch.clone();
-        record.cwd = self.cwd.clone();
-        record.content.structured_content = annotation.structured_content;
-        record.metadata = annotation.metadata;
-        record.repository_candidate_evidence = annotation.repository_candidate_evidence;
-        record.repository_bindings = annotation.repository_bindings;
-        record.repository_abstentions = annotation.repository_abstentions;
-        record.repository_file_observations = annotation.repository_file_observations;
-        record.repository_vcs_observations = annotation.repository_vcs_observations;
-        record.validate_contract()?;
-        Ok(record)
-    }
-
-    pub(crate) fn validate(&self) -> Result<Vec<u8>> {
-        self.locator.validate_contract()?;
-        if self.locator.source() != &self.source {
-            return Err(IndexError::DocumentSourceNotActive);
-        }
-        let locator_bytes = serde_json::to_vec(&self.locator)?;
-        if locator_bytes.len() > MAX_DOCUMENT_METADATA_BYTES {
-            return Err(IndexError::DocumentFieldTooLarge {
-                field: "native_locator",
-                actual: locator_bytes.len(),
-                maximum: MAX_DOCUMENT_METADATA_BYTES,
-            });
-        }
-        validate_document_text("event_type", &self.event_type, MAX_DOCUMENT_METADATA_BYTES)?;
-        if self.body.is_empty() {
-            return Err(IndexError::EmptyDocumentField { field: "body" });
-        }
-        match LEXICAL_INDEXED_BODY_LIMIT {
-            LexicalIndexedBodyLimit::ProviderValidatedFullText => {}
-        }
-        validate_optional_document_text(
-            "provider_session_id",
-            self.provider_session_id.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_optional_document_text(
-            "branch",
-            self.branch.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_optional_document_text(
-            "source_path",
-            self.source_path.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_document_text("agent_type", &self.agent_type, MAX_DOCUMENT_METADATA_BYTES)?;
-        validate_optional_document_text("role", self.role.as_deref(), MAX_DOCUMENT_METADATA_BYTES)?;
-        validate_optional_document_text(
-            "workspace",
-            self.workspace.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_optional_document_text("cwd", self.cwd.as_deref(), MAX_DOCUMENT_METADATA_BYTES)?;
-        if self.touched_files.len() > MAX_TOUCHED_FILES {
-            return Err(IndexError::DocumentFieldTooLarge {
-                field: "touched_files",
-                actual: self.touched_files.len(),
-                maximum: MAX_TOUCHED_FILES,
-            });
-        }
-        for path in &self.touched_files {
-            validate_document_text("touched_file", path, MAX_DOCUMENT_METADATA_BYTES)?;
-        }
-        Ok(locator_bytes)
-    }
-}
-
 /// Metadata-only proof that one source lineage was authoritatively absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -658,29 +503,4 @@ impl CommitReceipt {
 pub enum RevalidationTarget<'a> {
     Source(&'a CertifiedSource),
     Deletion(&'a CertifiedSourceDeletion),
-}
-
-fn validate_document_text(field: &'static str, value: &str, maximum: usize) -> Result<()> {
-    if value.is_empty() {
-        return Err(IndexError::EmptyDocumentField { field });
-    }
-    if value.len() > maximum {
-        return Err(IndexError::DocumentFieldTooLarge {
-            field,
-            actual: value.len(),
-            maximum,
-        });
-    }
-    Ok(())
-}
-
-fn validate_optional_document_text(
-    field: &'static str,
-    value: Option<&str>,
-    maximum: usize,
-) -> Result<()> {
-    if let Some(value) = value {
-        validate_document_text(field, value, maximum)?;
-    }
-    Ok(())
 }

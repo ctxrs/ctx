@@ -9,10 +9,8 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::ScannedSourceCounts;
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
-    EventHydrationRequest, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    SourceInventoryObservation, SourceKey, TypedKey,
+    CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -24,8 +22,8 @@ use std::sync::{
 };
 
 use super::{
-    observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
-    JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlRecordRef,
+    observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
+    JsonlProbe, JsonlRecordRef,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -45,10 +43,6 @@ const FAMILY_INVENTORY_AUTHORITY: &str = "borrowed-jsonl-provider-root-v1";
 const FAMILY_INVENTORY_REVISION: &str = "borrowed-jsonl-inventory-v1";
 const FAMILY_DISCOVERY_REVISION: &str = "borrowed-jsonl-discovery-v1";
 const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
-mod hydration;
-#[cfg(test)]
-use hydration::set_after_jsonl_group_open_hook;
-use hydration::{hydrate_batch, hydrate_single};
 mod leaf;
 #[cfg(test)]
 use leaf::family_scanner_worker_count_policy;
@@ -212,33 +206,19 @@ pub(crate) trait JsonlFamilyProjector: Send {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()>;
 
     fn finish(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn finish_projecting(
-        &mut self,
-        _emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
-    ) -> Result<()> {
+    fn finish_projecting(&mut self, _emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
         self.finish()
     }
 
     fn rejected_records(&self) -> u64 {
         0
-    }
-}
-
-pub(crate) trait JsonlFamilyHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure>;
-
-    fn finish(&mut self) -> std::result::Result<(), HydrationFailure> {
-        Ok(())
     }
 }
 
@@ -261,12 +241,6 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>>;
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure>;
 
     fn owns(&self, source: &SourceKey) -> bool {
         source.provider() == self.provider().as_str()
@@ -434,7 +408,9 @@ impl JsonlFamilyLeaf {
         Ok(Arc::new(opened))
     }
 
-    fn open_for_hydration(&self) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
+    fn open_for_revalidation(
+        &self,
+    ) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
         #[cfg(test)]
         FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
@@ -648,7 +624,6 @@ struct FamilyResident {
     owned_sources: HashMap<[u8; 32], SourceKey>,
     terminal_sources: HashMap<[u8; 32], TerminalSourceEvidence>,
     certified_inventory: Option<CertifiedSourceInventory>,
-    hydration_inventory: Option<JsonlFamilyInventory>,
 }
 
 pub(crate) fn jsonl_family_driver(
@@ -662,12 +637,6 @@ pub(crate) fn jsonl_family_driver(
     let owns_adapter = Arc::clone(&adapter);
     let owns_resident = Arc::clone(&resident);
     let revalidation_resident = Arc::clone(&resident);
-    let hydration_adapter = Arc::clone(&adapter);
-    let hydration_root = root.clone();
-    let hydration_resident = Arc::clone(&resident);
-    let batch_adapter = Arc::clone(&adapter);
-    let batch_root = root.clone();
-    let batch_resident = Arc::clone(&resident);
     let terminal_adapter = adapter;
     let terminal_root = root;
     let inventory_resident = Arc::clone(&resident);
@@ -685,18 +654,7 @@ pub(crate) fn jsonl_family_driver(
                 })
         },
         move |target| revalidate_target(&revalidation_resident, target),
-        move |request| {
-            hydrate_single(
-                &*hydration_adapter,
-                &hydration_root,
-                &hydration_resident,
-                request,
-            )
-        },
     )
-    .with_batch_hydration(move |request| {
-        hydrate_batch(&*batch_adapter, &batch_root, &batch_resident, request)
-    })
     .with_complete_inventory_revalidation(move |expected| {
         revalidate_complete_inventory(
             terminal_adapter.as_ref(),
@@ -801,7 +759,6 @@ fn capture(
     resident.owned_sources = owned_sources;
     resident.terminal_sources = terminal_sources;
     resident.certified_inventory = Some(inventory);
-    resident.hydration_inventory = Some(closing);
     Ok(())
 }
 
@@ -859,13 +816,6 @@ fn route_discovery(
 
 fn route_internal(error: impl std::fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
-}
-
-fn hydration_error(kind: HydrationFailureKind, detail: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: detail.to_string(),
-    }
 }
 
 fn contract_error(error: impl std::fmt::Display) -> CaptureError {

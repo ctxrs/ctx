@@ -6,8 +6,7 @@ use std::{
     },
 };
 
-use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, SourceKey};
-use ctx_history_index::LexicalDocument;
+use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey};
 use thiserror::Error;
 
 use super::super::{SourceBackedCoordinatorError, SourceBackedGenerationSink};
@@ -104,7 +103,7 @@ impl<R> ParallelLeafScanComplete<R> {
 pub enum ParallelLeafScanMessageKind {
     BeginReplace,
     BeginAppend,
-    Document,
+    CoreRecord,
     CompleteReplace,
     CompleteAppend,
     CompleteRetain,
@@ -115,7 +114,7 @@ impl std::fmt::Display for ParallelLeafScanMessageKind {
         match self {
             Self::BeginReplace => formatter.write_str("replacement begin"),
             Self::BeginAppend => formatter.write_str("append begin"),
-            Self::Document => formatter.write_str("document"),
+            Self::CoreRecord => formatter.write_str("Core record"),
             Self::CompleteReplace => formatter.write_str("replacement completion"),
             Self::CompleteAppend => formatter.write_str("append completion"),
             Self::CompleteRetain => formatter.write_str("retained completion"),
@@ -148,10 +147,10 @@ pub enum ParallelLeafScanProtocolError {
     DuplicateBegin { job_index: usize },
     #[error("parallel leaf job {job_index} began after completion")]
     BeginAfterCompletion { job_index: usize },
-    #[error("parallel leaf job {job_index} emitted a document before beginning")]
-    DocumentBeforeBegin { job_index: usize },
-    #[error("parallel leaf job {job_index} emitted a document after completion")]
-    DocumentAfterCompletion { job_index: usize },
+    #[error("parallel leaf job {job_index} emitted a Core record before beginning")]
+    CoreRecordBeforeBegin { job_index: usize },
+    #[error("parallel leaf job {job_index} emitted a Core record after completion")]
+    CoreRecordAfterCompletion { job_index: usize },
     #[error("parallel leaf job {job_index} completed more than once")]
     DuplicateCompletion { job_index: usize },
     #[error("parallel leaf job {job_index} completed as {completion} without beginning")]
@@ -233,7 +232,7 @@ where
 pub enum ParallelLeafSinkOperation {
     BeginReplace,
     BeginAppend,
-    AddDocument,
+    AddCoreRecord,
     CompleteReplace,
     CompleteAppend,
     RetainSource,
@@ -244,7 +243,7 @@ impl std::fmt::Display for ParallelLeafSinkOperation {
         match self {
             Self::BeginReplace => formatter.write_str("begin replacement"),
             Self::BeginAppend => formatter.write_str("begin append"),
-            Self::AddDocument => formatter.write_str("add document"),
+            Self::AddCoreRecord => formatter.write_str("add Core record"),
             Self::CompleteReplace => formatter.write_str("complete replacement"),
             Self::CompleteAppend => formatter.write_str("complete append"),
             Self::RetainSource => formatter.write_str("retain source"),
@@ -298,7 +297,7 @@ where
 #[derive(Debug)]
 pub(super) enum ParallelLeafProtocolMessage<R> {
     Begin(ParallelLeafScanBegin),
-    Document(LexicalDocument),
+    CoreRecord(CoreRecord),
     Complete(ParallelLeafScanComplete<R>),
 }
 
@@ -341,11 +340,11 @@ impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
         self.send(ParallelLeafProtocolMessage::Begin(begin))
     }
 
-    pub fn emit_document(
+    pub fn emit_core_record(
         &mut self,
-        document: LexicalDocument,
+        record: CoreRecord,
     ) -> Result<(), ParallelLeafScanCancelled> {
-        self.send(ParallelLeafProtocolMessage::Document(document))
+        self.send(ParallelLeafProtocolMessage::CoreRecord(record))
     }
 
     pub fn complete(
@@ -459,8 +458,8 @@ where
     let state = state_mut(states, job_index)?;
     match message {
         ParallelLeafProtocolMessage::Begin(begin) => apply_begin(sink, job_index, state, begin),
-        ParallelLeafProtocolMessage::Document(document) => {
-            apply_document(sink, job_index, state, document)
+        ParallelLeafProtocolMessage::CoreRecord(record) => {
+            apply_core_record(sink, job_index, state, record)
         }
         ParallelLeafProtocolMessage::Complete(completion) => {
             let result = apply_completion(sink, job_index, state, completion)?;
@@ -540,39 +539,33 @@ where
     Ok(())
 }
 
-fn apply_document<E>(
+fn apply_core_record<E>(
     sink: &mut SourceBackedGenerationSink<'_>,
     job_index: usize,
     state: &mut ParallelLeafJobState,
-    document: LexicalDocument,
+    record: CoreRecord,
 ) -> Result<(), ParallelLeafScanError<E>>
 where
     E: StdError + 'static,
 {
     if state.completion.is_some() {
-        return Err(ParallelLeafScanProtocolError::DocumentAfterCompletion { job_index }.into());
+        return Err(ParallelLeafScanProtocolError::CoreRecordAfterCompletion { job_index }.into());
     }
     if state.begin.is_none() {
-        return Err(ParallelLeafScanProtocolError::DocumentBeforeBegin { job_index }.into());
+        return Err(ParallelLeafScanProtocolError::CoreRecordBeforeBegin { job_index }.into());
     }
-    let source = bound_source(job_index, ParallelLeafScanMessageKind::Document, state)?;
+    let source = bound_source(job_index, ParallelLeafScanMessageKind::CoreRecord, state)?;
     validate_source(
         job_index,
-        ParallelLeafScanMessageKind::Document,
+        ParallelLeafScanMessageKind::CoreRecord,
         source,
-        &document.source,
+        &record.source,
     )?;
-    validate_source(
-        job_index,
-        ParallelLeafScanMessageKind::Document,
-        source,
-        document.locator.source(),
-    )?;
-    sink.add_document(document).map_err(|error| {
+    sink.add_core_record(record).map_err(|error| {
         sink_error(
             job_index,
             source,
-            ParallelLeafSinkOperation::AddDocument,
+            ParallelLeafSinkOperation::AddCoreRecord,
             error,
         )
     })

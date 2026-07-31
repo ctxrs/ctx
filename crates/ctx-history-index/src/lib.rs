@@ -20,11 +20,11 @@ pub(crate) use contracts::{
     MAX_DOCUMENT_METADATA_BYTES,
 };
 pub use contracts::{
-    CommitReceipt, GenerationManifest, GenerationRemoval, IndexError, LexicalDocument, Result,
-    RevalidationTarget, WriterOptions, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
-    LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
+    CommitReceipt, GenerationManifest, GenerationRemoval, IndexError, Result, RevalidationTarget,
+    WriterOptions, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
+    LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
-pub use ctx_history_core::{CoreRecord, CoreRecordAnnotation};
+pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
     hex, prior_core_record, register_compact_identity, register_event_identity,
     register_session_identity, sha256_hex, source_sort_key, source_token,
@@ -73,7 +73,7 @@ use ctx_history_core::{
     SourceKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
 };
 #[cfg(test)]
-use ctx_history_core::{SourceRecordLocator, StableEntityId, IDENTITY_VERSION};
+use ctx_history_core::{StableEntityId, IDENTITY_VERSION};
 #[cfg(test)]
 use tantivy::TantivyDocument;
 use tantivy::{
@@ -562,19 +562,6 @@ impl GenerationWriter {
                 Err(IndexError::DocumentSourceNotActive)
             }
         }
-    }
-
-    pub fn add_document(&mut self, document: LexicalDocument) -> Result<()> {
-        self.add_document_with_annotation(document, CoreRecordAnnotation::default())
-    }
-
-    pub fn add_document_with_annotation(
-        &mut self,
-        document: LexicalDocument,
-        annotation: CoreRecordAnnotation,
-    ) -> Result<()> {
-        let record = document.to_core_record_with_annotation(annotation)?;
-        self.add_core_record(record)
     }
 
     /// Adds one complete generation-owned Core record.

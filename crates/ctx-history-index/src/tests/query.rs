@@ -8,8 +8,8 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     let second = document(&source, 2, "atomic generation");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(second.clone()).unwrap();
-    writer.add_document(first.clone()).unwrap();
+    writer.add_core_record(second.clone()).unwrap();
+    writer.add_core_record(first.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 2)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -110,8 +110,8 @@ fn bounded_core_event_batch_is_complete_and_requested_ordered() {
     let second = document(&source, 2, "second complete body");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(first.clone()).unwrap();
-    writer.add_document(second.clone()).unwrap();
+    writer.add_core_record(first.clone()).unwrap();
+    writer.add_core_record(second.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 2)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -288,28 +288,14 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         SourceAnchor::CatalogLineage([42; 32]),
     )
     .unwrap();
-    let mut document = document(&source, 1, "custom identity needle");
+    let mut record = document(&source, 1, "custom identity needle");
     let native_event_id = TypedKey::composite(vec![
         TypedKey::utf8("fixture-provider").unwrap(),
         TypedKey::utf8("fixture-source").unwrap(),
         TypedKey::utf8("fixture-session").unwrap(),
     ])
     .unwrap();
-    document.locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: 0,
-            byte_length: 100,
-            physical_ordinal: 1,
-            native_session_key: Some(native_event_id.clone()),
-            native_event_key: Some(TypedKey::U64(1)),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        [1; 32],
-    )
-    .unwrap();
-    let record = document.to_core_record().unwrap();
+    record.native_event_id = Some(native_event_id.clone());
     assert_eq!(record.native_event_id.as_ref(), Some(&native_event_id));
 
     let event_id = record.event_id;
@@ -369,7 +355,7 @@ fn bounded_core_event_batch_stops_after_one_large_record_exceeds_byte_budget() {
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     for document in documents {
-        writer.add_document(document).unwrap();
+        writer.add_core_record(document).unwrap();
     }
     writer.certify_source(certificate(&source, 1, 3)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -402,8 +388,8 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
     );
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(cjk.clone()).unwrap();
-    writer.add_document(identifier.clone()).unwrap();
+    writer.add_core_record(cjk.clone()).unwrap();
+    writer.add_core_record(identifier.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 2)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -437,9 +423,9 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
     let unrelated = document(&source, 3, "coveragegamma");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(partial.clone()).unwrap();
-    writer.add_document(unrelated).unwrap();
-    writer.add_document(exact.clone()).unwrap();
+    writer.add_core_record(partial.clone()).unwrap();
+    writer.add_core_record(unrelated).unwrap();
+    writer.add_core_record(exact.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 3)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -472,7 +458,7 @@ fn session_event_budget_declines_before_materializing_an_oversized_session() {
     writer.begin_source(source.clone()).unwrap();
     for sequence in 1..=3 {
         writer
-            .add_document(document(&source, sequence, "bounded body"))
+            .add_core_record(document(&source, sequence, "bounded body"))
             .unwrap();
     }
     writer.certify_source(certificate(&source, 1, 3)).unwrap();
@@ -524,14 +510,14 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
         .unwrap()
         .set_merge_policy(Box::<NoMergePolicy>::default());
     first.begin_source(target.clone()).unwrap();
-    first.add_document(target_fourth.clone()).unwrap();
-    first.add_document(target_first.clone()).unwrap();
+    first.add_core_record(target_fourth.clone()).unwrap();
+    first.add_core_record(target_first.clone()).unwrap();
     first
         .certify_source(appendable_certificate(&target, 1, 2, 20))
         .unwrap();
     first.begin_source(other.clone()).unwrap();
-    first.add_document(other_second.clone()).unwrap();
-    first.add_document(other_first.clone()).unwrap();
+    first.add_core_record(other_second.clone()).unwrap();
+    first.add_core_record(other_first.clone()).unwrap();
     first.certify_source(certificate(&other, 1, 2)).unwrap();
     first.commit(|_| true).unwrap();
 
@@ -541,8 +527,8 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
         .unwrap()
         .set_merge_policy(Box::<NoMergePolicy>::default());
     let base = append.begin_source_append(target.clone()).unwrap().clone();
-    append.add_document(target_third.clone()).unwrap();
-    append.add_document(target_second.clone()).unwrap();
+    append.add_core_record(target_third.clone()).unwrap();
+    append.add_core_record(target_second.clone()).unwrap();
     let proof = CertifiedSourceAppend::certify(
         &base,
         appendable_certificate(&target, 2, 4, 40),
@@ -690,7 +676,7 @@ fn source_event_second_page_reopens_without_materializing_the_remaining_source()
     for sequence in 1..=EVENT_COUNT {
         let event = document(&source, sequence, "large source body");
         expected.push(event.event_id);
-        writer.add_document(event).unwrap();
+        writer.add_core_record(event).unwrap();
     }
     writer
         .certify_source(certificate(&source, 1, EVENT_COUNT))
@@ -778,7 +764,7 @@ fn sparse_source_pages_visit_only_exact_source_terms_across_segments_and_reopen(
     for sequence in 1..=2 {
         let event = document(&target, sequence, "sparse target first segment");
         expected.push(event.event_id);
-        writer.add_document(event).unwrap();
+        writer.add_core_record(event).unwrap();
     }
     writer
         .certify_source(appendable_certificate(&target, 1, 2, 20))
@@ -788,7 +774,7 @@ fn sparse_source_pages_visit_only_exact_source_terms_across_segments_and_reopen(
         writer.begin_source(unrelated.clone()).unwrap();
         for sequence in 1..=EVENTS_PER_UNRELATED_SOURCE {
             writer
-                .add_document(document(&unrelated, sequence, "unrelated corpus event"))
+                .add_core_record(document(&unrelated, sequence, "unrelated corpus event"))
                 .unwrap();
         }
         writer
@@ -806,7 +792,7 @@ fn sparse_source_pages_visit_only_exact_source_terms_across_segments_and_reopen(
     for sequence in 3..=4 {
         let event = document(&target, sequence, "sparse target second segment");
         expected.push(event.event_id);
-        append.add_document(event).unwrap();
+        append.add_core_record(event).unwrap();
     }
     append
         .certify_source_append(
@@ -899,7 +885,7 @@ fn source_event_byte_budget_returns_large_singletons_without_skips_or_extra_deco
         let event = document(&source, index as u64 + 1, body);
         expected_content_bytes.insert(event.event_id, body.len());
         expected_ids.push(event.event_id);
-        writer.add_document(event).unwrap();
+        writer.add_core_record(event).unwrap();
     }
     writer.certify_source(certificate(&source, 1, 3)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -951,18 +937,18 @@ fn source_event_size_suffix_counts_structured_core_content() {
         "command": "cargo test",
         "output": ["first", "second", "third"],
     });
-    let expected_content_bytes =
-        event.body.len() + serde_json::to_vec(&structured_content).unwrap().len();
+    let expected_content_bytes = event.content.normalized_body.as_ref().unwrap().len()
+        + serde_json::to_vec(&structured_content).unwrap().len();
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
-        .add_document_with_annotation(
+        .add_core_record(with_annotation(
             event,
             CoreRecordAnnotation {
                 structured_content: Some(structured_content),
                 ..CoreRecordAnnotation::default()
             },
-        )
+        ))
         .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -984,7 +970,7 @@ fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record(
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
-        .add_document(document(&source, 1, "forged order body"))
+        .add_core_record(document(&source, 1, "forged order body"))
         .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -1040,8 +1026,8 @@ fn source_event_pages_bind_generation_descriptor_and_bounds() {
     let old_second = document(&source, 2, "old second");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
-    first.add_document(old_second.clone()).unwrap();
-    first.add_document(old_first.clone()).unwrap();
+    first.add_core_record(old_second.clone()).unwrap();
+    first.add_core_record(old_first.clone()).unwrap();
     first.certify_source(certificate(&source, 1, 2)).unwrap();
     first.commit(|_| true).unwrap();
     let old_pin = VerifiedIndex::open(temp.path()).unwrap();
@@ -1092,8 +1078,8 @@ fn source_event_pages_bind_generation_descriptor_and_bounds() {
     let replacement = document(&source, 3, "replacement");
     let mut rewriting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     rewriting.begin_source(source.clone()).unwrap();
-    rewriting.add_document(replacement.clone()).unwrap();
-    rewriting.add_document(rewritten_first.clone()).unwrap();
+    rewriting.add_core_record(replacement.clone()).unwrap();
+    rewriting.add_core_record(rewritten_first.clone()).unwrap();
     rewriting
         .certify_source(certificate(&source, 2, 2))
         .unwrap();
@@ -1200,7 +1186,7 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
         warning,
         discussion.clone(),
     ] {
-        writer.add_document(document).unwrap();
+        writer.add_core_record(document).unwrap();
     }
     writer.certify_source(certificate(&source, 1, 10)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -1318,12 +1304,12 @@ fn semantic_pages_select_addresses_before_decoding_and_bound_retained_core_bytes
     for sequence in 1..=INELIGIBLE_EVENTS {
         let mut event = document(&source, sequence, "ineligible assistant message");
         event.role = Some("assistant".to_owned());
-        writer.add_document(event).unwrap();
+        writer.add_core_record(event).unwrap();
     }
     for sequence in INELIGIBLE_EVENTS + 1..=INELIGIBLE_EVENTS + 3 {
         let event = document(&source, sequence, &large_body);
         expected.push(event.event_id);
-        writer.add_document(event).unwrap();
+        writer.add_core_record(event).unwrap();
     }
     writer
         .certify_source(certificate(&source, 1, INELIGIBLE_EVENTS + 3))
@@ -1375,7 +1361,7 @@ fn semantic_event_pages_handle_empty_final_and_generation_bound_cursors() {
     let expected = document(&source, 1, "only eligible event");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(expected.clone()).unwrap();
+    writer.add_core_record(expected.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open(temp.path()).unwrap();
@@ -1428,8 +1414,8 @@ fn semantic_event_pages_keep_old_pins_isolated_from_rewrite_and_deletion() {
     let old_second = document(&source, 2, "old second event");
     let mut first_writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first_writer.begin_source(source.clone()).unwrap();
-    first_writer.add_document(old_second.clone()).unwrap();
-    first_writer.add_document(old_first.clone()).unwrap();
+    first_writer.add_core_record(old_second.clone()).unwrap();
+    first_writer.add_core_record(old_first.clone()).unwrap();
     first_writer
         .certify_source(certificate(&source, 1, 2))
         .unwrap();
@@ -1448,10 +1434,10 @@ fn semantic_event_pages_keep_old_pins_isolated_from_rewrite_and_deletion() {
         GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement_writer.begin_source(source.clone()).unwrap();
     replacement_writer
-        .add_document(replacement.clone())
+        .add_core_record(replacement.clone())
         .unwrap();
     replacement_writer
-        .add_document(rewritten_first.clone())
+        .add_core_record(rewritten_first.clone())
         .unwrap();
     replacement_writer
         .certify_source(certificate(&source, 2, 2))
@@ -1512,7 +1498,6 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     let mut root = document_for_session(&codex_root, "root-thread", 1, "shared needle");
     root.workspace = Some("Ctx-Rich-Fixture".to_owned());
     root.cwd = Some("/work/ctx-root".to_owned());
-    root.source_path = Some("/history/ctx[root].jsonl".to_owned());
     root.occurred_at_unix_ms = Some(100);
     let root_session_id = root.session_id;
     root.root_session_id = root_session_id;
@@ -1523,13 +1508,11 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     child.branch = Some("feature/query-seam".to_owned());
     child.workspace = Some("ChildSpace".to_owned());
     child.cwd = Some("/work/child".to_owned());
-    child.source_path = Some("/history/child.jsonl".to_owned());
     child.agent_type = "subagent".to_owned();
     child.is_primary = false;
     child.event_type = "tool_call".to_owned();
     child.role = Some("assistant".to_owned());
     child.occurred_at_unix_ms = Some(200);
-    child.touched_files = vec!["crates/Query.rs".to_owned()];
     let child_session_id = child.session_id;
 
     let mut other = document_for_session(&claude, "other-thread", 3, "shared needle");
@@ -1541,17 +1524,17 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(codex_root.clone()).unwrap();
-    writer.add_document(root).unwrap();
+    writer.add_core_record(root).unwrap();
     writer
         .certify_source(certificate(&codex_root, 1, 1))
         .unwrap();
     writer.begin_source(codex_child.clone()).unwrap();
-    writer.add_document(child).unwrap();
+    writer.add_core_record(child).unwrap();
     writer
         .certify_source(certificate(&codex_child, 1, 1))
         .unwrap();
     writer.begin_source(claude.clone()).unwrap();
-    writer.add_document(other).unwrap();
+    writer.add_core_record(other).unwrap();
     writer.certify_source(certificate(&claude, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open(temp.path()).unwrap();
@@ -1677,7 +1660,7 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
     let expected = document(&source, 1, &body);
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(expected.clone()).unwrap();
+    writer.add_core_record(expected.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -1763,7 +1746,9 @@ fn empty_or_invalid_programmatic_queries_are_safe() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open(temp.path()).unwrap();

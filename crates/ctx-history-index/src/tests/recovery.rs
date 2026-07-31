@@ -7,7 +7,7 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "previous generation"))
+        .add_core_record(document(&source, 1, "previous generation"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     let first_receipt = first.commit(|_| true).unwrap();
@@ -15,7 +15,7 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
     let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
-        .add_document(document(&source, 1, "uncommitted replacement"))
+        .add_core_record(document(&source, 1, "uncommitted replacement"))
         .unwrap();
     replacement
         .certify_source(certificate(&source, 2, 1))
@@ -36,7 +36,7 @@ fn deletion_requires_final_inventory_revalidation() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "retained"))
+        .add_core_record(document(&source, 1, "retained"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -81,12 +81,12 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(removed.clone()).unwrap();
     first
-        .add_document(document(&removed, 1, "removed body"))
+        .add_core_record(document(&removed, 1, "removed body"))
         .unwrap();
     first.certify_source(certificate(&removed, 1, 1)).unwrap();
     first.begin_source(retained.clone()).unwrap();
     first
-        .add_document(document(&retained, 1, "retained body"))
+        .add_core_record(document(&retained, 1, "retained body"))
         .unwrap();
     first.certify_source(certificate(&retained, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -108,7 +108,7 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     unrelated.begin_source(retained.clone()).unwrap();
     unrelated
-        .add_document(document(&retained, 2, "rewritten retained body"))
+        .add_core_record(document(&retained, 2, "rewritten retained body"))
         .unwrap();
     unrelated
         .certify_source(certificate(&retained, 3, 1))
@@ -127,7 +127,7 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     let mut republishing = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     republishing.begin_source(returning.clone()).unwrap();
     republishing
-        .add_document(document(&returning, 4, "returned body"))
+        .add_core_record(document(&returning, 4, "returned body"))
         .unwrap();
     republishing
         .certify_source(certificate(&returning, 4, 1))
@@ -203,7 +203,7 @@ fn replacement_atomically_removes_old_source_documents() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "retired content"))
+        .add_core_record(document(&source, 1, "retired content"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -211,7 +211,7 @@ fn replacement_atomically_removes_old_source_documents() {
     let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
-        .add_document(document(&source, 1, "current content"))
+        .add_core_record(document(&source, 1, "current content"))
         .unwrap();
     replacement
         .certify_source(certificate(&source, 2, 1))
@@ -230,7 +230,7 @@ fn certified_append_indexes_only_the_delta() {
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
-    first.add_document(document(&source, 1, "base")).unwrap();
+    first.add_core_record(document(&source, 1, "base")).unwrap();
     first
         .certify_source(appendable_certificate(&source, 1, 1, 10))
         .unwrap();
@@ -238,7 +238,9 @@ fn certified_append_indexes_only_the_delta() {
 
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
-    append.add_document(document(&source, 2, "delta")).unwrap();
+    append
+        .add_core_record(document(&source, 2, "delta"))
+        .unwrap();
     let proof = CertifiedSourceAppend::certify(
         &base,
         appendable_certificate(&source, 2, 2, 20),
@@ -262,7 +264,7 @@ fn append_rejects_an_identity_already_in_the_base() {
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
-    first.add_document(document(&source, 1, "base")).unwrap();
+    first.add_core_record(document(&source, 1, "base")).unwrap();
     first
         .certify_source(appendable_certificate(&source, 1, 1, 10))
         .unwrap();
@@ -271,7 +273,7 @@ fn append_rejects_an_identity_already_in_the_base() {
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     append.begin_source_append(source.clone()).unwrap();
     let error = append
-        .add_document(document(&source, 1, "duplicate"))
+        .add_core_record(document(&source, 1, "duplicate"))
         .unwrap_err();
     assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
 }
@@ -283,7 +285,7 @@ fn verified_reader_remains_pinned_to_its_generation() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "old pinned generation"))
+        .add_core_record(document(&source, 1, "old pinned generation"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -292,7 +294,7 @@ fn verified_reader_remains_pinned_to_its_generation() {
     let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
-        .add_document(document(&source, 1, "new committed generation"))
+        .add_core_record(document(&source, 1, "new committed generation"))
         .unwrap();
     replacement
         .certify_source(certificate(&source, 2, 1))
@@ -320,7 +322,9 @@ fn a_partial_unreferenced_manifest_does_not_poison_retry() {
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate).unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     assert_eq!(receipt.generation_id, generation_id);
@@ -337,7 +341,9 @@ fn manifest_corruption_fails_closed() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     fs::write(
@@ -359,7 +365,9 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -421,7 +429,9 @@ fn verified_open_rejects_mismatched_core_contract_fingerprint() {
     let source = source("core-fingerprint-mismatch.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -465,7 +475,9 @@ fn verified_open_rejects_mismatched_active_policy() {
     let source = source("policy-mismatch.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -498,7 +510,9 @@ fn certificate_count_mismatch_is_rejected_before_commit() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     let error = writer
         .certify_source(certificate(&source, 1, 2))
         .unwrap_err();
@@ -515,8 +529,8 @@ fn duplicate_event_identity_is_rejected_before_commit() {
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     let duplicate = document(&source, 1, "first");
-    writer.add_document(duplicate.clone()).unwrap();
-    let error = writer.add_document(duplicate).unwrap_err();
+    writer.add_core_record(duplicate.clone()).unwrap();
+    let error = writer.add_core_record(duplicate).unwrap_err();
     assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
 }
 
@@ -526,7 +540,9 @@ fn verified_generation_rejects_a_forged_duplicate_event_identity() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -567,7 +583,7 @@ fn verified_generation_rejects_forged_source_ownership() {
     let second = source("second.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(first.clone()).unwrap();
-    writer.add_document(document(&first, 1, "body")).unwrap();
+    writer.add_core_record(document(&first, 1, "body")).unwrap();
     writer.certify_source(certificate(&first, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -622,7 +638,7 @@ fn verified_generation_rejects_malformed_stored_core_record() {
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
-        .add_document(document(&source, 1, "complete body"))
+        .add_core_record(document(&source, 1, "complete body"))
         .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -668,7 +684,7 @@ fn document_identity_kinds_are_checked() {
     writer.begin_source(source.clone()).unwrap();
     let mut invalid = document(&source, 1, "body");
     invalid.event_id = invalid.session_id;
-    let error = writer.add_document(invalid).unwrap_err();
+    let error = writer.add_core_record(invalid).unwrap_err();
     assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
@@ -680,23 +696,21 @@ fn document_identities_must_belong_to_the_document_source() {
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(second.clone()).unwrap();
     let mut invalid = document(&first, 1, "body");
-    invalid.locator = document(&second, 2, "other").locator;
     invalid.source = second;
-    let error = writer.add_document(invalid).unwrap_err();
+    let error = writer.add_core_record(invalid).unwrap_err();
     assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
-fn empty_body_is_rejected_without_an_index_side_length_limit() {
+fn empty_core_body_is_rejected_by_the_canonical_writer_validation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    let error = writer.add_document(document(&source, 1, "")).unwrap_err();
-    assert!(matches!(
-        error,
-        IndexError::EmptyDocumentField { field: "body" }
-    ));
+    let mut invalid = document(&source, 1, "body");
+    invalid.content.normalized_body = Some(String::new());
+    let error = writer.add_core_record(invalid).unwrap_err();
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
@@ -767,7 +781,9 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
     let source = source("digest-corruption.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -818,11 +834,17 @@ fn one_pass_verifier_matches_reference_for_source_count_corruption() {
     let second = source("count-second.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(first.clone()).unwrap();
-    writer.add_document(document(&first, 1, "first")).unwrap();
+    writer
+        .add_core_record(document(&first, 1, "first"))
+        .unwrap();
     writer.certify_source(certificate(&first, 1, 1)).unwrap();
     writer.begin_source(second.clone()).unwrap();
-    writer.add_document(document(&second, 1, "second")).unwrap();
-    writer.add_document(document(&second, 2, "second")).unwrap();
+    writer
+        .add_core_record(document(&second, 1, "second"))
+        .unwrap();
+    writer
+        .add_core_record(document(&second, 2, "second"))
+        .unwrap();
     writer.certify_source(certificate(&second, 1, 2)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -857,7 +879,9 @@ fn one_pass_verifier_matches_reference_for_total_count_corruption() {
     let source = source("total-count.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 

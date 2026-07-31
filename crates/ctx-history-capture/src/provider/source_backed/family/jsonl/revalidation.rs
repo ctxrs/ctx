@@ -50,23 +50,6 @@ pub(crate) fn observe_opened_file(
     Ok(observation)
 }
 
-/// Observes one stable metadata instant while permitting the retained
-/// append-log file to have grown since its authority handle was acquired.
-pub(crate) fn observe_opened_file_same_object(
-    source_path: &Path,
-    opened: &OpenedProviderSourceFile,
-) -> Result<JsonlFileObservation> {
-    for _ in 0..2 {
-        let before = observe_metadata(source_path, opened.file(), &opened.file().metadata()?)?;
-        opened.revalidate_same_object()?;
-        let after = observe_metadata(source_path, opened.file(), &opened.file().metadata()?)?;
-        if before == after {
-            return Ok(after);
-        }
-    }
-    Err(CaptureError::SourceChangedDuringCapture)
-}
-
 pub(crate) fn revalidate_frozen_prefix(
     source_path: &Path,
     source_file: &OpenedProviderSourceFile,

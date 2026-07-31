@@ -149,8 +149,6 @@ pub fn register_custom_history_source_backed_route(
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let scan_input = input.clone();
     let revalidation_input = input.clone();
-    let hydration_input = input.clone();
-    let batch_hydration_input = input;
     let claimed_source = owned_source.clone();
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
@@ -184,7 +182,7 @@ pub fn register_custom_history_source_backed_route(
                         staging_started = true;
                     }
                     for document in page.documents {
-                        sink.add_document(document)
+                        sink.add_core_record(document)
                             .map_err(capture_coordinator_error)?;
                     }
                     Ok(())
@@ -298,13 +296,7 @@ pub fn register_custom_history_source_backed_route(
                     .is_ok_and(|inventory| deletion.verifies(&inventory))
             }
         },
-        move |request| {
-            CustomHistorySourceBackedResolver::hydrate_current_event(&hydration_input, request)
-        },
-    )
-    .with_batch_hydration(move |request| {
-        CustomHistorySourceBackedResolver::hydrate_current_batch(&batch_hydration_input, request)
-    });
+    );
     registry.register(SourceBackedRoute::explicit_manual(
         source,
         SourceBackedSelectorAuthority::CatalogLineage,

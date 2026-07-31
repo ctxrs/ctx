@@ -11,7 +11,7 @@ pub fn register_warp_source_backed_route(
 ) -> SourceBackedCoordinatorResult<()> {
     let selected = WarpSourceSelectionV0::new(data_root, source.path.clone(), surface_key)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let adapter = project_warp_source_backed_v0(selected, resolve_warp_locator_v0)
+    let adapter = project_warp_source_backed_v0(selected)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     register_replacement_document_tree_route_with_authority(
         registry,
@@ -44,9 +44,7 @@ pub fn register_goose_source_backed_route(
             )
             .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     }
-    let resolver = GooseSourceBackedResolverV0::new(selected.clone())
-        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let adapter = GooseSourceBackedAdapterV0::open(selected, resolver)
+    let adapter = GooseSourceBackedAdapterV0::open(selected)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     register_replacement_document_tree_route_with_authority(
         registry,

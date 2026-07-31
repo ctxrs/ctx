@@ -207,7 +207,7 @@ impl ReplacementDocumentTree for ZedReplacementTree {
             zed_snapshot_revision_digest(&snapshot_revision),
             self.path.to_string_lossy().into_owned(),
             |document| {
-                sink.emit_document(document)
+                sink.emit_core_record(document)
                     .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
             },
         )
@@ -269,16 +269,6 @@ impl ReplacementDocumentTree for ZedReplacementTree {
         }
         (tree.authority.terminal_revalidate)().map_err(route_error)?;
         Ok(tree.tree_fingerprint)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let resolver = ZedLocatorResolverV0::new(&self.data_root, &self.path).map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        resolver.hydrate_batch(request)
     }
 }
 

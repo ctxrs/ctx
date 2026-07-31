@@ -67,46 +67,6 @@ where
         Ok(certificate)
     }
 
-    fn hydrate(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let resolver = CrushLocatorResolverV0::discover(&self.data_root, self.inventory.as_ref())
-            .map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        let locators = request
-            .events()
-            .iter()
-            .map(EventHydrationRequest::locator)
-            .collect::<Vec<_>>();
-        let hydrated = resolver
-            .hydrate_locators(&locators)
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
-        let records = request
-            .events()
-            .iter()
-            .zip(hydrated)
-            .map(|(event, hydrated)| {
-                let provider_bytes = hydrated
-                    .decoded_display_text
-                    .ok_or_else(|| {
-                        hydration_failure(
-                            HydrationFailureKind::UnsupportedParserRevision,
-                            "Crush record has no exact display text",
-                        )
-                    })?
-                    .into_bytes();
-                Ok(HydratedProviderRecord {
-                    event_id: event.event_id(),
-                    provider_bytes,
-                })
-            })
-            .collect::<Result<Vec<_>, HydrationFailure>>()?;
-        BatchHydrationResult::new(records)
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))
-    }
-
     #[cfg(test)]
     fn observe_snapshot_counters(&self, counters: SqliteInventorySnapshotCounters) {
         self.inventory.record_snapshot_work(

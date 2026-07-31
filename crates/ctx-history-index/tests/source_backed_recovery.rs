@@ -16,13 +16,12 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, TypedKey,
+    CertifiedSourceInventory, CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, VerifiedIndex, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, VerifiedIndex, WriterOptions,
 };
 use tantivy::Index;
 use tempfile::{tempdir, TempDir};
@@ -764,7 +763,7 @@ fn build_generation(root: &Path, revision: u8, body: &str) -> CommitReceipt {
     let source = source();
     let mut writer = GenerationWriter::open(root, writer_options()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, body)).unwrap();
+    writer.add_core_record(document(&source, body)).unwrap();
     writer
         .certify_source(certificate(&source, revision))
         .unwrap();
@@ -792,7 +791,7 @@ fn try_staged_replacement(root: &Path) -> std::result::Result<GenerationWriter, 
     let source = source();
     let mut writer = GenerationWriter::open(root, writer_options())?;
     writer.begin_source(source.clone())?;
-    writer.add_document(document(&source, CANDIDATE_BODY))?;
+    writer.add_core_record(document(&source, CANDIDATE_BODY))?;
     writer.certify_source(certificate(&source, 2))?;
     Ok(writer)
 }
@@ -905,7 +904,7 @@ fn certificate(source: &SourceKey, revision: u8) -> CertifiedSource {
     .unwrap()
 }
 
-fn document(source: &SourceKey, body: &str) -> LexicalDocument {
+fn document(source: &SourceKey, body: &str) -> CoreRecord {
     let native_session_coordinate = TypedKey::utf8("session").unwrap();
     let session_key =
         NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
@@ -925,40 +924,27 @@ fn document(source: &SourceKey, body: &str) -> LexicalDocument {
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: 100,
-                byte_length: 100,
-                physical_ordinal: 1,
-                native_session_key: Some(native_session_coordinate),
-                native_event_key: Some(TypedKey::U64(1)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [1; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some("/history/source-backed-recovery.jsonl".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 1,
-        occurred_at_unix_ms: Some(1_700_000_000_001),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: body.to_owned(),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
-    }
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "primary",
+        true,
+        "codex-parser-v1",
+        body,
+    )
+    .unwrap();
+    record.provider_session_id = Some("session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_001);
+    record.role = Some("user".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record
 }
 
 fn assert_generation(root: &Path, generation_id: &str, present: &str, absent: &str) {
