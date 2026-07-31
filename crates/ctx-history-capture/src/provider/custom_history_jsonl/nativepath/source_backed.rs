@@ -43,7 +43,7 @@ use crate::{
         custom_history_jsonl::{validate_custom_history_identifier, validate_custom_source_record},
         normalization::{provider_policy_event_text, provider_value_text},
     },
-    CaptureError, ProviderImportSummary, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, ProviderImportSummary, ProviderSourceFailureKind, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 mod parser;
@@ -161,6 +161,11 @@ pub(crate) enum CustomHistorySourceBackedError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("Custom History manifest failed ({kind}): {detail}")]
+    StructuralManifest {
+        kind: ProviderSourceFailureKind,
+        detail: String,
+    },
     #[error(
         "Custom History source-backed {limit:?} bound exceeded: maximum {maximum}, observed {observed}"
     )]
@@ -688,7 +693,18 @@ fn stage_custom_history_source_backed_explicit(
         .filter(|prior| prior.parser_revision() == CUSTOM_SOURCE_BACKED_PARSER_REVISION)
         .and_then(|prior| decode_checkpoint(prior).ok())
         .map(|checkpoint| checkpoint.certified_prefix_bytes);
-    let projection = parse_projection(&opened, prior_prefix_bytes)?;
+    let projection =
+        parse_projection(&opened, prior_prefix_bytes).map_err(|error| match error {
+            CustomHistorySourceBackedError::StructuralManifest { kind, detail } => {
+                CustomHistorySourceBackedError::Capture(CaptureError::ProviderSource {
+                    provider: CaptureProvider::Custom.as_str(),
+                    path: input.path().to_path_buf(),
+                    kind,
+                    detail,
+                })
+            }
+            error => error,
+        })?;
     opened.revalidate()?;
     let closing_inventory = observe_custom_history_source_backed_explicit(input)?;
     let closing_ordinary = closing_inventory

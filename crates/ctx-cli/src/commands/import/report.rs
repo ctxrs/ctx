@@ -1,7 +1,9 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use ctx_history_capture::{CaptureError, ProviderSourceFailureKind};
+use ctx_history_capture::{
+    CaptureError, ProviderSourceFailureKind, SourceBackedRouteError, SourceBackedRouteErrorKind,
+};
 
 use crate::commands::import::totals::ImportTotals;
 use crate::commands::import::{
@@ -316,6 +318,13 @@ pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
                 _ => ImportFailureType::Other,
             };
         }
+        if let Some(route) = cause.downcast_ref::<SourceBackedRouteError>() {
+            return match route.kind {
+                SourceBackedRouteErrorKind::Unsupported => ImportFailureType::UnsupportedSchema,
+                SourceBackedRouteErrorKind::InvalidSource => ImportFailureType::MalformedSource,
+                _ => ImportFailureType::Other,
+            };
+        }
         if let Some(error) = cause.downcast_ref::<std::io::Error>() {
             return match error.kind() {
                 std::io::ErrorKind::NotFound => ImportFailureType::NotFound,
@@ -568,6 +577,25 @@ mod tests {
                 kind,
                 detail: "typed failure".to_owned(),
             });
+            assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+            assert_eq!(import_failure_type(&error), expected);
+        }
+    }
+
+    #[test]
+    fn typed_source_backed_route_failures_keep_stable_classification() {
+        let cases = [
+            (
+                SourceBackedRouteErrorKind::Unsupported,
+                ImportFailureType::UnsupportedSchema,
+            ),
+            (
+                SourceBackedRouteErrorKind::InvalidSource,
+                ImportFailureType::MalformedSource,
+            ),
+        ];
+        for (kind, expected) in cases {
+            let error = anyhow::Error::new(SourceBackedRouteError::new(kind, "typed failure"));
             assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
             assert_eq!(import_failure_type(&error), expected);
         }

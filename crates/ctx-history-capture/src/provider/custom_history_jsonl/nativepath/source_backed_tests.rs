@@ -8,18 +8,19 @@ use ctx_history_core::{
     BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
     HydrationFailureKind, NativeRecordCoordinate, SessionHydrationRequest, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, WriterOptions};
+use ctx_history_index::{LexicalDocument, VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
 use super::source_backed::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, register_custom_history_source_backed_route,
-        SourceBackedProviderRegistry,
+        SourceBackedCoordinatorError, SourceBackedProviderRegistry, SourceBackedRouteErrorKind,
     },
     test_support_paths::tempdir,
-    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
+    ProviderSourceFailureKind, ProviderSourceKind, ProviderSourceStatus,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 fn manifest() -> Value {
@@ -151,6 +152,70 @@ fn present(outcome: CustomHistorySourceBackedOutcome) -> CustomHistorySourceBack
         CustomHistorySourceBackedOutcome::Present(receipt) => *receipt,
         CustomHistorySourceBackedOutcome::Missing { .. } => panic!("expected present source"),
     }
+}
+
+fn structural_manifest_failure(
+    path: &Path,
+    lineage: [u8; 32],
+) -> (ProviderSourceFailureKind, String) {
+    let input = CustomHistorySourceBackedInput::explicit(path, lineage);
+    let error = scan_custom_history_source_backed_explicit(&input, None, |_, _| Ok(()))
+        .expect_err("structurally invalid manifest must fail its source");
+    match error {
+        CustomHistorySourceBackedError::Capture(CaptureError::ProviderSource {
+            provider,
+            path: failed_path,
+            kind,
+            detail,
+        }) => {
+            assert_eq!(provider, CaptureProvider::Custom.as_str());
+            assert_eq!(failed_path, path);
+            (kind, detail)
+        }
+        error => panic!("expected a typed provider source failure, got {error:?}"),
+    }
+}
+
+#[test]
+fn missing_manifest_is_a_malformed_source_failure() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("missing-manifest.jsonl");
+    fs::write(&path, []).unwrap();
+
+    let (kind, detail) = structural_manifest_failure(&path, [20; 32]);
+    assert_eq!(kind, ProviderSourceFailureKind::InvalidSource);
+    assert!(detail.contains("missing manifest record"), "{detail}");
+}
+
+#[test]
+fn unsupported_manifest_is_an_unsupported_schema_failure() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("unsupported-manifest.jsonl");
+    write_records(
+        &path,
+        &[json!({
+            "record_type": "manifest",
+            "schema_version": "ctx-history-jsonl-v999",
+        })],
+    );
+
+    let (kind, detail) = structural_manifest_failure(&path, [21; 32]);
+    assert_eq!(kind, ProviderSourceFailureKind::SchemaIncompatible);
+    assert!(detail.contains("ctx-history-jsonl-v999"), "{detail}");
+}
+
+#[test]
+fn duplicate_manifest_is_a_malformed_source_failure() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("duplicate-manifest.jsonl");
+    write_records(&path, &[manifest(), manifest()]);
+
+    let (kind, detail) = structural_manifest_failure(&path, [22; 32]);
+    assert_eq!(kind, ProviderSourceFailureKind::InvalidSource);
+    assert!(
+        detail.contains("duplicate manifest record at line 2"),
+        "{detail}"
+    );
 }
 
 #[test]
@@ -557,6 +622,65 @@ fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() 
             .kind,
         HydrationFailureKind::ConfirmedDeleted
     );
+}
+
+#[test]
+fn structural_manifest_failure_retains_the_published_generation_and_restores() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("retained-across-invalidity.jsonl");
+    let valid_lines = write_records(
+        &path,
+        &[
+            manifest(),
+            source(),
+            session("root", None, true),
+            event(0, "retained-event", "root", "retained across invalidity"),
+        ],
+    );
+    let valid_bytes = valid_lines.concat();
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_custom_history_source_backed_route(
+        &mut registry,
+        explicit_provider_source(&path),
+        [23; 32],
+    )
+    .unwrap();
+    let index_root = temp.path().join("retained-index");
+
+    let initial =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    let initial_generation = initial.commit.generation_id.clone();
+    assert_eq!(initial.commit.indexed_documents, 1);
+
+    fs::write(&path, []).unwrap();
+    let error = refresh_source_backed_generation(&index_root, &registry, WriterOptions::default())
+        .expect_err("a missing manifest must abort publication");
+    match error {
+        SourceBackedCoordinatorError::RouteScan { provider, source } => {
+            assert_eq!(provider, CaptureProvider::Custom);
+            assert_eq!(source.kind, SourceBackedRouteErrorKind::InvalidSource);
+            assert!(
+                source.detail.contains("missing manifest record"),
+                "{source}"
+            );
+        }
+        error => panic!("expected a custom source scan failure, got {error:?}"),
+    }
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(retained.generation_id(), initial_generation);
+    assert_eq!(retained.document_count(), 1);
+    assert_eq!(retained.manifest().sources, initial.sources);
+    drop(retained);
+
+    fs::write(&path, valid_bytes).unwrap();
+    let restored =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(restored.commit.indexed_documents, 1);
+    assert_eq!(restored.sources.len(), 1);
+    assert_ne!(restored.commit.generation_id, initial_generation);
+    let recovered = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(recovered.generation_id(), restored.commit.generation_id);
+    assert_eq!(recovered.document_count(), 1);
 }
 
 #[test]

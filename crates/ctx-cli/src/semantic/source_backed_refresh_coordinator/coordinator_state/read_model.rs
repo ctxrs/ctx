@@ -119,6 +119,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) daemon_mode: DaemonMode,
     pub(super) trigger: &'static str,
     pub(super) trigger_provenance: &'static str,
+    pub(super) failure_type: Option<&'static str>,
     pub(super) last_error: Option<String>,
     pub(super) post_publication_error: Option<String>,
 }
@@ -169,6 +170,7 @@ impl SourceBackedRefreshAttempt {
             "daemon_mode": self.daemon_mode.as_str(),
             "trigger": self.trigger,
             "trigger_provenance": self.trigger_provenance,
+            "failure_type": self.failure_type,
             "error_code": self.failure_code(),
             "reason": self.failure_reason(),
             "last_error": self.last_error,
@@ -214,6 +216,7 @@ impl SourceBackedRefreshAttempt {
             "daemon_mode": self.daemon_mode.as_str(),
             "trigger": self.trigger,
             "trigger_provenance": self.trigger_provenance,
+            "failure_type": self.failure_type,
             "error_code": self.failure_code(),
             "reason": self.failure_reason(),
             "last_error": self.last_error,

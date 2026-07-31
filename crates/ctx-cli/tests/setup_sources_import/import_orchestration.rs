@@ -599,6 +599,87 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
 }
 
 #[test]
+fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
+    let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("structural-manifest.jsonl");
+    let fixture_arg = fixture.to_str().unwrap();
+
+    let cases: [(&str, &[u8], &str, &str); 3] = [
+        (
+            "missing",
+            b"",
+            "invalid_source",
+            "invalid capture payload",
+        ),
+        (
+            "unsupported",
+            b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v999\"}\n",
+            "schema_incompatible",
+            "unsupported provider schema",
+        ),
+        (
+            "duplicate",
+            b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
+            "invalid_source",
+            "invalid capture payload",
+        ),
+    ];
+    for (name, bytes, failure_kind, cli_classification) in cases {
+        fs::write(&fixture, bytes).unwrap();
+        let stderr = failure_stderr(ctx(&temp).args([
+            "import",
+            "--input-format",
+            "ctx-history-jsonl-v1",
+            "--path",
+            fixture_arg,
+            "--no-daemon",
+            "--format=json",
+            "--progress",
+            "none",
+        ]));
+        assert!(stderr.contains(failure_kind), "{name}: {stderr}");
+        assert!(stderr.contains(cli_classification), "{name}: {stderr}");
+        assert!(
+            stderr.contains("retained generation"),
+            "{name} did not report fail-closed retention: {stderr}"
+        );
+    }
+
+    fs::write(
+        &fixture,
+        concat!(
+            "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
+            "{\"record_type\":\"source\",\"source_id\":\"recovered-source\",\"provider_key\":\"recovered-agent\",\"source_format\":\"recovered-jsonl\"}\n",
+            "{\"record_type\":\"session\",\"source_id\":\"recovered-source\",\"session_id\":\"recovered-session\",\"started_at\":\"2026-07-31T12:00:00Z\",\"agent_type\":\"primary\",\"is_primary\":true}\n",
+            "{malformed-json}\n",
+            "{\"record_type\":\"event\",\"source_id\":\"recovered-source\",\"session_id\":\"recovered-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-07-31T12:00:01Z\",\"payload\":{\"text\":\"structural manifest recovery oracle\"}}\n",
+        ),
+    )
+    .unwrap();
+    let recovered = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture_arg,
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(recovered["outcome"], "success", "{recovered:#}");
+    assert_eq!(
+        recovered["totals"]["current_indexed_documents"], 1,
+        "{recovered:#}"
+    );
+    assert_eq!(
+        recovered["totals"]["current_rejected_records"], 1,
+        "{recovered:#}"
+    );
+}
+
+#[test]
 fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
     let temp = tempdir();
     let _daemon = start_full_source_refresh_daemon(&temp);
