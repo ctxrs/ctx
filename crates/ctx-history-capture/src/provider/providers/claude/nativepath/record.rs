@@ -1,11 +1,9 @@
 use std::fmt;
 
-use ctx_history_core::{ContentRef, EventType};
 use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -16,9 +14,7 @@ use super::{
         ClaudeSparseOutputDiagnostic, ToolCallRequest, CLAUDE_MAX_FILE_TOUCHES_PER_RECORD,
     },
 };
-use crate::{
-    provider::normalization::provider_policy_event_text, OutputOutcome, OutputOutcomeMetadata,
-};
+use crate::{OutputOutcome, OutputOutcomeMetadata};
 
 mod value_hydration;
 
@@ -469,22 +465,6 @@ fn push_body_row(
     let subrecord_index = rows.len() as u64;
     let identity = identity(raw_ordinal, subrecord_index);
     let body_sha256 = retained_body_hash(kind, role.as_deref(), &body);
-    let event_type = match kind {
-        ClaudeEventKind::Message => EventType::Message,
-        ClaudeEventKind::Summary => EventType::Summary,
-        ClaudeEventKind::Notice => EventType::Notice,
-        ClaudeEventKind::ToolCall => EventType::ToolCall,
-        ClaudeEventKind::ToolOutput => EventType::ToolOutput,
-    };
-    let retained = provider_policy_event_text(event_type, &body, &Value::Null);
-    let retention = retained.retention.as_json();
-    let truncated = retention
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let complete_body_ref = (event_type == EventType::Message && truncated)
-        .then(|| ContentRef::from_bytes(body.as_bytes()))
-        .flatten();
     rows.push(ClaudeRetainedRow {
         identity,
         native_order: order(identity),
@@ -493,10 +473,10 @@ fn push_body_row(
         kind,
         role,
         occurred_at,
-        body: Some(retained.text),
+        body: Some(body),
         body_sha256: Some(body_sha256),
-        body_text_retention: truncated.then_some(retention),
-        complete_body_ref,
+        body_text_retention: None,
+        complete_body_ref: None,
         tool_call: None,
         sparse_output: None,
         locator: locator.clone(),

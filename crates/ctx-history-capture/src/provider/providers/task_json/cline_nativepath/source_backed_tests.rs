@@ -34,8 +34,8 @@ use crate::{
 use super::source::ClineFileStamp;
 use super::source_backed::{
     cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
-    roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
-    TaskJsonFixtureOperations,
+    collect_task_json_test_documents, roo_task_json_source_backed_adapter,
+    roo_task_json_source_backed_resolver, TaskJsonFixtureOperations,
 };
 
 #[derive(Debug)]
@@ -97,6 +97,21 @@ impl Drop for TaskJsonScanActivityGuard {
 fn task_json_routes_cold_noop_replace_and_delete_through_shared_engine() {
     for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
         lifecycle_case(provider);
+    }
+}
+
+#[test]
+fn task_json_lexical_documents_preserve_message_content_beyond_16k() {
+    let expected = source_fixture_body();
+    assert!(expected.chars().count() > 16_384);
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let documents = collect_task_json_test_documents(provider, &fixture.root).unwrap();
+        let document = documents
+            .iter()
+            .find(|document| document.body.ends_with("task-json-tail"))
+            .expect("task JSON route must emit the complete long message");
+        assert_eq!(document.body, expected);
     }
 }
 
@@ -900,7 +915,7 @@ fn messages(body: &str) -> Value {
 }
 
 fn source_fixture_body() -> String {
-    format!("{}task-json-tail", "cold body ".repeat(400))
+    format!("{}task-json-tail", "cold body ".repeat(2_200))
 }
 
 fn replace_json(path: &Path, value: &Value) {

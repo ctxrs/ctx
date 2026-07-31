@@ -9,7 +9,7 @@ use ctx_history_core::{
     HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
     TypedKey,
 };
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_index::{LexicalDocument, VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -483,33 +483,43 @@ fn shared_family_claude_hydrates_full_source_text_beyond_index_retention() {
     let path = session_path(&projects, "-project", "session-1");
     let long_message = format!("{}ordinary-unique-tail", "m".repeat(20_000));
     let long_compound = format!("{}compound-unique-tail", "c".repeat(20_000));
+    let ordinary_record = message("session-1", "message-long", &long_message);
+    let compound_record = json!({
+        "sessionId": "session-1",
+        "type": "assistant",
+        "uuid": "compound-long",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": long_compound},
+                {
+                    "type": "tool_use",
+                    "id": "call-long",
+                    "name": "Read",
+                    "input": {"file_path": "src/long.rs"}
+                }
+            ]
+        }
+    });
+    let ordinary_documents = project_test_record(&ordinary_record);
+    assert_eq!(ordinary_documents.len(), 1);
+    assert_eq!(ordinary_documents[0].body, long_message);
+    assert!(ordinary_documents[0].body.ends_with("ordinary-unique-tail"));
+    let compound_documents = project_test_record(&compound_record);
+    assert_eq!(compound_documents.len(), 2);
+    assert_eq!(compound_documents[0].body, long_compound);
+    assert!(compound_documents[0].body.ends_with("compound-unique-tail"));
     write_lines(
         &path,
         &[
-            message("session-1", "message-long", &long_message),
+            ordinary_record,
             json!({
                 "sessionId": "session-1",
                 "type": "system",
                 "uuid": "notice-1",
                 "summary": "source-authored notice"
             }),
-            json!({
-                "sessionId": "session-1",
-                "type": "assistant",
-                "uuid": "compound-long",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": long_compound},
-                        {
-                            "type": "tool_use",
-                            "id": "call-long",
-                            "name": "Read",
-                            "input": {"file_path": "src/long.rs"}
-                        }
-                    ]
-                }
-            }),
+            compound_record,
         ],
     );
     let registry = registry(&projects);
@@ -653,4 +663,49 @@ fn append_record(path: &Path, record: &Value) {
     let mut file = OpenOptions::new().append(true).open(path).unwrap();
     serde_json::to_writer(&mut file, record).unwrap();
     file.write_all(b"\n").unwrap();
+}
+
+fn project_test_record(record: &Value) -> Vec<LexicalDocument> {
+    let bytes = serde_json::to_vec(record).unwrap();
+    let locator = super::ClaudePhysicalLocator {
+        path: PathBuf::from("/workspace/project/session-1.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: u64::try_from(bytes.len()).unwrap(),
+        line_number: 1,
+        record_sha256: Sha256::digest(&bytes).into(),
+    };
+    let parsed = super::parse_native_record(&bytes, 0, &locator).unwrap();
+    let binding = super::Binding {
+        project_dir: PathBuf::from("/workspace/project"),
+        key: super::ClaudeSessionKey {
+            root_session_id: "session-1".to_owned(),
+            workflow_run_id: None,
+            agent_id: None,
+        },
+        layout: super::SessionLayout::Primary,
+    };
+    let source = super::source_key(&binding.key).unwrap();
+    let identities = super::identities(&binding).unwrap();
+    let mut session = super::ClaudeSessionMetadata::new(binding.key.clone());
+    session.observe(
+        parsed.timestamp.as_deref(),
+        parsed.cwd.as_deref(),
+        parsed.version.as_deref(),
+        parsed.git_branch.as_deref(),
+    );
+    parsed
+        .rows
+        .into_iter()
+        .map(|row| {
+            super::lexical_document(
+                &source,
+                "/workspace/project/session-1.jsonl",
+                &binding,
+                &identities,
+                &session,
+                row,
+            )
+            .unwrap()
+        })
+        .collect()
 }

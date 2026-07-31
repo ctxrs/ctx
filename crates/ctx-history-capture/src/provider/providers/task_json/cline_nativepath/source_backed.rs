@@ -725,6 +725,33 @@ fn scan_task(
     task_terminal(dialect, accumulator, checkpoint).map_err(task_route_error)
 }
 
+#[cfg(test)]
+pub(super) fn collect_task_json_test_documents(
+    provider: CaptureProvider,
+    root: &Path,
+) -> SourceBackedRouteResult<Vec<LexicalDocument>> {
+    let dialect = match provider {
+        CaptureProvider::Cline => TaskJsonNativeDialect::CLINE,
+        CaptureProvider::RooCode => TaskJsonNativeDialect::ROO,
+        _ => {
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::InvalidSource,
+                "test document collection supports only Cline and Roo Code",
+            ))
+        }
+    };
+    let authority = discover_root(dialect, root)
+        .map_err(|error| task_route_error(TaskJsonSourceBackedError::Native(error)))?;
+    let mut documents = Vec::new();
+    for task in authority.task_routes() {
+        scan_task(dialect, &authority, task, |document| {
+            documents.push(document);
+            Ok(())
+        })?;
+    }
+    Ok(documents)
+}
+
 fn project_native_page(
     dialect: TaskJsonNativeDialect,
     task: &mut TaskAccumulator,

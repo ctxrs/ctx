@@ -81,6 +81,7 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         let first_row: serde_json::Value = serde_json::from_str(&expected[0]).unwrap();
         let expected_first_body = first_row["text"].as_str().unwrap();
         assert_eq!(documents[0].body, expected_first_body);
+        assert!(documents[0].body.chars().count() > 16_384);
         assert!(documents[0].body.ends_with("opencode-tail"));
         assert_eq!(documents[0].provider_session_id.as_deref(), Some("child"));
         let root_session_id = session_id(&scan.source, "root").unwrap();
@@ -1034,7 +1035,7 @@ fn create_fixture(path: &Path, provider: &str, rows: usize) -> Vec<String> {
         let text = if sequence == 0 {
             format!(
                 "{} opencode-tail",
-                format!("{provider} retained ").repeat(400)
+                format!("{provider} retained ").repeat(1_500)
             )
         } else {
             format!("{provider} retained message {sequence}")

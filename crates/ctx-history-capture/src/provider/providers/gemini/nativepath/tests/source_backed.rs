@@ -4,7 +4,9 @@ use std::{
     path::Path,
 };
 
-use super::super::source_backed::{hydrate_gemini_source_backed_record, GeminiSourceBackedError};
+use super::super::source_backed::{
+    hydrate_gemini_source_backed_record, project_gemini_test_event, GeminiSourceBackedError,
+};
 use super::*;
 use crate::{
     provider::source_backed::{
@@ -323,6 +325,46 @@ fn gemini_exact_jsonl_locator_reopens_original_record_after_append() {
     let hydrated_after_append =
         hydrate_gemini_source_backed_record(&appended_source, &document.locator).unwrap();
     assert_eq!(hydrated_after_append.provider_bytes, exact_text.as_bytes());
+}
+
+#[test]
+fn gemini_lexical_document_preserves_structured_tool_arguments_beyond_16k() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let structured_tail = format!("{}gemini-structured-tail", "argument-".repeat(2_100));
+    let expected_args = json!({
+        "path": "src/complete.rs",
+        "content": structured_tail,
+    });
+    let path = write_transcript(
+        &root,
+        &[
+            header("structured-source-backed", "main"),
+            json!({
+                "id": "structured-tool-call",
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "call-structured",
+                    "name": "write_file",
+                    "args": expected_args,
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, mut events) = scan_collect(&source, None);
+    assert_eq!(events.len(), 1);
+
+    let document = project_gemini_test_event(&source, events.remove(0)).unwrap();
+    let (tool_name, arguments) = document.body.split_once('\n').unwrap();
+    assert_eq!(tool_name, "write_file");
+    assert_eq!(
+        serde_json::from_str::<Value>(arguments).unwrap(),
+        expected_args
+    );
+    assert!(arguments.contains("gemini-structured-tail"));
+    assert!(document.body.chars().count() > 16_384);
 }
 
 #[test]
