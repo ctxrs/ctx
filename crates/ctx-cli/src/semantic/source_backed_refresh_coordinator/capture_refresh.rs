@@ -37,6 +37,7 @@ pub(super) fn execute_capture_owned_refresh(
 
 pub(super) struct RecoveredCaptureOwnedPublication {
     pub(super) generation_id: String,
+    pub(super) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     pub(super) source_manifest: SourceManifest,
     pub(super) resolver: Arc<SourceBackedResolverRegistry>,
     pub(super) verified_index: Arc<VerifiedIndex>,
@@ -44,6 +45,7 @@ pub(super) struct RecoveredCaptureOwnedPublication {
 
 pub(super) fn recover_capture_owned_resolver(
     data_root: &Path,
+    published_explicit_source_catalog: &ExplicitSourceCatalogAuthority,
 ) -> Result<Option<RecoveredCaptureOwnedPublication>> {
     let Some(generation_id) = retained_generation_hint(data_root)? else {
         return Ok(None);
@@ -55,17 +57,6 @@ pub(super) fn recover_capture_owned_resolver(
         return Ok(None);
     }
 
-    let discovery = source_backed_discovery_context()?.with_data_root(data_root);
-    let mut report = discover_provider_sources_with_context(&discovery);
-    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
-        .context("validate provider roots before restoring source hydration")?;
-    let catalog = load_explicit_source_catalog_authority(data_root)?;
-    catalog
-        .validate_source_roots(data_root)
-        .context("validate explicit provider roots before restoring source hydration")?;
-    catalog.prepare_discovery_report(data_root, &mut report)?;
-    let mut build =
-        build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
     let retained_generation = Arc::new(open_published_generation(data_root)?.ok_or_else(|| {
         anyhow!("retained source-backed generation {generation_id} is unavailable")
     })?);
@@ -75,11 +66,13 @@ pub(super) fn recover_capture_owned_resolver(
             retained_generation.generation_id()
         );
     }
-    catalog.register_routes_after_discovery_merge(
+    let Some(resolver) = reconstruct_generation_bound_resolver(
         data_root,
-        Some(&retained_generation),
-        &mut build,
-    )?;
+        published_explicit_source_catalog,
+        &retained_generation,
+    ) else {
+        return Ok(None);
+    };
     let removals = retained_generation
         .manifest()
         .removals
@@ -95,10 +88,43 @@ pub(super) fn recover_capture_owned_resolver(
     .map_err(|error| anyhow!("recover Pro source manifest: {}", error.message))?;
     Ok(Some(RecoveredCaptureOwnedPublication {
         generation_id,
+        published_explicit_source_catalog: published_explicit_source_catalog.clone(),
         source_manifest,
-        resolver: Arc::new(build.registry.resolver_registry()),
+        resolver,
         verified_index: retained_generation,
     }))
+}
+
+fn reconstruct_generation_bound_resolver(
+    data_root: &Path,
+    published_explicit_source_catalog: &ExplicitSourceCatalogAuthority,
+    retained_generation: &VerifiedIndex,
+) -> Option<Arc<SourceBackedResolverRegistry>> {
+    let reconstruct = || -> Result<Arc<SourceBackedResolverRegistry>> {
+        let discovery = source_backed_discovery_context()?.with_data_root(data_root);
+        let mut report = discover_provider_sources_with_context(&discovery);
+        validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+            .context("validate provider roots before restoring source hydration")?;
+        published_explicit_source_catalog
+            .validate_source_roots(data_root)
+            .context(
+                "validate published explicit provider roots before restoring source hydration",
+            )?;
+        published_explicit_source_catalog.prepare_discovery_report(data_root, &mut report)?;
+        let mut build =
+            build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
+        published_explicit_source_catalog.register_routes_after_discovery_merge(
+            data_root,
+            Some(retained_generation),
+            &mut build,
+        )?;
+        reject_unowned_retained_source_families(
+            &build.registry,
+            &retained_generation.manifest().sources,
+        )?;
+        Ok(Arc::new(build.registry.resolver_registry()))
+    };
+    reconstruct().ok()
 }
 
 pub(super) fn execute_capture_owned_refresh_with<Refresh>(

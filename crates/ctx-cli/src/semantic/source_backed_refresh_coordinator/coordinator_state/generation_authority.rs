@@ -10,6 +10,7 @@ pub(super) struct RetainedGenerationResolver {
 #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
 pub(crate) struct GenerationBoundSourceBackedResolver {
     pub(super) generation_id: String,
+    pub(super) published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub(super) source_manifest: Option<SourceManifest>,
     pub(super) resolver: Arc<SourceBackedResolverRegistry>,
     pub(super) verified_index: Mutex<Option<Arc<VerifiedIndex>>>,
@@ -25,6 +26,10 @@ impl fmt::Debug for GenerationBoundSourceBackedResolver {
         formatter
             .debug_struct("GenerationBoundSourceBackedResolver")
             .field("generation_id", &self.generation_id)
+            .field(
+                "published_explicit_source_catalog",
+                &self.published_explicit_source_catalog,
+            )
             .field("source_manifest", &self.source_manifest)
             .field("verified_index_bound", &verified_index_bound)
             .finish_non_exhaustive()
@@ -39,6 +44,12 @@ impl GenerationBoundSourceBackedResolver {
 
     pub(crate) fn resolver(&self) -> &SourceBackedResolverRegistry {
         self.resolver.as_ref()
+    }
+
+    pub(crate) fn published_explicit_source_catalog(
+        &self,
+    ) -> Option<&ExplicitSourceCatalogAuthority> {
+        self.published_explicit_source_catalog.as_ref()
     }
 
     pub(crate) fn source_manifest(&self) -> Option<&SourceManifest> {
