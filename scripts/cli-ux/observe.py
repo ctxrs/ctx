@@ -519,6 +519,30 @@ def _process_identity(pid: int) -> tuple[int, int] | None:
     return int(fields[1]), int(fields[3])
 
 
+def _process_diagnostic(pid: int) -> str:
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        close = stat_line.rfind(")")
+        fields = stat_line[close + 2 :].split() if close >= 0 else []
+        state = fields[0] if fields else "?"
+        parent = fields[1] if len(fields) > 1 else "?"
+        session = fields[3] if len(fields) > 3 else "?"
+        command = (
+            Path(f"/proc/{pid}/cmdline")
+            .read_bytes()
+            .replace(b"\0", b" ")
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+        return (
+            f"{pid} state={state} ppid={parent} session={session} "
+            f"cwd={cwd} argv={command[:512]}"
+        )
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return str(pid)
+
+
 def _direct_child_pids() -> set[int]:
     parent = os.getpid()
     children_path = Path(f"/proc/{parent}/task/{parent}/children")
@@ -867,8 +891,8 @@ def observe(
         )
         if leaked_pids:
             raise ObservationError(
-                "observation command leaked descendant processes: "
-                + ", ".join(str(pid) for pid in leaked_pids)
+                "observation command leaked descendant processes:\n  "
+                + "\n  ".join(_process_diagnostic(pid) for pid in leaked_pids)
             )
         if _file_sha256(executable) != executable_sha256:
             raise ObservationError("executable changed during observation")
