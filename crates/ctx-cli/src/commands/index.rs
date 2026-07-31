@@ -15,7 +15,7 @@ use crate::output::{compact_json, print_json, JsonOutputFormat};
 use crate::semantic::source_epoch_status_report;
 use crate::ui::{RenderContext, Ui};
 
-use super::index_dashboard::IndexDashboard;
+use super::index_dashboard::{render_semantic_disabled_wait, IndexDashboard};
 
 #[cfg(any(test, ctx_pro_test_helper))]
 pub(crate) mod dashboard_fixture;
@@ -261,7 +261,12 @@ fn run_index_wait(
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "blocked"))?;
             } else if !quiet {
-                write_index_status_human(ui, &mut dashboard, &status)?;
+                if selection.semantic && !bool_at(&status, &["semantic", "enabled"]) {
+                    let document = render_semantic_disabled_wait(&status, ui.stdout_context());
+                    ui.write_stdout(&document)?;
+                } else {
+                    write_index_status_human(ui, &mut dashboard, &status)?;
+                }
             }
             return Err(anyhow!(message));
         }

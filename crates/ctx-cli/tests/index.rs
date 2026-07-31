@@ -397,7 +397,7 @@ fn human_status_and_wait_share_the_ready_document() {
 }
 
 #[test]
-fn human_wait_blocked_renders_the_final_searchable_snapshot() {
+fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
 
@@ -420,11 +420,16 @@ fn human_wait_blocked_renders_the_final_searchable_snapshot() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(
-        stdout.starts_with("✓ Your history is searchable\n")
-            || stdout.starts_with("OK Your history is searchable\n"),
+        stdout.starts_with("✗ Semantic indexing is blocked\n")
+            || stdout.starts_with("ERROR Semantic indexing is blocked\n"),
         "{stdout}"
     );
-    assert!(stdout.contains("Semantic search  Off"));
+    assert!(stdout.contains("Keyword search remains available."));
+    assert!(stdout.contains("\nKeyword search\n"));
+    assert!(stdout.contains("\nSemantic search\nStatus  Off\n"));
+    assert!(stdout.ends_with("\nNext\n  ctx setup --semantic\n"));
+    assert!(!stdout.contains("Your history is searchable"));
+    assert!(!stdout.contains("ctx doctor"));
     assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
 }
 
