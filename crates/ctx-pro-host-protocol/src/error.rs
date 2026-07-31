@@ -10,6 +10,7 @@ pub enum ErrorClass {
     ProtocolMismatch,
     MissingSource,
     MissingRepository,
+    ResourceNotFound,
     StaleFact,
     LineOutOfRange,
     StaleSnapshot,

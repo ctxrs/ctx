@@ -63,6 +63,36 @@ fn blame_commit_negotiates_the_exact_protocol_and_returns_typed_json() {
 }
 
 #[test]
+fn missing_blame_resource_has_stable_cli_diagnostic_in_human_and_json_modes() {
+    let root = tempdir().unwrap();
+    initialize_current_query_store(root.path());
+    let helper = root.path().join("ctx-pro-blame-missing-resource");
+    support::write_blame_error_helper(&helper, "resource_not_found");
+
+    for (format, expected_stderr) in [
+        (None, "✗ resource_not_found\n"),
+        (Some("--format=json"), "Error: resource_not_found\n"),
+    ] {
+        let mut command = Command::cargo_bin("ctx").unwrap();
+        command.env("CTX_PRO_HELPER", &helper).args([
+            "--data-root",
+            root.path().to_str().unwrap(),
+            "blame",
+            "commit",
+            "0123456789abcdef",
+        ]);
+        if let Some(format) = format {
+            command.arg(format);
+        }
+        command
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::eq(expected_stderr));
+    }
+}
+
+#[test]
 fn commit_blame_human_output_preserves_production_grouping() {
     let root = tempdir().unwrap();
     initialize_current_query_store(root.path());
