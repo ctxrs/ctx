@@ -272,30 +272,107 @@ fn daemon_handoff_observation(
     let status = read_daemon_status(data_root);
     let lock_pid = super::super::paths_status::read_pid_lock_file(&daemon_lock_path(data_root));
     let lock_active = lock_pid.is_some_and(|pid| daemon_lock_is_owned_by(data_root, pid));
+    let now_ms = utc_now().timestamp_millis();
     let observation = daemon_handoff_observation_from(
         status.as_ref(),
         lock_pid,
         lock_active,
         expected_failure_pid,
         Some(expected_config),
-        utc_now().timestamp_millis(),
+        now_ms,
     );
+    let refresh_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    let active_refresh = daemon_owned_source_refresh_is_active(
+        status.as_ref(),
+        refresh_job.as_ref(),
+        lock_pid,
+        now_ms,
+    );
+    // The daemon's first scheduler tick can enter a long synchronous refresh
+    // before setup gets an endpoint response. The base observation has already
+    // verified fresh status, lock ownership, and applied config; a refresh
+    // started by that same daemon is sufficient bounded handoff evidence.
+    if matches!(observation, DaemonHandoffObservation::Running(_)) && active_refresh {
+        return observation;
+    }
+    let endpoint_usable = lock_active
+        && lock_pid.is_some_and(|pid| daemon_source_refresh_endpoint_is_usable(data_root, pid));
+    complete_daemon_handoff_observation(
+        observation,
+        status.as_ref(),
+        lock_pid,
+        lock_active,
+        expected_config,
+        endpoint_usable,
+        active_refresh,
+    )
+}
+
+pub(super) fn complete_daemon_handoff_observation(
+    observation: DaemonHandoffObservation,
+    status: Option<&Value>,
+    lock_pid: Option<u32>,
+    lock_active: bool,
+    expected_config: &AppConfig,
+    endpoint_usable: bool,
+    active_refresh: bool,
+) -> DaemonHandoffObservation {
     match observation {
-        DaemonHandoffObservation::Running(handoff)
-            if !daemon_source_refresh_endpoint_is_usable(data_root, handoff.pid) =>
-        {
-            DaemonHandoffObservation::Pending
+        DaemonHandoffObservation::Running(handoff) if endpoint_usable || active_refresh => {
+            DaemonHandoffObservation::Running(handoff)
         }
-        DaemonHandoffObservation::Pending
-            if lock_active
-                && lock_pid.is_some_and(|pid| {
-                    daemon_source_refresh_endpoint_is_usable(data_root, pid)
-                }) =>
-        {
-            daemon_live_endpoint_observation_from(status.as_ref(), lock_pid, expected_config)
+        DaemonHandoffObservation::Running(_) => DaemonHandoffObservation::Pending,
+        DaemonHandoffObservation::Pending if lock_active && endpoint_usable => {
+            daemon_live_endpoint_observation_from(status, lock_pid, expected_config)
         }
         observation => observation,
     }
+}
+
+pub(super) fn daemon_owned_source_refresh_is_active(
+    daemon_status: Option<&Value>,
+    refresh_job: Option<&Value>,
+    lock_pid: Option<u32>,
+    now_ms: i64,
+) -> bool {
+    let Some((daemon_status, refresh_job)) = daemon_status.zip(refresh_job) else {
+        return false;
+    };
+    let daemon_started_at_ms = daemon_status
+        .get("started_at_ms")
+        .and_then(Value::as_i64)
+        .filter(|started_at_ms| *started_at_ms > 0);
+    let job_started_at_ms = refresh_job
+        .get("last_run_at_ms")
+        .and_then(Value::as_i64)
+        .filter(|started_at_ms| {
+            // Reject a stale job inherited from an earlier daemon owner and
+            // timestamps too far in the future to be credible.
+            daemon_started_at_ms.is_some_and(|daemon_started| *started_at_ms >= daemon_started)
+                && *started_at_ms
+                    <= now_ms.saturating_add(DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS)
+        });
+    daemon_status
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        == lock_pid
+        && daemon_started_at_ms.is_some()
+        && job_started_at_ms.is_some()
+        && refresh_job.get("owner").and_then(Value::as_str) == Some("daemon")
+        && refresh_job.get("kind").and_then(Value::as_str) == Some("source_backed")
+        && refresh_job.get("status").and_then(Value::as_str) == Some("running")
+        && refresh_job.get("request_state").and_then(Value::as_str) == Some("running")
+        && refresh_job
+            .get("request_id")
+            .and_then(Value::as_str)
+            .is_some_and(|request_id| !request_id.is_empty())
+        && refresh_job
+            .get("progress")
+            .and_then(|progress| progress.get("phase"))
+            .and_then(Value::as_str)
+            .is_some_and(|phase| !phase.is_empty() && phase != "failed")
+        && refresh_job.get("last_error").is_none_or(Value::is_null)
 }
 
 pub(super) fn daemon_live_endpoint_observation_from(
