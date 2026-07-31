@@ -35,9 +35,16 @@ pub(super) fn execute_capture_owned_refresh(
     execute_capture_owned_refresh_with(execution, &discovery, refresh_all_provider_sources)
 }
 
+pub(super) struct RecoveredCaptureOwnedPublication {
+    pub(super) generation_id: String,
+    pub(super) source_manifest: SourceManifest,
+    pub(super) resolver: Arc<SourceBackedResolverRegistry>,
+    pub(super) verified_index: Arc<VerifiedIndex>,
+}
+
 pub(super) fn recover_capture_owned_resolver(
     data_root: &Path,
-) -> Result<Option<(String, Arc<SourceBackedResolverRegistry>)>> {
+) -> Result<Option<RecoveredCaptureOwnedPublication>> {
     let Some(generation_id) = retained_generation_hint(data_root)? else {
         return Ok(None);
     };
@@ -59,9 +66,9 @@ pub(super) fn recover_capture_owned_resolver(
     catalog.prepare_discovery_report(data_root, &mut report)?;
     let mut build =
         build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
-    let retained_generation = open_published_generation(data_root)?.ok_or_else(|| {
+    let retained_generation = Arc::new(open_published_generation(data_root)?.ok_or_else(|| {
         anyhow!("retained source-backed generation {generation_id} is unavailable")
-    })?;
+    })?);
     if retained_generation.generation_id() != generation_id {
         bail!(
             "retained source-backed generation hint {generation_id} does not match verified generation {}",
@@ -73,10 +80,25 @@ pub(super) fn recover_capture_owned_resolver(
         Some(&retained_generation),
         &mut build,
     )?;
-    Ok(Some((
+    let removals = retained_generation
+        .manifest()
+        .removals
+        .iter()
+        .map(|removal| SourceRemoval::new(removal.deletion().clone(), removal.inventory().clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| anyhow!("recover certified Pro source removal: {}", error.message))?;
+    let source_manifest = SourceManifest::new(
+        generation_id.clone(),
+        retained_generation.manifest().sources.clone(),
+        removals,
+    )
+    .map_err(|error| anyhow!("recover Pro source manifest: {}", error.message))?;
+    Ok(Some(RecoveredCaptureOwnedPublication {
         generation_id,
-        Arc::new(build.registry.resolver_registry()),
-    )))
+        source_manifest,
+        resolver: Arc::new(build.registry.resolver_registry()),
+        verified_index: retained_generation,
+    }))
 }
 
 pub(super) fn execute_capture_owned_refresh_with<Refresh>(

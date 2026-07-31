@@ -720,6 +720,76 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
 }
 
 #[test]
+fn daemon_startup_repairs_verified_publication_before_service_readiness() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let generation_id = ctx_history_index::GenerationWriter::open(
+        super::super::source_backed_refresh_coordinator::source_backed_index_root(root.path()),
+        ctx_history_index::WriterOptions::default(),
+    )?
+    .commit(|_| true)?
+    .generation_id;
+    let catalog = crate::commands::import::load_explicit_source_catalog_authority(root.path())?;
+    let job_path = daemon_source_backed_refresh_job_path(root.path());
+    super::super::paths_status::write_daemon_job_status(
+        &job_path,
+        &json!({
+            "mode": "background",
+            "owner": "daemon",
+            "kind": "source_backed",
+            "status": "running",
+            "request_id": "startup-crash-window",
+            "request_state": "running",
+            "requested_explicit_source_catalog": catalog.to_json(),
+            "progress": {
+                "phase": "committed",
+                "completed_sources": 0,
+                "total_sources": 0,
+            },
+            "daemon_mode": "full",
+            "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
+        }),
+    )?;
+    fs::write(
+        root.path().join(".fail-daemon-before-ready-for-test"),
+        b"fail",
+    )?;
+
+    let error = run_daemon_inner(
+        DaemonRunArgs {
+            foreground: false,
+            once: true,
+            idle_exit_seconds: None,
+            loop_interval_seconds: None,
+            max_chunks: None,
+            max_seconds: None,
+            force: false,
+            start_mode: Some(DaemonStartModeArg::Auto),
+            trigger_command: Some(DaemonTriggerCommandArg::Search),
+            format: crate::output::JsonOutputFormat::Json,
+        },
+        root.path(),
+        &AppConfig::default(),
+    )
+    .expect_err("the post-reconciliation readiness failure must surface");
+
+    assert!(error
+        .to_string()
+        .contains("injected daemon failure before readiness"));
+    let recovered = read_daemon_job_status(&job_path)
+        .ok_or_else(|| anyhow!("reconciled source refresh job is missing"))?;
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["request_state"], "published");
+    assert_eq!(recovered["published_generation"], generation_id);
+    assert_eq!(recovered["receipt"]["published_generation"], generation_id);
+    assert_eq!(
+        recovered["published_explicit_source_catalog"],
+        recovered["receipt"]["published_explicit_source_catalog"]
+    );
+    Ok(())
+}
+
+#[test]
 fn telemetry_policy_is_reloaded_and_failures_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     let config_path = root.path().join(CONFIG_FILE);
