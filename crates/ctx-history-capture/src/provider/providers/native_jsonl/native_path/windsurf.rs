@@ -4,8 +4,7 @@ use ctx_history_core::{CaptureProvider, EventRole, EventType};
 use serde_json::Value;
 
 use crate::{
-    provider::file_touches::normalized_key, PROVIDER_MAX_TEXT_CHARS,
-    WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
+    provider::file_touches::normalized_key, WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
 };
 
 pub(crate) fn windsurf_event_type(value: &Value) -> EventType {
@@ -63,9 +62,6 @@ fn windsurf_extract_text(value: &Value) -> Option<String> {
 }
 
 fn windsurf_collect_text(value: &Value, key: Option<&str>, out: &mut Vec<String>) {
-    if out.iter().map(|part| part.chars().count()).sum::<usize>() >= PROVIDER_MAX_TEXT_CHARS {
-        return;
-    }
     match value {
         Value::String(text) => {
             if !windsurf_large_content_key(key.unwrap_or_default()) && !text.trim().is_empty() {

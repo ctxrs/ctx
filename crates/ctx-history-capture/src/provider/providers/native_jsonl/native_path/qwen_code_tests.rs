@@ -9,12 +9,16 @@ use super::*;
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
-    const SENTINEL: &str = "QWEN_CODE_SOURCE_BACKED_SENTINEL";
+    const TAIL_TERM: &str = "qwencodetailneedle";
 
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join(".qwen/projects");
     let transcript = transcript_path(&root);
-    let source_record = message("qwen-life", "source-backed-user", "user", SENTINEL);
+    let source_record = tool_call("qwen-life", "source-backed-tool", TAIL_TERM);
+    let expected_body = source_record
+        .pointer("/message/content")
+        .unwrap()
+        .to_string();
     write_transcript(&transcript, std::slice::from_ref(&source_record));
     let mut expected_record = serde_json::to_vec(&source_record).unwrap();
     expected_record.push(b'\n');
@@ -23,13 +27,14 @@ fn source_backed_cold_projection_and_exact_locator() {
         qwen_code_source_backed_adapter(),
         &root,
         "qwen-life",
-        SENTINEL,
+        &expected_body,
+        TAIL_TERM,
         &expected_record,
         None,
         "qwen-life",
         "primary",
         true,
-        "ff13570b6860d2e7b42b48d1255150490bc74d5ecff07a462742ab9d1de664ed",
+        "1549f87e6b69136ab9c7a9a1f913801cee705ffdafeb08379cf744a6fc5a9d1d",
     );
 }
 
@@ -37,16 +42,24 @@ fn transcript_path(root: &Path) -> PathBuf {
     root.join("sanitized-workspace/chats/qwen-life.jsonl")
 }
 
-fn message(session_id: &str, id: &str, kind: &str, content: &str) -> Value {
+fn tool_call(session_id: &str, id: &str, tail_term: &str) -> Value {
     json!({
         "uuid": id,
         "sessionId": session_id,
         "timestamp": "2026-07-25T12:00:01Z",
-        "type": kind,
+        "type": "assistant",
         "cwd": "/workspace/qwen",
         "message": {
-            "role": kind,
-            "content": [{"type": "text", "text": content}]
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "qwen-call",
+                "name": "write_file",
+                "input": {
+                    "padding": "w".repeat(17_000),
+                    "zz_tail": tail_term,
+                },
+            }]
         },
         "model": "qwen3-coder",
     })

@@ -10,12 +10,16 @@ use crate::test_support_paths::tempdir;
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
-    const SENTINEL: &str = "TABNINE_SOURCE_BACKED_SENTINEL";
+    const TAIL_TERM: &str = "tabninetailneedle";
 
     let temp = tempdir().unwrap();
     let root = temp.path().join(".tabnine/agent");
     let transcript = transcript_path(&root);
-    let source_record = message("source-backed-user", "user", SENTINEL);
+    let source_record = tool_call("source-backed-tool", TAIL_TERM);
+    let expected_body = json!({
+        "toolCalls": source_record.get("toolCalls").unwrap(),
+    })
+    .to_string();
     write_transcript(
         &transcript,
         &[header("tabnine-life"), source_record.clone()],
@@ -27,13 +31,14 @@ fn source_backed_cold_projection_and_exact_locator() {
         tabnine_source_backed_adapter(),
         &root,
         "tabnine-life",
-        SENTINEL,
+        &expected_body,
+        TAIL_TERM,
         &expected_record,
         None,
         "tabnine-life",
         "primary",
         true,
-        "8a5a2dcae3dded1b95f8c03e06611a86b1be18950728ecb7bfd7d05bcc399656",
+        "a5cd51c9c37456dde096091dc863db5141938b43b2f3a15840df796e9d9a0224",
     );
 }
 
@@ -52,12 +57,19 @@ fn header(session_id: &str) -> Value {
     })
 }
 
-fn message(id: &str, kind: &str, content: &str) -> Value {
+fn tool_call(id: &str, tail_term: &str) -> Value {
     json!({
         "id": id,
         "timestamp": "2026-07-25T12:00:01Z",
-        "type": kind,
-        "content": content,
+        "type": "tabnine",
+        "toolCalls": [{
+            "id": "tabnine-call",
+            "name": "write_file",
+            "args": {
+                "padding": "t".repeat(17_000),
+                "zz_tail": tail_term,
+            },
+        }],
         "model": "tabnine-agent",
     })
 }

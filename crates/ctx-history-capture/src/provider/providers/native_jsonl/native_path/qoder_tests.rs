@@ -10,12 +10,16 @@ use crate::test_support_paths::tempdir;
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
-    const SENTINEL: &str = "QODER_SOURCE_BACKED_SENTINEL";
+    const TAIL_TERM: &str = "qodertailneedle";
 
     let temp = tempdir().unwrap();
     let root = temp.path().join(".qoder/projects");
     let transcript = transcript_path(&root);
-    let source_record = message("source-backed-user", "user", SENTINEL);
+    let source_record = tool_call("source-backed-tool", TAIL_TERM);
+    let expected_body = source_record
+        .pointer("/message/content")
+        .unwrap()
+        .to_string();
     write_transcript(&transcript, &[header("qoder-life"), source_record.clone()]);
     let mut expected_record = serde_json::to_vec(&source_record).unwrap();
     expected_record.push(b'\n');
@@ -24,13 +28,14 @@ fn source_backed_cold_projection_and_exact_locator() {
         qoder_source_backed_adapter(),
         &root,
         "qoder-life",
-        SENTINEL,
+        &expected_body,
+        TAIL_TERM,
         &expected_record,
         None,
         "qoder-life",
         "primary",
         true,
-        "4bd6717ce7ea0e674a7b0de6ed3bd84153ba417bc54991c4691d72ae38673b43",
+        "913b9e24a1f1f906b0dba46552964ac0ab2e9c01acb548b9696bbb1ca89d7183",
     );
 }
 
@@ -52,14 +57,25 @@ fn header(session_id: &str) -> Value {
     })
 }
 
-fn message(id: &str, kind: &str, content: &str) -> Value {
+fn tool_call(id: &str, tail_term: &str) -> Value {
     json!({
-        "type": kind,
+        "type": "assistant",
         "sessionId": "qoder-life",
         "uuid": id,
         "timestamp": "2026-07-25T12:00:01Z",
         "cwd": "/workspace/qoder",
-        "message": {"role": kind, "content": content},
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "qoder-call",
+                "name": "write_file",
+                "input": {
+                    "padding": "q".repeat(17_000),
+                    "zz_tail": tail_term,
+                },
+            }],
+        },
         "model": "qoder-agent",
     })
 }

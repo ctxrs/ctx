@@ -16,7 +16,9 @@ use crate::{
     provider_sources::provider_source_for_path,
 };
 
-// The fixture helper keeps all ten expected contract values explicit at call
+const COMPLETE_BODY_REGRESSION_BOUNDARY_CHARS: usize = 16 * 1024;
+
+// The fixture helper keeps all eleven expected contract values explicit at call
 // sites; a test-only argument struct would make failures less legible.
 #[allow(clippy::too_many_arguments)]
 pub(in super::super) fn assert_source_backed_fixture(
@@ -24,6 +26,7 @@ pub(in super::super) fn assert_source_backed_fixture(
     root: &Path,
     expected_native_session_id: &str,
     expected_body: &str,
+    expected_tail_term: &str,
     expected_record: &[u8],
     expected_parent_provider_session_id: Option<&str>,
     expected_root_provider_session_id: &str,
@@ -32,6 +35,14 @@ pub(in super::super) fn assert_source_backed_fixture(
     expected_projection_digest: &str,
 ) {
     use ctx_history_core::NativeRecordCoordinate;
+
+    let body_prefix = expected_body
+        .split_once(expected_tail_term)
+        .map(|(prefix, _)| prefix)
+        .expect("complete-body tail term is absent from the expected body");
+    assert!(body_prefix.chars().count() > COMPLETE_BODY_REGRESSION_BOUNDARY_CHARS);
+    serde_json::from_str::<serde_json::Value>(expected_body)
+        .expect("structured complete-body fixture must remain valid JSON");
 
     let opening = adapter.discover(root).unwrap();
     assert!(!opening.root_missing());
@@ -59,8 +70,16 @@ pub(in super::super) fn assert_source_backed_fixture(
     assert_eq!(certified.counts().indexed_documents, documents.len() as u64);
     let document = documents
         .iter()
-        .find(|document| document.body.contains(expected_body))
+        .find(|document| document.body.contains(expected_tail_term))
         .unwrap();
+    assert_eq!(document.body, expected_body);
+    let tail_matches = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .search_event_candidates(expected_tail_term, 10)
+        .unwrap();
+    assert!(tail_matches
+        .iter()
+        .any(|candidate| candidate.event.event_id == document.event.event_id));
     assert_eq!(
         document.event.provider,
         JsonlFamilyAdapter::provider(&adapter).as_str()
