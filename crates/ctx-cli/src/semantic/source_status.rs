@@ -118,7 +118,7 @@ fn attach_catch_up_status(report: &mut Value, status: Option<Value>) {
 fn source_daemon_report(data_root: &Path) -> Value {
     let mut daemon = daemon_report_with_disabled_status(data_root, true);
     if let Some(jobs) = daemon.get_mut("jobs").and_then(Value::as_object_mut) {
-        jobs.retain(|name, _| name == "source_backed_refresh");
+        jobs.retain(|name, _| matches!(name.as_str(), "source_backed_refresh" | "semantic_index"));
     }
     daemon
 }

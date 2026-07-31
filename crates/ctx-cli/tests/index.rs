@@ -353,6 +353,71 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
 }
 
 #[test]
+fn semantic_model_cache_missing_is_an_immediate_terminal_wait() {
+    let temp = daemon_test_root();
+    import_ready_history(&temp);
+    ctx(&temp)
+        .args(["daemon", "disable", "--format=json"])
+        .assert()
+        .success();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+    let jobs = data_root(&temp).join("daemon/jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    fs::write(
+        jobs.join("semantic-index.json"),
+        json!({
+            "status": "skipped",
+            "reason": "model_cache_missing",
+            "last_run_at_ms": 1,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
+    assert_eq!(
+        status["daemon"]["jobs"]["semantic_index"]["status"], "skipped",
+        "{status:#}"
+    );
+    assert_eq!(
+        status["daemon"]["jobs"]["semantic_index"]["reason"], "model_cache_missing",
+        "{status:#}"
+    );
+
+    let output = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args([
+            "index",
+            "wait",
+            "--semantic",
+            "--format=json",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let wait: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(wait["status"], "blocked", "{wait:#}");
+    assert_eq!(wait["selection"]["semantic"], true, "{wait:#}");
+    assert_eq!(
+        wait["index"]["daemon"]["jobs"]["semantic_index"]["reason"], "model_cache_missing",
+        "{wait:#}"
+    );
+    assert!(
+        stderr.contains("local embedding model cache is missing"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("timed out"), "{stderr}");
+}
+
+#[test]
 fn human_status_and_wait_share_the_ready_document() {
     let temp = daemon_test_root();
     import_ready_history(&temp);

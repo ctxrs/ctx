@@ -5,7 +5,10 @@ use std::{
 
 use serde_json::json;
 
-use super::{index_terminal_error, index_watch_output, IndexSelection, IndexWatchOutput};
+use super::{
+    index_terminal_error, index_watch_output, lexical_index_status, IndexSelection,
+    IndexWatchOutput,
+};
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
 
 #[derive(Clone, Default)]
@@ -62,6 +65,100 @@ fn watch_status(
             },
         },
     })
+}
+
+fn first_publication_pending_status() -> serde_json::Value {
+    json!({
+        "schema_version": 2,
+        "initialized": false,
+        "lexical": {
+            "status": lexical_index_status(false, 0, 0, 1, 0),
+            "source_status": "pending",
+            "indexed_sessions": 0,
+            "indexed_items": 0,
+            "completed_source_bytes": 0,
+            "total_source_bytes": 2048,
+            "inventory_units": 0,
+            "pending_inventory_units": 1,
+            "failed_inventory_units": 0,
+        },
+        "semantic": {
+            "status": "disabled",
+            "enabled": false,
+            "coverage": {
+                "embedded_items": 0,
+                "searchable_items": 0,
+                "embedded_chunks": 0,
+            },
+        },
+        "daemon": {
+            "status": "running",
+            "running": true,
+            "jobs": {},
+        },
+    })
+}
+
+#[test]
+fn first_publication_pending_is_not_collapsed_to_missing() {
+    assert_eq!(lexical_index_status(false, 0, 0, 1, 0), "pending");
+    assert_eq!(lexical_index_status(false, 0, 0, 0, 0), "missing");
+
+    let status = first_publication_pending_status();
+    assert!(
+        index_terminal_error(&status, IndexSelection::default_for(&status)).is_none(),
+        "{status:#}"
+    );
+}
+
+#[test]
+fn first_publication_pending_has_stable_human_and_machine_frames() {
+    let status = first_publication_pending_status();
+    for width in [32, 48, 80, 100] {
+        let mut output = IndexWatchOutput::for_test(Vec::new(), false, width);
+        output.print_human(&status).unwrap();
+        let rendered = String::from_utf8(output.writer).unwrap();
+        assert!(
+            rendered.starts_with("Indexing your history"),
+            "width={width}: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Remaining"),
+            "width={width}: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("does not exist"),
+            "width={width}: {rendered:?}"
+        );
+        assert!(!rendered.contains('\u{1b}'), "width={width}: {rendered:?}");
+    }
+
+    let mut output = IndexWatchOutput::for_test(Vec::new(), false, 32);
+    output.print_json(&status).unwrap();
+    let rendered = String::from_utf8(output.writer).unwrap();
+    let rendered: serde_json::Value = serde_json::from_str(rendered.trim()).unwrap();
+    assert_eq!(rendered, status);
+    assert_eq!(rendered["initialized"], false);
+    assert_eq!(rendered["lexical"]["status"], "pending");
+    assert_eq!(rendered["lexical"]["pending_inventory_units"], 1);
+}
+
+#[test]
+fn model_cache_missing_semantic_job_is_terminal_even_while_projection_is_pending() {
+    let mut status = watch_status(12, 12, false);
+    status["lexical"]["status"] = json!("ready");
+    status["lexical"]["pending_inventory_units"] = json!(0);
+    status["semantic"]["enabled"] = json!(true);
+    status["semantic"]["status"] = json!("pending");
+    status["daemon"]["jobs"]["semantic_index"] = json!({
+        "status": "skipped",
+        "reason": "model_cache_missing",
+    });
+
+    assert_eq!(
+        index_terminal_error(&status, IndexSelection::default_for(&status)).as_deref(),
+        Some("semantic indexing is skipped because the local embedding model cache is missing")
+    );
 }
 
 #[test]

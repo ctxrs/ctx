@@ -1,6 +1,6 @@
 use super::*;
 use std::{
-    io,
+    fs, io,
     sync::{Arc, Mutex},
 };
 
@@ -95,6 +95,48 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
         json!(data_root.join("search/semantic"))
     );
     assert!(status.report.get("prior_epoch").is_none());
+}
+
+#[test]
+fn source_daemon_report_preserves_semantic_terminal_job_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join(crate::config::CONFIG_FILE),
+        "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_semantic_job_path(&data_root),
+        &json!({
+            "status": "skipped",
+            "reason": "model_cache_missing",
+            "last_run_at_ms": 1,
+        }),
+    )
+    .unwrap();
+
+    let daemon = source_daemon_report(&data_root);
+    let jobs = daemon["jobs"].as_object().unwrap();
+    assert!(jobs.contains_key("source_backed_refresh"), "{daemon:#}");
+    assert!(jobs.contains_key("semantic_index"), "{daemon:#}");
+    assert!(!jobs.contains_key("history_refresh"), "{daemon:#}");
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["last_run_status"],
+        "skipped"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["last_run_reason"],
+        "model_cache_missing"
+    );
+    if super::super::semantic_query_service_supported() {
+        assert_eq!(daemon["jobs"]["semantic_index"]["status"], "skipped");
+        assert_eq!(
+            daemon["jobs"]["semantic_index"]["reason"],
+            "model_cache_missing"
+        );
+    }
 }
 
 #[test]
