@@ -132,7 +132,7 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
                     },
                     &format!(
                         "parallel semantic sentinel source {index}; \
-                         ordered locator sentinel event {event_index}"
+                         ordered Core sentinel event {event_index}"
                     ),
                 )
             })
@@ -217,8 +217,8 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
         search_event_ids(&parallel_verified, "parallel semantic sentinel")
     );
     assert_eq!(
-        search_event_ids(&single_verified, "ordered locator sentinel"),
-        search_event_ids(&parallel_verified, "ordered locator sentinel")
+        search_event_ids(&single_verified, "ordered Core sentinel"),
+        search_event_ids(&parallel_verified, "ordered Core sentinel")
     );
     drop(single_verified);
     drop(parallel_verified);
@@ -594,25 +594,17 @@ fn source_backed_cold_append_and_replay_keep_cumulative_counts() {
         appended_counts
     );
 
-    let source = codex_source_key(native_session_id).unwrap();
-    let locator = SourceRecordLocator::new(
-        source,
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: append_offset,
-            byte_length: appended_bytes.len() as u64,
-            physical_ordinal: 2,
-            native_session_key: Some(TypedKey::utf8(native_session_id).unwrap()),
-            native_event_key: Some(TypedKey::U64(2)),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        Sha256::digest(&appended_bytes).into(),
-    )
-    .unwrap();
-    let hydrated = hydrate_codex_locator(&sessions, &locator).unwrap();
-    assert_eq!(hydrated.provider_bytes, appended_bytes);
+    let appended_event = appended_events
+        .iter()
+        .find(|event| event.event_sequence == 2)
+        .unwrap();
+    let core = replayed_index
+        .core_record_by_id(appended_event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(core.native_event_id, Some(TypedKey::U64(2)));
     assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
+        core.content.normalized_body.as_deref(),
         Some("append sentinel")
     );
 }
@@ -1004,7 +996,7 @@ fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_hash_r
     let discovery = discover_codex_catalog_sources(&catalog);
     assert!(discovery.rejections.is_empty());
     let source = discovery.sources.into_iter().next().unwrap();
-    let opened = open_codex_source_capability(&source).unwrap();
+    let opened = crate::provider::codex::nativepath::open_codex_source_capability(&source).unwrap();
     let certified_observation =
         opened_codex_file_observation(&source.source_path, opened.file()).unwrap();
     let certified_digest = Sha256::digest(&original).into();

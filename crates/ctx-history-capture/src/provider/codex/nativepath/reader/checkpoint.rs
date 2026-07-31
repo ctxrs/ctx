@@ -206,18 +206,23 @@ pub(super) fn decode_pending_tool_authority(
             "pending tool-call authority correlation does not match checkpoint state",
         ));
     }
-    if let Some(evidence) =
-        crate::provider::codex::repository::repository_tool_evidence(&retained.payload)
+    if let [evidence] =
+        crate::provider::codex::repository::repository_tool_evidence(&retained.payload).as_slice()
     {
         // Fresh source-backed projection redacts provider-native arguments
-        // from display/Core text. Rehydration must reconstruct that same
-        // bounded context, not revive the legacy preview from build_event_row.
+        // from display/Core text. Append-proof reconstruction must recover
+        // that same bounded context, not revive the legacy preview.
         context.command_preview = None;
         context.arguments_preview = None;
+        context.tool_name.clone_from(&evidence.tool_name);
         context.session_cwd = owner.cwd.clone();
-        context.exact_command = evidence.command;
-        context.declared_workdir = evidence.declared_workdir;
-        context.continuation_cell_id = evidence.continuation_cell_id;
+        context.exact_command.clone_from(&evidence.command);
+        context
+            .declared_workdir
+            .clone_from(&evidence.declared_workdir);
+        context
+            .continuation_cell_id
+            .clone_from(&evidence.continuation_cell_id);
         if context.exact_command.is_some() {
             context.origin_call_id = Some(call_id.clone());
             context.origin_event_sequence = Some(authority.raw_ordinal);

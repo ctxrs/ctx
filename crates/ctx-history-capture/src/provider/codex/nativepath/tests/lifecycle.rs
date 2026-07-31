@@ -432,7 +432,7 @@ fn append_proof_cannot_cross_canonical_locator_identity() {
         .unwrap();
     assert_eq!(proof.generation.get(), 73);
     assert_eq!(proof.identity.canonical_source_key, "canonical-proof-a");
-    assert_eq!(proof.identity.locator, first_path);
+    assert_eq!(proof.identity.source_path, first_path);
 
     let error = CodexNativeScanner::new_source_backed_v0(
         discover_one(&second_path, "proof-owner"),

@@ -27,6 +27,15 @@ pub(crate) fn codex_command_preview(
     let command = tool_input::command(value)?;
     Some(codex_local_preview(&command, PROVIDER_MAX_PREVIEW_CHARS).0)
 }
+pub(crate) fn codex_command_text(
+    tool_name: &str,
+    argument_value: Option<&Value>,
+) -> Option<String> {
+    if !codex_is_command_tool(tool_name) {
+        return None;
+    }
+    tool_input::command(argument_value?)
+}
 pub(crate) fn codex_value_preview(value: &Value, max_chars: usize) -> (String, bool) {
     let rendered = match value {
         Value::String(text) => text.clone(),
@@ -61,6 +70,17 @@ pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool
     let (retained, fields_omitted) = codex_tool_argument_value_with_omissions(parsed, None);
     let (preview, truncated) = codex_value_preview(&retained, PROVIDER_MAX_PREVIEW_CHARS);
     (preview, truncated, !fields_omitted)
+}
+pub(crate) fn codex_tool_arguments_text(value: &Value) -> (String, bool) {
+    let parsed = codex_parse_embedded_json(value);
+    let parsed = parsed.as_ref().unwrap_or(value);
+    let (retained, fields_omitted) = codex_tool_argument_value_with_omissions(parsed, None);
+    let rendered = match retained {
+        Value::String(text) => text,
+        Value::Null => String::new(),
+        other => serde_json::to_string(&other).unwrap_or_else(|_| other.to_string()),
+    };
+    (rendered, fields_omitted)
 }
 fn codex_file_touch_arguments_preview(
     retained_paths: Vec<String>,

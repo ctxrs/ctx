@@ -146,7 +146,7 @@ struct ChangedSourceStartV0 {
 struct ColdPreparedPageV0 {
     source_index: usize,
     page_index: u64,
-    documents: Vec<CodexCoreDocument>,
+    records: Vec<CoreRecord>,
 }
 
 #[derive(Debug)]
@@ -460,7 +460,7 @@ fn run_cold_scan_lane_v0(
             if !page.core_rows.is_empty() {
                 return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
             }
-            let mut documents = Vec::with_capacity(page.source_backed_rows.len());
+            let mut records = Vec::with_capacity(page.source_backed_rows.len());
             if !page.source_backed_rows.is_empty() {
                 let owner = page
                     .owner
@@ -468,8 +468,7 @@ fn run_cold_scan_lane_v0(
                     .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
                 validate_owner(owner, &job.native_session_id)?;
                 for row in page.source_backed_rows {
-                    documents.push(codex_lexical_document(
-                        &job.source,
+                    records.push(codex_core_record(
                         &job.source_key,
                         job.session_id,
                         owner,
@@ -488,7 +487,7 @@ fn run_cold_scan_lane_v0(
                 ColdLaneMessageV0::Page(ColdPreparedPageV0 {
                     source_index: job.source_index,
                     page_index,
-                    documents,
+                    records,
                 }),
                 cancellation,
                 lane_index,
@@ -665,34 +664,29 @@ fn consume_cold_lanes_v0(
                         "page references an unknown source",
                     ),
                 )?;
-                for document in page.documents {
-                    if !document
-                        .document
-                        .source
-                        .exact_descriptor_eq(&plan.source_key)
-                        || document.document.session_id != plan.session_id
-                        || document.document.provider_session_id.as_deref()
+                for record in page.records {
+                    if !record.source.exact_descriptor_eq(&plan.source_key)
+                        || record.session_id != plan.session_id
+                        || record.provider_session_id.as_deref()
                             != Some(plan.native_session_id.as_str())
                     {
                         return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                             "document identity does not match its assigned source",
                         ));
                     }
-                    let (_, _, _, physical_ordinal) =
-                        validate_codex_locator(&document.document.locator)?;
-                    if physical_ordinal != document.document.event_sequence
+                    if record.native_event_id != Some(TypedKey::U64(record.event_sequence))
                         || lane_state
                             .last_event_sequence
-                            .is_some_and(|last| document.document.event_sequence <= last)
+                            .is_some_and(|last| record.event_sequence <= last)
                     {
                         return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                             "document event sequence is not strictly increasing",
                         ));
                     }
-                    let event_sequence = document.document.event_sequence;
+                    record.validate_contract()?;
+                    let event_sequence = record.event_sequence;
                     let add_started = Instant::now();
-                    let add_result =
-                        writer.add_document_with_annotation(document.document, document.annotation);
+                    let add_result = writer.add_core_record(record);
                     timings.writer_add_document += add_started.elapsed();
                     add_result?;
                     lane_state.last_event_sequence = Some(event_sequence);

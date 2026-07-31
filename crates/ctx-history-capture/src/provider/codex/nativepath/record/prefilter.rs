@@ -93,6 +93,7 @@ pub(in super::super) fn codex_skip_projection(
         }
         CodexRecordClass::ExcludedResult(_)
         | CodexRecordClass::SessionMeta
+        | CodexRecordClass::TurnContext
         | CodexRecordClass::Retained(_) => None,
     }
 }

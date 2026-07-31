@@ -2,7 +2,7 @@
 //!
 //! The catalog lineage supplied by discovery is durable identity. The path is
 //! only a route used to acquire one retained ordinary-file capability. Parsing,
-//! certification, exact hydration, and final route checks all use that
+//! certification, direct Core publication, and final route checks all use that
 //! capability rather than reopening a canonicalized pathname.
 
 use std::{
@@ -15,14 +15,11 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    CertifiedSourceAppend, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    CertifiedSourceAppend, CoreRecord, CoreRecordError, EventIdentityInput, NativeItemKey,
+    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -33,20 +30,16 @@ use crate::{
     CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
-mod hydration;
 mod path;
 mod projection;
-pub(crate) use hydration::CodexPromptHistorySourceBackedResolverV0;
 use path::absolute_lexical_path;
-use projection::{
-    lexical_document, prompt_lexical_body, retained_document_bytes, stable_session_id,
-};
+use projection::{core_record, retained_record_bytes};
 
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
 const SOURCE_REVISION_KIND: &str = "codex-prompt-history-ordinary-file-v2";
-const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v2";
+const PARSER_REVISION: &str = "codex-prompt-history-core-record-v3";
 const FRONTIER_KIND: &str = "codex-prompt-history-jsonl-frontier-v1";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
@@ -55,8 +48,6 @@ const LOGICAL_EVENT_KIND: &str = "codex-prompt-history-event";
 const CHECKPOINT_VERSION: u32 = 1;
 const PAGE_MAX_DOCUMENTS: usize = 64;
 const PAGE_MAX_RETAINED_BYTES: usize = 1024 * 1024;
-const DOCUMENT_METADATA_MAX_BYTES: usize = 64 * 1024;
-const MAX_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
 
 #[cfg(test)]
 std::thread_local! {
@@ -109,7 +100,7 @@ pub(crate) enum CodexPromptHistorySourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -122,22 +113,8 @@ pub(crate) enum CodexPromptHistorySourceBackedErrorV0 {
     InvalidCheckpoint,
     #[error("Codex prompt-history source-backed counters overflowed or did not reconcile")]
     CountMismatch,
-    #[error("Codex prompt-history source-backed document exceeds its page bound")]
-    DocumentTooLarge,
-    #[error("Codex prompt-history resolver received conflicting routes for one source")]
-    DuplicateResolverSource,
-    #[error("Codex prompt-history locator source is not registered with this resolver")]
-    LocatorSourceNotFound,
-    #[error("Codex prompt-history source-backed locator is malformed")]
-    InvalidLocator,
-    #[error("Codex prompt-history locator range exceeds the bounded JSONL record size")]
-    LocatorRangeTooLarge,
-    #[error("Codex prompt-history locator range is no longer present")]
-    LocatorRangeMissing,
-    #[error("Codex prompt-history locator record digest no longer matches provider bytes")]
-    LocatorDigestMismatch,
-    #[error("Codex prompt-history locator no longer decodes to the indexed provider event")]
-    LocatorRecordMismatch,
+    #[error("Codex prompt-history Core record exceeds its page bound")]
+    RecordTooLarge,
 }
 
 pub(crate) type CodexPromptHistorySourceBackedResultV0<T> =
@@ -201,7 +178,7 @@ pub(crate) enum CodexPromptHistorySourceBackedDispositionV0 {
 #[derive(Debug)]
 pub(crate) struct CodexPromptHistorySourceBackedPageV0 {
     pub(crate) source: SourceKey,
-    pub(crate) documents: Vec<LexicalDocument>,
+    pub(crate) records: Vec<CoreRecord>,
     pub(crate) retained_bytes: usize,
 }
 
@@ -255,9 +232,7 @@ struct ScanAnalysis {
 struct RetainedPromptRecord {
     line: PromptLine,
     byte_offset: u64,
-    byte_length: u64,
     physical_ordinal: u64,
-    record_digest: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -267,7 +242,7 @@ where
 {
     source: &'a CodexPromptHistorySourceBackedSourceV0,
     emit: Emit,
-    documents: Vec<LexicalDocument>,
+    records: Vec<CoreRecord>,
     retained_bytes: usize,
     emitted_documents: u64,
 }
@@ -280,44 +255,44 @@ where
         Self {
             source,
             emit,
-            documents: Vec::new(),
+            records: Vec::new(),
             retained_bytes: 0,
             emitted_documents: 0,
         }
     }
 
-    fn push(&mut self, document: LexicalDocument) -> CodexPromptHistorySourceBackedResultV0<()> {
-        let retained = retained_document_bytes(&document);
+    fn push(&mut self, record: CoreRecord) -> CodexPromptHistorySourceBackedResultV0<()> {
+        let retained = retained_record_bytes(&record);
         if retained > PAGE_MAX_RETAINED_BYTES {
-            return Err(CodexPromptHistorySourceBackedErrorV0::DocumentTooLarge);
+            return Err(CodexPromptHistorySourceBackedErrorV0::RecordTooLarge);
         }
-        if !self.documents.is_empty()
-            && (self.documents.len() == PAGE_MAX_DOCUMENTS
+        if !self.records.is_empty()
+            && (self.records.len() == PAGE_MAX_DOCUMENTS
                 || self.retained_bytes.saturating_add(retained) > PAGE_MAX_RETAINED_BYTES)
         {
             self.flush()?;
         }
         self.retained_bytes = self.retained_bytes.saturating_add(retained);
-        self.documents.push(document);
+        self.records.push(record);
         Ok(())
     }
 
     fn flush(&mut self) -> CodexPromptHistorySourceBackedResultV0<()> {
-        if self.documents.is_empty() {
+        if self.records.is_empty() {
             return Ok(());
         }
-        let documents = std::mem::take(&mut self.documents);
+        let records = std::mem::take(&mut self.records);
         let retained_bytes = std::mem::take(&mut self.retained_bytes);
         self.emitted_documents = self
             .emitted_documents
             .checked_add(
-                u64::try_from(documents.len())
+                u64::try_from(records.len())
                     .map_err(|_| CodexPromptHistorySourceBackedErrorV0::CountMismatch)?,
             )
             .ok_or(CodexPromptHistorySourceBackedErrorV0::CountMismatch)?;
         (self.emit)(CodexPromptHistorySourceBackedPageV0 {
             source: self.source.source.clone(),
-            documents,
+            records,
             retained_bytes,
         })
     }
@@ -399,7 +374,7 @@ pub(crate) fn stage_planned_codex_prompt_history_source_backed_v0(
 fn scan_codex_prompt_history_source_backed_inner_v0(
     source: CodexPromptHistorySourceBackedSourceV0,
     prior: Option<&CertifiedSource>,
-    project_documents: bool,
+    project_records: bool,
     frozen: CodexPromptHistoryFrozenSnapshotV0,
     emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
@@ -479,7 +454,7 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
 
     let (disposition, emit_from_byte) =
         classify_disposition(prior, &certificate, analysis.prior_prefix_digest)?;
-    let emitted_documents = if !project_documents
+    let emitted_documents = if !project_records
         || matches!(
             disposition,
             CodexPromptHistorySourceBackedDispositionV0::Unchanged
@@ -493,7 +468,7 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
             prior_prefix_boundary,
             |record| {
                 if record.byte_offset >= emit_from_byte {
-                    pages.push(lexical_document(&source, record)?)
+                    pages.push(core_record(&source, record)?)
                 } else {
                     Ok(())
                 }
@@ -580,7 +555,6 @@ fn walk_complete_records(
     loop {
         let record_offset = offset;
         let complete_before = complete.clone();
-        let mut record_digest = Sha256::new();
         let mut bytes = Vec::new();
         let mut observed = 0_usize;
         let mut saw_any = false;
@@ -606,7 +580,6 @@ fn walk_complete_records(
             });
             whole.update(chunk);
             complete.update(chunk);
-            record_digest.update(chunk);
             observed = observed
                 .checked_add(chunk.len())
                 .ok_or(CodexPromptHistorySourceBackedErrorV0::CountMismatch)?;
@@ -655,14 +628,10 @@ fn walk_complete_records(
         };
         match classification {
             RecordClassification::Retained(line) => {
-                let byte_length = u64::try_from(observed)
-                    .map_err(|_| CodexPromptHistorySourceBackedErrorV0::CountMismatch)?;
                 retained(&RetainedPromptRecord {
                     line,
                     byte_offset: record_offset,
-                    byte_length,
                     physical_ordinal: ordinal,
-                    record_digest: record_digest.finalize().into(),
                 })?;
                 retained_records = retained_records
                     .checked_add(1)

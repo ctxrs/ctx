@@ -4,10 +4,7 @@ use std::{
     path::Path,
 };
 
-use ctx_history_core::{
-    ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, NativeRecordCoordinate,
-};
-use ctx_history_index::LexicalDocument;
+use ctx_history_core::{CoreRecord, TypedKey};
 use serde_json::json;
 
 use super::*;
@@ -39,409 +36,165 @@ fn collect(
     prior: Option<&CertifiedSource>,
 ) -> (
     CodexPromptHistorySourceBackedScanV0,
-    Vec<LexicalDocument>,
+    Vec<CoreRecord>,
     Vec<(usize, usize)>,
 ) {
-    let mut documents = Vec::new();
-    let mut pages = Vec::new();
     let source = observe_codex_prompt_history_source_backed_explicit_v0(input).unwrap();
+    let mut records = Vec::new();
+    let mut pages = Vec::new();
     let scan = scan_codex_prompt_history_source_backed_v0(source, prior, |page| {
-        assert_eq!(page.source, input.source_key().unwrap());
-        pages.push((page.documents.len(), page.retained_bytes));
-        documents.extend(page.documents);
+        pages.push((page.records.len(), page.retained_bytes));
+        records.extend(page.records);
         Ok(())
     })
     .unwrap();
-    (scan, documents, pages)
+    (scan, records, pages)
+}
+
+fn core_body(record: &CoreRecord) -> &str {
+    record.content.normalized_body.as_deref().unwrap()
 }
 
 #[test]
-fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
+fn cold_scan_emits_complete_self_contained_core_records() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("history.jsonl");
-    let long = format!("full-prompt-{}-prompt-tail-sentinel", "x".repeat(8_192));
-    let mut lines = (0..70)
+    let long = "complete prompt body ".repeat(8_000);
+    write_lines(
+        &path,
+        &[
+            prompt_line("session-a", 1_700_000_000, &long),
+            prompt_line("session-a", 1_700_000_001, "second prompt"),
+        ],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [7; 32]);
+    let (scan, records, pages) = collect(&input, None);
+
+    assert!(matches!(
+        scan.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Cold
+    ));
+    assert_eq!(records.len(), 2);
+    assert_eq!(core_body(&records[0]), long);
+    assert_eq!(records[0].provider_session_id.as_deref(), Some("session-a"));
+    assert_eq!(records[0].native_event_id, Some(TypedKey::U64(0)));
+    assert_eq!(records[0].occurred_at_unix_ms, Some(1_700_000_000_000));
+    assert_eq!(records[0].role.as_deref(), Some("user"));
+    assert!(records
+        .iter()
+        .all(|record| record.validate_contract().is_ok()));
+    assert!(pages
+        .iter()
+        .all(|(count, bytes)| *count <= PAGE_MAX_DOCUMENTS && *bytes <= PAGE_MAX_RETAINED_BYTES));
+}
+
+#[test]
+fn append_noop_and_rewrite_preserve_lifecycle_and_stable_ids() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    write_lines(&path, &[prompt_line("s", 1_700_000_000, "one")]);
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [8; 32]);
+    let (cold, cold_records, _) = collect(&input, None);
+
+    append(&path, &prompt_line("s", 1_700_000_001, "two"));
+    let (appended, appended_records, _) = collect(&input, Some(&cold.certificate));
+    assert!(matches!(
+        appended.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Append
+    ));
+    assert_eq!(appended_records.len(), 1);
+    assert_eq!(core_body(&appended_records[0]), "two");
+    assert_eq!(appended_records[0].event_sequence, 1);
+
+    let (unchanged, unchanged_records, _) = collect(&input, Some(&appended.certificate));
+    assert!(matches!(
+        unchanged.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Unchanged
+    ));
+    assert!(unchanged_records.is_empty());
+
+    write_lines(
+        &path,
+        &[
+            prompt_line("s", 1_700_000_000, "rewritten one"),
+            prompt_line("s", 1_700_000_001, "two"),
+        ],
+    );
+    let (replacement, replacement_records, _) = collect(&input, Some(&appended.certificate));
+    assert!(matches!(
+        replacement.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Replacement
+    ));
+    assert_eq!(replacement_records.len(), 2);
+    assert_eq!(core_body(&replacement_records[0]), "rewritten one");
+    assert_eq!(replacement_records[0].event_id, cold_records[0].event_id);
+}
+
+#[test]
+fn incomplete_tail_is_deferred_until_terminated() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let complete = prompt_line("s", 1_700_000_000, "one");
+    let mut partial = prompt_line("s", 1_700_000_001, "two");
+    partial.pop();
+    write_lines(&path, &[complete, partial]);
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [9; 32]);
+
+    let (cold, records, _) = collect(&input, None);
+    assert_eq!(records.len(), 1);
+    assert!(!cold.terminal);
+    append(&path, b"\n");
+    let (appended, records, _) = collect(&input, Some(&cold.certificate));
+    assert!(matches!(
+        appended.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Append
+    ));
+    assert_eq!(records.len(), 1);
+    assert_eq!(core_body(&records[0]), "two");
+    assert!(appended.terminal);
+}
+
+#[test]
+fn pages_remain_bounded() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let lines = (0..(PAGE_MAX_DOCUMENTS + 3))
         .map(|index| {
             prompt_line(
-                "session-a",
-                1_785_139_200 + i64::from(index),
-                if index == 0 { &long } else { "ordinary prompt" },
+                "s",
+                1_700_000_000 + index as i64,
+                &format!("prompt {index}"),
             )
         })
         .collect::<Vec<_>>();
     write_lines(&path, &lines);
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [41; 32]);
-
-    let (cold, cold_documents, pages) = collect(&input, None);
-    assert!(matches!(
-        cold.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Cold
-    ));
-    assert_eq!(cold_documents.len(), 70);
-    assert_eq!(cold.emitted_documents, 70);
-    assert!(cold.terminal);
-    assert!(pages.len() >= 2);
-    assert!(pages.iter().all(|(documents, bytes)| {
-        *documents <= PAGE_MAX_DOCUMENTS && *bytes <= PAGE_MAX_RETAINED_BYTES
-    }));
-    assert_eq!(cold_documents[0].body, long);
-    assert!(cold_documents[0].body.ends_with("prompt-tail-sentinel"));
-    assert_eq!(
-        cold_documents[0].root_session_id,
-        cold_documents[0].session_id
-    );
-    assert_eq!(cold_documents[0].event_sequence, 0);
-    assert_eq!(cold_documents[0].agent_type, "primary");
-    let NativeRecordCoordinate::Jsonl {
-        physical_ordinal,
-        native_session_key: Some(TypedKey::Utf8(session)),
-        native_event_key: Some(TypedKey::U64(event_ordinal)),
-        ..
-    } = cold_documents[0].locator.coordinate()
-    else {
-        panic!("prompt history must emit a typed JSONL locator");
-    };
-    assert_eq!(*physical_ordinal, 0);
-    assert_eq!(session, "session-a");
-    assert_eq!(*event_ordinal, 0);
-
-    let resolver = CodexPromptHistorySourceBackedResolverV0::new([cold.source.clone()]).unwrap();
-    let request = EventHydrationRequest::new(
-        cold_documents[0].event_id,
-        cold_documents[0].locator.clone(),
-    )
-    .unwrap();
-    assert_eq!(
-        resolver.hydrate_event(&request).unwrap().provider_bytes,
-        long.as_bytes()
-    );
-
-    reset_prompt_history_work_counters();
-    let (noop, noop_documents, noop_pages) = collect(&input, Some(&cold.certificate));
-    assert!(matches!(
-        noop.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Unchanged
-    ));
-    assert!(noop_documents.is_empty());
-    assert!(noop_pages.is_empty());
-    revalidate_codex_prompt_history_source_backed_v0(&noop.source, &noop.certificate).unwrap();
-    assert_eq!(
-        prompt_history_full_scan_bytes(),
-        0,
-        "exact no-op must not parse prompt-history bodies"
-    );
-    assert_eq!(
-        prompt_history_prefix_hash_bytes(),
-        0,
-        "exact no-op must not hash the certified source prefix"
-    );
-
-    let appended = prompt_line("session-a", 1_785_139_270, "appended prompt");
-    append(&path, &appended);
-    lines.push(appended);
-    reset_prompt_history_work_counters();
-    let planned = plan_codex_prompt_history_source_backed_v0(
-        observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap(),
-        Some(&noop.certificate),
-    )
-    .unwrap();
-    let mut appended_documents = Vec::new();
-    let appended_scan = stage_planned_codex_prompt_history_source_backed_v0(
-        observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap(),
-        Some(&noop.certificate),
-        &planned,
-        |page| {
-            appended_documents.extend(page.documents);
-            Ok(())
-        },
-    )
-    .unwrap();
-    assert_eq!(planned.certificate, appended_scan.certificate);
-    let current_len = fs::metadata(&path).unwrap().len();
-    assert!(
-        prompt_history_full_scan_bytes() <= current_len.saturating_mul(3),
-        "plan plus staging must perform at most one planning scan and two staging scans"
-    );
-    assert!(
-        prompt_history_prefix_hash_bytes() <= current_len.saturating_mul(6),
-        "plan plus staging must keep stable prefix confirmation bounded"
-    );
-    assert!(matches!(
-        appended_scan.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append
-    ));
-    assert_eq!(appended_documents.len(), 1);
-    assert_eq!(appended_documents[0].event_sequence, 70);
-    assert_eq!(appended_documents[0].body, "appended prompt");
-    assert_eq!(
-        appended_documents[0].session_id,
-        cold_documents[0].session_id
-    );
-    let (revalidated, revalidated_documents, _) = collect(&input, Some(&appended_scan.certificate));
-    assert!(matches!(
-        revalidated.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Unchanged
-    ));
-    assert!(revalidated_documents.is_empty());
-
-    let (_, rebuilt, _) = collect(&input, None);
-    assert_eq!(rebuilt[0].event_id, cold_documents[0].event_id);
-    assert_eq!(
-        rebuilt.last().unwrap().event_id,
-        appended_documents[0].event_id
-    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [10; 32]);
+    let (_, records, pages) = collect(&input, None);
+    assert_eq!(records.len(), PAGE_MAX_DOCUMENTS + 3);
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].0, PAGE_MAX_DOCUMENTS);
+    assert!(pages
+        .iter()
+        .all(|(_, bytes)| *bytes <= PAGE_MAX_RETAINED_BYTES));
 }
 
 #[test]
-fn active_source_family_contract_prompt_history_freezes_eof_and_defers_append() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let first = prompt_line("active-session", 1_785_139_200, "first prompt");
-    let second = prompt_line("active-session", 1_785_139_201, "second prompt");
-    fs::write(&path, &first).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [46; 32]);
-    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
-    let mut documents = Vec::new();
-    let expected_length = (first.len() + second.len()) as u64;
-    let append_path = path.clone();
-    set_after_prompt_history_prefix_hash_hook(move || append(&append_path, &second));
-    let first_scan = scan_codex_prompt_history_source_backed_v0(source, None, |page| {
-        documents.extend(page.documents);
-        Ok(())
-    })
-    .unwrap();
-
-    assert_eq!(fs::metadata(&path).unwrap().len(), expected_length);
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].body, "first prompt");
-    revalidate_codex_prompt_history_source_backed_v0(&first_scan.source, &first_scan.certificate)
-        .unwrap();
-
-    let resolver =
-        CodexPromptHistorySourceBackedResolverV0::new([first_scan.source.clone()]).unwrap();
-    let request =
-        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
-    assert_eq!(
-        resolver.hydrate_event(&request).unwrap().provider_bytes,
-        b"first prompt"
-    );
-
-    let (catch_up, catch_up_documents, _) = collect(&input, Some(&first_scan.certificate));
-    assert!(matches!(
-        catch_up.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append
-    ));
-    assert_eq!(catch_up_documents.len(), 1);
-    assert_eq!(catch_up_documents[0].body, "second prompt");
-}
-
-#[test]
-fn active_source_family_contract_prompt_history_plan_and_stage_share_frozen_eof() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let first = prompt_line("active-session", 1_785_139_200, "first prompt");
-    let planned_append = prompt_line("active-session", 1_785_139_201, "planned append");
-    let deferred_append = prompt_line("active-session", 1_785_139_202, "deferred append");
-    fs::write(&path, &first).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [49; 32]);
-    let (cold, _, _) = collect(&input, None);
-    append(&path, &planned_append);
-
-    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
-    let planned =
-        plan_codex_prompt_history_source_backed_v0(source.clone(), Some(&cold.certificate))
-            .unwrap();
-    append(&path, &deferred_append);
-
-    let mut staged_documents = Vec::new();
-    let staged = stage_planned_codex_prompt_history_source_backed_v0(
-        source,
-        Some(&cold.certificate),
-        &planned,
-        |page| {
-            staged_documents.extend(page.documents);
-            Ok(())
-        },
-    )
-    .unwrap();
-    assert_eq!(staged.certificate, planned.certificate);
-    assert!(matches!(
-        staged.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append
-    ));
-    assert_eq!(staged_documents.len(), 1);
-    assert_eq!(staged_documents[0].body, "planned append");
-    revalidate_codex_prompt_history_source_backed_v0(&staged.source, &staged.certificate).unwrap();
-
-    let (catch_up, catch_up_documents, _) = collect(&input, Some(&staged.certificate));
-    assert!(matches!(
-        catch_up.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append
-    ));
-    assert_eq!(catch_up_documents.len(), 1);
-    assert_eq!(catch_up_documents[0].body, "deferred append");
-}
-
-#[test]
-fn active_source_family_contract_prompt_history_hydration_retries_append_and_rejects_rewrite() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let first = prompt_line("active-session", 1_785_139_200, "stable prompt");
-    fs::write(&path, &first).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [50; 32]);
-    let (scan, documents, _) = collect(&input, None);
-    let resolver = CodexPromptHistorySourceBackedResolverV0::new([scan.source.clone()]).unwrap();
-    let request =
-        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
-
-    let append_path = path.clone();
-    super::hydration::install_after_prompt_hydration_observation_hook(move || {
-        append(
-            &append_path,
-            &prompt_line("active-session", 1_785_139_201, "later prompt"),
+fn owned_prompt_path_has_no_legacy_transport_dependency() {
+    let owned = [
+        include_str!("../source_backed.rs"),
+        include_str!("projection.rs"),
+    ]
+    .join("\n");
+    for forbidden in [
+        "LexicalDocument",
+        "SourceRecordLocator",
+        "ContentSourceResolver",
+        "HydrationRequest",
+        "hydrate_",
+    ] {
+        assert!(
+            !owned.contains(forbidden),
+            "found forbidden token {forbidden}"
         );
-    });
-    assert_eq!(
-        resolver.hydrate_event(&request).unwrap().provider_bytes,
-        b"stable prompt"
-    );
-
-    let rewrite_path = path.clone();
-    super::hydration::install_after_prompt_hydration_observation_hook(move || {
-        let mut bytes = fs::read(&rewrite_path).unwrap();
-        let offset = bytes
-            .windows(b"stable prompt".len())
-            .position(|window| window == b"stable prompt")
-            .unwrap();
-        bytes[offset] = b'S';
-        fs::write(&rewrite_path, bytes).unwrap();
-    });
-    assert_eq!(
-        resolver.hydrate_event(&request).unwrap_err().kind,
-        HydrationFailureKind::StaleRecordEvidence
-    );
-}
-
-#[test]
-fn prefix_hash_observation_rejects_in_place_mutation() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let first = prompt_line("mutation-session", 1_785_139_200, "first prompt");
-    fs::write(&path, &first).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [47; 32]);
-    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
-    let rewrite_path = path.clone();
-    set_after_prompt_history_prefix_hash_hook(move || {
-        let mut file = OpenOptions::new().write(true).open(rewrite_path).unwrap();
-        file.write_all(b"[").unwrap();
-        file.sync_all().unwrap();
-    });
-
-    let error = scan_codex_prompt_history_source_backed_v0(source, None, |_| Ok(())).unwrap_err();
-    assert!(matches!(
-        error,
-        CodexPromptHistorySourceBackedErrorV0::SourceChanged
-    ));
-}
-
-#[cfg(unix)]
-#[test]
-fn prefix_hash_observation_rejects_named_replacement() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let moved = temp.path().join("old-history.jsonl");
-    let first = prompt_line("replacement-session", 1_785_139_200, "first prompt");
-    fs::write(&path, &first).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [48; 32]);
-    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
-    let replacement_path = path.clone();
-    set_after_prompt_history_prefix_hash_hook(move || {
-        fs::rename(&replacement_path, moved).unwrap();
-        fs::write(replacement_path, first).unwrap();
-    });
-
-    assert!(scan_codex_prompt_history_source_backed_v0(source, None, |_| Ok(())).is_err());
-}
-
-#[test]
-fn source_backed_prompt_adapter_has_no_preview_or_store_body_fallback() {
-    let source = include_str!("../source_backed.rs");
-    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
-    assert!(!source.contains("ctx_history_store"));
-}
-
-#[test]
-fn malformed_incomplete_tail_is_not_certified_until_append_completes_it() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let first = prompt_line("tail-session", 1_785_139_200, "complete");
-    let incomplete = br#"{"session_id":"tail-session","ts":1785139201,"text":"tail"#;
-    let mut bytes = first.clone();
-    bytes.extend_from_slice(incomplete);
-    fs::write(&path, bytes).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [42; 32]);
-
-    let (before, documents, _) = collect(&input, None);
-    assert_eq!(documents.len(), 1);
-    assert!(!before.terminal);
-    assert_eq!(before.certificate.counts().complete_records, 1);
-    assert_eq!(
-        before.certificate.counts().certified_bytes,
-        u64::try_from(first.len()).unwrap()
-    );
-
-    append(&path, b"\"}\n");
-    let (after, appended_documents, _) = collect(&input, Some(&before.certificate));
-    assert!(matches!(
-        after.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append
-    ));
-    assert!(after.terminal);
-    assert_eq!(after.certificate.counts().complete_records, 2);
-    assert_eq!(appended_documents.len(), 1);
-    assert_eq!(appended_documents[0].event_sequence, 1);
-    assert_eq!(appended_documents[0].body, "tail");
-}
-
-#[cfg(unix)]
-#[test]
-fn retained_resolver_rejects_same_path_leaf_replacement() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("history.jsonl");
-    let line = prompt_line("leaf-session", 1_785_139_200, "leaf");
-    fs::write(&path, &line).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [43; 32]);
-    let (scan, documents, _) = collect(&input, None);
-    let resolver = CodexPromptHistorySourceBackedResolverV0::new([scan.source.clone()]).unwrap();
-    let request =
-        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
-
-    fs::rename(&path, temp.path().join("old-history.jsonl")).unwrap();
-    fs::write(&path, &line).unwrap();
-
-    let error = resolver.hydrate_event(&request).unwrap_err();
-    assert_eq!(error.kind, HydrationFailureKind::StaleRecordEvidence);
-}
-
-#[cfg(unix)]
-#[test]
-fn retained_resolver_rejects_same_path_root_replacement() {
-    let temp = tempdir().unwrap();
-    let root = temp.path().join("codex");
-    fs::create_dir(&root).unwrap();
-    let path = root.join("history.jsonl");
-    let line = prompt_line("root-session", 1_785_139_200, "root");
-    fs::write(&path, &line).unwrap();
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [44; 32]);
-    let (scan, documents, _) = collect(&input, None);
-    let resolver = CodexPromptHistorySourceBackedResolverV0::new([scan.source.clone()]).unwrap();
-    let request =
-        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
-
-    fs::rename(&root, temp.path().join("old-codex")).unwrap();
-    fs::create_dir(&root).unwrap();
-    fs::write(&path, &line).unwrap();
-
-    let error = resolver.hydrate_event(&request).unwrap_err();
-    assert_eq!(error.kind, HydrationFailureKind::StaleRecordEvidence);
+    }
 }

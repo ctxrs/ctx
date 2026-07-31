@@ -18,14 +18,15 @@ use super::{
         MAX_CODEX_TOOL_CALL_ID_BYTES, MAX_CODEX_TOOL_CONTEXTS,
     },
     record::{
-        classify_codex_record, parse_decoded_record, parse_session_meta, prefilter_codex_record,
-        CodexRecordAdmission, CodexRecordClass, CodexRecordProbe, CodexResultKind,
-        CodexSkipProjection,
+        classify_codex_record, parse_decoded_record, parse_session_meta, parse_turn_context_cwd,
+        prefilter_codex_record, CodexRecordAdmission, CodexRecordClass, CodexRecordProbe,
+        CodexResultKind, CodexSkipProjection,
     },
     rows::{
         build_source_backed_event_row, build_source_backed_sparse_output_row,
-        source_backed_output_eligibility, CodexEventRow, CodexRetainedNonMaterialized,
-        CodexSessionRow, CodexSourceBackedDocumentEligibility, CodexSourceBackedRowV0,
+        source_backed_display_text, source_backed_output_eligibility, CodexEventRow,
+        CodexRetainedNonMaterialized, CodexSessionRow, CodexSourceBackedDocumentEligibility,
+        CodexSourceBackedRowV0,
     },
     source::{CodexAppendProof, CodexCatalogSource, CodexFileObservation},
 };
@@ -101,7 +102,6 @@ pub(crate) struct CodexScanCounters {
     pub(crate) legacy_row_json_serializations: u64,
     pub(crate) legacy_json_serialized_bytes: u64,
     pub(crate) legacy_file_touch_rows_created: u64,
-    pub(crate) legacy_complete_content_locators_created: u64,
     pub(crate) legacy_page_owner_json_serializations: u64,
     pub(crate) legacy_page_identity_owner_json_serializations: u64,
     pub(crate) legacy_page_identity_row_json_serializations: u64,

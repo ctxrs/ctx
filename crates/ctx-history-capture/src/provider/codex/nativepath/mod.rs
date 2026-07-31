@@ -1,4 +1,4 @@
-//! Provider-owned Codex source discovery, parsing, indexing, and hydration.
+//! Provider-owned Codex source discovery, parsing, and direct Core indexing.
 
 mod checkpoint;
 mod prompt_history;
@@ -15,16 +15,15 @@ pub(crate) use prompt_history::{
     scan_codex_prompt_history_source_backed_v0,
     stage_planned_codex_prompt_history_source_backed_v0,
     CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
-    CodexPromptHistorySourceBackedResolverV0,
-};
-pub(crate) use reader::{
-    open_codex_source_capability, opened_codex_file_observation,
-    revalidate_codex_source_observation, CodexNativeOwnedPage, CodexNativeScanner, CodexSourceScan,
 };
 #[cfg(test)]
 pub(crate) use reader::{
-    CodexNativeFrontier, CodexParseDisposition, MAX_CODEX_PAGE_BYTES, MAX_CODEX_PAGE_ROWS,
-    MAX_CODEX_RECORD_BYTES,
+    open_codex_source_capability, CodexNativeFrontier, CodexParseDisposition, MAX_CODEX_PAGE_BYTES,
+    MAX_CODEX_PAGE_ROWS, MAX_CODEX_RECORD_BYTES,
+};
+pub(crate) use reader::{
+    opened_codex_file_observation, revalidate_codex_source_observation, CodexNativeOwnedPage,
+    CodexNativeScanner, CodexSourceScan,
 };
 pub(crate) use rows::CodexSessionRow;
 pub(crate) use source::{
@@ -43,8 +42,7 @@ pub(crate) use source_backed::{
     CodexTerminalSourceEvidenceV0,
 };
 pub use source_backed::{
-    hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,
-    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
+    ingest_codex_source_backed_v0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
     CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
 };
 #[cfg(test)]

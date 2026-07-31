@@ -801,6 +801,7 @@ dependencies = [
  "jsonc-parser",
  "libc",
  "quick-xml",
+ "regex",
  "rmpv",
  "rusqlite",
  "serde",

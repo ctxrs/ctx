@@ -319,8 +319,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             validate_owner(owner, &native_session_id)?;
             for row in page.source_backed_rows {
                 let conversion_started = Instant::now();
-                let document = codex_lexical_document(
-                    &source,
+                let record = codex_core_record(
                     &source_key,
                     session_id,
                     owner,
@@ -329,8 +328,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                 )?;
                 timings.scanner_worker_busy += conversion_started.elapsed();
                 let add_started = Instant::now();
-                let add_result =
-                    writer.add_document_with_annotation(document.document, document.annotation);
+                let add_result = writer.add_core_record(record);
                 timings.writer_add_document += add_started.elapsed();
                 add_result?;
                 staged_for_source = staged_for_source
