@@ -116,7 +116,46 @@ fn bounded_core_event_batch_is_complete_and_requested_ordered() {
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    let coordinates = index
+        .session_event_coordinates(first.session_id.as_uuid())
+        .unwrap();
+    assert_eq!(
+        coordinates
+            .iter()
+            .map(|coordinate| coordinate.event_id)
+            .collect::<Vec<_>>(),
+        vec![first.event_id.as_uuid(), second.event_id.as_uuid()]
+    );
+    assert!(coordinates.iter().all(|coordinate| {
+        coordinate.event_type == "message" && coordinate.role.as_deref() == Some("user")
+    }));
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        0,
+        "session selection metadata must not decode complete Core bodies"
+    );
+
     let requested = [second.event_id.as_uuid(), first.event_id.as_uuid()];
+    crate::query::reset_stored_core_event_record_materializations();
+    let bounded_batch = index
+        .core_events_by_ids_with_budget(&requested, requested.len(), DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bounded_batch
+            .items
+            .iter()
+            .map(|record| record.event_id.as_uuid())
+            .collect::<Vec<_>>(),
+        requested
+    );
+    assert!(bounded_batch.encoded_core_bytes >= bounded_batch.content_bytes);
+    assert_eq!(
+        bounded_batch.content_bytes,
+        "first complete body".len() + "second complete body".len()
+    );
+
     crate::query::reset_stored_core_event_record_materializations();
     let records = index
         .core_events_by_ids_if_bounded(&requested, requested.len(), usize::MAX)
@@ -586,6 +625,277 @@ fn source_event_second_page_reopens_without_materializing_the_remaining_source()
 }
 
 #[test]
+fn sparse_source_pages_visit_only_exact_source_terms_across_segments_and_reopen() {
+    const UNRELATED_SOURCES: u64 = 32;
+    const EVENTS_PER_UNRELATED_SOURCE: u64 = 32;
+    const PAGE_LIMIT: usize = 2;
+
+    let temp = tempdir().unwrap();
+    let target = source("sparse-target.jsonl");
+    let mut expected = Vec::new();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer
+        .writer_mut()
+        .unwrap()
+        .set_merge_policy(Box::<NoMergePolicy>::default());
+    writer.begin_source(target.clone()).unwrap();
+    for sequence in 1..=2 {
+        let event = document(&target, sequence, "sparse target first segment");
+        expected.push(event.event_id);
+        writer.add_document(event).unwrap();
+    }
+    writer
+        .certify_source(appendable_certificate(&target, 1, 2, 20))
+        .unwrap();
+    for source_index in 0..UNRELATED_SOURCES {
+        let unrelated = source(&format!("unrelated-{source_index}.jsonl"));
+        writer.begin_source(unrelated.clone()).unwrap();
+        for sequence in 1..=EVENTS_PER_UNRELATED_SOURCE {
+            writer
+                .add_document(document(&unrelated, sequence, "unrelated corpus event"))
+                .unwrap();
+        }
+        writer
+            .certify_source(certificate(&unrelated, 1, EVENTS_PER_UNRELATED_SOURCE))
+            .unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    append
+        .writer_mut()
+        .unwrap()
+        .set_merge_policy(Box::<NoMergePolicy>::default());
+    let base = append.begin_source_append(target.clone()).unwrap().clone();
+    for sequence in 3..=4 {
+        let event = document(&target, sequence, "sparse target second segment");
+        expected.push(event.event_id);
+        append.add_document(event).unwrap();
+    }
+    append
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&target, 2, 4, 40),
+                20,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    append.commit(|_| true).unwrap();
+    expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
+
+    let first_pin = VerifiedIndex::open(temp.path()).unwrap();
+    let segment_count = first_pin.searcher.segment_readers().len();
+    assert!(segment_count >= 2, "test requires multiple live segments");
+    crate::query::reset_source_event_order_term_visits();
+    crate::query::reset_stored_core_event_record_materializations();
+    let first = first_pin
+        .core_source_event_page(&target, None, PAGE_LIMIT)
+        .unwrap();
+    let first_term_visits = crate::query::source_event_order_term_visits();
+    assert!(
+        first_term_visits <= (PAGE_LIMIT + 1) * segment_count,
+        "exact-source term visits {first_term_visits} exceeded page/lookahead × segments"
+    );
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        PAGE_LIMIT
+    );
+    assert!(
+        first_term_visits < (UNRELATED_SOURCES * EVENTS_PER_UNRELATED_SOURCE) as usize / 8,
+        "sparse-source page work followed the unrelated corpus"
+    );
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        expected[..PAGE_LIMIT]
+    );
+    let serialized_cursor = serde_json::to_vec(first.next_cursor.as_ref().unwrap()).unwrap();
+    drop(first_pin);
+
+    let reopened = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let cursor: SourceEventCursor = serde_json::from_slice(&serialized_cursor).unwrap();
+    crate::query::reset_source_event_order_term_visits();
+    crate::query::reset_stored_core_event_record_materializations();
+    let second = reopened
+        .core_source_event_page(&target, Some(&cursor), PAGE_LIMIT)
+        .unwrap();
+    assert!(second.terminal);
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        expected[PAGE_LIMIT..]
+    );
+    assert!(crate::query::source_event_order_term_visits() <= (PAGE_LIMIT + 1) * segment_count);
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        PAGE_LIMIT
+    );
+}
+
+#[test]
+fn source_event_byte_budget_returns_large_singletons_without_skips_or_extra_decodes() {
+    let temp = tempdir().unwrap();
+    let source = source("large-source-page.jsonl");
+    let maximum_body = format!(
+        "x{}",
+        " ".repeat(ctx_history_core::MAX_CORE_CONTENT_BYTES - 1)
+    );
+    let large_body = format!("x{}", " ".repeat(1024 * 1024 - 1));
+    let bodies = [
+        maximum_body.as_str(),
+        large_body.as_str(),
+        large_body.as_str(),
+    ];
+    let mut expected_content_bytes = HashMap::new();
+    let mut expected_ids = Vec::new();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for (index, body) in bodies.into_iter().enumerate() {
+        let event = document(&source, index as u64 + 1, body);
+        expected_content_bytes.insert(event.event_id, body.len());
+        expected_ids.push(event.event_id);
+        writer.add_document(event).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+    expected_ids.sort_by_key(|identity| identity.encode_canonical().unwrap());
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let budget = CoreEventPageBudget::new(1, 1);
+    let mut cursor = None;
+    let mut actual_ids = Vec::new();
+    loop {
+        crate::query::reset_stored_core_event_record_materializations();
+        let page = index
+            .core_source_event_page_with_budget(
+                &source,
+                cursor.as_ref(),
+                MAX_SOURCE_EVENT_PAGE_ITEMS,
+                budget,
+            )
+            .unwrap();
+        assert_eq!(page.items.len(), 1, "oversized valid records must progress");
+        assert_eq!(
+            crate::query::stored_core_event_record_materializations(),
+            1,
+            "size suffixes must stop before decoding the next record"
+        );
+        let event_id = page.items[0].event_id;
+        assert_eq!(
+            page.content_bytes,
+            *expected_content_bytes.get(&event_id).unwrap()
+        );
+        assert!(page.content_bytes <= ctx_history_core::MAX_CORE_CONTENT_BYTES);
+        assert!(page.encoded_core_bytes <= ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES);
+        actual_ids.push(event_id);
+        if page.terminal {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(actual_ids, expected_ids);
+}
+
+#[test]
+fn source_event_size_suffix_counts_structured_core_content() {
+    let temp = tempdir().unwrap();
+    let source = source("structured-source-page.jsonl");
+    let event = document(&source, 1, "normalized body");
+    let structured_content = serde_json::json!({
+        "command": "cargo test",
+        "output": ["first", "second", "third"],
+    });
+    let expected_content_bytes =
+        event.body.len() + serde_json::to_vec(&structured_content).unwrap().len();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_document_with_annotation(
+            event,
+            CoreRecordAnnotation {
+                structured_content: Some(structured_content),
+                ..CoreRecordAnnotation::default()
+            },
+        )
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let page = index.core_source_event_page(&source, None, 1).unwrap();
+    assert!(page.terminal);
+    assert_eq!(page.content_bytes, expected_content_bytes);
+    assert_eq!(
+        crate::index_document::core_content_bytes(&page.items[0].core_record.content).unwrap(),
+        expected_content_bytes
+    );
+}
+
+#[test]
+fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record() {
+    let temp = tempdir().unwrap();
+    let source = source("forged-source-order.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_document(document(&source, 1, "forged order body"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut forged: TantivyDocument = searcher.doc(address).unwrap();
+    let encoded_core = forged
+        .get_first(fields.core_record)
+        .and_then(|value| value.as_bytes())
+        .unwrap()
+        .to_vec();
+    let core_record = ctx_history_core::CoreRecord::decode_stored(&encoded_core).unwrap();
+    let mut forged_order = crate::index_document::SourceEventOrderKey::for_core_record(
+        &core_record,
+        encoded_core.len(),
+    )
+    .unwrap()
+    .into_bytes();
+    let last = forged_order.last_mut().unwrap();
+    *last ^= 1;
+    forged.add_bytes(fields.source_event_order, &forged_order);
+    drop(searcher);
+
+    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(matches!(
+        verified.core_source_event_page(&source, None, 1),
+        Err(IndexError::InvalidStoredDocumentField("source_event_order"))
+    ));
+}
+
+#[test]
 fn source_event_pages_bind_generation_descriptor_and_bounds() {
     const { assert!(MAX_SOURCE_EVENT_PAGE_ITEMS <= 4_096) };
     let temp = tempdir().unwrap();
@@ -612,6 +922,27 @@ fn source_event_pages_bind_generation_descriptor_and_bounds() {
     assert!(matches!(
         old_pin.source_event_page(&source, None, MAX_SOURCE_EVENT_PAGE_ITEMS + 1),
         Err(IndexError::InvalidSourceEventPageSize { .. })
+    ));
+    assert!(matches!(
+        old_pin.core_source_event_page_with_budget(
+            &source,
+            None,
+            1,
+            CoreEventPageBudget::new(0, 1),
+        ),
+        Err(IndexError::InvalidCoreEventPageByteLimit { .. })
+    ));
+    assert!(matches!(
+        old_pin.core_source_event_page_with_budget(
+            &source,
+            None,
+            1,
+            CoreEventPageBudget::new(
+                ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES + 1,
+                ctx_history_core::MAX_CORE_CONTENT_BYTES,
+            ),
+        ),
+        Err(IndexError::InvalidCoreEventPageByteLimit { .. })
     ));
     assert!(
         old_pin
@@ -837,6 +1168,57 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     assert!(final_page.next_cursor.is_none());
     assert!(core_final_page.next_cursor.is_none());
     assert_eq!(index.semantic_eligible_event_count().unwrap(), 4);
+}
+
+#[test]
+fn semantic_pages_select_addresses_before_decoding_and_bound_retained_core_bytes() {
+    const INELIGIBLE_EVENTS: u64 = 128;
+    let temp = tempdir().unwrap();
+    let source = source("semantic-address-first.jsonl");
+    let large_body = format!("x{}", " ".repeat(512 * 1024 - 1));
+    let mut expected = Vec::new();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 1..=INELIGIBLE_EVENTS {
+        let mut event = document(&source, sequence, "ineligible assistant message");
+        event.role = Some("assistant".to_owned());
+        writer.add_document(event).unwrap();
+    }
+    for sequence in INELIGIBLE_EVENTS + 1..=INELIGIBLE_EVENTS + 3 {
+        let event = document(&source, sequence, &large_body);
+        expected.push(event.event_id);
+        writer.add_document(event).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, 1, INELIGIBLE_EVENTS + 3))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let budget = CoreEventPageBudget::new(1, 1);
+    let mut cursor = None;
+    let mut actual = Vec::new();
+    loop {
+        crate::query::reset_stored_core_event_record_materializations();
+        let page = index
+            .core_semantic_event_page_with_budget(cursor.as_ref(), 64, budget)
+            .unwrap();
+        assert_eq!(page.eligible_total, 3);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.encoded_core_bytes <= ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES);
+        assert!(page.content_bytes <= ctx_history_core::MAX_CORE_CONTENT_BYTES);
+        assert!(
+            crate::query::stored_core_event_record_materializations() <= 2,
+            "semantic byte lookahead may decode only the admitted record and one non-fitting record"
+        );
+        actual.push(page.items[0].event_id);
+        if page.terminal {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(actual, expected);
 }
 
 #[test]

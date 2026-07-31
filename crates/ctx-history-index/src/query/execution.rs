@@ -4,8 +4,9 @@ impl VerifiedIndex {
     /// Enumerates one exact source in strict full `StableEntityId` order.
     ///
     /// The cursor is exclusive and bound to both this immutable generation
-    /// and the source's exact descriptor. Only `limit + 1` records are
-    /// materialized; the additional record is the terminal lookahead.
+    /// and the source's exact descriptor. Candidate selection seeks directly
+    /// into each segment's exact-source order range before complete records
+    /// are decoded under the default item and byte bounds.
     pub fn source_event_page(
         &self,
         source: &SourceKey,
@@ -24,22 +25,88 @@ impl VerifiedIndex {
         cursor: Option<&SourceEventCursor>,
         limit: usize,
     ) -> Result<CoreSourceEventPage> {
+        self.core_source_event_page_with_budget(
+            source,
+            cursor,
+            limit,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+    }
+
+    /// Enumerates complete Core records under item, encoded-Core, and decoded
+    /// content byte bounds. A valid first record is always admitted so even a
+    /// maximum-size Core record makes cursor progress as a singleton page.
+    pub fn core_source_event_page_with_budget(
+        &self,
+        source: &SourceKey,
+        cursor: Option<&SourceEventCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<CoreSourceEventPage> {
         if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&limit) {
             return Err(IndexError::InvalidSourceEventPageSize {
                 requested: limit,
                 maximum: MAX_SOURCE_EVENT_PAGE_ITEMS,
             });
         }
+        validate_core_event_page_budget(budget)?;
         source.validate_contract()?;
         let after = cursor
             .map(|cursor| self.validate_source_event_cursor(source, cursor))
             .transpose()?;
         self.validate_source_event_source(source)?;
-        let mut items = self.source_event_records_after(source, after, limit.saturating_add(1))?;
-        let terminal = items.len() <= limit;
-        if !terminal {
-            items.truncate(limit);
+        let candidates =
+            self.source_event_addresses_after(source, after, limit.saturating_add(1))?;
+        let candidate_count = candidates.len();
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        let mut encoded_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        let mut consumed = 0_usize;
+        for candidate in candidates {
+            if items.len() == limit {
+                break;
+            }
+            let order = candidate
+                .source_order
+                .ok_or(IndexError::InvalidStoredDocumentField(
+                    SOURCE_EVENT_ORDER_FIELD,
+                ))?;
+            if !items.is_empty()
+                && !core_event_page_budget_admits(
+                    budget,
+                    encoded_core_bytes,
+                    content_bytes,
+                    order.encoded_core_bytes(),
+                    order.content_bytes(),
+                )
+            {
+                break;
+            }
+            let (record, actual_encoded_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
+            let actual_order = SourceEventOrderKey::for_core_record(
+                &record.core_record,
+                actual_encoded_core_bytes,
+            )?;
+            if actual_order != order
+                || record.event_id.digest() != candidate.identity_digest
+                || !record.core_record.source.exact_descriptor_eq(source)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SOURCE_EVENT_ORDER_FIELD,
+                ));
+            }
+            encoded_core_bytes = encoded_core_bytes
+                .checked_add(actual_order.encoded_core_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            content_bytes = content_bytes
+                .checked_add(actual_order.content_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            items.push(record);
+            consumed = consumed.checked_add(1).ok_or(IndexError::CountOverflow)?;
         }
+        let terminal = consumed == candidate_count;
         let next_cursor = if terminal {
             None
         } else {
@@ -51,6 +118,8 @@ impl VerifiedIndex {
             generation_id: self.generation_id.clone(),
             source: source.clone(),
             items,
+            encoded_core_bytes,
+            content_bytes,
             next_cursor,
             terminal,
         })
@@ -77,23 +146,74 @@ impl VerifiedIndex {
         cursor: Option<&SemanticEventCursor>,
         limit: usize,
     ) -> Result<CoreSemanticEventPage> {
+        self.core_semantic_event_page_with_budget(cursor, limit, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+    }
+
+    /// Returns complete semantic candidates after address-only selection and
+    /// final-order decoding under retained Core byte bounds. Unlike exact-source
+    /// pages, semantic candidates do not have a source-prefix size lookup, so at
+    /// most one decoded non-fitting record is transiently considered.
+    pub fn core_semantic_event_page_with_budget(
+        &self,
+        cursor: Option<&SemanticEventCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<CoreSemanticEventPage> {
         if !(1..=MAX_SEMANTIC_EVENT_PAGE_ITEMS).contains(&limit) {
             return Err(IndexError::InvalidSemanticEventPageSize {
                 requested: limit,
                 maximum: MAX_SEMANTIC_EVENT_PAGE_ITEMS,
             });
         }
+        validate_core_event_page_budget(budget)?;
         let after = cursor
             .map(|cursor| self.validate_semantic_event_cursor(cursor))
             .transpose()?;
         let eligibility = SemanticEligibility::CURRENT;
         let eligible_total = self.semantic_eligible_event_count()?;
-        let mut items =
-            self.semantic_event_records_after(after, eligibility, limit.saturating_add(1))?;
-        let terminal = items.len() <= limit;
-        if !terminal {
-            items.truncate(limit);
+        let candidates =
+            self.semantic_event_addresses_after(after, eligibility, limit.saturating_add(1))?;
+        let candidate_count = candidates.len();
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        let mut encoded_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        let mut consumed = 0_usize;
+        for candidate in candidates {
+            if items.len() == limit {
+                break;
+            }
+            let (record, record_encoded_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
+            let record_content_bytes = core_content_bytes(&record.core_record.content)?;
+            if record.event_id.digest() != candidate.identity_digest
+                || !eligibility.includes(&record.event)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    EVENT_IDENTITY_DIGEST_FIELD,
+                ));
+            }
+            if !items.is_empty()
+                && !core_event_page_budget_admits(
+                    budget,
+                    encoded_core_bytes,
+                    content_bytes,
+                    record_encoded_core_bytes,
+                    record_content_bytes,
+                )
+            {
+                break;
+            }
+            encoded_core_bytes = encoded_core_bytes
+                .checked_add(record_encoded_core_bytes)
+                .ok_or(IndexError::CountOverflow)?;
+            content_bytes = content_bytes
+                .checked_add(record_content_bytes)
+                .ok_or(IndexError::CountOverflow)?;
+            items.push(record);
+            consumed = consumed.checked_add(1).ok_or(IndexError::CountOverflow)?;
         }
+        let terminal = consumed == candidate_count;
         let next_cursor = if terminal {
             None
         } else {
@@ -106,6 +226,8 @@ impl VerifiedIndex {
             eligibility,
             eligible_total,
             items,
+            encoded_core_bytes,
+            content_bytes,
             next_cursor,
             terminal,
         })
@@ -375,11 +497,54 @@ impl VerifiedIndex {
         maximum_events: usize,
         maximum_stored_core_bytes: usize,
     ) -> Result<Option<Vec<CoreEventRecord>>> {
+        Ok(self
+            .core_event_batch_by_ids(
+                event_ids,
+                maximum_events,
+                maximum_stored_core_bytes,
+                usize::MAX,
+                false,
+            )?
+            .map(|batch| batch.items))
+    }
+
+    /// Returns a complete requested-order Core batch under both encoded and
+    /// decoded-content byte ceilings. This composes with
+    /// [`Self::session_event_coordinates`] so presentation can select a small
+    /// session prefix/window before any bodies are retained.
+    pub fn core_events_by_ids_with_budget(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<Option<CoreEventBatch>> {
+        validate_core_event_page_budget(budget)?;
+        self.core_event_batch_by_ids(
+            event_ids,
+            maximum_events,
+            budget.maximum_encoded_core_bytes,
+            budget.maximum_content_bytes,
+            true,
+        )
+    }
+
+    fn core_event_batch_by_ids(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        maximum_stored_core_bytes: usize,
+        maximum_content_bytes: usize,
+        admit_oversized_singleton: bool,
+    ) -> Result<Option<CoreEventBatch>> {
         if event_ids.len() > maximum_events {
             return Ok(None);
         }
         if event_ids.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Some(CoreEventBatch {
+                items: Vec::new(),
+                encoded_core_bytes: 0,
+                content_bytes: 0,
+            }));
         }
 
         let fields = fields_from_schema(self.searcher.schema())?;
@@ -398,18 +563,27 @@ impl VerifiedIndex {
         let addresses = self.searcher.search(&query, &DocSetCollector)?;
         let mut records = BTreeMap::new();
         let mut stored_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
         for address in addresses {
             let (record, record_stored_core_bytes) =
                 stored_core_event_record_with_size(&self.searcher, address, fields)?;
+            let record_content_bytes = core_content_bytes(&record.core_record.content)?;
             let Some(next_stored_core_bytes) =
                 stored_core_bytes.checked_add(record_stored_core_bytes)
             else {
                 return Ok(None);
             };
-            if next_stored_core_bytes > maximum_stored_core_bytes {
+            let Some(next_content_bytes) = content_bytes.checked_add(record_content_bytes) else {
+                return Ok(None);
+            };
+            if (next_stored_core_bytes > maximum_stored_core_bytes
+                || next_content_bytes > maximum_content_bytes)
+                && !(admit_oversized_singleton && event_ids.len() == 1)
+            {
                 return Ok(None);
             }
             stored_core_bytes = next_stored_core_bytes;
+            content_bytes = next_content_bytes;
             let event_id = record.event_id.as_uuid();
             if !requested.contains(&event_id) {
                 return Err(IndexError::InvalidStoredDocumentField("event_id"));
@@ -429,7 +603,11 @@ impl VerifiedIndex {
             };
             ordered.push(record);
         }
-        Ok(Some(ordered))
+        Ok(Some(CoreEventBatch {
+            items: ordered,
+            encoded_core_bytes: stored_core_bytes,
+            content_bytes,
+        }))
     }
 
     /// Returns the complete stored Core data for one compact event ID.
@@ -536,6 +714,97 @@ impl VerifiedIndex {
         let mut records = self.core_event_records_for_query(&query, fields)?;
         sort_core_events_for_session(&mut records);
         Ok(records)
+    }
+
+    /// Returns one session's deterministic presentation coordinates without
+    /// retaining complete Core bodies. Callers can select a prefix or centered
+    /// window from this small metadata and pass those IDs to
+    /// [`Self::core_events_by_ids_with_budget`].
+    pub fn session_event_coordinates(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<SessionEventCoordinate>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.session_id, &session_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let segments = self.searcher.segment_readers();
+        let mut coordinates = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let segment = segments
+                .get(address.segment_ord as usize)
+                .ok_or(IndexError::InvalidStoredDocumentField("session_id"))?;
+            let event_id_high = segment
+                .fast_fields()
+                .u64(EVENT_ID_HIGH_FIELD)?
+                .first(address.doc_id)
+                .ok_or(IndexError::InvalidStoredDocumentField("event_id"))?;
+            let event_id_low = segment
+                .fast_fields()
+                .u64(EVENT_ID_LOW_FIELD)?
+                .first(address.doc_id)
+                .ok_or(IndexError::InvalidStoredDocumentField("event_id"))?;
+            let event_sequence = segment
+                .fast_fields()
+                .u64("event_sequence")?
+                .first(address.doc_id)
+                .ok_or(IndexError::InvalidStoredDocumentField("event_sequence"))?;
+            let occurred_at_unix_ms = segment
+                .fast_fields()
+                .i64("occurred_at_unix_ms")?
+                .first(address.doc_id);
+            let document: TantivyDocument = self.searcher.doc(address)?;
+            let event_id = stored_identity(
+                &document,
+                fields.event_identity,
+                fields.event_id,
+                fields.event_identity_digest,
+                StableEntityKind::Event,
+                "event_identity",
+            )?;
+            let stored_session_id = stored_identity(
+                &document,
+                fields.session_identity,
+                fields.session_id,
+                fields.session_identity_digest,
+                StableEntityKind::Session,
+                "session_identity",
+            )?;
+            let compact_event_id =
+                Uuid::from_u128((u128::from(event_id_high) << 64) | u128::from(event_id_low));
+            if event_id.as_uuid() != compact_event_id
+                || stored_session_id.as_uuid() != session_id
+                || required_u64(&document, fields.event_sequence, "event_sequence")?
+                    != event_sequence
+                || optional_i64(&document, fields.occurred_at_unix_ms)? != occurred_at_unix_ms
+            {
+                return Err(IndexError::InvalidStoredDocumentField("session_id"));
+            }
+            coordinates.push(SessionEventCoordinate {
+                event_id: compact_event_id,
+                event_sequence,
+                occurred_at_unix_ms,
+                event_type: required_string(&document, fields.event_type, "event_type")?,
+                role: optional_string(&document, fields.role)?,
+            });
+        }
+        coordinates.sort_by(|left, right| {
+            left.event_sequence
+                .cmp(&right.event_sequence)
+                .then_with(|| left.occurred_at_unix_ms.cmp(&right.occurred_at_unix_ms))
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        });
+        if let Some(pair) = coordinates
+            .windows(2)
+            .find(|pair| pair[0].event_id == pair[1].event_id)
+        {
+            return Err(IndexError::DuplicateEventIdentity(
+                pair[1].event_id.to_string(),
+            ));
+        }
+        Ok(coordinates)
     }
 
     /// Returns one session only when its event cardinality is within a caller
@@ -715,142 +984,129 @@ impl VerifiedIndex {
         Ok(cursor.after)
     }
 
-    fn source_event_records_after(
+    fn source_event_addresses_after(
         &self,
         source: &SourceKey,
         after: Option<StableEntityId>,
         capacity: usize,
-    ) -> Result<Vec<CoreEventRecord>> {
+    ) -> Result<Vec<EventAddressCandidate>> {
         let fields = fields_from_schema(self.searcher.schema())?;
-        let source_term = Term::from_field_text(fields.source_key, &source_token(source));
-        let after_digest = after.map(|identity| hex(&identity.digest()));
-        let mut candidates = BinaryHeap::with_capacity(capacity);
+        let source_prefix = SourceEventOrderKey::source_prefix(source);
+        let range_end = SourceEventOrderKey::source_range_end(source);
+        let after_bound = after
+            .map(|identity| SourceEventOrderKey::source_after_bound(source, identity.digest()));
+        let candidate_capacity = capacity
+            .checked_mul(self.searcher.segment_readers().len())
+            .ok_or(IndexError::CountOverflow)?;
+        let mut candidates = Vec::with_capacity(candidate_capacity);
 
         for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
-            let source_inverted = segment.inverted_index(fields.source_key)?;
-            let Some(source_postings) =
-                source_inverted.read_postings(&source_term, IndexRecordOption::Basic)?
-            else {
-                continue;
+            let inverted = segment.inverted_index(fields.source_event_order)?;
+            let terms = inverted.terms();
+            let mut stream = match after_bound.as_deref() {
+                Some(bound) => terms.range().gt(bound).lt(&range_end).into_stream()?,
+                None => terms
+                    .range()
+                    .ge(source_prefix)
+                    .lt(&range_end)
+                    .into_stream()?,
             };
-            let identity_inverted = segment.inverted_index(fields.event_identity_digest)?;
-            let terms = identity_inverted.terms();
-            let mut stream = match after_digest.as_deref() {
-                Some(digest) => terms.range().gt(digest.as_bytes()).into_stream()?,
-                None => terms.stream()?,
-            };
-            while stream.advance() {
-                if candidates.len() == capacity
-                    && candidates
-                        .peek()
-                        .is_some_and(|largest: &CoreEventIdentityCandidate| {
-                            stream.key() > largest.digest_term.as_bytes()
-                        })
-                {
-                    break;
-                }
-                let mut identity_postings = identity_inverted
+            let mut segment_candidates = 0_usize;
+            while segment_candidates < capacity && stream.advance() {
+                #[cfg(test)]
+                SOURCE_EVENT_ORDER_TERM_VISITS
+                    .set(SOURCE_EVENT_ORDER_TERM_VISITS.get().saturating_add(1));
+                let source_order = SourceEventOrderKey::decode_for_source(source, stream.key())?;
+                let mut postings = inverted
                     .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
-                let mut doc_id = identity_postings.doc();
-                while doc_id != TERMINATED {
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED && segment_candidates < capacity {
                     if !segment.is_deleted(doc_id) {
-                        // This cheap postings clone is an independent cursor;
-                        // seeking it tests membership without walking or
-                        // materializing the complete source.
-                        let mut source_membership = source_postings.clone();
-                        let source_doc = source_membership.doc();
-                        let matches_source = source_doc == doc_id
-                            || (source_doc < doc_id && source_membership.seek(doc_id) == doc_id);
-                        if matches_source {
-                            let address = DocAddress::new(segment_ord as u32, doc_id);
-                            let record = self.core_event_record(address, fields)?;
-                            let digest_term = hex(&record.event_id.digest());
-                            if digest_term.as_bytes() != stream.key()
-                                || !record.core_record.source.exact_descriptor_eq(source)
-                            {
-                                return Err(IndexError::InvalidStoredDocumentField(
-                                    EVENT_IDENTITY_DIGEST_FIELD,
-                                ));
-                            }
-                            candidates.push(CoreEventIdentityCandidate::new(record, digest_term)?);
-                            if candidates.len() > capacity {
-                                candidates.pop();
-                            }
-                        }
+                        candidates.push(EventAddressCandidate {
+                            identity_digest: source_order.event_digest(),
+                            address: DocAddress::new(segment_ord as u32, doc_id),
+                            source_order: Some(source_order),
+                        });
+                        segment_candidates = segment_candidates
+                            .checked_add(1)
+                            .ok_or(IndexError::CountOverflow)?;
                     }
-                    doc_id = identity_postings.advance();
+                    doc_id = postings.advance();
                 }
             }
         }
 
-        let mut candidates = candidates.into_vec();
-        candidates.sort_by_key(|candidate| candidate.identity);
+        candidates.sort_by_key(|candidate| candidate.identity_digest);
         for pair in candidates.windows(2) {
-            match pair[0].identity.cmp(&pair[1].identity) {
-                Ordering::Less => {}
-                Ordering::Equal => {
-                    return Err(IndexError::DuplicateEventIdentity(
-                        pair[1].record.event_id.to_string(),
-                    ));
-                }
-                Ordering::Greater => {
-                    return Err(IndexError::InvalidStoredDocumentField(
-                        EVENT_IDENTITY_DIGEST_FIELD,
-                    ));
-                }
+            if pair[0].identity_digest == pair[1].identity_digest {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SOURCE_EVENT_ORDER_FIELD,
+                ));
             }
         }
-        Ok(candidates
-            .into_iter()
-            .map(|candidate| candidate.record)
-            .collect())
+        Ok(candidates)
     }
 
-    fn semantic_event_records_after(
+    fn semantic_event_addresses_after(
         &self,
         after: Option<StableEntityId>,
         eligibility: SemanticEligibility,
         capacity: usize,
-    ) -> Result<Vec<CoreEventRecord>> {
+    ) -> Result<Vec<EventAddressCandidate>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let after_digest = after.map(|identity| hex(&identity.digest()));
-        let mut candidates = BinaryHeap::with_capacity(capacity);
+        let candidate_capacity = capacity
+            .checked_mul(self.searcher.segment_readers().len())
+            .ok_or(IndexError::CountOverflow)?;
+        let mut candidates = Vec::with_capacity(candidate_capacity);
+        let message_term = Term::from_field_text(fields.event_type, "message");
+        let user_term = Term::from_field_text(fields.role, "user");
 
         for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
             let inverted = segment.inverted_index(fields.event_identity_digest)?;
+            let Some(message_postings) = segment
+                .inverted_index(fields.event_type)?
+                .read_postings(&message_term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
+            let Some(user_postings) = segment
+                .inverted_index(fields.role)?
+                .read_postings(&user_term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
             let terms = inverted.terms();
             let mut stream = match after_digest.as_deref() {
                 Some(digest) => terms.range().gt(digest.as_bytes()).into_stream()?,
                 None => terms.stream()?,
             };
-            while stream.advance() {
-                if candidates.len() == capacity
-                    && candidates
-                        .peek()
-                        .is_some_and(|largest: &CoreEventIdentityCandidate| {
-                            stream.key() > largest.digest_term.as_bytes()
-                        })
-                {
-                    break;
-                }
+            let mut segment_candidates = 0_usize;
+            while segment_candidates < capacity && stream.advance() {
+                let identity_digest = decode_identity_digest_term(stream.key())?;
                 let mut postings = inverted
                     .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
                 let mut doc_id = postings.doc();
-                while doc_id != TERMINATED {
+                while doc_id != TERMINATED && segment_candidates < capacity {
                     if !segment.is_deleted(doc_id) {
-                        let address = DocAddress::new(segment_ord as u32, doc_id);
-                        let record = self.core_event_record(address, fields)?;
-                        let digest_term = hex(&record.event_id.digest());
-                        if digest_term.as_bytes() != stream.key() {
-                            return Err(IndexError::InvalidStoredDocumentField(
-                                EVENT_IDENTITY_DIGEST_FIELD,
-                            ));
-                        }
-                        if eligibility.includes(&record.event) {
-                            candidates.push(CoreEventIdentityCandidate::new(record, digest_term)?);
-                            if candidates.len() > capacity {
-                                candidates.pop();
-                            }
+                        let mut messages = message_postings.clone();
+                        let mut users = user_postings.clone();
+                        let message_doc = messages.doc();
+                        let user_doc = users.doc();
+                        let is_message = message_doc == doc_id
+                            || (message_doc < doc_id && messages.seek(doc_id) == doc_id);
+                        let is_user = user_doc == doc_id
+                            || (user_doc < doc_id && users.seek(doc_id) == doc_id);
+                        if is_message && is_user {
+                            debug_assert_eq!(eligibility, SemanticEligibility::CURRENT);
+                            candidates.push(EventAddressCandidate {
+                                identity_digest,
+                                address: DocAddress::new(segment_ord as u32, doc_id),
+                                source_order: None,
+                            });
+                            segment_candidates = segment_candidates
+                                .checked_add(1)
+                                .ok_or(IndexError::CountOverflow)?;
                         }
                     }
                     doc_id = postings.advance();
@@ -858,12 +1114,16 @@ impl VerifiedIndex {
             }
         }
 
-        let mut candidates = candidates.into_vec();
-        candidates.sort_by_key(|candidate| candidate.identity);
-        Ok(candidates
-            .into_iter()
-            .map(|candidate| candidate.record)
-            .collect())
+        candidates.sort_by_key(|candidate| candidate.identity_digest);
+        if candidates
+            .windows(2)
+            .any(|pair| pair[0].identity_digest == pair[1].identity_digest)
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_IDENTITY_DIGEST_FIELD,
+            ));
+        }
+        Ok(candidates)
     }
 
     fn count_semantic_eligible_events(
@@ -918,5 +1178,75 @@ impl VerifiedIndex {
 
     fn core_event_record(&self, address: DocAddress, fields: Fields) -> Result<CoreEventRecord> {
         stored_core_event_record(&self.searcher, address, fields)
+    }
+}
+
+fn validate_core_event_page_budget(budget: CoreEventPageBudget) -> Result<()> {
+    for (field, requested, maximum) in [
+        (
+            "encoded Core",
+            budget.maximum_encoded_core_bytes,
+            MAX_ENCODED_CORE_RECORD_BYTES,
+        ),
+        (
+            "content",
+            budget.maximum_content_bytes,
+            MAX_CORE_CONTENT_BYTES,
+        ),
+    ] {
+        if requested == 0 || requested > maximum {
+            return Err(IndexError::InvalidCoreEventPageByteLimit {
+                field,
+                requested,
+                maximum,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn core_event_page_budget_admits(
+    budget: CoreEventPageBudget,
+    retained_encoded_core_bytes: usize,
+    retained_content_bytes: usize,
+    candidate_encoded_core_bytes: usize,
+    candidate_content_bytes: usize,
+) -> bool {
+    retained_encoded_core_bytes
+        .checked_add(candidate_encoded_core_bytes)
+        .is_some_and(|total| total <= budget.maximum_encoded_core_bytes)
+        && retained_content_bytes
+            .checked_add(candidate_content_bytes)
+            .is_some_and(|total| total <= budget.maximum_content_bytes)
+}
+
+fn decode_identity_digest_term(term: &[u8]) -> Result<[u8; 32]> {
+    if term.len() != 64 {
+        return Err(IndexError::InvalidStoredDocumentField(
+            EVENT_IDENTITY_DIGEST_FIELD,
+        ));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in term.chunks_exact(2).enumerate() {
+        let Some(high) = decode_hex_digit(pair[0]) else {
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_IDENTITY_DIGEST_FIELD,
+            ));
+        };
+        let Some(low) = decode_hex_digit(pair[1]) else {
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_IDENTITY_DIGEST_FIELD,
+            ));
+        };
+        digest[index] = (high << 4) | low;
+    }
+    Ok(digest)
+}
+
+fn decode_hex_digit(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
     }
 }
