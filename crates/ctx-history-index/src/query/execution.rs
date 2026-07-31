@@ -360,6 +360,78 @@ impl VerifiedIndex {
             .transpose()
     }
 
+    /// Returns a complete, requested-order Core mapping when the batch is
+    /// within the caller's count and stored-Core byte budgets and every event
+    /// is present.
+    ///
+    /// Duplicate requested IDs are rejected before Tantivy is queried. Missing
+    /// events or a byte-budget overrun decline the whole batch instead of
+    /// exposing a partial mapping. While decoding, previously retained Core
+    /// records stay within `maximum_stored_core_bytes`; at most the one record
+    /// currently being considered can exceed that retained budget.
+    pub fn core_events_by_ids_if_bounded(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        maximum_stored_core_bytes: usize,
+    ) -> Result<Option<Vec<CoreEventRecord>>> {
+        if event_ids.len() > maximum_events {
+            return Ok(None);
+        }
+        if event_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut requested = BTreeSet::new();
+        for event_id in event_ids {
+            if !requested.insert(*event_id) {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        let query = TermSetQuery::new(
+            requested
+                .iter()
+                .map(|event_id| Term::from_field_text(fields.event_id, &event_id.to_string()))
+                .collect::<Vec<_>>(),
+        );
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let mut records = BTreeMap::new();
+        let mut stored_core_bytes = 0_usize;
+        for address in addresses {
+            let (record, record_stored_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, address, fields)?;
+            let Some(next_stored_core_bytes) =
+                stored_core_bytes.checked_add(record_stored_core_bytes)
+            else {
+                return Ok(None);
+            };
+            if next_stored_core_bytes > maximum_stored_core_bytes {
+                return Ok(None);
+            }
+            stored_core_bytes = next_stored_core_bytes;
+            let event_id = record.event_id.as_uuid();
+            if !requested.contains(&event_id) {
+                return Err(IndexError::InvalidStoredDocumentField("event_id"));
+            }
+            if records.insert(event_id, record).is_some() {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        if records.len() != requested.len() {
+            return Ok(None);
+        }
+
+        let mut ordered = Vec::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let Some(record) = records.remove(event_id) else {
+                return Ok(None);
+            };
+            ordered.push(record);
+        }
+        Ok(Some(ordered))
+    }
+
     /// Returns the complete stored Core data for one compact event ID.
     pub fn core_record_by_id(&self, event_id: Uuid) -> Result<Option<CoreRecord>> {
         Ok(self
@@ -489,6 +561,21 @@ impl VerifiedIndex {
         session_id: Uuid,
         maximum_events: usize,
     ) -> Result<Option<Vec<CoreEventRecord>>> {
+        Ok(self
+            .core_events_for_session_within_budget(session_id, maximum_events, usize::MAX)?
+            .map(|(records, _)| records))
+    }
+
+    /// Returns one complete session and its exact stored-Core byte count only
+    /// when both caller budgets admit it. A declined session never exposes a
+    /// partial event list, and retained decoded records remain within the byte
+    /// budget plus at most the one record currently being considered.
+    pub fn core_events_for_session_within_budget(
+        &self,
+        session_id: Uuid,
+        maximum_events: usize,
+        maximum_stored_core_bytes: usize,
+    ) -> Result<Option<(Vec<CoreEventRecord>, usize)>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let query = TermQuery::new(
             Term::from_field_text(fields.session_id, &session_id.to_string()),
@@ -498,9 +585,28 @@ impl VerifiedIndex {
         if count > maximum_events {
             return Ok(None);
         }
-        let mut records = self.core_event_records_for_query(&query, fields)?;
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let mut records = Vec::with_capacity(addresses.len());
+        let mut stored_core_bytes = 0_usize;
+        for address in addresses {
+            let (record, record_stored_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, address, fields)?;
+            if record.session_id.as_uuid() != session_id {
+                return Err(IndexError::InvalidStoredDocumentField("session_id"));
+            }
+            let Some(next_stored_core_bytes) =
+                stored_core_bytes.checked_add(record_stored_core_bytes)
+            else {
+                return Ok(None);
+            };
+            if next_stored_core_bytes > maximum_stored_core_bytes {
+                return Ok(None);
+            }
+            stored_core_bytes = next_stored_core_bytes;
+            records.push(record);
+        }
         sort_core_events_for_session(&mut records);
-        Ok(Some(records))
+        Ok(Some((records, stored_core_bytes)))
     }
 
     fn body_query_terms(&self, natural_text: &str, fields: Fields) -> Result<Vec<Term>> {

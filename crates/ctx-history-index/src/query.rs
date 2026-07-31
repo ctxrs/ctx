@@ -364,6 +364,14 @@ pub(super) fn stored_core_event_record(
     address: DocAddress,
     fields: Fields,
 ) -> Result<CoreEventRecord> {
+    stored_core_event_record_with_size(searcher, address, fields).map(|(record, _)| record)
+}
+
+pub(super) fn stored_core_event_record_with_size(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<(CoreEventRecord, usize)> {
     #[cfg(test)]
     STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.set(
         STORED_CORE_EVENT_RECORD_MATERIALIZATIONS
@@ -371,11 +379,9 @@ pub(super) fn stored_core_event_record(
             .saturating_add(1),
     );
     let document: TantivyDocument = searcher.doc(address)?;
-    let core_record = CoreRecord::decode_stored(required_bytes(
-        &document,
-        fields.core_record,
-        "core_record",
-    )?)?;
+    let encoded_core_record = required_bytes(&document, fields.core_record, "core_record")?;
+    let stored_core_bytes = encoded_core_record.len();
+    let core_record = CoreRecord::decode_stored(encoded_core_record)?;
     let event_id = stored_identity(
         &document,
         fields.event_identity,
@@ -462,30 +468,33 @@ pub(super) fn stored_core_event_record(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(CoreEventRecord {
-        event: EventRecord {
-            event_id,
-            session_id,
-            parent_session_id,
-            root_session_id,
-            locator,
-            provider,
-            source_format,
-            provider_session_id,
-            branch,
-            source_path: optional_string(&document, fields.source_path)?,
-            agent_type,
-            is_primary,
-            event_sequence,
-            occurred_at_unix_ms,
-            event_type,
-            role,
-            workspace,
-            cwd,
-            touched_files,
+    Ok((
+        CoreEventRecord {
+            event: EventRecord {
+                event_id,
+                session_id,
+                parent_session_id,
+                root_session_id,
+                locator,
+                provider,
+                source_format,
+                provider_session_id,
+                branch,
+                source_path: optional_string(&document, fields.source_path)?,
+                agent_type,
+                is_primary,
+                event_sequence,
+                occurred_at_unix_ms,
+                event_type,
+                role,
+                workspace,
+                cwd,
+                touched_files,
+            },
+            core_record,
         },
-        core_record,
-    })
+        stored_core_bytes,
+    ))
 }
 
 struct CoreEventIdentityCandidate {

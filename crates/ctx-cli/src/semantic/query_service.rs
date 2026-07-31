@@ -56,6 +56,8 @@ pub(in crate::semantic) use server::{
     start_daemon_source_refresh_service, DaemonQueryActivity, DaemonQueryService,
 };
 
+const MAX_SEMANTIC_CORE_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 #[error("source-backed semantic search is not ready ({code}): {detail}")]
 pub(crate) struct SourceBackedSemanticNotReady {
@@ -356,17 +358,27 @@ fn core_content_for_events(
     events: &[&EventRecord],
     max_chars: Option<usize>,
 ) -> Result<HashMap<Uuid, String>> {
+    let event_ids = events
+        .iter()
+        .map(|event| event.event_id.as_uuid())
+        .collect::<Vec<_>>();
+    let records = index
+        .core_events_by_ids_if_bounded(
+            &event_ids,
+            SEMANTIC_EXACT_TOP_K_MAX,
+            MAX_SEMANTIC_CORE_BATCH_BYTES,
+        )?
+        .ok_or_else(|| {
+            anyhow!(
+                "Core generation {} did not exactly resolve {} requested events within the {}-event/{}-byte display bounds",
+                index.generation_id(),
+                events.len(),
+                SEMANTIC_EXACT_TOP_K_MAX,
+                MAX_SEMANTIC_CORE_BATCH_BYTES,
+            )
+        })?;
     let mut contents = HashMap::with_capacity(events.len());
-    for event in events {
-        let record = index
-            .core_event_by_id(event.event_id.as_uuid())?
-            .ok_or_else(|| {
-                anyhow!(
-                    "Core generation {} omitted event {}",
-                    index.generation_id(),
-                    event.event_id
-                )
-            })?;
+    for (event, record) in events.iter().zip(records) {
         if record.event_id != event.event_id || record.session_id != event.session_id {
             return Err(anyhow!(
                 "Core event {} does not match its pinned citation",
@@ -466,22 +478,45 @@ fn source_semantic_candidates_with_embedding(
         let raw_candidates = search.hits.len();
         let mut filtered = 0_usize;
         let mut non_positive = 0_usize;
-        let mut candidates = Vec::with_capacity(raw_candidates);
+        let mut positive_hits = Vec::with_capacity(raw_candidates);
         for hit in search.hits {
             if !hit.similarity.is_finite() || hit.similarity <= 0.0 {
                 non_positive = non_positive.saturating_add(1);
                 continue;
             }
-            let record = index.core_event_by_id(hit.event_id)?.ok_or_else(|| {
+            positive_hits.push(hit);
+        }
+        let event_ids = positive_hits
+            .iter()
+            .map(|hit| hit.event_id)
+            .collect::<Vec<_>>();
+        let records = index
+            .core_events_by_ids_if_bounded(
+                &event_ids,
+                SEMANTIC_EXACT_TOP_K_MAX,
+                MAX_SEMANTIC_CORE_BATCH_BYTES,
+            )?
+            .ok_or_else(|| {
                 source_semantic_not_ready(
                     "semantic_projection_event_mismatch",
                     format!(
-                        "flat-F32 event {} is absent from Core generation {}",
-                        hit.event_id,
+                        "flat-F32 event batch does not map exactly to Core generation {}",
                         index.generation_id()
                     ),
                 )
             })?;
+        let mut candidates = Vec::with_capacity(records.len());
+        for (hit, record) in positive_hits.into_iter().zip(records) {
+            if record.event_id.as_uuid() != hit.event_id {
+                return Err(source_semantic_not_ready(
+                    "semantic_projection_event_mismatch",
+                    format!(
+                        "flat-F32 event {} does not match its ordered Core record in generation {}",
+                        hit.event_id,
+                        index.generation_id()
+                    ),
+                ));
+            }
             if record.event_type != "message" || record.role.as_deref() != Some("user") {
                 return Err(source_semantic_not_ready(
                     "semantic_projection_event_mismatch",
