@@ -110,18 +110,6 @@ public struct ShowSessionOptions: Sendable {
     }
 }
 
-public struct LocateSessionOptions: Sendable {
-    public var id: String?
-    public var provider: String?
-    public var providerSession: String?
-
-    public init(id: String? = nil, provider: String? = nil, providerSession: String? = nil) {
-        self.id = id
-        self.provider = provider
-        self.providerSession = providerSession
-    }
-}
-
 public struct HostedConfig: Sendable {
     public var baseURL: URL?
     public var apiKey: String?

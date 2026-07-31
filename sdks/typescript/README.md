@@ -26,13 +26,11 @@ const results = await client.search("sqlite storage", { refresh: "off" });
 - `showEvent(id, { before, after, window })` wraps `ctx show event --format json`.
 - `showSession(id, { mode })` wraps `ctx show session --format json`.
 - `showSession({ provider, providerSession, mode })` looks up by provider-owned session ID.
-- `locateEvent(id)` wraps `ctx locate event --format json`.
-- `locateSession(id)` and `locateSession({ provider, providerSession })` wrap `ctx locate session --format json`.
 - `version()` wraps `ctx --version` and reports SDK/API version metadata.
 
 All data methods return a `agent-history-v1` envelope with `contractVersion`,
 `schemaVersion`, `operation`, and an operation-specific field such as `status`,
-`search`, or `location`. TypeScript consumers get operation-specific return
+`search`, `event`, or `session`. TypeScript consumers get operation-specific return
 types discriminated by `operation`; CLI JSON remains an adapter detail.
 
 ## Dogfood Example
@@ -41,8 +39,8 @@ types discriminated by `operation`; CLI JSON remains an adapter detail.
 node sdks/typescript/examples/dogfood-toy.js
 ```
 
-The example runs `status`, `search`, `show event`, `show session`,
-`locate event`, and `locate session` against a mocked local runner by default.
+The example runs `status`, `search`, `show event`, and `show session` against a
+mocked local runner by default.
 Set `CTX_SDK_EXAMPLE_CTX_PATH` to point it at a real `ctx` binary instead.
 
 ## Local CLI Adapter

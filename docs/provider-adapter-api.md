@@ -17,7 +17,6 @@ Adapters should provide:
   expose file paths;
 - compact typed outcome/evidence and a full-body `ContentRef` for
   tool/command results when the parser can normalize the complete body;
-- source path plus cursor or line information for citations;
 - clear errors for malformed or unsupported input.
 
 Adapters must be read-only with respect to provider-owned files. They should

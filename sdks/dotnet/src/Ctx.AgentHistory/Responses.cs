@@ -101,28 +101,6 @@ public sealed record ShowSessionResponse : AgentHistoryResponse
     public SessionResult Session { get; }
 }
 
-public sealed record LocateEventResponse : AgentHistoryResponse
-{
-    internal LocateEventResponse(JsonObject envelope)
-        : base(envelope)
-    {
-        Location = LocationResult.FromJson(envelope["location"] as JsonObject);
-    }
-
-    public LocationResult Location { get; }
-}
-
-public sealed record LocateSessionResponse : AgentHistoryResponse
-{
-    internal LocateSessionResponse(JsonObject envelope)
-        : base(envelope)
-    {
-        Location = LocationResult.FromJson(envelope["location"] as JsonObject);
-    }
-
-    public LocationResult Location { get; }
-}
-
 public sealed record AgentHistoryBackend
 {
     private readonly JsonObject _json;
@@ -413,9 +391,6 @@ public sealed record SearchHit
         Provider = JsonHelpers.GetString(json, "provider");
         Timestamp = JsonHelpers.GetString(json, "timestamp");
         Cwd = JsonHelpers.GetString(json, "cwd");
-        SourcePath = JsonHelpers.GetString(json, "sourcePath");
-        SourceExists = JsonHelpers.GetBool(json, "sourceExists");
-        Cursor = JsonHelpers.GetString(json, "cursor");
         WhyMatched = JsonHelpers.GetStringArray(json, "whyMatched");
         Citations = JsonHelpers.GetObjectArray(json, "citations", Citation.FromJson);
         SuggestedNextCommands = JsonHelpers.GetStringArray(json, "suggestedNextCommands");
@@ -435,9 +410,6 @@ public sealed record SearchHit
     public string? Provider { get; }
     public string? Timestamp { get; }
     public string? Cwd { get; }
-    public string? SourcePath { get; }
-    public bool? SourceExists { get; }
-    public string? Cursor { get; }
     public IReadOnlyList<string> WhyMatched { get; }
     public IReadOnlyList<Citation> Citations { get; }
     public IReadOnlyList<string> SuggestedNextCommands { get; }
@@ -464,9 +436,6 @@ public sealed record Citation
         Provider = JsonHelpers.GetString(json, "provider");
         SessionId = JsonHelpers.GetString(json, "sessionId");
         EventSeq = JsonHelpers.GetInt(json, "eventSeq");
-        SourcePath = JsonHelpers.GetString(json, "sourcePath");
-        SourceExists = JsonHelpers.GetBool(json, "sourceExists");
-        Cursor = JsonHelpers.GetString(json, "cursor");
     }
 
     public string? ItemId { get; }
@@ -478,9 +447,6 @@ public sealed record Citation
     public string? Provider { get; }
     public string? SessionId { get; }
     public int? EventSeq { get; }
-    public string? SourcePath { get; }
-    public bool? SourceExists { get; }
-    public string? Cursor { get; }
 
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
 
@@ -496,12 +462,10 @@ public sealed record EventResult
         _json = JsonHelpers.CloneObject(json);
         Event = AgentHistoryEvent.FromJson(json["event"] as JsonObject);
         Events = JsonHelpers.GetObjectArray(json, "events", AgentHistoryEvent.FromJsonRequired);
-        Source = SourceLocation.FromJson(json["source"] as JsonObject);
     }
 
     public AgentHistoryEvent? Event { get; }
     public IReadOnlyList<AgentHistoryEvent> Events { get; }
-    public SourceLocation? Source { get; }
 
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
 
@@ -517,14 +481,12 @@ public sealed record SessionResult
         _json = JsonHelpers.CloneObject(json);
         Session = SessionRecord.FromJson(json["session"] as JsonObject);
         Events = JsonHelpers.GetObjectArray(json, "events", AgentHistoryEvent.FromJsonRequired);
-        Source = SourceLocation.FromJson(json["source"] as JsonObject);
         Mode = JsonHelpers.GetString(json, "mode");
         Format = JsonHelpers.GetString(json, "format");
     }
 
     public SessionRecord? Session { get; }
     public IReadOnlyList<AgentHistoryEvent> Events { get; }
-    public SourceLocation? Source { get; }
     public string? Mode { get; }
     public string? Format { get; }
 
@@ -547,7 +509,6 @@ public sealed record SessionRecord
         StartedAt = JsonHelpers.GetString(json, "startedAt");
         UpdatedAt = JsonHelpers.GetString(json, "updatedAt");
         Cwd = JsonHelpers.GetString(json, "cwd");
-        SourcePath = JsonHelpers.GetString(json, "sourcePath");
         Visibility = JsonHelpers.GetString(json, "visibility");
     }
 
@@ -558,7 +519,6 @@ public sealed record SessionRecord
     public string? StartedAt { get; }
     public string? UpdatedAt { get; }
     public string? Cwd { get; }
-    public string? SourcePath { get; }
     public string? Visibility { get; }
 
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
@@ -575,12 +535,13 @@ public sealed record AgentHistoryEvent
         _json = JsonHelpers.CloneObject(json);
         CtxEventId = JsonHelpers.GetString(json, "ctxEventId");
         CtxSessionId = JsonHelpers.GetString(json, "ctxSessionId");
+        Provider = JsonHelpers.GetString(json, "provider");
+        ProviderSessionId = JsonHelpers.GetString(json, "providerSessionId");
+        SourceFormat = JsonHelpers.GetString(json, "sourceFormat");
         Sequence = JsonHelpers.GetInt(json, "sequence");
         EventType = JsonHelpers.GetString(json, "eventType");
         Role = JsonHelpers.GetString(json, "role");
         OccurredAt = JsonHelpers.GetString(json, "occurredAt");
-        Source = JsonHelpers.Clone(json["source"]);
-        Cursor = JsonHelpers.GetString(json, "cursor");
         Text = JsonHelpers.GetString(json, "text");
         Preview = JsonHelpers.GetString(json, "preview");
         Citations = JsonHelpers.GetObjectArray(json, "citations", Citation.FromJson);
@@ -588,12 +549,13 @@ public sealed record AgentHistoryEvent
 
     public string? CtxEventId { get; }
     public string? CtxSessionId { get; }
+    public string? Provider { get; }
+    public string? ProviderSessionId { get; }
+    public string? SourceFormat { get; }
     public int? Sequence { get; }
     public string? EventType { get; }
     public string? Role { get; }
     public string? OccurredAt { get; }
-    public JsonNode? Source { get; }
-    public string? Cursor { get; }
     public string? Text { get; }
     public string? Preview { get; }
     public IReadOnlyList<Citation> Citations { get; }
@@ -602,58 +564,6 @@ public sealed record AgentHistoryEvent
 
     internal static AgentHistoryEvent? FromJson(JsonObject? json) => json is null ? null : new AgentHistoryEvent(json);
     internal static AgentHistoryEvent FromJsonRequired(JsonObject json) => new(json);
-}
-
-public sealed record LocationResult
-{
-    private readonly JsonObject _json;
-
-    private LocationResult(JsonObject json)
-    {
-        _json = JsonHelpers.CloneObject(json);
-        CtxSessionId = JsonHelpers.GetString(json, "ctxSessionId");
-        CtxEventId = JsonHelpers.GetString(json, "ctxEventId");
-        Provider = JsonHelpers.GetString(json, "provider");
-        ProviderSessionId = JsonHelpers.GetString(json, "providerSessionId");
-        Source = SourceLocation.FromJson(json["source"] as JsonObject);
-        Resume = JsonHelpers.CloneObject(json["resume"] as JsonObject);
-    }
-
-    public string? CtxSessionId { get; }
-    public string? CtxEventId { get; }
-    public string? Provider { get; }
-    public string? ProviderSessionId { get; }
-    public SourceLocation? Source { get; }
-    public JsonObject Resume { get; }
-
-    public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
-
-    internal static LocationResult FromJson(JsonObject? json) => new(json ?? new JsonObject());
-}
-
-public sealed record SourceLocation
-{
-    private readonly JsonObject _json;
-
-    private SourceLocation(JsonObject json)
-    {
-        _json = JsonHelpers.CloneObject(json);
-        Path = JsonHelpers.GetString(json, "path");
-        Cursor = JsonHelpers.GetString(json, "cursor");
-        Exists = JsonHelpers.GetBool(json, "exists");
-        SourceId = JsonHelpers.GetString(json, "sourceId");
-        SourceFormat = JsonHelpers.GetString(json, "sourceFormat");
-    }
-
-    public string? Path { get; }
-    public string? Cursor { get; }
-    public bool? Exists { get; }
-    public string? SourceId { get; }
-    public string? SourceFormat { get; }
-
-    public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
-
-    internal static SourceLocation? FromJson(JsonObject? json) => json is null ? null : new SourceLocation(json);
 }
 
 internal static class ResponseReaders

@@ -12,7 +12,7 @@ attempts, and what worked or failed.
 Use this skill in two modes:
 
 - retrieval before work, when prior sessions may contain decisions, commands,
-  failures, or source citations that affect the current task;
+  failures, or citations that affect the current task;
 - history research reports, when the user asks an agent or read-only subagent to
   research a historical topic across prior local agent sessions.
 
@@ -57,7 +57,7 @@ Use this skill in two modes:
    ```
 
    Use default text output for agent reading. Do not add `--format json` for
-   search, show, or locate unless you are piping it into `jq` or a script, or
+   search or show unless you are piping it into `jq` or a script, or
    you need exact machine-readable fields. JSON output is much larger and can
    quickly consume the context window.
 
@@ -95,11 +95,12 @@ Use this skill in two modes:
    ctx show session <ctx-session-id>
    ```
 
-4. Locate original provider material when source identity or resume hints matter:
+4. Read provider-owned session identity from Core-backed search/show results
+   when resume hints matter. `provider_session_id` is the Codex resume UUID:
 
    ```bash
-   ctx locate event <ctx-event-id>
-   ctx locate session <ctx-session-id>
+   ctx show session <ctx-session-id> --format json
+   ctx show session --provider codex --provider-session <codex-resume-uuid>
    ```
 
 5. Write a transcript of relevant sessions when you, the human, or another
@@ -161,7 +162,7 @@ material.
 
    Use full or log mode only when default output omits necessary evidence.
 4. Compare evidence across sessions. Note agreements, conflicts, stale results,
-   missing raw sources, and gaps where searches did not find evidence.
+   and gaps where searches did not find evidence.
 5. Produce the report as agent synthesis with citations.
 
 Concise report shape:
@@ -184,11 +185,11 @@ Long report shape:
 
 - Cite ctx material when it affects your answer or implementation.
 - Include the provider, ctx session ID, ctx event ID when available, provider
-  session ID when available, and source path or cursor when present.
+  session ID when available.
 - If you synthesize across multiple snippets, label the conclusion as your
   synthesis and cite the supporting snippets.
-- If a source citation is stale or unavailable, say ctx returned indexed text
-  but the raw source could not be opened.
+- If a cited event or session is absent from the current Core generation, say
+  so and consider whether an explicit `ctx import` is appropriate.
 
 ## Safety Rules
 

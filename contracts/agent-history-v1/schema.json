@@ -17,8 +17,6 @@
         "search",
         "showEvent",
         "showSession",
-        "locateEvent",
-        "locateSession",
         "error"
       ]
     },
@@ -32,7 +30,6 @@
     "search": { "$ref": "#/$defs/searchResult" },
     "event": { "$ref": "#/$defs/eventResult" },
     "session": { "$ref": "#/$defs/sessionResult" },
-    "location": { "$ref": "#/$defs/locationResult" },
     "error": { "$ref": "#/$defs/agentHistoryError" }
   },
   "$defs": {
@@ -153,9 +150,6 @@
         "provider": { "type": ["string", "null"] },
         "timestamp": { "type": ["string", "null"] },
         "cwd": { "type": ["string", "null"] },
-        "sourcePath": { "type": ["string", "null"] },
-        "sourceExists": { "type": ["boolean", "null"] },
-        "cursor": { "type": ["string", "null"] },
         "whyMatched": {
           "type": "array",
           "items": { "type": "string" }
@@ -212,8 +206,7 @@
         "events": {
           "type": "array",
           "items": { "$ref": "#/$defs/event" }
-        },
-        "source": { "$ref": "#/$defs/sourceLocation" }
+        }
       },
       "additionalProperties": true
     },
@@ -225,7 +218,6 @@
           "type": "array",
           "items": { "$ref": "#/$defs/event" }
         },
-        "source": { "$ref": "#/$defs/sourceLocation" },
         "mode": { "type": ["string", "null"] },
         "format": { "type": ["string", "null"] }
       },
@@ -236,42 +228,19 @@
       "properties": {
         "ctxEventId": { "type": ["string", "null"] },
         "ctxSessionId": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
+        "providerSessionId": { "type": ["string", "null"] },
+        "sourceFormat": { "type": ["string", "null"] },
         "sequence": { "type": ["integer", "null"] },
         "eventType": { "type": ["string", "null"] },
         "role": { "type": ["string", "null"] },
         "occurredAt": { "type": ["string", "null"] },
-        "source": { "type": ["string", "null"] },
-        "cursor": { "type": ["string", "null"] },
         "text": { "type": ["string", "null"] },
         "preview": { "type": ["string", "null"] },
         "citations": {
           "type": "array",
           "items": { "$ref": "#/$defs/citation" }
         }
-      },
-      "additionalProperties": true
-    },
-    "locationResult": {
-      "type": "object",
-      "required": ["ctxSessionId", "provider", "source"],
-      "properties": {
-        "ctxSessionId": { "type": "string" },
-        "ctxEventId": { "type": ["string", "null"] },
-        "provider": { "type": "string" },
-        "providerSessionId": { "type": ["string", "null"] },
-        "source": { "$ref": "#/$defs/sourceLocation" },
-        "resume": { "type": "object", "additionalProperties": true }
-      },
-      "additionalProperties": true
-    },
-    "sourceLocation": {
-      "type": "object",
-      "properties": {
-        "path": { "type": ["string", "null"] },
-        "cursor": { "type": ["string", "null"] },
-        "exists": { "type": ["boolean", "null"] },
-        "sourceId": { "type": ["string", "null"] },
-        "sourceFormat": { "type": ["string", "null"] }
       },
       "additionalProperties": true
     },
@@ -303,10 +272,7 @@
         "time": { "type": ["string", "null"] },
         "provider": { "type": ["string", "null"] },
         "sessionId": { "type": ["string", "null"] },
-        "eventSeq": { "type": ["integer", "null"] },
-        "sourcePath": { "type": ["string", "null"] },
-        "sourceExists": { "type": ["boolean", "null"] },
-        "cursor": { "type": ["string", "null"] }
+        "eventSeq": { "type": ["integer", "null"] }
       },
       "additionalProperties": true
     },

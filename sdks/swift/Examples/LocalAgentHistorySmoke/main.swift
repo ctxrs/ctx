@@ -20,13 +20,11 @@ struct LocalAgentHistorySmoke {
               let eventID = hit.ctxEventId,
               let sessionID = hit.ctxSessionId
         else {
-            throw SmokeError("search returned no event hit to show and locate")
+            throw SmokeError("search returned no event hit to show")
         }
 
         let event = try client.showEvent(eventID, options: ShowEventOptions(window: 1))
         let session = try client.showSession(sessionID)
-        let eventLocation = try client.locateEvent(eventID)
-        let sessionLocation = try client.locateSession(sessionID)
 
         print("mode=\(config.useRealCtx ? "real" : "fake")")
         print("status.initialized=\(status.status.initialized)")
@@ -37,8 +35,8 @@ struct LocalAgentHistorySmoke {
         print("search.window=\(search.search.resultWindow?.returned ?? 0)/\(search.search.resultWindow?.limit ?? 0) more=\(search.search.resultWindow?.moreAvailable == true)")
         print("showEvent.event=\(event.event.event?.ctxEventId ?? "missing")")
         print("showSession.session=\(session.session.session?.ctxSessionId ?? "missing")")
-        print("locateEvent.sourceExists=\(eventLocation.location.source.exists == true)")
-        print("locateSession.provider=\(sessionLocation.location.provider)")
+        print("showEvent.providerSession=\(event.event.event?.providerSessionId ?? "missing")")
+        print("showSession.providerSession=\(session.session.session?.providerSessionId ?? "missing")")
     }
 }
 
@@ -100,13 +98,11 @@ private final class FakeSmokeRunner: CommandRunner, @unchecked Sendable {
         case ["import", "--format=json"]:
             return CommandResult(stdout: #"{"resume":true,"totals":{"imported_sources":1,"imported_sessions":1,"imported_events":1},"sources":[{"provider":"codex","path":"/tmp/ctx-sdk-fixture/session.jsonl","status":"imported","imported_sessions":1,"imported_events":1}]}"#)
         case ["search", "local agent history"]:
-            return CommandResult(stdout: #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx locate event 11111111-1111-4111-8111-111111111111","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222","ctx locate session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#)
+            return CommandResult(stdout: #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#)
         case ["show", "event"]:
-            return CommandResult(stdout: #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","source":"codex","cursor":"line:2","text":"local agent history search result"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","source":"codex","cursor":"line:2","text":"local agent history search result"}],"source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","cursor":"line:2","exists":true,"source_id":"33333333-3333-4333-8333-333333333333","source_format":"codex_session_jsonl"}}"#)
+            return CommandResult(stdout: #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result"}]}"#)
         case ["show", "session"]:
-            return CommandResult(stdout: #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result"}],"source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","exists":true,"source_format":"codex_session_jsonl"},"mode":"lite","format":"json"}"#)
-        case ["locate", "event"], ["locate", "session"]:
-            return CommandResult(stdout: #"{"ctx_session_id":"22222222-2222-4222-8222-222222222222","ctx_event_id":"11111111-1111-4111-8111-111111111111","provider":"codex","provider_session_id":"codex-fixture-session","source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","cursor":"line:2","exists":true,"source_id":"33333333-3333-4333-8333-333333333333","source_format":"codex_session_jsonl"},"resume":{"cursor":"line:2"}}"#)
+            return CommandResult(stdout: #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result"}],"mode":"lite","format":"json"}"#)
         default:
             return CommandResult(stdout: "", stderr: "unexpected fake ctx command: \(arguments.joined(separator: " "))\n", exitCode: 2)
         }

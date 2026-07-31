@@ -17,8 +17,6 @@ large dependency footprint.
 - `search(SearchOptions)` -> `SearchResponse`
 - `showEvent(String, ShowEventOptions)` -> `ShowEventResponse`
 - `showSession(String, ShowSessionOptions)` -> `ShowSessionResponse`
-- `locateEvent(String)` -> `LocateEventResponse`
-- `locateSession(String)` -> `LocateSessionResponse`
 - `version()` -> `VersionInfo`
 
 All data responses extend `AgentHistoryEnvelope`, with `contractVersion`,
@@ -37,7 +35,7 @@ sdks/jvm/scripts/test
 
 The test script also compiles and runs `examples/ToyAgentHistoryApp.java`, a fake
 transport toy app that exercises `status`, `search`, `showEvent`, and
-`locateEvent` without reading local private history.
+`showSession` without reading local private history.
 
 ## Tests
 

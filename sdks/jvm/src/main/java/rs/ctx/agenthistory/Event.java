@@ -29,6 +29,22 @@ public final class Event {
         return getCtxSessionId();
     }
 
+    public String getProvider() {
+        return AgentHistoryValue.string(fields.get("provider"));
+    }
+
+    public String provider() {
+        return getProvider();
+    }
+
+    public String getProviderSessionId() {
+        return AgentHistoryValue.string(fields.get("providerSessionId"));
+    }
+
+    public String providerSessionId() {
+        return getProviderSessionId();
+    }
+
     public Integer getSequence() {
         return AgentHistoryValue.integer(fields.get("sequence"));
     }
@@ -59,22 +75,6 @@ public final class Event {
 
     public String occurredAt() {
         return getOccurredAt();
-    }
-
-    public String getSource() {
-        return AgentHistoryValue.string(fields.get("source"));
-    }
-
-    public String source() {
-        return getSource();
-    }
-
-    public String getCursor() {
-        return AgentHistoryValue.string(fields.get("cursor"));
-    }
-
-    public String cursor() {
-        return getCursor();
     }
 
     public String getText() {

@@ -16,7 +16,7 @@ the local retrieval product.
   history into the configured ctx data root before querying. Default search must
   not download embedding models, start semantic indexing, start a daemon, or
   write the semantic sidecar.
-- `ctx show` and `ctx locate` write nothing in local-only security mode, except
+- `ctx show` writes nothing in local-only security mode, except
   `ctx show session --out` writes only the explicit path when one is provided.
 - `ctx status` does not mutate canonical history or local Pro graph data:
   missing stores stay missing, and existing stores are not migrated, repaired,
@@ -57,7 +57,7 @@ the local retrieval product.
 - Provider files are read as sources and not modified.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default.
-- Search/show/locate JSON and SQLite search projections preserve local
+- Search/show JSON and SQLite search projections preserve local
   transcript text by default, including absolute paths and secret-shaped
   strings. They must be treated as private local data.
 - The public provider support matrix contains only supported providers and uses
@@ -137,8 +137,8 @@ unavailable:
    their sticky owner-private file backends.
 2. Import canonical NativePath history, materialize Core plus Pro, restart the daemon,
    and run `ctx blame`; verify Core Tantivy retrieval never depends on either
-   credential namespace and the SQLCipher graph remains derived-facts and
-   locator-only, source-rebuildable state.
+   credential namespace and the SQLCipher graph remains derived-facts,
+   source-rebuildable state.
 3. Upgrade the same root to the candidate pair, restart the daemon and helper,
    and repeat materialization and blame. Verify neither namespace changes its
    selected backend when a native vault later becomes available.

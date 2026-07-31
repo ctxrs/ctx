@@ -41,8 +41,6 @@ Each SDK exposes typed operation-specific responses for:
 - `search`
 - `showEvent`
 - `showSession`
-- `locateEvent`
-- `locateSession`
 - version metadata
 - structured errors
 
@@ -53,8 +51,9 @@ Responses include the common `agent-history-v1` envelope fields:
 - `operation`
 - `backend`
 
-Payloads include typed agent history data such as freshness, citations, sessions,
-events, and source locations.
+Payloads include typed agent history data such as freshness, citations,
+sessions, events, and provider-owned session IDs. For Codex,
+`providerSessionId` is the resume UUID.
 
 ## Local and hosted backends
 
@@ -71,7 +70,7 @@ structured `not_supported` error.
 Each SDK includes a fake-by-default toy app or example that exercises the agent history
 workflow without reading private local history:
 
-`status -> init -> import/sync -> search -> showEvent -> showSession -> locateEvent -> locateSession`
+`status -> init -> import/sync -> search -> showEvent -> showSession`
 
 The examples can be pointed at a real local ctx binary explicitly when the
 language toolchain is installed and an isolated `CTX_DATA_ROOT` is provided.

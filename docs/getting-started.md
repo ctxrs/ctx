@@ -138,9 +138,9 @@ Use `ctx import --no-daemon` for a one-run opt-out. JSON import output does not
 start or nudge the daemon. Use a human-readable native import or an explicit
 daemon command when background maintenance should start.
 
-After upgrading an older data root to `0.10.x` or newer, the first refresh or import may
-re-read previously indexed provider transcripts once. That rebuilds search
-content with touched-file metadata and local/private transcript text.
+After upgrading an older data root to `0.10.x` or newer, the first refresh or
+import may perform a one-time provider reimport. That rebuilds search content
+with touched-file metadata and local/private transcript text.
 
 Native provider `--path` imports require `--provider`. Custom JSONL imports use
 `--input-format ctx-history-jsonl-v1 --path <file>` instead.

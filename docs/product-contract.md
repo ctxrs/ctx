@@ -41,10 +41,9 @@ research agent.
   is complete and dirty work is drained; explicit semantic search may query
   partial coverage for diagnostics.
 - `ctx show session` and `ctx show event` render transcripts, hits, and context
-  windows using ctx-owned IDs, and `ctx show session --out` writes transcript
-  artifacts.
-- `ctx locate session` and `ctx locate event` report provenance and resume
-  metadata.
+  windows from the active verified Core generation using ctx-owned IDs, and
+  `ctx show session --out` writes transcript artifacts. Search/show expose the
+  provider-owned session ID when known; for Codex, it is the resume UUID.
 - `ctx pro` starts or resumes an anonymous 14-day trial without an account,
   authentication, or payment method, installs or repairs the signed
   target-specific helper, and catches the encrypted graph up. The official
@@ -139,8 +138,8 @@ research agent.
   canonical activity rather than accepted as setup flags.
 - The only public Pro query is `ctx blame file|commit|pr`. It returns typed,
   bounded matches with complete deduplicated canonical evidence. OSS
-  `ctx show session|event` and `ctx locate session|event` remain available;
-  there are no Pro show, locate, timeline, facts, or related aliases. Blame may
+  `ctx show session|event` remains available; there are no Pro show, timeline,
+  facts, or related aliases. Blame may
   catch stale derived state up;
   that changes only the encrypted graph. Pure canonical tail appends
   resume from the durable frontier; incompatible mutation epochs, legacy
@@ -244,15 +243,14 @@ details:
 - provider when known;
 - ctx-owned session and event IDs;
 - provider-owned session ID when known;
-- event sequence when known;
-- source path and cursor when available;
-- source availability when checked.
+- event sequence when known.
 
 Provider-owned IDs are metadata. Positional command arguments are ctx-owned
 IDs unless a command explicitly accepts `--provider ... --provider-session ...`.
 
-If raw source files move, ctx may still return indexed text from SQLite. Output
-should make source availability visible when that information is known.
+Search and show read complete normalized content from Core. They do not reopen
+provider transcript files at query time. Explicit import and daemon refresh are
+the surfaces that discover and ingest provider-file changes.
 
 ## Privacy Contract
 

@@ -1,7 +1,6 @@
 import {
   type ImportEnvelope,
   type JsonValue,
-  type LocationEnvelope,
   type AgentHistoryEnvelope,
   type SearchBackendMode,
   type SearchEnvelope,
@@ -78,13 +77,7 @@ await client.search({ backend: "hybrid", semanticWeight: 0.8 });
 const shown = await client.showEvent("11111111-1111-4111-8111-111111111111");
 expectType<ShowEventEnvelope>(shown);
 expectType<string | null | undefined>(shown.event.events[0]!.ctxSessionId);
-
-const located = await client.locateSession({
-  provider: "codex",
-  providerSession: "codex-fixture-session",
-});
-expectType<LocationEnvelope<"locateSession">>(located);
-expectType<string>(located.location.ctxSessionId);
+expectType<string | null | undefined>(shown.event.events[0]!.providerSessionId);
 
 const envelope = toAgentHistoryEnvelope("search", { query: "x", results: [] });
 expectType<SearchEnvelope>(envelope);
@@ -108,9 +101,6 @@ function readEnvelope(envelope: AgentHistoryEnvelope): string {
       return envelope.event.events[0]?.ctxEventId ?? "";
     case "showSession":
       return envelope.session.events?.[0]?.ctxEventId ?? "";
-    case "locateEvent":
-    case "locateSession":
-      return envelope.location.provider;
     case "error":
       return envelope.error.code;
   }

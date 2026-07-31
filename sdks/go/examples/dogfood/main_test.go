@@ -23,10 +23,8 @@ func TestDogfoodExampleUsesFakeTransportByDefault(t *testing.T) {
 		"sync events=1",
 		"search results=1",
 		"search window=1/1 more=true",
-		"show event=11111111-1111-4111-8111-111111111111 sequence=1",
+		"show event=11111111-1111-4111-8111-111111111111 sequence=1 provider_session=dogfood-session",
 		"show session events=1 mode=lite",
-		"locate provider=codex cursor=line:1",
-		"locate session provider=codex cursor=line:1",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\n%s", want, output)

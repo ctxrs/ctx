@@ -177,13 +177,10 @@ func TestSearchRequiresQueryTermOrFileBeforeTransport(t *testing.T) {
 	}
 }
 
-func TestShowAndLocateValidateRequiredEventID(t *testing.T) {
+func TestShowEventValidatesRequiredEventID(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{response: `{}`}))
 	if _, err := client.ShowEvent(context.Background(), ShowEventOptions{}); !IsErrorKind(err, ErrorKindInvalidArgument) {
 		t.Fatalf("ShowEvent error kind mismatch: %v", err)
-	}
-	if _, err := client.LocateEvent(context.Background(), LocateEventOptions{}); !IsErrorKind(err, ErrorKindInvalidArgument) {
-		t.Fatalf("LocateEvent error kind mismatch: %v", err)
 	}
 }
 
@@ -208,37 +205,6 @@ func TestRejectsWrongCanonicalEnvelope(t *testing.T) {
 	}`}))
 	if _, err := client.Status(context.Background()); !IsErrorKind(err, ErrorKindDecode) {
 		t.Fatalf("expected operation decode error, got %v", err)
-	}
-}
-
-func TestLegacyShowEventSourceObjectNormalizesToTypedEvent(t *testing.T) {
-	client := NewClient(WithTransport(fakeTransport{response: `{
-		"event": {
-			"ctx_event_id": "event-1",
-			"ctx_session_id": "session-1",
-			"sequence": 1,
-			"event_type": "message",
-			"source": {
-				"path": "/tmp/session.jsonl",
-				"cursor": "line:1",
-				"exists": true,
-				"source_id": "source-1",
-				"source_format": "codex_session_jsonl"
-			},
-			"text": "hello"
-		},
-		"events": []
-	}`}))
-
-	response, err := client.ShowEvent(context.Background(), ShowEventOptions{ID: "event-1"})
-	if err != nil {
-		t.Fatalf("ShowEvent returned error: %v", err)
-	}
-	if response.Event.Event == nil || response.Event.Event.Source != "" {
-		t.Fatalf("unexpected normalized event source: %+v", response.Event.Event)
-	}
-	if response.Event.Source == nil || response.Event.Source.Path != "/tmp/session.jsonl" {
-		t.Fatalf("expected source location from legacy event source, got %+v", response.Event.Source)
 	}
 }
 
@@ -388,11 +354,6 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 		t.Fatalf("unexpected typed session: %+v", session.Session.Session)
 	}
 
-	location := readFixture[LocateEventResponse](t, "locate-event.location.json")
-	if location.Location.Resume == nil || location.Location.Resume.Cursor != "line:2" {
-		t.Fatalf("unexpected typed resume location: %+v", location.Location.Resume)
-	}
-
 	errorEnvelope := readFixture[ErrorResponse](t, "error.not-supported.json")
 	if errorEnvelope.Error.Code != ErrorKindHostedNotImplemented || errorEnvelope.Backend.Kind != BackendKindHosted {
 		t.Fatalf("unexpected error envelope: %+v", errorEnvelope)
@@ -460,12 +421,6 @@ func assertFixtureDecodes(t *testing.T, path, operation string, data []byte) {
 	case "show_session", "showSession":
 		var value ShowSessionResponse
 		err = json.Unmarshal(data, &value)
-	case "locate_event", "locateEvent":
-		var value LocateEventResponse
-		err = json.Unmarshal(data, &value)
-	case "locate_session", "locateSession":
-		var value LocateSessionResponse
-		err = json.Unmarshal(data, &value)
 	case "error":
 		var value ErrorResponse
 		err = json.Unmarshal(data, &value)
@@ -506,10 +461,6 @@ func operationFromFilename(name string) string {
 		return "showEvent"
 	case "show-session":
 		return "showSession"
-	case "locate-event":
-		return "locateEvent"
-	case "locate-session":
-		return "locateSession"
 	default:
 		return base
 	}

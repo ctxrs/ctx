@@ -29,7 +29,7 @@ Every SDK should have:
 - structured error tests for all `agent-history-v1` error codes;
 - timeout/cancellation tests using idiomatic language primitives;
 - a dogfood toy app or example that exercises `init`, `import` or `sync`,
-  `search`, `showEvent`, `showSession`, `locateEvent`, and `locateSession`
+  `search`, `showEvent`, and `showSession`
   against fake transport by default, plus an opt-in real local ctx smoke where
   the toolchain supports it.
 

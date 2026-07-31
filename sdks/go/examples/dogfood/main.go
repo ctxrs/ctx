@@ -76,10 +76,10 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		}
 	}
 	if eventID == "" {
-		return fmt.Errorf("show/locate require CTX_EXAMPLE_EVENT_ID when using a real ctx binary with no search hits")
+		return fmt.Errorf("show requires CTX_EXAMPLE_EVENT_ID when using a real ctx binary with no search hits")
 	}
 	if sessionID == "" {
-		return fmt.Errorf("show/locate require CTX_EXAMPLE_SESSION_ID when using a real ctx binary with no search hits")
+		return fmt.Errorf("show requires CTX_EXAMPLE_SESSION_ID when using a real ctx binary with no search hits")
 	}
 
 	show, err := client.ShowEvent(ctx, ctxagenthistory.ShowEventOptions{ID: eventID, Before: 1, After: 1})
@@ -87,7 +87,7 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		return fmt.Errorf("show event: %w", err)
 	}
 	if show.Event.Event != nil {
-		fmt.Fprintf(stdout, "show event=%s sequence=%d\n", show.Event.Event.CtxEventID, show.Event.Event.Sequence)
+		fmt.Fprintf(stdout, "show event=%s sequence=%d provider_session=%s\n", show.Event.Event.CtxEventID, show.Event.Event.Sequence, show.Event.Event.ProviderSessionID)
 	}
 
 	session, err := client.ShowSession(ctx, ctxagenthistory.ShowSessionOptions{ID: sessionID, Mode: "lite"})
@@ -95,22 +95,6 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		return fmt.Errorf("show session: %w", err)
 	}
 	fmt.Fprintf(stdout, "show session events=%d mode=%s\n", len(session.Session.Events), session.Session.Mode)
-
-	locate, err := client.LocateEvent(ctx, ctxagenthistory.LocateEventOptions{ID: eventID})
-	if err != nil {
-		return fmt.Errorf("locate event: %w", err)
-	}
-	if locate.Location.Source != nil {
-		fmt.Fprintf(stdout, "locate provider=%s cursor=%s\n", locate.Location.Provider, locate.Location.Source.Cursor)
-	}
-
-	sessionLocation, err := client.LocateSession(ctx, ctxagenthistory.LocateSessionOptions{ID: sessionID})
-	if err != nil {
-		return fmt.Errorf("locate session: %w", err)
-	}
-	if sessionLocation.Location.Source != nil {
-		fmt.Fprintf(stdout, "locate session provider=%s cursor=%s\n", sessionLocation.Location.Provider, sessionLocation.Location.Source.Cursor)
-	}
 
 	return nil
 }
@@ -203,7 +187,6 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 		envelope["event"] = map[string]any{
 			"event":  event,
 			"events": []map[string]any{event},
-			"source": dogfoodSource(),
 		}
 	case "showSession":
 		envelope["session"] = map[string]any{
@@ -213,14 +196,9 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 				"providerSessionId": "dogfood-session",
 			},
 			"events": []map[string]any{dogfoodEvent()},
-			"source": dogfoodSource(),
 			"mode":   "lite",
 			"format": "json",
 		}
-	case "locateEvent":
-		envelope["location"] = dogfoodLocation(true)
-	case "locateSession":
-		envelope["location"] = dogfoodLocation(false)
 	default:
 		envelope["operation"] = "error"
 		envelope["error"] = map[string]any{
@@ -235,39 +213,16 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 
 func dogfoodEvent() map[string]any {
 	return map[string]any{
-		"ctxEventId":   fixtureEventID,
-		"ctxSessionId": fixtureSessionID,
-		"sequence":     1,
-		"eventType":    "message",
-		"role":         "assistant",
-		"source":       "codex",
-		"cursor":       "line:1",
-		"text":         "local agent history search result",
-	}
-}
-
-func dogfoodSource() map[string]any {
-	return map[string]any{
-		"path":         "/tmp/ctx-sdk-dogfood/session.jsonl",
-		"cursor":       "line:1",
-		"exists":       false,
-		"sourceId":     "33333333-3333-4333-8333-333333333333",
-		"sourceFormat": "codex_session_jsonl",
-	}
-}
-
-func dogfoodLocation(includeEvent bool) map[string]any {
-	location := map[string]any{
+		"ctxEventId":        fixtureEventID,
 		"ctxSessionId":      fixtureSessionID,
 		"provider":          "codex",
 		"providerSessionId": "dogfood-session",
-		"source":            dogfoodSource(),
-		"resume":            map[string]any{"cursor": "line:1"},
+		"sourceFormat":      "codex_session_jsonl",
+		"sequence":          1,
+		"eventType":         "message",
+		"role":              "assistant",
+		"text":              "local agent history search result",
 	}
-	if includeEvent {
-		location["ctxEventId"] = fixtureEventID
-	}
-	return location
 }
 
 func operationName(name string) string {
@@ -276,10 +231,6 @@ func operationName(name string) string {
 		return "showEvent"
 	case "show_session":
 		return "showSession"
-	case "locate_event":
-		return "locateEvent"
-	case "locate_session":
-		return "locateSession"
 	case "setup":
 		return "init"
 	default:

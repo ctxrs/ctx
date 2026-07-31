@@ -120,10 +120,6 @@ class LocalCliAdapterTests(unittest.TestCase):
                 "showSession",
             )
             self.assertEqual(client.showSession("session-1")["operation"], "showSession")
-            self.assertEqual(client.locate_event("event-1")["operation"], "locateEvent")
-            self.assertEqual(client.locateEvent("event-1")["operation"], "locateEvent")
-            self.assertEqual(client.locate_session("session-1")["operation"], "locateSession")
-            self.assertEqual(client.locateSession("session-1")["operation"], "locateSession")
 
     def test_search_requires_query_term_or_file_before_cli(self) -> None:
         with fake_ctx(fail=True) as cli:
@@ -361,8 +357,6 @@ class DogfoodExampleTests(unittest.TestCase):
         self.assertEqual(snapshot.search["operation"], "search")
         self.assertEqual(snapshot.event["operation"], "showEvent")
         self.assertEqual(snapshot.session["operation"], "showSession")
-        self.assertEqual(snapshot.event_location["operation"], "locateEvent")
-        self.assertEqual(snapshot.session_location["operation"], "locateSession")
         self.assertEqual(snapshot.search["search"]["results"][0]["resultScope"], "event")
         self.assertEqual(
             snapshot.search["search"]["resultWindow"],
@@ -480,25 +474,6 @@ def _fake_ctx_script(
                     "format": "json",
                 }
             )
-        elif args[:2] == ["locate", "event"]:
-            payload.update(
-                {
-                    "payload_type": "event_location",
-                    "ctx_event_id": args[2],
-                    "ctx_session_id": "session-1",
-                    "provider": "codex",
-                    "source": {"path": "/tmp/session.jsonl", "exists": True},
-                }
-            )
-        elif args[:2] == ["locate", "session"]:
-            payload.update(
-                {
-                    "payload_type": "session_location",
-                    "ctx_session_id": args[2],
-                    "provider": "codex",
-                    "source": {"path": "/tmp/session.jsonl", "exists": True},
-                }
-            )
         elif command == "search":
             payload.update(
                 {
@@ -569,8 +544,6 @@ def assert_agent_history_v1_envelope(test: unittest.TestCase, payload: object) -
             test.assertEqual(hit["retrievalScore"], 0.98)
     elif operation == "showEvent":
         _assert_required_keys(test, value, {"events"})
-    elif operation in {"locateEvent", "locateSession"}:
-        _assert_required_keys(test, value, {"ctxSessionId", "provider", "source"})
     elif operation == "error":
         _assert_required_keys(test, value, {"code", "message", "retryable"})
 
@@ -601,8 +574,6 @@ EXPECTED_PAYLOAD_KEYS = {
     "search": "search",
     "showEvent": "event",
     "showSession": "session",
-    "locateEvent": "location",
-    "locateSession": "location",
     "error": "error",
 }
 

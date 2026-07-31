@@ -148,30 +148,27 @@ installer and development installer place those native runtime files under
 They are product runtime assets, not provider-history storage, and may be shared
 by multiple ctx data roots on the same machine.
 
-## Source-authoritative derived storage
+## Core and derived storage
 
-Provider transcript files and explicit plugin/custom source streams are the
-sole authority for history content in v0.26. ctx creates three disposable
-local consumers:
+Import reads provider transcript files and explicit plugin/custom source
+streams, applies content policy, and publishes a self-contained Core
+generation with stable identities, metadata, and policy-selected normalized
+content. ctx also maintains local consumers:
 
-- `search/lexical` contains immutable Tantivy generations. The complete
-  policy-selected meaningful body is indexed for term matching but is not
-  stored. Stored fields are bounded identity, filter, ordering, citation, and
-  exact typed-locator metadata.
+- `search/lexical` contains immutable verified Core/Tantivy generations used
+  for lexical search and complete show presentation.
 - `search/semantic` contains generation-bound flat-F32 vectors, hashes, and
-  offsets. Semantic projection hydrates provider bytes before filtering,
-  chunking, or embedding and does not persist plaintext transcript chunks.
+  offsets derived from eligible Core content; it does not persist separate
+  plaintext transcript chunks.
 - `relational.sqlite` contains a disposable metadata projection for stable
   read-only `ctx_*` SQL views. It can contain IDs, provider/source metadata,
-  timestamps, workspace/cwd data, touched-file metadata, event classes,
-  locators, and projection state. It does not contain message bodies or
-  display previews.
+  timestamps, workspace/cwd data, touched-file metadata, event classes, and
+  projection state. It does not contain message bodies or display previews.
 
-All three consumers are rebuildable from current provider sources. Search,
-show, and MCP presentation hydrate exact content through the typed locator and
-resolver bound to the active lexical generation. A missing, changed, stale, or
-unsupported source fails with typed source availability rather than falling
-back to a stored text copy.
+Search, show, and MCP presentation read the active verified Core generation.
+They do not reopen provider transcript files at query time. Provider-file
+changes become visible after import or daemon refresh publishes a new Core
+generation.
 
 Pre-v0.26 history is never opened, migrated, or used as fallback. After a
 source-backed Tantivy generation is verified and active, ctx deletes old
@@ -263,11 +260,10 @@ same identity-aware `--delete-data` operation completes. The nonsecret
 
 ## What ctx Avoids By Default
 
-The current CLI does not store command/tool result bodies, stdout/stderr,
-binary artifacts, image payloads, raw diffs, provider-private blobs, message
-bodies, or display previews in Tantivy or the relational projection. Result
-events retain compact metadata, typed evidence, citations, exact locators, and
-an optional `ContentRef`; the provider source remains authoritative.
+The current CLI does not retain payload classes excluded by policy, including
+binary artifacts, image payloads, raw diffs, and provider-private blobs. Core
+does retain policy-selected normalized message and result content needed for
+search and show; the relational projection remains metadata-only.
 See
 [`provider-import-policy.md`](provider-import-policy.md) for the native adapter
 content policy.
@@ -280,21 +276,10 @@ copy token values from `agent_conversations.conversation_data`.
 No session text, prompts, transcripts, or indexed snippets are sent by ctx by
 default.
 
-Search, show, and MCP read rendered message bodies ephemerally from their
-recorded local provider sources. `--content indexed` remains an accepted
-compatibility selector, but it does not mean the body comes from an index:
-both show policies hydrate provider-authoritative content. Hydrated bodies are
-not written back to Tantivy, the semantic generation, the relational
-projection, or the Pro graph. Exact locators and verification metadata remain
-bounded.
-
-For local Pro materialization, eligible Codex result bodies are re-read from
-their original JSONL records immediately before a journal page is sent. The
-public resolver verifies immutable record and full-body hashes. Complete UTF-8
-outputs of at most 256 KiB may be attached transiently, with at most 1 MiB total
-per request; oversized, missing, changed, unreadable, or unsupported content is
-omitted in full. Sidecar bytes are never written to canonical journal payloads,
-digests, chunks, or the Pro graph handoff checkpoint.
+Search, show, MCP, and eligible Pro materialization consume the verified Core
+generation rather than reopening original provider records. Output remains
+bounded, and content excluded by import policy is not reconstructed at query
+time.
 
 ## Provider-Owned Data
 
@@ -305,11 +290,9 @@ files needed to choose the provider's winning root. It does not create provider
 directories, migrate provider data, execute provider commands, or combine a
 selected replacement with old defaults. Exact one-shot paths are read only
 after the user supplies `--path` and are not remembered as discovery policy.
-If a source moves, changes, or is deleted, a matching lexical record may remain
-discoverable but content rendering fails with typed source availability. ctx
-does not return an old indexed copy or an empty placeholder. Refresh or
-explicitly re-import the source to publish a generation bound to its current
-bytes.
+If a source moves, changes, or is deleted, the active Core generation remains
+self-contained and queryable. Refresh or explicit import discovers the new
+source state and atomically publishes the corresponding generation.
 
 ## Command Read/Write Behavior
 
@@ -325,9 +308,8 @@ local upsert as described above.
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate lexical generation and atomic publication, catalog/epoch metadata, relational catch-up, and optional daemon files; semantic catch-up is daemon-owned |
-| `ctx show session` / `ctx show event` | active lexical metadata plus exact provider records selected by typed locators | selected `--out` path for `show session` when provided |
-| `ctx locate` | active lexical locator/provenance metadata | none |
-| `ctx search` | active lexical generation and exact provider records for result hydration; depending on refresh mode, bounded provider discovery/path metadata and existing semantic generation | candidate lexical generation publication and relational catch-up only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
+| `ctx show session` / `ctx show event` | active verified Core generation | selected `--out` path for `show session` when provided |
+| `ctx search` | active verified Core generation and existing semantic generation; depending on refresh mode, bounded provider discovery/path metadata | candidate Core generation publication and relational catch-up only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
 | `ctx sql` | `relational.sqlite` metadata projection and active lexical generation identity for generation checks | may initialize an empty disposable projection on a completely fresh root; never refreshes sources or creates prior-epoch storage |
 | `ctx pro` / `ctx pro setup` | selected credential store, commercial account state, signed release metadata/artifact, source-backed Core history, and an optional first-challenge codename only for `ctx pro --referral <codename>` | selected credential store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
 | `ctx pro manage` | selected credential store and commercial account state | may refresh the WorkOS session in the selected credential store and open a hosted billing-portal URL |
@@ -355,8 +337,8 @@ explicit source-backed import with that opt-out requires an existing endpoint.
 `ctx setup --catalog-only` does not autostart daemon maintenance.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
-write any derived generation. It still reads exact provider records to hydrate
-results. Default `--backend hybrid --refresh off`
+write any derived generation. It serves results from the active Core
+generation. Default `--backend hybrid --refresh off`
 uses semantic evidence only when semantic coverage is complete and dirty work is
 drained, and otherwise falls back to lexical. Explicit semantic searches may ask
 the daemon query service to embed the query from an already-cached local model
@@ -493,8 +475,8 @@ ctx import --history-source example-agent/default
 ```
 
 Current adapters are safe to re-run. They rescan sources idempotently and keep
-source paths or cursors when available. Imports always commit valid records and
-report rejected records. Sources with no usable imported content fail, as do
+stable source identity and import-progress metadata. Imports always commit valid
+records and report rejected records. Sources with no usable imported content fail, as do
 unreadable or incompatible sources; ctx-owned generation failures abort the
 command. Native provider progress is scoped by provider, source format, and an
 opaque source identity derived from the configured source root.
@@ -505,8 +487,8 @@ verifies its manifest and policy identity, then atomically publishes it under
 semantic, and Pro consumers are advanced only against a verified active Core
 generation and fail closed on generation mismatch.
 
-Custom history JSONL and history-source plugins follow the same
-source-authoritative lifecycle. Failed plugin runs do not advance cursor state.
+Custom history JSONL and history-source plugins follow the same import and Core
+publication lifecycle. Failed plugin runs do not advance cursor state.
 Explicit file paths and plugin manifests are not added to `config.toml` or
 treated as fixed provider homes.
 
@@ -610,7 +592,7 @@ deletion; it is security metadata outside the user-deletable Pro inventory.
 
 ## Privacy Truth
 
-Provider transcripts, indexed terms, hydrated snippets, commands, and file
+Provider transcripts, indexed terms, Core snippets, commands, and file
 paths may contain credentials, customer data, private repository names, or
 proprietary design notes.
 

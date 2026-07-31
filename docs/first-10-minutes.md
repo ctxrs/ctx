@@ -90,8 +90,8 @@ refresh when they live in bounded default locations, and still support explicit
 `--path` imports.
 
 After upgrading from an older ctx version, the first refresh or import can
-re-read previously indexed provider transcripts once so the local index includes
-current touched-file metadata and local transcript text.
+perform a one-time provider reimport so Core includes current touched-file
+metadata and local transcript text.
 
 ## 5. Search
 
@@ -113,12 +113,12 @@ Copy ctx-owned IDs from the result and inspect the hit or transcript:
 ```bash
 ctx show event <ctx-event-id> --window 3
 ctx show session <ctx-session-id>
-ctx locate event <ctx-event-id>
 ```
 
 Use citations from `ctx search` or `ctx show` when the retrieved material
-affects an answer or implementation. Add `--format json` only when a script or `jq`
-needs exact fields.
+affects an answer or implementation. Add `--format json` only when a script or
+`jq` needs exact fields such as `provider_session_id`; for Codex, that field is
+the resume UUID.
 
 ## 6. Local Help And Upgrade Status
 

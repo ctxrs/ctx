@@ -14,7 +14,7 @@ public final class AgentHistoryClientTest {
         acceptsCanonicalSearchFixture();
         camelizesSearchRetrievalJson();
         decodesAllCanonicalFixturesThroughTypedResponses();
-        normalizesRawShowAndLocateResponses();
+        normalizesRawShowResponses();
         buildsSearchCommand();
         localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment();
         searchRequiresIntent();
@@ -143,22 +143,14 @@ public final class AgentHistoryClientTest {
         assertEquals(null, response.getSearch().getPagination().getNextCursor());
     }
 
-    private static void normalizesRawShowAndLocateResponses() {
+    private static void normalizesRawShowResponses() {
         Map<String, String> responses = new LinkedHashMap<>();
         responses.put("showEvent", "{"
                 + "\"event\":{\"ctx_event_id\":\"event-1\",\"ctx_session_id\":\"session-1\","
+                + "\"provider\":\"codex\",\"provider_session_id\":\"provider-session\","
                 + "\"sequence\":7,\"event_type\":\"message\",\"role\":\"assistant\","
-                + "\"source\":\"codex\",\"text\":\"hello\"},"
-                + "\"events\":[{\"ctx_event_id\":\"event-1\",\"ctx_session_id\":\"session-1\",\"sequence\":7}],"
-                + "\"source\":{\"path\":\"/tmp/session.jsonl\",\"exists\":true}"
-                + "}");
-        responses.put("locateEvent", "{"
-                + "\"ctx_session_id\":\"session-1\","
-                + "\"ctx_event_id\":\"event-1\","
-                + "\"provider\":\"codex\","
-                + "\"provider_session_id\":\"provider-session\","
-                + "\"source\":{\"path\":\"/tmp/session.jsonl\",\"cursor\":\"line:7\",\"exists\":true},"
-                + "\"resume\":{\"cursor\":\"line:7\"}"
+                + "\"text\":\"hello\"},"
+                + "\"events\":[{\"ctx_event_id\":\"event-1\",\"ctx_session_id\":\"session-1\",\"sequence\":7}]"
                 + "}");
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport("local-cli", responses));
 
@@ -166,13 +158,7 @@ public final class AgentHistoryClientTest {
         assertEquals("showEvent", shown.operation());
         assertEquals("event-1", shown.getEvent().getEvent().getCtxEventId());
         assertEquals(Integer.valueOf(7), shown.getEvent().getEvents().get(0).getSequence());
-        assertEquals("/tmp/session.jsonl", shown.getEvent().getSource().getPath());
-
-        LocateEventResponse located = client.locateEvent("event-1");
-        assertEquals("locateEvent", located.operation());
-        assertEquals("session-1", located.getLocation().getCtxSessionId());
-        assertEquals("line:7", located.getLocation().getSource().getCursor());
-        assertEquals("line:7", located.getLocation().getResume().getCursor());
+        assertEquals("provider-session", shown.getEvent().getEvent().getProviderSessionId());
     }
 
     private static void decodesAllCanonicalFixturesThroughTypedResponses() throws Exception {
@@ -206,12 +192,6 @@ public final class AgentHistoryClientTest {
                                     break;
                                 case "showSession":
                                     new ShowSessionResponse(canonical).getSession().getEvents();
-                                    break;
-                                case "locateEvent":
-                                    new LocateEventResponse(canonical).getLocation().getSource();
-                                    break;
-                                case "locateSession":
-                                    new LocateSessionResponse(canonical).getLocation().getSource();
                                     break;
                                 case "error":
                                     ErrorResponse error = new ErrorResponse(canonical);

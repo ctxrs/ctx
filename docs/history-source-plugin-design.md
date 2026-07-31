@@ -13,7 +13,7 @@ storage schema. The plugin or provider owns a durable
 - explicit single-source selection;
 - validation of the durable path, container schema, and source identity;
 - registration of that provider-owned path with the custom source-backed route;
-- daemon-owned generation publication and exact locator hydration.
+- daemon-owned import and Core generation publication.
 
 This does not add an in-process ABI, marketplace, hosted plugin store,
 installation manager, automatic plugin scheduling, command-output body store,
@@ -84,10 +84,10 @@ upsert explicit custom ctx_history_jsonl_v1 route
 daemon-owned source-backed refresh + terminal receipt
 ```
 
-The provider file is the exact-body authority. Tantivy and relational
-projections are disposable derivatives, and complete-content hydration returns
-to that file through typed locators. Neither the old Store, a `NativePath`
-body, a command-output snapshot, nor a ctx-owned content pack participates.
+Core is the imported-content authority used by search and presentation.
+Tantivy and relational projections are disposable derivatives. Neither a
+`NativePath` body nor a command-output snapshot participates in query-time
+presentation.
 
 The shared custom JSONL route handles cold builds, no-ops, appends, rewrites,
 replacement, deletion, source certification, and crash-safe publication.
@@ -107,8 +107,8 @@ ctx import --history-source-manifest ./ctx-history-plugin.json
 ```
 
 Selection must resolve to one source. Search filters use the canonical
-`provider_key/source_id` identity from the provider file. `ctx show ...
---content complete` hydrates from that same file.
+`provider_key/source_id` identity from the provider file. Once imported,
+`ctx show ... --content complete` reads normalized content from Core.
 
 ## Failure And Trust Model
 
