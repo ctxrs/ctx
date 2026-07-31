@@ -134,10 +134,42 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
         serde_json::json!([
             "core_projection_currentness",
             "materialized_target_coverage",
+            "repository_coverage",
             "access",
             "supported_operations",
             "available_operations"
         ])
+    );
+    assert_eq!(
+        canonical["status_contract"]["repository_coverage_axes"],
+        serde_json::json!([
+            "repository_candidate_events",
+            "logical_binding_events",
+            "certified_live_root_access_events",
+            "file_evidence_events",
+            "exact_commit_evidence_events",
+            "exact_pull_request_evidence_events"
+        ])
+    );
+    assert_eq!(
+        canonical["status_contract"]["operation_prerequisites"]["global"],
+        serde_json::json!(["current_complete_projection", "entitlement", "graph_key"])
+    );
+    assert_eq!(
+        canonical["status_contract"]["operation_prerequisites"]["file_blame"],
+        serde_json::json!([
+            "local_repository",
+            "certified_live_root_access_events",
+            "file_evidence_events"
+        ])
+    );
+    assert_eq!(
+        canonical["status_contract"]["operation_prerequisites"]["commit_blame"],
+        serde_json::json!(["exact_commit_evidence_events"])
+    );
+    assert_eq!(
+        canonical["status_contract"]["operation_prerequisites"]["pull_request_blame"],
+        serde_json::json!(["exact_pull_request_evidence_events"])
     );
     let ack = canonical["dto_fields"]["CoreSourceDeltaPageApplied"]["required"]
         .as_array()

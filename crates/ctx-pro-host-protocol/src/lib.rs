@@ -55,7 +55,7 @@ mod message;
 pub use message::{
     Capability, CoreProjectionCurrentness, HelloRequest, HelloResult, HelperEnvelope,
     HelperMessage, HostEnvelope, HostMessage, MaterializedCoverage, ProAccessState,
-    ProAccessStatus, ProOperation, StatusRequest, StatusResult,
+    ProAccessStatus, ProOperation, RepositoryCoverage, StatusRequest, StatusResult,
 };
 mod query;
 pub use query::{
