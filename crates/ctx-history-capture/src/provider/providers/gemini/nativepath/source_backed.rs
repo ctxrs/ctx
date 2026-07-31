@@ -662,6 +662,33 @@ fn decode_display_text(
         .filter(|text| text != "rewind to "))
 }
 
+#[cfg(test)]
+pub(super) fn project_gemini_test_event(
+    source: &GeminiTranscriptSource,
+    event: super::GeminiRetainedEvent,
+) -> GeminiSourceBackedResult<LexicalDocument> {
+    let session = read_gemini_session_header(source)?;
+    let source_key = gemini_source_key(&session.native_session_id)?;
+    let session_id = gemini_session_id(&source_key, &session.native_session_id)?;
+    let parent_session_id = session
+        .parent_native_session_id
+        .as_deref()
+        .map(|parent_native_session_id| {
+            let parent_source = gemini_source_key(parent_native_session_id)?;
+            gemini_session_id(&parent_source, parent_native_session_id)
+        })
+        .transpose()?;
+    project_event(
+        &source_key,
+        session_id,
+        parent_session_id,
+        parent_session_id.unwrap_or(session_id),
+        &source.path.display().to_string(),
+        &session,
+        event,
+    )
+}
+
 fn capture_scan_error(error: GeminiScanError) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
