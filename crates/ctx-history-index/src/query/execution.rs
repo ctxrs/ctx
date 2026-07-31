@@ -13,8 +13,48 @@ impl VerifiedIndex {
         cursor: Option<&SourceEventCursor>,
         limit: usize,
     ) -> Result<SourceEventPage> {
-        self.core_source_event_page(source, cursor, limit)
-            .map(Into::into)
+        if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&limit) {
+            return Err(IndexError::InvalidSourceEventPageSize {
+                requested: limit,
+                maximum: MAX_SOURCE_EVENT_PAGE_ITEMS,
+            });
+        }
+        source.validate_contract()?;
+        let after = cursor
+            .map(|cursor| self.validate_source_event_cursor(source, cursor))
+            .transpose()?;
+        self.validate_source_event_source(source)?;
+        let candidates =
+            self.source_event_addresses_after(source, after, limit.saturating_add(1))?;
+        let candidate_count = candidates.len();
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        for candidate in candidates.into_iter().take(limit) {
+            let record = stored_event_record(&self.searcher, candidate.address, fields)?;
+            if record.event_id.digest() != candidate.identity_digest
+                || !record.source.exact_descriptor_eq(source)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SOURCE_EVENT_ORDER_FIELD,
+                ));
+            }
+            items.push(record);
+        }
+        let terminal = items.len() == candidate_count;
+        let next_cursor = if terminal {
+            None
+        } else {
+            items.last().map(|event| {
+                SourceEventCursor::new(self.generation_id.clone(), source.clone(), event.event_id)
+            })
+        };
+        Ok(SourceEventPage {
+            generation_id: self.generation_id.clone(),
+            source: source.clone(),
+            items,
+            next_cursor,
+            terminal,
+        })
     }
 
     /// Enumerates complete Core records for one exact source in strict full
@@ -136,7 +176,49 @@ impl VerifiedIndex {
         cursor: Option<&SemanticEventCursor>,
         limit: usize,
     ) -> Result<SemanticEventPage> {
-        self.core_semantic_event_page(cursor, limit).map(Into::into)
+        if !(1..=MAX_SEMANTIC_EVENT_PAGE_ITEMS).contains(&limit) {
+            return Err(IndexError::InvalidSemanticEventPageSize {
+                requested: limit,
+                maximum: MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+            });
+        }
+        let after = cursor
+            .map(|cursor| self.validate_semantic_event_cursor(cursor))
+            .transpose()?;
+        let eligibility = SemanticEligibility::CURRENT;
+        let eligible_total = self.semantic_eligible_event_count()?;
+        let candidates =
+            self.semantic_event_addresses_after(after, eligibility, limit.saturating_add(1))?;
+        let candidate_count = candidates.len();
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        for candidate in candidates.into_iter().take(limit) {
+            let record = stored_event_record(&self.searcher, candidate.address, fields)?;
+            if record.event_id.digest() != candidate.identity_digest
+                || !eligibility.includes(&record)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    EVENT_IDENTITY_DIGEST_FIELD,
+                ));
+            }
+            items.push(record);
+        }
+        let terminal = items.len() == candidate_count;
+        let next_cursor = if terminal {
+            None
+        } else {
+            items
+                .last()
+                .map(|event| SemanticEventCursor::new(self.generation_id.clone(), event.event_id))
+        };
+        Ok(SemanticEventPage {
+            generation_id: self.generation_id.clone(),
+            eligibility,
+            eligible_total,
+            items,
+            next_cursor,
+            terminal,
+        })
     }
 
     /// Returns complete Core semantic candidates in strict full
@@ -413,73 +495,117 @@ impl VerifiedIndex {
             return Ok(None);
         }
         filters.validate_source_identity_filters()?;
-        let identities = self.custom_source_identity_events(fields)?;
-        let terms = identities
-            .iter()
-            .filter(|(_, provider_key, source_id)| {
-                source_identity_values_match(filters, provider_key, source_id)
-            })
-            .map(|(event_id, _, _)| Term::from_field_text(fields.event_id, &event_id.to_string()))
-            .collect::<Vec<_>>();
-        if terms.is_empty() {
-            return Ok(Some(Box::new(EmptyQuery)));
-        }
-        Ok(Some(Box::new(TermSetQuery::new(terms))))
-    }
-
-    fn custom_source_identity_events(
-        &self,
-        fields: Fields,
-    ) -> Result<&Vec<(Uuid, String, String)>> {
-        if self.custom_source_identity_events.get().is_none() {
-            let query = TermQuery::new(
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
+            Occur::Must,
+            Box::new(TermQuery::new(
                 Term::from_field_text(fields.provider, "custom"),
                 IndexRecordOption::Basic,
-            );
-            let identities = self
-                .event_records_for_query(&query, fields)?
-                .into_iter()
-                .filter_map(|event| {
-                    let event_id = event.event_id.as_uuid();
-                    custom_source_identity(&event).map(|(provider_key, source_id)| {
-                        (event_id, provider_key.to_owned(), source_id.to_owned())
-                    })
-                })
-                .collect();
-            let _ = self.custom_source_identity_events.set(identities);
+            )),
+        )];
+        if let Some(history_source) = filters.history_source.as_deref() {
+            let Some((history_provider_key, history_source_id)) =
+                history_source.trim().split_once('/')
+            else {
+                return Ok(Some(Box::new(EmptyQuery)));
+            };
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_provider_key, history_provider_key),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_source_id, history_source_id),
+                    IndexRecordOption::Basic,
+                )),
+            ));
         }
-        Ok(self
-            .custom_source_identity_events
-            .get()
-            .expect("custom source identity cache was initialized"))
+        if let Some(provider_key) = filters.provider_key.as_deref().map(str::trim) {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_provider_key, provider_key),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        if let Some(source_id) = filters.source_id.as_deref().map(str::trim) {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_source_id, source_id),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        Ok(Some(Box::new(BooleanQuery::new(clauses))))
     }
 
     pub fn event_by_id(&self, event_id: Uuid) -> Result<Option<EventRecord>> {
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let query = TermQuery::new(
-            Term::from_field_text(fields.event_id, &event_id.to_string()),
-            IndexRecordOption::Basic,
-        );
-        let mut events = self.event_records_for_query(&query, fields)?;
-        events.sort_by_key(|event| event.event_id.as_uuid());
-        Ok(events.into_iter().next())
+        Ok(self
+            .events_by_ids_if_bounded(&[event_id], 1)?
+            .and_then(|mut events| events.pop()))
     }
 
     /// Returns one verified event together with its complete stored Core data.
     pub fn core_event_by_id(&self, event_id: Uuid) -> Result<Option<CoreEventRecord>> {
+        Ok(self
+            .core_events_by_ids_if_bounded(&[event_id], 1, usize::MAX)?
+            .and_then(|mut events| events.pop()))
+    }
+
+    /// Returns a complete requested-order body-free metadata mapping when the
+    /// caller's count bound admits it and every compact event ID is present.
+    pub fn events_by_ids_if_bounded(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+    ) -> Result<Option<Vec<EventRecord>>> {
+        if event_ids.len() > maximum_events {
+            return Ok(None);
+        }
+        if event_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
         let fields = fields_from_schema(self.searcher.schema())?;
-        let query = TermQuery::new(
-            Term::from_field_text(fields.event_id, &event_id.to_string()),
-            IndexRecordOption::Basic,
+        let mut requested = BTreeSet::new();
+        for event_id in event_ids {
+            if !requested.insert(*event_id) {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        let query = TermSetQuery::new(
+            requested
+                .iter()
+                .map(|event_id| Term::from_field_text(fields.event_id, &event_id.to_string()))
+                .collect::<Vec<_>>(),
         );
-        let address = self
-            .searcher
-            .search(&query, &DocSetCollector)?
-            .into_iter()
-            .next();
-        address
-            .map(|address| stored_core_event_record(&self.searcher, address, fields))
-            .transpose()
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let mut records = BTreeMap::new();
+        for address in addresses {
+            let record = stored_event_record(&self.searcher, address, fields)?;
+            let event_id = record.event_id.as_uuid();
+            if !requested.contains(&event_id) {
+                return Err(IndexError::InvalidStoredDocumentField("event_id"));
+            }
+            if records.insert(event_id, record).is_some() {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        if records.len() != requested.len() {
+            return Ok(None);
+        }
+        let mut ordered = Vec::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let Some(record) = records.remove(event_id) else {
+                return Ok(None);
+            };
+            ordered.push(record);
+        }
+        Ok(Some(ordered))
     }
 
     /// Returns a complete, requested-order Core mapping when the batch is
@@ -526,6 +652,25 @@ impl VerifiedIndex {
             budget.maximum_encoded_core_bytes,
             budget.maximum_content_bytes,
             true,
+        )
+    }
+
+    /// Returns a complete requested-order Core batch only when every record
+    /// fits the aggregate byte ceilings. Unlike paged presentation reads, an
+    /// oversized singleton is declined instead of being admitted for progress.
+    pub fn core_events_by_ids_with_strict_budget(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<Option<CoreEventBatch>> {
+        validate_core_event_page_budget(budget)?;
+        self.core_event_batch_by_ids(
+            event_ids,
+            maximum_events,
+            budget.maximum_encoded_core_bytes,
+            budget.maximum_content_bytes,
+            false,
         )
     }
 
@@ -577,11 +722,12 @@ impl VerifiedIndex {
             let Some(next_content_bytes) = content_bytes.checked_add(record_content_bytes) else {
                 return Ok(None);
             };
-            if (next_stored_core_bytes > maximum_stored_core_bytes
-                || next_content_bytes > maximum_content_bytes)
-                && !(admit_oversized_singleton && event_ids.len() == 1)
+            if next_stored_core_bytes > maximum_stored_core_bytes
+                || next_content_bytes > maximum_content_bytes
             {
-                return Ok(None);
+                if !(admit_oversized_singleton && event_ids.len() == 1) {
+                    return Ok(None);
+                }
             }
             stored_core_bytes = next_stored_core_bytes;
             content_bytes = next_content_bytes;
@@ -626,15 +772,37 @@ impl VerifiedIndex {
             &format!("{}.*", canonical_uuid_prefix(prefix)?),
             fields.event_id,
         )?;
-        let mut events = self.event_records_for_query(&query, fields)?;
+        validate_event_sort_fast_fields(&self.searcher)?;
+        let collector = TopDocs::with_limit(ID_PREFIX_MATCH_LIMIT).tweak_score(|segment_reader| {
+            let high = segment_reader
+                .fast_fields()
+                .u64(EVENT_ID_HIGH_FIELD)
+                .ok()
+                .map(|column| column.first_or_default_col(0));
+            let low = segment_reader
+                .fast_fields()
+                .u64(EVENT_ID_LOW_FIELD)
+                .ok()
+                .map(|column| column.first_or_default_col(0));
+            move |doc, _score| {
+                Reverse((
+                    high.as_ref().map_or(0, |column| column.get_val(doc)),
+                    low.as_ref().map_or(0, |column| column.get_val(doc)),
+                ))
+            }
+        });
+        type PrefixHit = (Reverse<(u64, u64)>, DocAddress);
+        let hits: Vec<PrefixHit> = self.searcher.search(&query, &collector)?;
+        let mut events = hits
+            .into_iter()
+            .map(|(_, address)| stored_event_record(&self.searcher, address, fields))
+            .collect::<Result<Vec<_>>>()?;
         events.sort_by_key(|event| event.event_id.as_uuid());
-        events.truncate(ID_PREFIX_MATCH_LIMIT);
         Ok(events)
     }
 
     pub fn session_by_id(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
-        let events = self.events_for_session(session_id)?;
-        Ok(events.first().map(SessionRecord::from))
+        self.session_record_by_id(session_id)
     }
 
     /// Returns at most two UUID-prefix matches, enough to distinguish a unique
@@ -645,15 +813,7 @@ impl VerifiedIndex {
             &format!("{}.*", canonical_uuid_prefix(prefix)?),
             fields.session_id,
         )?;
-        let mut events = self.event_records_for_query(&query, fields)?;
-        sort_events_for_session(&mut events);
-        let mut sessions = BTreeMap::new();
-        for event in &events {
-            sessions
-                .entry(event.session_id.as_uuid())
-                .or_insert_with(|| SessionRecord::from(event));
-        }
-        Ok(sessions.into_values().take(ID_PREFIX_MATCH_LIMIT).collect())
+        self.session_records_for_ambiguity_query(&query)
     }
 
     /// Returns at most two sessions for an exact provider-native session key.
@@ -686,23 +846,49 @@ impl VerifiedIndex {
             ));
         }
         let query = BooleanQuery::new(clauses);
-        let mut events = self.event_records_for_query(&query, fields)?;
-        sort_events_for_session(&mut events);
-        let mut sessions = BTreeMap::new();
-        for event in &events {
-            sessions
-                .entry(event.session_id.as_uuid())
-                .or_insert_with(|| SessionRecord::from(event));
+        self.session_records_for_ambiguity_query(&query)
+    }
+
+    fn session_records_for_ambiguity_query(&self, query: &dyn Query) -> Result<Vec<SessionRecord>> {
+        let session_ids = self
+            .searcher
+            .search(query, &SessionIdCollector::new(ID_PREFIX_MATCH_LIMIT))?;
+        let mut sessions = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            let Some(session) = self.session_record_by_id(session_id)? else {
+                return Err(IndexError::InvalidStoredDocumentField("session_id"));
+            };
+            sessions.push(session);
         }
-        Ok(sessions.into_values().take(ID_PREFIX_MATCH_LIMIT).collect())
+        Ok(sessions)
+    }
+
+    fn session_record_by_id(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
+        let Some(coordinate) = self
+            .session_event_coordinate_prefix(session_id, 1)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let event = self
+            .event_by_id(coordinate.event_id)?
+            .ok_or(IndexError::InvalidStoredDocumentField("session_id"))?;
+        if event.session_id.as_uuid() != session_id {
+            return Err(IndexError::InvalidStoredDocumentField("session_id"));
+        }
+        Ok(Some(SessionRecord::from(&event)))
     }
 
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<EventRecord>> {
-        Ok(self
-            .core_events_for_session(session_id)?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.session_id, &session_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let mut events = self.event_records_for_query(&query, fields)?;
+        sort_events_for_session(&mut events);
+        Ok(events)
     }
 
     /// Returns every event in one session with complete stored Core data.
@@ -925,9 +1111,54 @@ impl VerifiedIndex {
         session_id: Uuid,
         maximum_events: usize,
     ) -> Result<Option<Vec<EventRecord>>> {
-        Ok(self
-            .core_events_for_session_if_bounded(session_id, maximum_events)?
-            .map(|records| records.into_iter().map(|record| record.event).collect()))
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.session_id, &session_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        if self.searcher.search(&query, &Count)? > maximum_events {
+            return Ok(None);
+        }
+        let mut events = self.event_records_for_query(&query, fields)?;
+        sort_events_for_session(&mut events);
+        Ok(Some(events))
+    }
+
+    /// Returns exact normalized Core-content bytes for a nonempty session only
+    /// when its cardinality is within the caller's bound. This reads indexed
+    /// size metadata and never loads or decodes stored Core records.
+    pub fn core_content_bytes_for_session_if_bounded(
+        &self,
+        session_id: Uuid,
+        maximum_events: usize,
+    ) -> Result<Option<usize>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.session_id, &session_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let count = self.searcher.search(&query, &Count)?;
+        if count == 0 || count > maximum_events {
+            return Ok(None);
+        }
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let segments = self.searcher.segment_readers();
+        let mut total = 0_usize;
+        for address in addresses {
+            let segment = segments
+                .get(address.segment_ord as usize)
+                .ok_or(IndexError::InvalidStoredDocumentField("session_id"))?;
+            let value = segment
+                .fast_fields()
+                .u64(CORE_CONTENT_BYTES_FIELD)?
+                .first(address.doc_id)
+                .ok_or(IndexError::InvalidStoredDocumentField(
+                    CORE_CONTENT_BYTES_FIELD,
+                ))?;
+            let value = usize::try_from(value).map_err(|_| IndexError::CountOverflow)?;
+            total = total.checked_add(value).ok_or(IndexError::CountOverflow)?;
+        }
+        Ok(Some(total))
     }
 
     /// Returns complete Core events only when session cardinality is within a
@@ -1285,6 +1516,96 @@ impl VerifiedIndex {
 
     fn core_event_record(&self, address: DocAddress, fields: Fields) -> Result<CoreEventRecord> {
         stored_core_event_record(&self.searcher, address, fields)
+    }
+}
+
+struct SessionIdCollector {
+    limit: usize,
+}
+
+impl SessionIdCollector {
+    fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+}
+
+struct SessionIdSegmentCollector {
+    high: tantivy::columnar::Column<u64>,
+    low: tantivy::columnar::Column<u64>,
+    limit: usize,
+    session_ids: BTreeSet<Uuid>,
+    invalid: bool,
+}
+
+struct SessionIdSegmentFruit {
+    session_ids: BTreeSet<Uuid>,
+    invalid: bool,
+}
+
+impl Collector for SessionIdCollector {
+    type Fruit = Vec<Uuid>;
+    type Child = SessionIdSegmentCollector;
+
+    fn for_segment(
+        &self,
+        _segment_local_id: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(SessionIdSegmentCollector {
+            high: segment.fast_fields().u64(SESSION_ID_HIGH_FIELD)?,
+            low: segment.fast_fields().u64(SESSION_ID_LOW_FIELD)?,
+            limit: self.limit,
+            session_ids: BTreeSet::new(),
+            invalid: false,
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
+    }
+
+    fn merge_fruits(
+        &self,
+        segment_fruits: Vec<SessionIdSegmentFruit>,
+    ) -> tantivy::Result<Self::Fruit> {
+        let mut session_ids = BTreeSet::new();
+        for fruit in segment_fruits {
+            if fruit.invalid {
+                return Err(tantivy::TantivyError::InvalidArgument(
+                    "session identity fast field is absent".to_owned(),
+                ));
+            }
+            for session_id in fruit.session_ids {
+                session_ids.insert(session_id);
+                if session_ids.len() > self.limit {
+                    session_ids.pop_last();
+                }
+            }
+        }
+        Ok(session_ids.into_iter().collect())
+    }
+}
+
+impl SegmentCollector for SessionIdSegmentCollector {
+    type Fruit = SessionIdSegmentFruit;
+
+    fn collect(&mut self, doc: DocId, _score: Score) {
+        let (Some(high), Some(low)) = (self.high.first(doc), self.low.first(doc)) else {
+            self.invalid = true;
+            return;
+        };
+        self.session_ids
+            .insert(Uuid::from_u128((u128::from(high) << 64) | u128::from(low)));
+        if self.session_ids.len() > self.limit {
+            self.session_ids.pop_last();
+        }
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        SessionIdSegmentFruit {
+            session_ids: self.session_ids,
+            invalid: self.invalid,
+        }
     }
 }
 

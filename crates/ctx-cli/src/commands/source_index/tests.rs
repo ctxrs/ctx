@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn search_context_bytes_use_core_snippets_and_complete_core_sessions_not_json() {
+    fn search_context_bytes_use_core_snippets_and_indexed_complete_session_sizes_not_json() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let (value, collection, index) = search_existing_generation(

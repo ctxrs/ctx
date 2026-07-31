@@ -4,14 +4,12 @@ use std::{
     sync::OnceLock,
 };
 
-use tantivy::{Index, ReloadPolicy, Searcher};
-use uuid::Uuid;
-
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
     load_manifest_for_metas, meta_generation, searcher_generation, validate_schema,
     verify_searcher, verify_searcher_structure, GenerationManifest, IndexError, Result,
 };
+use tantivy::{Index, ReloadPolicy, Searcher};
 
 /// A verified reader pinned to one immutable lexical generation.
 pub struct VerifiedIndex {
@@ -19,7 +17,6 @@ pub struct VerifiedIndex {
     pub(crate) manifest: GenerationManifest,
     pub(crate) generation_id: String,
     pub(crate) semantic_eligible_event_count: OnceLock<u64>,
-    pub(crate) custom_source_identity_events: OnceLock<Vec<(Uuid, String, String)>>,
 }
 
 impl VerifiedIndex {
@@ -68,7 +65,6 @@ impl VerifiedIndex {
             manifest,
             generation_id,
             semantic_eligible_event_count: OnceLock::new(),
-            custom_source_identity_events: OnceLock::new(),
         })
     }
 

@@ -627,19 +627,19 @@ fn verified_generation_rejects_forged_source_ownership() {
     };
     assert!(matches!(
         error,
-        IndexError::InvalidStoredDocumentField("core_record")
+        IndexError::InvalidStoredDocumentField("query_metadata")
     ));
 }
 
 #[test]
-fn verified_generation_rejects_malformed_stored_core_record() {
+fn verified_generation_defers_malformed_stored_core_validation_until_exact_read() {
     let temp = tempdir().unwrap();
     let source = source("malformed-core.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer
-        .add_core_record(document(&source, 1, "complete body"))
-        .unwrap();
+    let event = document(&source, 1, "complete body");
+    let event_id = event.event_id.as_uuid();
+    writer.add_core_record(event).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -669,11 +669,12 @@ fn verified_generation_rejects_malformed_stored_core_record() {
         vec![forged],
     );
 
-    let error = match VerifiedIndex::open(temp.path()) {
-        Ok(_) => panic!("malformed stored Core generation unexpectedly opened"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, IndexError::CoreRecord(_)));
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(verified.event_by_id(event_id).unwrap().is_some());
+    assert!(matches!(
+        verified.core_event_by_id(event_id),
+        Err(IndexError::CoreRecord(_))
+    ));
 }
 
 #[test]
@@ -823,7 +824,7 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
     );
     assert!(matches!(
         one_pass,
-        IndexError::InvalidStoredDocumentField("event_identity")
+        IndexError::InvalidStoredDocumentField("query_metadata")
     ));
 }
 
