@@ -103,6 +103,116 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 }
 
 #[test]
+fn bounded_core_event_batch_is_complete_and_requested_ordered() {
+    let temp = tempdir().unwrap();
+    let source = source("bounded-event-batch.jsonl");
+    let first = document(&source, 1, "first complete body");
+    let second = document(&source, 2, "second complete body");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_document(first.clone()).unwrap();
+    writer.add_document(second.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let requested = [second.event_id.as_uuid(), first.event_id.as_uuid()];
+    crate::query::reset_stored_core_event_record_materializations();
+    let records = index
+        .core_events_by_ids_if_bounded(&requested, requested.len(), usize::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.event_id.as_uuid())
+            .collect::<Vec<_>>(),
+        requested
+    );
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.core_record.content.meaningful_text())
+            .collect::<Vec<_>>(),
+        vec!["second complete body", "first complete body",]
+    );
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        2,
+        "each requested event must materialize exactly one stored Core document"
+    );
+
+    crate::query::reset_stored_core_event_record_materializations();
+    assert!(index
+        .core_events_by_ids_if_bounded(&requested, requested.len() - 1, usize::MAX)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        0,
+        "an oversized request must be declined before querying stored documents"
+    );
+
+    crate::query::reset_stored_core_event_record_materializations();
+    assert!(matches!(
+        index.core_events_by_ids_if_bounded(
+            &[first.event_id.as_uuid(), first.event_id.as_uuid()],
+            2,
+            usize::MAX,
+        ),
+        Err(IndexError::DuplicateEventIdentity(_))
+    ));
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        0,
+        "duplicate requested IDs must be rejected before querying stored documents"
+    );
+
+    assert!(index
+        .core_events_by_ids_if_bounded(&[first.event_id.as_uuid(), Uuid::nil()], 2, usize::MAX,)
+        .unwrap()
+        .is_none());
+    assert!(index
+        .core_events_by_ids_if_bounded(&[], 0, 0)
+        .unwrap()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn bounded_core_event_batch_stops_after_one_large_record_exceeds_byte_budget() {
+    let temp = tempdir().unwrap();
+    let source = source("large-bounded-event-batch.jsonl");
+    let large_body = "large-core-body".repeat(128 * 1024);
+    let documents = (1..=3)
+        .map(|sequence| document(&source, sequence, &large_body))
+        .collect::<Vec<_>>();
+    let requested = documents
+        .iter()
+        .map(|document| document.event_id.as_uuid())
+        .collect::<Vec<_>>();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for document in documents {
+        writer.add_document(document).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    assert!(index
+        .core_events_by_ids_if_bounded(&requested, requested.len(), 1)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        1,
+        "byte-budget refusal must stop before decoding the remaining large records"
+    );
+}
+
+#[test]
 fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
     let temp = tempdir().unwrap();
     let source = source("script-aware.jsonl");

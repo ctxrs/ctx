@@ -41,10 +41,29 @@ impl CoreFixture {
     }
 
     fn document(&self, sequence: u64, role: EventRole, body: impl Into<String>) -> LexicalDocument {
+        self.document_in_session("gemini-session", sequence, role, body)
+    }
+
+    fn document_in_session(
+        &self,
+        native_session_id: &str,
+        sequence: u64,
+        role: EventRole,
+        body: impl Into<String>,
+    ) -> LexicalDocument {
+        let native_session_key = TypedKey::utf8(native_session_id).unwrap();
+        let session_key =
+            NativeSessionKey::native_id("session", native_session_key.clone()).unwrap();
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &self.source,
+            logical_session_kind: "thread",
+            native_session_key: &session_key,
+        })
+        .unwrap();
         let item = NativeItemKey::native_id("message", TypedKey::U64(sequence)).unwrap();
         let event_id = derive_event_id(EventIdentityInput {
             source: &self.source,
-            session_id: self.session_id,
+            session_id,
             logical_item_kind: "message",
             native_item_key: &item,
             subrecord_selector: None,
@@ -52,9 +71,9 @@ impl CoreFixture {
         .unwrap();
         LexicalDocument {
             event_id,
-            session_id: self.session_id,
+            session_id,
             parent_session_id: None,
-            root_session_id: self.session_id,
+            root_session_id: session_id,
             source: self.source.clone(),
             locator: SourceRecordLocator::new(
                 self.source.clone(),
@@ -62,7 +81,7 @@ impl CoreFixture {
                     byte_offset: sequence * 100,
                     byte_length: 80,
                     physical_ordinal: sequence,
-                    native_session_key: Some(TypedKey::utf8("gemini-session").unwrap()),
+                    native_session_key: Some(native_session_key),
                     native_event_key: Some(TypedKey::U64(sequence)),
                 },
                 LocatorRevisionPolicy::ExactSourceRevision,
@@ -70,7 +89,7 @@ impl CoreFixture {
                 [sequence as u8; 32],
             )
             .unwrap(),
-            provider_session_id: Some("gemini-session".to_owned()),
+            provider_session_id: Some(native_session_id.to_owned()),
             branch: None,
             source_path: Some(
                 self.temp
@@ -146,7 +165,7 @@ fn core_builder_combines_complete_lite_turn_with_provider_source_absent() {
         .into_iter()
         .find(|record| record.event_sequence == 1)
         .unwrap();
-    let mut builder = CoreSemanticDocumentBuilder { index: &index };
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
@@ -169,11 +188,112 @@ fn core_builder_preserves_semantic_tail_beyond_sixteen_kib() {
     let index = fixture.index(vec![fixture.document(1, EventRole::User, body.clone())]);
     let page = index.core_semantic_event_page(None, 1).unwrap();
     let record = page.items.first().unwrap();
-    let mut builder = CoreSemanticDocumentBuilder { index: &index };
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
 
     let document = builder.build_document(record).unwrap().unwrap();
 
     assert!(record.core_record.content.meaningful_text().ends_with(TAIL));
     assert!(document.text.ends_with(TAIL));
     assert!(document.text.len() > 16 * 1024);
+}
+
+#[test]
+fn core_builder_reuses_one_bounded_session_for_multiple_lite_turns() {
+    let fixture = CoreFixture::new();
+    let index = fixture.index(vec![
+        fixture.document(1, EventRole::User, "first question"),
+        fixture.document(2, EventRole::Assistant, "first answer"),
+        fixture.document(3, EventRole::User, "second question"),
+        fixture.document(4, EventRole::Assistant, "second answer"),
+    ]);
+    let anchors = index
+        .core_events_for_session(fixture.session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.role.as_deref() == Some(EventRole::User.as_str()))
+        .collect::<Vec<_>>();
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+
+    let first = builder.build_document(&anchors[0]).unwrap().unwrap();
+    let second = builder.build_document(&anchors[1]).unwrap().unwrap();
+
+    assert_eq!(
+        first.text,
+        "user:\nfirst question\n\nassistant:\nfirst answer"
+    );
+    assert_eq!(
+        second.text,
+        "user:\nsecond question\n\nassistant:\nsecond answer"
+    );
+    assert_eq!(builder.session_cache.sessions.len(), 1);
+}
+
+#[test]
+fn core_builder_fails_closed_when_lite_turn_session_exceeds_cache_bound() {
+    let fixture = CoreFixture::new();
+    let index = fixture.index(vec![
+        fixture.document(1, EventRole::User, "bounded question"),
+        fixture.document(2, EventRole::Assistant, "bounded answer"),
+    ]);
+    let anchor = index
+        .core_events_for_session(fixture.session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .find(|record| record.event_sequence == 1)
+        .unwrap();
+    let mut builder = CoreSemanticDocumentBuilder {
+        index: &index,
+        session_cache: LiteTurnSessionCache::new(1, 1, MAX_LITE_TURN_CACHED_CORE_BYTES),
+    };
+
+    let error = builder
+        .build_document(&anchor)
+        .expect_err("an oversized session must not produce a partial lite turn");
+
+    assert!(error
+        .to_string()
+        .contains("cannot fit the bounded lite-turn session cache"));
+    assert!(builder.session_cache.sessions.is_empty());
+    assert_eq!(builder.session_cache.retained_events, 0);
+    assert_eq!(builder.session_cache.retained_stored_core_bytes, 0);
+}
+
+#[test]
+fn core_builder_many_sessions_stay_within_tiny_lru_bounds() {
+    let fixture = CoreFixture::new();
+    let mut documents = Vec::new();
+    for session in 0..12_u64 {
+        let native_session_id = format!("gemini-session-{session}");
+        documents.push(fixture.document_in_session(
+            &native_session_id,
+            session * 2 + 1,
+            EventRole::User,
+            format!("question {session}"),
+        ));
+        documents.push(fixture.document_in_session(
+            &native_session_id,
+            session * 2 + 2,
+            EventRole::Assistant,
+            format!("answer {session}"),
+        ));
+    }
+    let index = fixture.index(documents);
+    let anchors = index.core_semantic_event_page(None, 64).unwrap().items;
+    assert_eq!(anchors.len(), 12);
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+
+    for anchor in &anchors {
+        builder.build_document(anchor).unwrap().unwrap();
+    }
+
+    assert_eq!(
+        builder.session_cache.sessions.len(),
+        MAX_LITE_TURN_CACHED_SESSIONS
+    );
+    assert_eq!(
+        builder.session_cache.lru.len(),
+        builder.session_cache.sessions.len()
+    );
+    assert!(builder.session_cache.retained_events <= MAX_LITE_TURN_CACHED_EVENTS);
+    assert!(builder.session_cache.retained_stored_core_bytes <= MAX_LITE_TURN_CACHED_CORE_BYTES);
 }

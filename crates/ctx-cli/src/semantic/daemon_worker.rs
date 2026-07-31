@@ -1,9 +1,15 @@
-use std::{path::Path, process, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::Path,
+    process,
+    time::Instant,
+};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{utc_now, AgentType, CaptureProvider, EventRole, EventType};
 use ctx_history_index::{CoreEventRecord, VerifiedIndex};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::{DaemonRunArgs, DaemonTriggerCommandArg};
 
@@ -38,6 +44,12 @@ use super::{
 use super::daemon::daemon_test_job;
 
 use crate::output::compact_json;
+
+const MAX_LITE_TURN_SESSION_EVENTS: usize = 4_096;
+const MAX_LITE_TURN_SESSION_CORE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LITE_TURN_CACHED_SESSIONS: usize = 8;
+const MAX_LITE_TURN_CACHED_EVENTS: usize = 4_096;
+const MAX_LITE_TURN_CACHED_CORE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) enum DaemonSemanticModelStartup {
@@ -296,7 +308,7 @@ fn reconcile_source_backed_semantic_page(
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
-    let mut builder = CoreSemanticDocumentBuilder { index: &index };
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
         runtime,
         cache_dir,
@@ -310,6 +322,107 @@ fn reconcile_source_backed_semantic_page(
 
 struct CoreSemanticDocumentBuilder<'a> {
     index: &'a VerifiedIndex,
+    // The document-builder trait is record-oriented, so retain only a tiny,
+    // generation-pin-local LRU rather than session bodies for the rebuild.
+    session_cache: LiteTurnSessionCache,
+}
+
+struct CachedLiteTurnSession {
+    events: Vec<CoreEventRecord>,
+    stored_core_bytes: usize,
+}
+
+struct LiteTurnSessionCache {
+    sessions: HashMap<Uuid, CachedLiteTurnSession>,
+    lru: VecDeque<Uuid>,
+    retained_events: usize,
+    retained_stored_core_bytes: usize,
+    maximum_sessions: usize,
+    maximum_events: usize,
+    maximum_stored_core_bytes: usize,
+}
+
+impl LiteTurnSessionCache {
+    fn new(
+        maximum_sessions: usize,
+        maximum_events: usize,
+        maximum_stored_core_bytes: usize,
+    ) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            lru: VecDeque::new(),
+            retained_events: 0,
+            retained_stored_core_bytes: 0,
+            maximum_sessions,
+            maximum_events,
+            maximum_stored_core_bytes,
+        }
+    }
+
+    fn contains(&self, session_id: Uuid) -> bool {
+        self.sessions.contains_key(&session_id)
+    }
+
+    fn touch(&mut self, session_id: Uuid) {
+        if let Some(position) = self
+            .lru
+            .iter()
+            .position(|candidate| *candidate == session_id)
+        {
+            self.lru.remove(position);
+        }
+        self.lru.push_back(session_id);
+    }
+
+    fn events(&self, session_id: Uuid) -> Option<&[CoreEventRecord]> {
+        self.sessions
+            .get(&session_id)
+            .map(|session| session.events.as_slice())
+    }
+
+    fn insert(
+        &mut self,
+        session_id: Uuid,
+        events: Vec<CoreEventRecord>,
+        stored_core_bytes: usize,
+    ) -> bool {
+        if self.maximum_sessions == 0
+            || events.len() > self.maximum_events
+            || stored_core_bytes > self.maximum_stored_core_bytes
+        {
+            return false;
+        }
+        while self.sessions.len() >= self.maximum_sessions
+            || self.retained_events.saturating_add(events.len()) > self.maximum_events
+            || self
+                .retained_stored_core_bytes
+                .saturating_add(stored_core_bytes)
+                > self.maximum_stored_core_bytes
+        {
+            let Some(oldest) = self.lru.pop_front() else {
+                return false;
+            };
+            if let Some(evicted) = self.sessions.remove(&oldest) {
+                self.retained_events = self.retained_events.saturating_sub(evicted.events.len());
+                self.retained_stored_core_bytes = self
+                    .retained_stored_core_bytes
+                    .saturating_sub(evicted.stored_core_bytes);
+            }
+        }
+        self.retained_events = self.retained_events.saturating_add(events.len());
+        self.retained_stored_core_bytes = self
+            .retained_stored_core_bytes
+            .saturating_add(stored_core_bytes);
+        self.sessions.insert(
+            session_id,
+            CachedLiteTurnSession {
+                events,
+                stored_core_bytes,
+            },
+        );
+        self.touch(session_id);
+        true
+    }
 }
 
 impl SourceBackedSemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
@@ -358,10 +471,62 @@ impl SourceBackedSemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
 }
 
 impl CoreSemanticDocumentBuilder<'_> {
-    fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
-        let events = self
-            .index
-            .core_events_for_session(anchor.session_id.as_uuid())?;
+    fn new(index: &VerifiedIndex) -> CoreSemanticDocumentBuilder<'_> {
+        CoreSemanticDocumentBuilder {
+            index,
+            session_cache: LiteTurnSessionCache::new(
+                MAX_LITE_TURN_CACHED_SESSIONS,
+                MAX_LITE_TURN_CACHED_EVENTS,
+                MAX_LITE_TURN_CACHED_CORE_BYTES,
+            ),
+        }
+    }
+
+    fn paired_assistant(&mut self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
+        let session_id = anchor.session_id.as_uuid();
+        if self.session_cache.contains(session_id) {
+            self.session_cache.touch(session_id);
+        } else {
+            let (events, stored_core_bytes) = self
+                .index
+                .core_events_for_session_within_budget(
+                    session_id,
+                    MAX_LITE_TURN_SESSION_EVENTS,
+                    MAX_LITE_TURN_SESSION_CORE_BYTES,
+                )?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Core semantic session {} exceeds the {}-event/{}-byte lite-turn bounds",
+                        anchor.session_id,
+                        MAX_LITE_TURN_SESSION_EVENTS,
+                        MAX_LITE_TURN_SESSION_CORE_BYTES
+                    )
+                })?;
+            if events
+                .iter()
+                .any(|record| record.session_id != anchor.session_id)
+            {
+                return Err(anyhow!(
+                    "Core semantic session {} returned a mismatched record",
+                    anchor.session_id
+                ));
+            }
+            if !self
+                .session_cache
+                .insert(session_id, events, stored_core_bytes)
+            {
+                return Err(anyhow!(
+                    "Core semantic session {} cannot fit the bounded lite-turn session cache",
+                    anchor.session_id
+                ));
+            }
+        }
+        let events = self.session_cache.events(session_id).ok_or_else(|| {
+            anyhow!(
+                "Core semantic session {} was not retained for lite-turn pairing",
+                anchor.session_id
+            )
+        })?;
         let anchor_index = events
             .iter()
             .position(|record| record.event_id == anchor.event_id)
