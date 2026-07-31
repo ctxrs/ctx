@@ -1,26 +1,19 @@
 use std::{
     collections::BTreeSet,
-    convert::Infallible,
     path::{Component, Path, PathBuf},
 };
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     provider::{
-        file_touches::{
-            event_type_supports_structured_file_touches,
-            visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
-        },
         normalization::provider_result_outcome_evidence,
         source_backed::{
             ParallelLeafScanCancelled, ParallelLeafScanEmitter, ParallelLeafScanWorkerError,
@@ -39,16 +32,13 @@ use crate::provider::providers::openhands::{
     event::{decode_openhands_event, OpenHandsDecodedEvent},
     source::{
         normalized_openhands_authority_path, openhands_checked_path_text,
-        openhands_json_path_is_event, OpenHandsFileObservation, OPENHANDS_MAX_PATH_BYTES,
+        openhands_json_path_is_event, OPENHANDS_MAX_PATH_BYTES,
     },
 };
 
 mod detection;
-mod hydration;
 
 use detection::detects_current_cli_format;
-#[cfg(test)]
-pub(super) use hydration::{hydration_failure, validate_locator};
 
 const OPENHANDS_SOURCE_ANCHOR_NAMESPACE: &str = "openhands.v1-conversation";
 const OPENHANDS_NATIVE_SESSION_NAMESPACE: &str = "openhands.v1-conversation";
@@ -60,8 +50,6 @@ const OPENHANDS_SOURCE_REVISION_KIND: &str = "openhands-v1-conversation-leaves-v
 const OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE: &str = "openhands.v1-selected-tree";
 const OPENHANDS_INVENTORY_REVISION_KIND: &str = "openhands-v1-event-file-inventory-v2";
 const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v2";
-const OPENHANDS_OBJECT_COORDINATE_KIND: &str = "openhands-event-object-v1";
-const OPENHANDS_LEAF_REVISION_DOMAIN: &[u8] = b"ctx.openhands.leaf-revision.v1\0";
 const OPENHANDS_CONVERSATION_CONTENT_DOMAIN: &[u8] = b"ctx.openhands.conversation-content.v1\0";
 const OPENHANDS_DISCOVERY_MAX_DEPTH: usize = 16;
 const OPENHANDS_DISCOVERY_MAX_ENTRIES: usize = 16_384;
@@ -74,8 +62,6 @@ pub(crate) enum OpenHandsSourceBackedErrorV2 {
     EventFiles(#[from] EventFileInventoryError),
     #[error(transparent)]
     Projection(#[from] ctx_history_core::ProjectionContractError),
-    #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(
@@ -97,22 +83,6 @@ pub(crate) enum OpenHandsSourceBackedErrorV2 {
     InvalidRelativeEventKey { path: PathBuf },
     #[error("OpenHands source-backed count overflow")]
     CountOverflow,
-    #[error("locator is not an OpenHands V1 conversation-tree event")]
-    InvalidLocator,
-    #[error("OpenHands locator conversation {0:?} was not found below the selected V1 tree")]
-    LocatorConversationNotFound(String),
-    #[error("OpenHands locator leaf {0:?} was not found below the selected V1 tree")]
-    LocatorLeafNotFound(String),
-    #[error("OpenHands locator leaf revision no longer matches the exact event file")]
-    LeafRevisionMismatch,
-    #[error("OpenHands locator record digest no longer matches the exact event file")]
-    RecordDigestMismatch,
-    #[error("OpenHands locator object coordinate no longer matches the decoded event")]
-    ObjectCoordinateMismatch,
-    #[error("OpenHands hydrated event identity does not match its locator coordinate")]
-    EventIdentityMismatch,
-    #[error("OpenHands hydrated session identity does not match its locator source")]
-    SessionIdentityMismatch,
     #[error("OpenHands exact event file no longer decodes: {0}")]
     DecodeFailed(String),
 }
@@ -156,7 +126,7 @@ pub(crate) struct OpenHandsEventFileLeafProjection {
     native_event_id: String,
     record_digest: [u8; 32],
     certified_bytes: u64,
-    document: Option<LexicalDocument>,
+    record: Option<CoreRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,8 +266,8 @@ impl OpenHandsEventFileAdapterV2 {
         plan: &OpenHandsEventFileSourcePlan,
         emitter: &mut ParallelLeafScanEmitter<'_, CertifiedSource, SourceBackedRouteError>,
     ) -> Result<CertifiedSource, ParallelLeafScanWorkerError<SourceBackedRouteError>> {
-        match project_group_with_emit(group, plan, |document| match document {
-            Some(document) => emitter.emit_document(document),
+        match project_group_with_emit(group, plan, |record| match record {
+            Some(record) => emitter.emit_core_record(record),
             None if emitter.is_cancelled() => Err(ParallelLeafScanCancelled),
             None => Ok(()),
         }) {
@@ -425,7 +395,7 @@ fn validate_plan_for_group(
 pub(super) fn project_group(
     group: EventFileGroup<'_>,
     plan: &OpenHandsEventFileSourcePlan,
-    mut emit: impl FnMut(LexicalDocument) -> OpenHandsSourceBackedResultV2<()>,
+    mut emit: impl FnMut(CoreRecord) -> OpenHandsSourceBackedResultV2<()>,
 ) -> OpenHandsSourceBackedResultV2<CertifiedSource> {
     match project_group_with_emit(group, plan, |document| match document {
         Some(document) => emit(document),
@@ -444,7 +414,7 @@ enum ProjectGroupError<E> {
 fn project_group_with_emit<E>(
     group: EventFileGroup<'_>,
     plan: &OpenHandsEventFileSourcePlan,
-    mut checkpoint: impl FnMut(Option<LexicalDocument>) -> Result<(), E>,
+    mut checkpoint: impl FnMut(Option<CoreRecord>) -> Result<(), E>,
 ) -> Result<CertifiedSource, ProjectGroupError<E>> {
     let jobs = projection_jobs(group, plan).map_err(ProjectGroupError::Provider)?;
     let mut event_ids = BTreeSet::new();
@@ -492,8 +462,8 @@ fn project_group_with_emit<E>(
                 },
             ));
         }
-        if let Some(document) = projected.document {
-            checkpoint(Some(document)).map_err(ProjectGroupError::Emit)?;
+        if let Some(record) = projected.record {
+            checkpoint(Some(record)).map_err(ProjectGroupError::Emit)?;
             counts.retained_records =
                 checked_add(counts.retained_records, 1).map_err(ProjectGroupError::Provider)?;
             counts.indexed_documents =
@@ -549,43 +519,32 @@ pub(crate) fn project_leaf_job(
     }
     let provider_bytes = group.read_leaf_at(job.leaf_ordinal)?;
     let record_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
-    let legacy_observation = OpenHandsFileObservation::from_metadata(leaf.metadata())?;
     let relative_file_key = leaf.coordinates().relative_file_key.clone();
-    let leaf_revision =
-        leaf_revision_digest(&relative_file_key, &legacy_observation, record_digest)?;
     let decoded = decode_openhands_event(leaf.display_path(), &provider_bytes)
         .map_err(|error| OpenHandsSourceBackedErrorV2::DecodeFailed(error.to_string()))?;
     let native_event_id = decoded.event_id().to_owned();
-    let document = lexical_body(&decoded)
+    let record = lexical_body(&decoded)
         .map(|body| {
-            Ok::<LexicalDocument, OpenHandsSourceBackedErrorV2>(LexicalDocument {
-                event_id: event_identity(&plan.source, plan.session_id, decoded.event_id())?,
-                session_id: plan.session_id,
-                parent_session_id: None,
-                root_session_id: plan.session_id,
-                source: plan.source.clone(),
-                locator: source_locator(
-                    &plan.source,
-                    &relative_file_key,
-                    decoded.event_id(),
-                    leaf_revision,
-                    record_digest,
-                )?,
-                provider_session_id: Some(plan.conversation_id.clone()),
-                branch: None,
-                source_path: Some(openhands_checked_path_text(leaf.display_path())?),
-                agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
-                is_primary: true,
-                event_sequence: u64::try_from(job.leaf_ordinal)
+            let mut record = CoreRecord::new_selected(
+                event_identity(&plan.source, plan.session_id, decoded.event_id())?,
+                plan.session_id,
+                plan.session_id,
+                plan.source.clone(),
+                u64::try_from(job.leaf_ordinal)
                     .map_err(|_| OpenHandsSourceBackedErrorV2::CountOverflow)?,
-                occurred_at_unix_ms: Some(decoded.timestamp().timestamp_millis()),
-                event_type: decoded.event_type().as_str().to_owned(),
-                role: Some(decoded.role().as_str().to_owned()),
+                decoded.event_type().as_str(),
+                ctx_history_core::AgentType::Primary.as_str(),
+                true,
+                OPENHANDS_PARSER_REVISION,
                 body,
-                workspace: None,
-                cwd: None,
-                touched_files: touched_files(&decoded),
-            })
+            )
+            .map_err(core_contract)?;
+            record.provider_session_id = Some(plan.conversation_id.clone());
+            record.native_event_id = Some(TypedKey::utf8(decoded.event_id())?);
+            record.occurred_at_unix_ms = Some(decoded.timestamp().timestamp_millis());
+            record.role = Some(decoded.role().as_str().to_owned());
+            record.validate_contract().map_err(core_contract)?;
+            Ok::<CoreRecord, OpenHandsSourceBackedErrorV2>(record)
         })
         .transpose()?;
     Ok(OpenHandsEventFileLeafProjection {
@@ -593,8 +552,8 @@ pub(crate) fn project_leaf_job(
         relative_file_key,
         native_event_id,
         record_digest,
-        certified_bytes: legacy_observation.length,
-        document,
+        certified_bytes: leaf.metadata().len(),
+        record,
     })
 }
 
@@ -683,23 +642,6 @@ fn openhands_value_indicates_timeout(value: &serde_json::Value) -> bool {
     visit(value, &mut remaining)
 }
 
-fn touched_files(decoded: &OpenHandsDecodedEvent) -> Vec<String> {
-    let mut paths = Vec::new();
-    let outcome = visit_provider_file_touch_drafts_with_limit(
-        decoded.value(),
-        event_type_supports_structured_file_touches(decoded.event_type()),
-        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
-        |(_, draft)| -> Result<(), Infallible> {
-            paths.push(draft.path);
-            Ok(())
-        },
-    );
-    match outcome {
-        Ok(_) => paths,
-        Err(error) => match error {},
-    }
-}
-
 pub(super) fn source_key(conversation_id: &str) -> OpenHandsSourceBackedResultV2<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         OPENHANDS_SOURCE_ANCHOR_NAMESPACE,
@@ -745,54 +687,8 @@ fn event_identity(
     })?)
 }
 
-fn identities(
-    source: &SourceKey,
-    conversation_id: &str,
-    event_id: &str,
-) -> OpenHandsSourceBackedResultV2<(StableEntityId, StableEntityId)> {
-    let session_id = session_identity(source, conversation_id)?;
-    let event_id = event_identity(source, session_id, event_id)?;
-    Ok((session_id, event_id))
-}
-
-pub(super) fn source_locator(
-    source: &SourceKey,
-    relative_file_key: &str,
-    event_id: &str,
-    leaf_revision: [u8; 32],
-    record_digest: [u8; 32],
-) -> OpenHandsSourceBackedResultV2<SourceRecordLocator> {
-    let record_coordinate = TypedKey::composite(vec![
-        TypedKey::utf8(OPENHANDS_OBJECT_COORDINATE_KIND)?,
-        TypedKey::utf8(event_id)?,
-        TypedKey::bytes(leaf_revision.to_vec())?,
-    ])?;
-    Ok(SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::TreeRecord {
-            relative_file_key: TypedKey::utf8(relative_file_key)?,
-            record_coordinate,
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?)
-}
-
-pub(super) fn leaf_revision_digest(
-    relative_file_key: &str,
-    observation: &OpenHandsFileObservation,
-    content_digest: [u8; 32],
-) -> OpenHandsSourceBackedResultV2<[u8; 32]> {
-    let observation = serde_json::to_vec(observation)?;
-    let mut digest = Sha256::new();
-    digest.update(OPENHANDS_LEAF_REVISION_DOMAIN);
-    digest.update((relative_file_key.len() as u64).to_be_bytes());
-    digest.update(relative_file_key.as_bytes());
-    digest.update((observation.len() as u64).to_be_bytes());
-    digest.update(observation);
-    digest.update(content_digest);
-    Ok(digest.finalize().into())
+fn core_contract(error: impl std::fmt::Display) -> OpenHandsSourceBackedErrorV2 {
+    OpenHandsSourceBackedErrorV2::Capture(CaptureError::InvalidPayload(error.to_string()))
 }
 
 fn digest_leaf(digest: &mut Sha256, relative_file_key: &str, evidence: &[u8; 32], length: u64) {
