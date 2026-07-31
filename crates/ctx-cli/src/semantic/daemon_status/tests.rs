@@ -316,7 +316,8 @@ fn enabled_daemon_without_observed_lifecycle_is_not_a_failure() {
         assert!(!plain.contains("Daemon failed"));
         assert!(!plain.contains("Status  failed"));
         assert!(!plain.contains("ctx daemon enable"));
-        assert!(!plain.contains("\nNext\n"));
+        assert!(normalized.contains("Hint: Check daemon startup and service health."));
+        assert!(plain.contains("\nNext\n  ctx doctor\n"));
         assert_eq!(strip_ansi(&document.render(&styled_context(width))), plain);
         assert_fits(&document, &plain_context);
     }
