@@ -207,12 +207,20 @@ fn render_sql_truncation(context: &RenderContext, result: &RawSqlResult) -> Opti
     if result.truncated.values {
         values.push(Field::new("Value-byte limit", value_bytes.as_str()));
     }
+    let detail = match (result.truncated.rows, result.truncated.values) {
+        (true, true) => {
+            "Rerun the original query with larger --max-rows and --max-value-bytes limits."
+        }
+        (true, false) => "Rerun the original query with a larger --max-rows limit.",
+        (false, true) => "Rerun the original query with a larger --max-value-bytes limit.",
+        (false, false) => unreachable!("truncation was checked above"),
+    };
     Some(diagnostic(
         context,
         Diagnostic {
             level: DiagnosticLevel::Warning,
             summary: "SQL results were truncated",
-            detail: Some("Increase the relevant query limit to return more data."),
+            detail: Some(detail),
             fields: &values,
             action: None,
         },
@@ -502,13 +510,33 @@ mod ui_tests {
         let mut result = result(vec![vec![text("codex"), text("summary")]]);
         result.truncated.rows = true;
         result.truncated.values = true;
-        let context = context(48, ColorMode::Never);
-        let document = render_sql_truncation(&context, &result).unwrap();
-        let rendered = document.render_plain();
-        assert!(rendered.starts_with("! SQL results were truncated\n"));
-        assert!(rendered.contains("Row limit"));
-        assert!(rendered.contains("Value-byte limit"));
-        assert_fits(&document, &context);
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_sql_truncation(&context, &result).unwrap();
+            let rendered = document.render_plain();
+            assert!(rendered.starts_with("! SQL results were truncated\n"));
+            assert!(rendered.contains("Row limit"));
+            assert!(rendered.contains("Value-byte limit"));
+            assert!(rendered.contains("Rerun the original query"));
+            assert!(rendered.contains("--max-rows"));
+            assert!(rendered.contains("--max-value-bytes"));
+            assert_fits(&document, &context);
+        }
+
+        result.truncated.values = false;
+        let rows_only = render_sql_truncation(&context(80, ColorMode::Never), &result)
+            .unwrap()
+            .render_plain();
+        assert!(rows_only.contains("a larger --max-rows limit"));
+        assert!(!rows_only.contains("--max-value-bytes"));
+
+        result.truncated.rows = false;
+        result.truncated.values = true;
+        let values_only = render_sql_truncation(&context(80, ColorMode::Never), &result)
+            .unwrap()
+            .render_plain();
+        assert!(values_only.contains("a larger --max-value-bytes limit"));
+        assert!(!values_only.contains("--max-rows"));
     }
 
     #[test]

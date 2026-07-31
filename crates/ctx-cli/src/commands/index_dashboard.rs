@@ -108,6 +108,36 @@ fn render_dashboard(status: &Value, context: &RenderContext, rates: DashboardRat
     document
 }
 
+pub(super) fn render_semantic_disabled_wait(status: &Value, context: &RenderContext) -> Document {
+    let lexical_ready = matches!(
+        string_at(status, &["lexical", "status"], "unknown").as_str(),
+        "ready" | "empty"
+    );
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Error,
+            title: "Semantic indexing is blocked",
+            detail: lexical_ready.then_some("Keyword search remains available."),
+        },
+    );
+    if lexical_ready {
+        append_separated(
+            &mut document,
+            section("Keyword search", render_ready_fields(status, context)),
+        );
+    }
+    append_separated(
+        &mut document,
+        section(
+            "Semantic search",
+            fields(context, &[Field::new("Status", "Off")]),
+        ),
+    );
+    append_action(&mut document, "ctx setup --semantic");
+    document
+}
+
 fn render_missing(context: &RenderContext) -> Document {
     let mut document = outcome(
         context,
@@ -160,14 +190,6 @@ fn render_lexical_failure(status: &Value, context: &RenderContext) -> Document {
 }
 
 fn render_ready(status: &Value, context: &RenderContext) -> Document {
-    let completed_bytes = u64_at(status, &["lexical", "completed_source_bytes"]);
-    let total_bytes = u64_at(status, &["lexical", "total_source_bytes"]);
-    let processed = format_bytes(total_bytes.max(completed_bytes));
-    let sessions = format_count(usize_at(status, &["lexical", "indexed_sessions"]));
-    let records = format!(
-        "{} searchable",
-        format_count(usize_at(status, &["lexical", "indexed_items"]))
-    );
     let mut document = outcome(
         context,
         Outcome {
@@ -177,20 +199,32 @@ fn render_ready(status: &Value, context: &RenderContext) -> Document {
         },
     );
     document.push_blank();
-    document.append(fields(
-        context,
-        &[
-            Field::new("Processed", &processed),
-            Field::new("Sessions", &sessions),
-            Field::new("Records", &records),
-        ],
-    ));
+    document.append(render_ready_fields(status, context));
 
     let failed = u64_at(status, &["lexical", "failed_inventory_units"]);
     if failed > 0 {
         append_attention(&mut document, context, failed);
     }
     document
+}
+
+fn render_ready_fields(status: &Value, context: &RenderContext) -> Document {
+    let completed_bytes = u64_at(status, &["lexical", "completed_source_bytes"]);
+    let total_bytes = u64_at(status, &["lexical", "total_source_bytes"]);
+    let processed = format_bytes(total_bytes.max(completed_bytes));
+    let sessions = format_count(usize_at(status, &["lexical", "indexed_sessions"]));
+    let records = format!(
+        "{} searchable",
+        format_count(usize_at(status, &["lexical", "indexed_items"]))
+    );
+    fields(
+        context,
+        &[
+            Field::new("Processed", &processed),
+            Field::new("Sessions", &sessions),
+            Field::new("Records", &records),
+        ],
+    )
 }
 
 fn render_active(status: &Value, context: &RenderContext, rates: DashboardRates) -> Document {
@@ -671,6 +705,43 @@ Semantic search  Off\n"
         assert!(missing_model.contains("Semantic search needs attention"));
         assert!(missing_model.contains("Reason  model cache missing"));
         assert!(!missing_model.contains("Embedded    357,421"));
+    }
+
+    #[test]
+    fn semantic_disabled_wait_is_blocked_without_a_success_headline() {
+        let mut ready = status(false);
+        ready["lexical"]["status"] = json!("ready");
+        ready["lexical"]["pending_inventory_units"] = json!(0);
+        ready["lexical"]["completed_source_bytes"] = json!(13_600_000_000_u64);
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width);
+            let document = render_semantic_disabled_wait(&ready, &context);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+            assert!(
+                rendered.starts_with("✗ Semantic indexing is blocked\n"),
+                "{rendered}"
+            );
+            assert!(normalized.contains("Keyword search remains available."));
+            assert!(rendered.contains("\nKeyword search\n"));
+            assert!(rendered.contains("\nSemantic search\nStatus  Off\n"));
+            assert!(rendered.ends_with("\nNext\n  ctx setup --semantic\n"));
+            assert!(!rendered.contains("Your history is searchable"));
+            assert!(!rendered.contains("ctx doctor"));
+            assert_fits(&document, &context);
+
+            let styled_context = RenderContext::for_test(
+                TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Always),
+            );
+            assert_eq!(
+                strip_ansi(
+                    &render_semantic_disabled_wait(&ready, &styled_context).render(&styled_context)
+                ),
+                rendered
+            );
+        }
     }
 
     #[test]
