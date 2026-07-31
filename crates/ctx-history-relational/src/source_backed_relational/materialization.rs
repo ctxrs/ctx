@@ -518,26 +518,7 @@ pub(super) fn validate_projected_generation(
 ) -> Result<ProjectionCounts> {
     let counts = projection_counts(conn)?;
     validate_generation_counts(counts, manifest)?;
-    let dangling_relationships: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM source_backed_sessions child
-         WHERE (child.parent_ctx_session_id IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM source_backed_sessions parent
-                    WHERE parent.ctx_session_id = child.parent_ctx_session_id
-                      AND parent.session_identity = child.parent_session_identity
-                ))
-            OR (child.root_ctx_session_id IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM source_backed_sessions root
-                    WHERE root.ctx_session_id = child.root_ctx_session_id
-                      AND root.session_identity = child.root_session_identity
-                ))",
-        [],
-        |row| row.get(0),
-    )?;
-    if dangling_relationships != 0 {
-        return invalid_record("session relationships reference absent sessions");
-    }
+    validate_all_session_relationships(conn, manifest)?;
     let dangling_event_or_file_relations: i64 = conn.query_row(
         "SELECT
             (SELECT COUNT(*) FROM source_backed_events event
@@ -567,6 +548,32 @@ pub(super) fn validate_projected_generation(
         return invalid_record("event or file relationships have mismatched stable identities");
     }
     Ok(counts)
+}
+
+fn validate_all_session_relationships(
+    conn: &Connection,
+    manifest: &ValidatedManifest,
+) -> Result<()> {
+    let mut relationships = conn.prepare(
+        "SELECT child.parent_ctx_session_id, child.parent_session_identity
+         FROM source_backed_sessions AS child
+         WHERE child.parent_ctx_session_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM source_backed_sessions AS parent
+               WHERE parent.ctx_session_id = child.parent_ctx_session_id
+                 AND parent.session_identity = child.parent_session_identity
+           )
+         UNION ALL
+         SELECT child.root_ctx_session_id, child.root_session_identity
+         FROM source_backed_sessions AS child
+         WHERE NOT EXISTS (
+             SELECT 1 FROM source_backed_sessions AS root
+             WHERE root.ctx_session_id = child.root_ctx_session_id
+               AND root.session_identity = child.root_session_identity
+         )",
+    )?;
+    validate_absent_relationships(relationships.query([])?, manifest)?;
+    Ok(())
 }
 
 pub(super) fn projection_counts(conn: &Connection) -> Result<ProjectionCounts> {
@@ -712,6 +719,7 @@ pub(super) fn validate_incremental_projected_generation(
     old: &SourceProjectionSnapshot,
     new: &SourceProjectionSnapshot,
     changed_source_ids: &BTreeSet<String>,
+    relationship_scope_changed: bool,
 ) -> Result<ProjectionCounts> {
     let counts = ProjectionCounts {
         sources: replace_count(
@@ -740,14 +748,17 @@ pub(super) fn validate_incremental_projected_generation(
         )?,
     };
     validate_generation_counts(counts, manifest)?;
-    validate_changed_rows(conn, changed_source_ids)?;
+    validate_changed_rows(conn, manifest, changed_source_ids)?;
 
     let affected_session_ids = old
         .session_ids
         .union(&new.session_ids)
         .cloned()
         .collect::<BTreeSet<_>>();
-    validate_session_reverse_dependencies(conn, &affected_session_ids)?;
+    validate_session_reverse_dependencies(conn, manifest, &affected_session_ids)?;
+    if relationship_scope_changed {
+        validate_all_session_relationships(conn, manifest)?;
+    }
     Ok(counts)
 }
 
@@ -769,27 +780,30 @@ fn validate_generation_counts(
     Ok(())
 }
 
-fn validate_changed_rows(conn: &Connection, source_ids: &BTreeSet<String>) -> Result<()> {
+fn validate_changed_rows(
+    conn: &Connection,
+    manifest: &ValidatedManifest,
+    source_ids: &BTreeSet<String>,
+) -> Result<()> {
     let mut sessions = conn.prepare(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM source_backed_sessions AS child
-                 INDEXED BY source_backed_sessions_source
-            WHERE child.source_id = ?1
-              AND (
-                  (child.parent_ctx_session_id IS NOT NULL
-                   AND NOT EXISTS (
-                       SELECT 1 FROM source_backed_sessions AS parent
-                       WHERE parent.ctx_session_id = child.parent_ctx_session_id
-                         AND parent.session_identity = child.parent_session_identity
-                   ))
-                  OR NOT EXISTS (
-                      SELECT 1 FROM source_backed_sessions AS root
-                      WHERE root.ctx_session_id = child.root_ctx_session_id
-                        AND root.session_identity = child.root_session_identity
-                  )
-              )
-        )",
+        "SELECT child.parent_ctx_session_id, child.parent_session_identity
+         FROM source_backed_sessions AS child INDEXED BY source_backed_sessions_source
+         WHERE child.source_id = ?1
+           AND child.parent_ctx_session_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM source_backed_sessions AS parent
+               WHERE parent.ctx_session_id = child.parent_ctx_session_id
+                 AND parent.session_identity = child.parent_session_identity
+           )
+         UNION ALL
+         SELECT child.root_ctx_session_id, child.root_session_identity
+         FROM source_backed_sessions AS child INDEXED BY source_backed_sessions_source
+         WHERE child.source_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM source_backed_sessions AS root
+               WHERE root.ctx_session_id = child.root_ctx_session_id
+                 AND root.session_identity = child.root_session_identity
+           )",
     )?;
     let mut events = conn.prepare(
         "SELECT EXISTS (
@@ -827,9 +841,7 @@ fn validate_changed_rows(conn: &Connection, source_ids: &BTreeSet<String>) -> Re
         )",
     )?;
     for source_id in source_ids {
-        if sessions.query_row([source_id], |row| row.get::<_, bool>(0))? {
-            return invalid_record("session relationships reference absent sessions");
-        }
+        validate_absent_relationships(sessions.query([source_id])?, manifest)?;
         if events.query_row([source_id], |row| row.get::<_, bool>(0))?
             || files.query_row([source_id], |row| row.get::<_, bool>(0))?
         {
@@ -841,37 +853,50 @@ fn validate_changed_rows(conn: &Connection, source_ids: &BTreeSet<String>) -> Re
 
 fn validate_session_reverse_dependencies(
     conn: &Connection,
+    manifest: &ValidatedManifest,
     affected_session_ids: &BTreeSet<String>,
 ) -> Result<()> {
     let mut parent = conn.prepare(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM source_backed_sessions AS child
-                 INDEXED BY source_backed_sessions_parent_reference
-            WHERE child.parent_ctx_session_id = ?1
-              AND NOT EXISTS (
-                  SELECT 1 FROM source_backed_sessions AS target
-                  WHERE target.ctx_session_id = child.parent_ctx_session_id
-                    AND target.session_identity = child.parent_session_identity
-              )
-        )",
+        "SELECT child.parent_ctx_session_id, child.parent_session_identity
+         FROM source_backed_sessions AS child
+              INDEXED BY source_backed_sessions_parent_reference
+         WHERE child.parent_ctx_session_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM source_backed_sessions AS target
+               WHERE target.ctx_session_id = child.parent_ctx_session_id
+                 AND target.session_identity = child.parent_session_identity
+           )",
     )?;
     let mut root = conn.prepare(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM source_backed_sessions AS child
-                 INDEXED BY source_backed_sessions_root_reference
-            WHERE child.root_ctx_session_id = ?1
-              AND NOT EXISTS (
-                  SELECT 1 FROM source_backed_sessions AS target
-                  WHERE target.ctx_session_id = child.root_ctx_session_id
-                    AND target.session_identity = child.root_session_identity
-              )
-        )",
+        "SELECT child.root_ctx_session_id, child.root_session_identity
+         FROM source_backed_sessions AS child
+              INDEXED BY source_backed_sessions_root_reference
+         WHERE child.root_ctx_session_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM source_backed_sessions AS target
+               WHERE target.ctx_session_id = child.root_ctx_session_id
+                 AND target.session_identity = child.root_session_identity
+           )",
     )?;
     for session_id in affected_session_ids {
-        if parent.query_row([session_id], |row| row.get::<_, bool>(0))?
-            || root.query_row([session_id], |row| row.get::<_, bool>(0))?
+        validate_absent_relationships(parent.query([session_id])?, manifest)?;
+        validate_absent_relationships(root.query([session_id])?, manifest)?;
+    }
+    Ok(())
+}
+
+fn validate_absent_relationships(
+    mut rows: rusqlite::Rows<'_>,
+    manifest: &ValidatedManifest,
+) -> Result<()> {
+    while let Some(row) = rows.next()? {
+        let target_id: String = row.get(0)?;
+        let identity: Vec<u8> = row.get(1)?;
+        let identity =
+            StableEntityId::decode_canonical(&identity).map_err(contract_record_error)?;
+        if identity.entity_kind() != StableEntityKind::Session
+            || identity.as_uuid().to_string() != target_id
+            || !manifest.permits_absent_relationship_target(identity)
         {
             return invalid_record("session relationships reference absent sessions");
         }

@@ -132,8 +132,8 @@ CREATE VIEW ctx_sessions AS
 SELECT
     s.ctx_session_id AS ctx_session_id,
     NULL AS history_record_id,
-    s.parent_ctx_session_id AS parent_ctx_session_id,
-    s.root_ctx_session_id AS root_ctx_session_id,
+    parent.ctx_session_id AS parent_ctx_session_id,
+    root.ctx_session_id AS root_ctx_session_id,
     src.provider AS provider,
     s.provider_session_id AS provider_session_id,
     s.external_agent_id AS external_agent_id,
@@ -152,7 +152,13 @@ SELECT
     s.branch AS branch,
     s.workspace AS workspace
 FROM source_backed_sessions s
-JOIN source_backed_sources src ON src.source_id = s.source_id;
+JOIN source_backed_sources src ON src.source_id = s.source_id
+LEFT JOIN source_backed_sessions parent
+    ON parent.ctx_session_id = s.parent_ctx_session_id
+   AND parent.session_identity = s.parent_session_identity
+LEFT JOIN source_backed_sessions root
+    ON root.ctx_session_id = s.root_ctx_session_id
+   AND root.session_identity = s.root_session_identity;
 
 DROP VIEW IF EXISTS ctx_events;
 CREATE VIEW ctx_events AS
@@ -235,7 +241,8 @@ SELECT
 FROM source_backed_sources src
 LEFT JOIN source_backed_sessions s ON s.source_id = src.source_id
 LEFT JOIN source_backed_sessions parent
-    ON parent.ctx_session_id = s.parent_ctx_session_id;
+    ON parent.ctx_session_id = s.parent_ctx_session_id
+   AND parent.session_identity = s.parent_session_identity;
 
 DROP VIEW IF EXISTS ctx_projection_metadata;
 CREATE VIEW ctx_projection_metadata AS

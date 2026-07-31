@@ -850,6 +850,206 @@ fn incremental_validation_work_does_not_scale_with_unchanged_rows() {
 }
 
 #[test]
+fn selected_source_subset_keeps_sessions_and_omits_unresolvable_lineage() {
+    let (_temp, mut projection) = projection();
+    let outside_parent_source = source(39);
+    let selected_child_source = source(40);
+    let (outside_parent_session_id, _) = identities(&outside_parent_source, 0);
+    let mut selected_records = records(selected_child_source.clone(), 1, 1);
+    let RelationalProjectionRecord::Session(child_session) = &mut selected_records[1] else {
+        panic!("fixture session ordering changed");
+    };
+    child_session.parent_session_id = Some(outside_parent_session_id);
+    child_session.root_session_id = outside_parent_session_id;
+
+    let selected_generation = generation(vec![certificate(selected_child_source, 1, 1)]);
+    let receipt = projection
+        .rebuild(&selected_generation, selected_records)
+        .unwrap();
+
+    assert_eq!(
+        (
+            receipt.source_count,
+            receipt.session_count,
+            receipt.event_count
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT parent_ctx_session_id IS NULL, root_ctx_session_id IS NULL
+             FROM ctx_sessions"
+        )[0],
+        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
+    );
+    assert_eq!(
+        query_rows(
+            &projection,
+            &format!(
+                "SELECT parent_ctx_session_id = '{outside_parent_session_id}',
+                        root_ctx_session_id = '{outside_parent_session_id}'
+                 FROM source_backed_sessions"
+            )
+        )[0],
+        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
+    );
+}
+
+#[test]
+fn selected_source_present_but_missing_relationship_target_fails_closed() {
+    let (_temp, mut projection) = projection();
+    let parent_source = source(43);
+    let child_source = source(44);
+    let (parent_session_id, _) = identities(&parent_source, 0);
+    let mut child_records = records(child_source.clone(), 1, 1);
+    let RelationalProjectionRecord::Session(child_session) = &mut child_records[1] else {
+        panic!("fixture session ordering changed");
+    };
+    child_session.parent_session_id = Some(parent_session_id);
+    child_session.root_session_id = parent_session_id;
+
+    let full_generation = generation(vec![
+        certificate(parent_source.clone(), 1, 0),
+        certificate(child_source, 1, 1),
+    ]);
+    let mut full_records = records(parent_source, 1, 0);
+    full_records.retain(|record| !matches!(record, RelationalProjectionRecord::Session(_)));
+    full_records.extend(child_records);
+
+    let error = projection
+        .rebuild(&full_generation, full_records)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalProjectionError::InvalidRecord(ref detail)
+            if detail == "session relationships reference absent sessions"
+    ));
+    assert_eq!(
+        query_rows(&projection, "SELECT COUNT(*) FROM ctx_events")[0][0],
+        RawSqlValue::Integer(0)
+    );
+}
+
+#[test]
+fn adding_relationship_source_requires_target_and_resolves_retained_evidence() {
+    let (_temp, mut projection) = projection();
+    let parent_source = source(45);
+    let child_source = source(46);
+    let (parent_session_id, _) = identities(&parent_source, 0);
+    let mut child_records = records(child_source.clone(), 1, 1);
+    let RelationalProjectionRecord::Session(child_session) = &mut child_records[1] else {
+        panic!("fixture session ordering changed");
+    };
+    child_session.parent_session_id = Some(parent_session_id);
+    child_session.root_session_id = parent_session_id;
+
+    let selected_generation = generation(vec![certificate(child_source.clone(), 1, 1)]);
+    projection
+        .rebuild(&selected_generation, child_records)
+        .unwrap();
+
+    let invalid_expansion = generation(vec![
+        certificate(parent_source.clone(), 1, 0),
+        certificate(child_source.clone(), 1, 1),
+    ]);
+    let mut missing_parent_records = records(parent_source.clone(), 1, 0);
+    missing_parent_records
+        .retain(|record| !matches!(record, RelationalProjectionRecord::Session(_)));
+    let error = projection
+        .catch_up(&invalid_expansion, missing_parent_records)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalProjectionError::InvalidRecord(ref detail)
+            if detail == "session relationships reference absent sessions"
+    ));
+    assert_eq!(
+        projection
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(selected_generation.generation_id.as_str())
+    );
+
+    let valid_expansion = generation(vec![
+        certificate(parent_source.clone(), 2, 1),
+        certificate(child_source, 1, 1),
+    ]);
+    projection
+        .catch_up(&valid_expansion, records(parent_source, 2, 1))
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT COUNT(*) FROM ctx_sessions
+             WHERE parent_ctx_session_id IS NOT NULL"
+        )[0][0],
+        RawSqlValue::Integer(1)
+    );
+}
+
+#[test]
+fn certified_removal_of_previously_external_parent_fails_closed() {
+    let (_temp, mut projection) = projection();
+    let outside_parent_source = source(47);
+    let selected_child_source = source(48);
+    let (outside_parent_session_id, _) = identities(&outside_parent_source, 0);
+    let mut child_records = records(selected_child_source.clone(), 1, 1);
+    let RelationalProjectionRecord::Session(child_session) = &mut child_records[1] else {
+        panic!("fixture session ordering changed");
+    };
+    child_session.parent_session_id = Some(outside_parent_session_id);
+    child_session.root_session_id = outside_parent_session_id;
+
+    let selected_generation = generation(vec![certificate(selected_child_source.clone(), 1, 1)]);
+    projection
+        .rebuild(&selected_generation, child_records)
+        .unwrap();
+
+    let removal_generation = generation_with_removals(
+        vec![certificate(selected_child_source, 1, 1)],
+        vec![removal(&outside_parent_source, 2)],
+    );
+    let error = projection
+        .catch_up(&removal_generation, Vec::new())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalProjectionError::InvalidRecord(ref detail)
+            if detail == "session relationships reference absent sessions"
+    ));
+
+    let metadata = projection.metadata().unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(selected_generation.generation_id.as_str())
+    );
+    assert_eq!(
+        metadata.target_core_generation_id.as_deref(),
+        Some(removal_generation.generation_id.as_str())
+    );
+    assert_eq!(metadata.status, RelationalProjectionStatus::Behind);
+    assert_eq!(
+        (
+            metadata.source_count,
+            metadata.session_count,
+            metadata.event_count
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT parent_ctx_session_id IS NULL, root_ctx_session_id IS NULL
+             FROM ctx_sessions"
+        )[0],
+        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
+    );
+}
+
+#[test]
 fn cross_source_lineage_survives_rewrite_and_deletion_fails_closed() {
     let (_temp, mut projection) = projection();
     let parent_source = source(41);
@@ -1210,7 +1410,7 @@ fn previous_relational_schema_requires_disposable_rebuild() {
     let conn = Connection::open(&path).unwrap();
     conn.execute(
         "UPDATE source_backed_relational_state
-         SET schema_version = 2, contract_version = 2
+         SET schema_version = 4, contract_version = 4
          WHERE singleton = 1",
         [],
     )
@@ -1224,8 +1424,8 @@ fn previous_relational_schema_requires_disposable_rebuild() {
     assert!(matches!(
         error,
         RelationalProjectionError::UnsupportedSchema {
-            schema_version: 2,
-            contract_version: 2,
+            schema_version: 4,
+            contract_version: 4,
         }
     ));
     assert!(error
