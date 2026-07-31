@@ -7,16 +7,16 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier, SourceObservation,
-    SourceRecordLocator, TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend, CoreRecord,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceObservation, TypedKey,
+    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, LexicalDocument, VerifiedIndex, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, VerifiedIndex, WriterOptions,
 };
 
-use super::super::{CompleteInventoryOwner, SourceOwner};
+use super::super::{CompleteInventoryOwner, SourceBackedCoordinatorError, SourceOwner};
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -150,7 +150,7 @@ fn run_replacements(worker_count: usize) -> ReplacementSummary {
             })?;
             let mut accepted_sequences = Vec::new();
             for sequence in 1..=job.leaf().document_count {
-                emitter.emit_document(test_document(
+                emitter.emit_core_record(test_core_record(
                     &source,
                     sequence,
                     job.leaf().id.saturating_add(10),
@@ -283,7 +283,7 @@ fn append_and_skipped_jobs_use_typed_lifecycles_and_ordered_results() {
                     source: job.source().clone(),
                     base: Box::new(base.clone()),
                 })?;
-                emitter.emit_document(test_document(job.source(), 2, 12))?;
+                emitter.emit_core_record(test_core_record(job.source(), 2, 12))?;
                 emitter.complete(ParallelLeafScanComplete::Append {
                     append: append.clone(),
                     result: "append",
@@ -396,17 +396,17 @@ fn protocol_rejects_missing_and_duplicate_completion() {
 }
 
 #[test]
-fn protocol_rejects_document_before_begin_and_skip_after_begin() {
+fn protocol_rejects_core_record_before_begin_and_skip_after_begin() {
     let source = test_source(7);
-    let document_source = source.clone();
-    let document = run_single(source, move |_job, emitter| {
-        emitter.emit_document(test_document(&document_source, 1, 71))?;
+    let record_source = source.clone();
+    let record = run_single(source, move |_job, emitter| {
+        emitter.emit_core_record(test_core_record(&record_source, 1, 71))?;
         Ok(())
     })
     .unwrap_err();
     assert!(matches!(
-        document,
-        ParallelLeafScanError::Protocol(ParallelLeafScanProtocolError::DocumentBeforeBegin {
+        record,
+        ParallelLeafScanError::Protocol(ParallelLeafScanProtocolError::CoreRecordBeforeBegin {
             job_index: 0
         })
     ));
@@ -542,9 +542,9 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
 }
 
 #[test]
-fn document_transport_is_a_zero_capacity_one_document_rendezvous() {
+fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
     let source = test_source(14);
-    let document = test_document(&source, 1, 141);
+    let record = test_core_record(&source, 1, 141);
     let (sender, receiver) =
         mpsc::sync_channel::<ParallelLeafWorkerEvent<(), TestWorkerFailure>>(0);
     let cancellation = AtomicBool::new(false);
@@ -560,7 +560,7 @@ fn document_transport_is_a_zero_capacity_one_document_rendezvous() {
                 cancellation: &cancellation,
             };
             barrier.wait();
-            emitter.emit_document(document).unwrap();
+            emitter.emit_core_record(record).unwrap();
             finished_sender.send(()).unwrap();
         });
 
@@ -575,11 +575,42 @@ fn document_transport_is_a_zero_capacity_one_document_rendezvous() {
             ParallelLeafWorkerEvent::Protocol {
                 worker_index: 0,
                 job_index: 0,
-                message: ParallelLeafProtocolMessage::Document(_),
+                message: ParallelLeafProtocolMessage::CoreRecord(_),
             }
         ));
         finished_receiver.recv().unwrap();
     });
+}
+
+#[test]
+fn oversized_valid_core_record_is_rejected_typed_by_the_generation_writer() {
+    let source = test_source(15);
+    let mut record = test_core_record(&source, 1, 151);
+    record.content.normalized_body = Some("\0".repeat(MAX_CORE_CONTENT_BYTES));
+    record.validate_contract().unwrap();
+
+    let error = run_single(source, move |job, emitter| {
+        emitter.begin(ParallelLeafScanBegin::replace(job.source().clone()))?;
+        emitter.emit_core_record(record)?;
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ParallelLeafScanError::Sink {
+            job_index: 0,
+            operation: ParallelLeafSinkOperation::AddCoreRecord,
+            source: SourceBackedCoordinatorError::Index(IndexError::CoreRecord(
+                CoreRecordError::FieldTooLarge {
+                    field: "encoded_core_record",
+                    maximum: MAX_ENCODED_CORE_RECORD_BYTES,
+                    ..
+                }
+            )),
+            ..
+        }
+    ));
 }
 
 fn run_single<F>(source: SourceKey, scan: F) -> TestRunResult<()>
@@ -611,7 +642,7 @@ fn publish_append_base(
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
-        .add_document(test_document(source, 1, revision))
+        .add_core_record(test_core_record(source, 1, revision))
         .unwrap();
     writer.certify_source(certificate.clone()).unwrap();
     writer.commit(|_| true).unwrap();
@@ -667,7 +698,7 @@ fn test_certificate(
     .unwrap()
 }
 
-fn test_document(source: &SourceKey, sequence: u64, revision: u8) -> LexicalDocument {
+fn test_core_record(source: &SourceKey, sequence: u64, revision: u8) -> CoreRecord {
     let native_session_key =
         NativeSessionKey::native_id("parallel.session", TypedKey::U64(1)).unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
@@ -686,36 +717,22 @@ fn test_document(source: &SourceKey, sequence: u64, revision: u8) -> LexicalDocu
         subrecord_selector: None,
     })
     .unwrap();
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderNative {
-            namespace: "parallel-leaf-test".to_owned(),
-            coordinate: TypedKey::U64(sequence),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some([revision; 32]),
-        [u8::try_from(sequence).unwrap_or(u8::MAX); 32],
-    )
-    .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some("parallel-session".to_owned()),
-        branch: None,
-        source_path: Some("/parallel/leaf".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: sequence,
-        occurred_at_unix_ms: i64::try_from(sequence).ok(),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: format!("parallel leaf document {sequence}"),
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    }
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        format!("parallel-leaf-parser-{revision}"),
+        format!("parallel leaf Core record {sequence}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("parallel-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.occurred_at_unix_ms = i64::try_from(sequence).ok();
+    record.role = Some("user".to_owned());
+    record
 }

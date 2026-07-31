@@ -427,47 +427,6 @@ fn active_source_family_contract_jsonl_rewrite_truncate_and_replacement_fail_clo
 }
 
 #[test]
-fn active_source_family_contract_jsonl_hydration_tolerates_append_only() {
-    use sha2::{Digest, Sha256};
-
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("events.jsonl");
-    let moved = temp.path().join("events-old.jsonl");
-    let first = b"{\"message\":\"indexed\"}\n";
-    fs::write(&path, first).unwrap();
-    let source = opened(&path);
-    let range = JsonlHydrationRange::new(0, first.len(), Sha256::digest(first).into()).unwrap();
-
-    let append_path = path.clone();
-    set_after_jsonl_hydration_observation_hook(move || {
-        OpenOptions::new()
-            .append(true)
-            .open(append_path)
-            .unwrap()
-            .write_all(b"{\"message\":\"active\"}\n")
-            .unwrap();
-    });
-    let hydrated = visit_verified_ranges(
-        &path,
-        &source,
-        &[range],
-        |_, bytes| -> crate::Result<Vec<u8>> { Ok(bytes.to_vec()) },
-    )
-    .unwrap();
-    assert_eq!(hydrated, vec![first.to_vec()]);
-
-    fs::rename(&path, &moved).unwrap();
-    fs::write(&path, first).unwrap();
-    assert!(visit_verified_ranges(
-        &path,
-        &source,
-        &[range],
-        |_, bytes| -> crate::Result<Vec<u8>> { Ok(bytes.to_vec()) }
-    )
-    .is_err());
-}
-
-#[test]
 fn parser_policy_descriptor_and_path_mismatch_force_replacement() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("events.jsonl");

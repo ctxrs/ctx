@@ -405,18 +405,14 @@ impl Document for IndexDocument {
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{
-        derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy,
-        NativeItemKey, NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput,
-        SourceAnchor, SourceKey, SourceRecordLocator, TypedKey,
+        derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
+        NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
     };
     use tantivy::schema::{Document, TantivyDocument};
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{
-        fields_from_schema, lexical_schema, GenerationWriter, IndexError, LexicalDocument,
-        WriterOptions,
-    };
+    use crate::{fields_from_schema, lexical_schema, GenerationWriter, IndexError, WriterOptions};
 
     fn source(source_format: &str) -> SourceKey {
         SourceKey::derive(
@@ -433,10 +429,9 @@ mod tests {
         .unwrap()
     }
 
-    fn lexical_document(source: &SourceKey) -> LexicalDocument {
-        let native_session_coordinate = TypedKey::utf8("session").unwrap();
+    fn core_record(source: &SourceKey) -> CoreRecord {
         let session_key =
-            NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
+            NativeSessionKey::native_id("session", TypedKey::utf8("session").unwrap()).unwrap();
         let session_id = derive_session_id(SessionIdentityInput {
             source,
             logical_session_kind: "thread",
@@ -452,40 +447,21 @@ mod tests {
             subrecord_selector: None,
         })
         .unwrap();
-        LexicalDocument {
+        let mut record = CoreRecord::new_selected(
             event_id,
             session_id,
-            parent_session_id: None,
-            root_session_id: session_id,
-            source: source.clone(),
-            locator: SourceRecordLocator::new(
-                source.clone(),
-                NativeRecordCoordinate::Jsonl {
-                    byte_offset: 0,
-                    byte_length: 100,
-                    physical_ordinal: 1,
-                    native_session_key: Some(native_session_coordinate),
-                    native_event_key: Some(TypedKey::U64(1)),
-                },
-                LocatorRevisionPolicy::StableRecordEvidence,
-                None,
-                [1; 32],
-            )
-            .unwrap(),
-            provider_session_id: None,
-            branch: None,
-            source_path: None,
-            agent_type: "primary".to_owned(),
-            is_primary: true,
-            event_sequence: 1,
-            occurred_at_unix_ms: None,
-            event_type: "message".to_owned(),
-            role: None,
-            body: "body".to_owned(),
-            workspace: None,
-            cwd: None,
-            touched_files: Vec::new(),
-        }
+            session_id,
+            source.clone(),
+            1,
+            "message",
+            "primary",
+            true,
+            "index-document-test-v1",
+            "body",
+        )
+        .unwrap();
+        record.native_event_id = Some(TypedKey::U64(1));
+        record
     }
 
     #[test]
@@ -546,13 +522,13 @@ mod tests {
     #[test]
     fn source_event_order_key_has_exact_source_order_and_size_layout() {
         let source = source("codex_session_jsonl");
-        let document = lexical_document(&source);
-        let core_record_bytes = document.to_core_record().unwrap().encode_stored().unwrap();
-        let content_bytes = document.body.len();
+        let record = core_record(&source);
+        let core_record_bytes = record.encode_stored().unwrap();
+        let content_bytes = core_content_bytes(&record.content).unwrap();
         let index_source = IndexSourceFields::new(&source, &crate::source_token(&source));
         let key = SourceEventOrderKey::for_document(
             &index_source,
-            document.event_id.digest(),
+            record.event_id.digest(),
             core_record_bytes.len(),
             content_bytes,
         )
@@ -566,7 +542,7 @@ mod tests {
         );
         assert_eq!(
             &key[SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET],
-            &document.event_id.digest()
+            &record.event_id.digest()
         );
         assert_eq!(
             u32::from_be_bytes(
@@ -588,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_source_descriptor_preserves_document_faults() {
+    fn cached_source_descriptor_preserves_core_record_and_active_source_faults() {
         let active = source("codex_session_jsonl");
         let descriptor_alias = source("codex_prompt_history_jsonl");
         assert_eq!(active, descriptor_alias);
@@ -599,15 +575,14 @@ mod tests {
             GenerationWriter::open(directory.path(), WriterOptions::default()).unwrap();
         writer.begin_source(active.clone()).unwrap();
 
-        let mut mismatched_identity = lexical_document(&active);
-        mismatched_identity.source = descriptor_alias.clone();
-        mismatched_identity.locator = lexical_document(&descriptor_alias).locator;
+        let mut mismatched_identity = core_record(&active);
+        mismatched_identity.event_id = mismatched_identity.session_id;
         assert!(matches!(
-            writer.add_document(mismatched_identity),
+            writer.add_core_record(mismatched_identity),
             Err(IndexError::CoreRecord(_))
         ));
         assert!(matches!(
-            writer.add_document(lexical_document(&descriptor_alias)),
+            writer.add_core_record(core_record(&descriptor_alias)),
             Err(IndexError::DocumentSourceNotActive)
         ));
     }

@@ -111,8 +111,8 @@ impl SourceBackedGenerationSink<'_> {
         Ok(self.writer.begin_source_append(source)?)
     }
 
-    pub fn add_document(&mut self, document: LexicalDocument) -> SourceBackedCoordinatorResult<()> {
-        self.writer.add_document(document)?;
+    pub fn add_core_record(&mut self, record: CoreRecord) -> SourceBackedCoordinatorResult<()> {
+        self.writer.add_core_record(record)?;
         Ok(())
     }
 
@@ -169,11 +169,11 @@ impl SourceBackedGenerationSink<'_> {
     pub fn replace_source(
         &mut self,
         certificate: CertifiedSource,
-        documents: impl IntoIterator<Item = LexicalDocument>,
+        core_records: impl IntoIterator<Item = CoreRecord>,
     ) -> SourceBackedCoordinatorResult<()> {
         self.begin_source(certificate.observation().source().clone())?;
-        for document in documents {
-            self.add_document(document)?;
+        for record in core_records {
+            self.add_core_record(record)?;
         }
         self.certify_source(certificate)
     }
@@ -221,11 +221,6 @@ type RevalidationCallback =
 type CompleteInventoryRevalidationCallback =
     dyn Fn(&CertifiedSourceInventory) -> bool + Send + Sync;
 type SuccessfulPublicationCallback = dyn Fn() + Send + Sync;
-type HydrationCallback = dyn Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
-    + Send
-    + Sync;
-type BatchHydrationCallback =
-    dyn Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure> + Send + Sync;
 
 /// Closure bundle at the coordinator boundary. This deliberately does not
 /// pretend provider scanners share a provider-local trait.
@@ -237,8 +232,6 @@ pub struct SourceBackedRouteDriver {
     pub(in super::super) revalidate_complete_inventory:
         Option<Arc<CompleteInventoryRevalidationCallback>>,
     pub(in super::super) after_successful_publication: Option<Arc<SuccessfulPublicationCallback>>,
-    pub(in super::super) hydrate: Arc<HydrationCallback>,
-    pub(in super::super) hydrate_batch: Option<Arc<BatchHydrationCallback>>,
 }
 
 impl fmt::Debug for SourceBackedRouteDriver {
@@ -255,10 +248,6 @@ impl SourceBackedRouteDriver {
             + 'static,
         owns_source: impl Fn(&SourceKey) -> bool + Send + Sync + 'static,
         revalidate: impl for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> bool + Send + Sync + 'static,
-        hydrate: impl Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
-            + Send
-            + Sync
-            + 'static,
     ) -> Self {
         Self {
             scan: Arc::new(scan),
@@ -266,8 +255,6 @@ impl SourceBackedRouteDriver {
             revalidate: Arc::new(revalidate),
             revalidate_complete_inventory: None,
             after_successful_publication: None,
-            hydrate: Arc::new(hydrate),
-            hydrate_batch: None,
         }
     }
 
@@ -289,39 +276,6 @@ impl SourceBackedRouteDriver {
     ) -> Self {
         self.after_successful_publication = Some(Arc::new(after_publication));
         self
-    }
-
-    /// Installs a provider-native ordered batch reader without changing the
-    /// mechanically compatible event hydration constructor.
-    pub fn with_batch_hydration(
-        mut self,
-        hydrate_batch: impl Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure>
-            + Send
-            + Sync
-            + 'static,
-    ) -> Self {
-        self.hydrate_batch = Some(Arc::new(hydrate_batch));
-        self
-    }
-
-    pub(in super::super) fn hydrate_batch(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        if let Some(hydrate_batch) = &self.hydrate_batch {
-            return hydrate_batch(request);
-        }
-        let records = request
-            .events()
-            .iter()
-            .map(|event| (self.hydrate)(event))
-            .collect::<Result<Vec<_>, _>>()?;
-        BatchHydrationResult::new(records).map_err(|error| {
-            hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                format!("invalid default route batch result: {error}"),
-            )
-        })
     }
 }
 
@@ -412,12 +366,6 @@ impl SourceBackedProviderRegistry {
 
     pub fn routes(&self) -> impl ExactSizeIterator<Item = &SourceBackedRouteMetadata> {
         self.routes.iter().map(SourceBackedRoute::metadata)
-    }
-
-    pub fn resolver_registry(&self) -> SourceBackedResolverRegistry {
-        SourceBackedResolverRegistry {
-            routes: self.routes.clone(),
-        }
     }
 
     pub fn executable_route_count(&self) -> usize {

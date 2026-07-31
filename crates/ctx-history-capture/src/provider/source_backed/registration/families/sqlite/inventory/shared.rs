@@ -91,11 +91,6 @@ pub(super) trait SqliteInventoryProvider: Send + Sync + 'static {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<CertifiedSource>;
 
-    fn hydrate(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure>;
-
     #[cfg(test)]
     fn after_snapshots_sealed(&self) {}
 
@@ -466,13 +461,6 @@ where
             current.authority_fingerprint,
             &fingerprints,
         ))
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        self.provider_adapter.hydrate(request)
     }
 }
 

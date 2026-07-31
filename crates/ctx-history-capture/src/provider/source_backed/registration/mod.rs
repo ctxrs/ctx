@@ -117,28 +117,3 @@ pub(crate) fn route_coordinator_error(
 fn capture_coordinator_error(error: SourceBackedCoordinatorError) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
-
-#[cfg(test)]
-pub(in crate::provider::source_backed) fn codex_display_bytes(
-    hydrated: CodexHydratedRecordV0,
-) -> Result<Vec<u8>, HydrationFailure> {
-    hydrated
-        .decoded_display_text
-        .map(String::into_bytes)
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::UnsupportedParserRevision,
-                "Codex record has no exact decoded display text",
-            )
-        })
-}
-
-pub(crate) fn hydration_failure(
-    kind: HydrationFailureKind,
-    detail: impl fmt::Display,
-) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: detail.to_string(),
-    }
-}

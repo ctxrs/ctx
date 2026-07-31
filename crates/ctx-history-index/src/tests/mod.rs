@@ -1,10 +1,9 @@
 use std::sync::atomic::Ordering;
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSourceInventory, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceObservation, TypedKey,
+    derive_event_id, derive_session_id, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceObservation, TypedKey,
 };
 use tantivy::{
     collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
@@ -129,7 +128,7 @@ fn stage_exact_replay(writer: &mut GenerationWriter, source: &SourceKey) -> Cert
     base
 }
 
-fn document(source: &SourceKey, sequence: u64, body: &str) -> LexicalDocument {
+fn document(source: &SourceKey, sequence: u64, body: &str) -> CoreRecord {
     document_for_session(source, "session", sequence, body)
 }
 
@@ -138,7 +137,7 @@ fn document_for_session(
     native_session_id: &str,
     sequence: u64,
     body: &str,
-) -> LexicalDocument {
+) -> CoreRecord {
     let native_session_coordinate = TypedKey::utf8(native_session_id).unwrap();
     let session_key =
         NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
@@ -161,40 +160,38 @@ fn document_for_session(
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: sequence * 100,
-                byte_length: 100,
-                physical_ordinal: sequence,
-                native_session_key: Some(native_session_coordinate),
-                native_event_key: Some(TypedKey::U64(sequence)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [sequence as u8; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some(native_session_id.to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some(format!("/history/{native_session_id}.jsonl")),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: sequence,
-        occurred_at_unix_ms: Some(1_700_000_000_000 + sequence as i64),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: body.to_owned(),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
-    }
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "index-test-core-record-v1",
+        body,
+    )
+    .unwrap();
+    record.provider_session_id = Some(native_session_id.to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("user".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record
+}
+
+fn with_annotation(mut record: CoreRecord, annotation: CoreRecordAnnotation) -> CoreRecord {
+    record.content.structured_content = annotation.structured_content;
+    record.metadata = annotation.metadata;
+    record.repository_candidate_evidence = annotation.repository_candidate_evidence;
+    record.repository_bindings = annotation.repository_bindings;
+    record.repository_abstentions = annotation.repository_abstentions;
+    record.repository_file_observations = annotation.repository_file_observations;
+    record.repository_vcs_observations = annotation.repository_vcs_observations;
+    record
 }
 
 fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> Vec<Uuid> {
@@ -295,7 +292,7 @@ fn multisegment_fixture(
         writer.begin_source(current.clone()).unwrap();
         for sequence in 1..=documents_per_source {
             writer
-                .add_document(document_for_session(
+                .add_core_record(document_for_session(
                     &current,
                     &format!("session-{source_index}"),
                     sequence,

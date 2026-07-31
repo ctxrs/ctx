@@ -87,7 +87,7 @@ pub(super) fn revalidate_complete_inventory(
             }
             drop(leaf.open_verified()?);
         } else if let Some(checkpoint) = evidence.checkpoint.as_ref() {
-            let (opened, _) = leaf.open_for_hydration()?;
+            let (opened, _) = leaf.open_for_revalidation()?;
             revalidate_frozen_prefix(
                 leaf.source_path(),
                 opened.as_ref(),
