@@ -518,7 +518,9 @@ mod tests {
         let rendered = document.render_plain();
         let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(rendered.starts_with("! ctx needs attention\n"));
-        assert!(rendered.contains("Automatic upgrades  blocked (path shadowed)\n"));
+        assert!(normalized
+            .contains("Automatic upgrades blocked (another ctx binary appears earlier in PATH)"));
+        assert!(!rendered.contains("path shadowed"));
         assert!(rendered.contains("Local usage"));
         assert!(rendered.contains("local_usage_config_unavailable"));
         assert!(normalized.contains("local usage configuration could not be read"));
