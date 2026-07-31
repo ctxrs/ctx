@@ -16,14 +16,51 @@ mod unix {
 
     pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
         let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-        if arguments.len() < 3 || arguments[0] != "--data-root" {
-            return Err("expected --data-root <path> <daemon|upgrade>".into());
-        }
-        let data_root = PathBuf::from(&arguments[1]);
-        match arguments[2].to_str() {
-            Some("daemon") if arguments.len() == 3 => run_daemon(&data_root),
-            Some("upgrade") if arguments.len() == 5 && arguments[3] == "--candidate" => {
-                run_upgrade(&data_root, Path::new(&arguments[4]))
+        let (data_root, command_index) = if arguments.first().is_some_and(|arg| arg == "--data-root")
+        {
+            let root = arguments
+                .get(1)
+                .ok_or("expected a path after --data-root")?;
+            (PathBuf::from(root), 2)
+        } else {
+            (
+                PathBuf::from(env::var_os("CTX_DATA_ROOT").ok_or(
+                    "expected --data-root <path> or CTX_DATA_ROOT for v0.25 fixture command",
+                )?),
+                0,
+            )
+        };
+        match arguments.get(command_index).and_then(|argument| argument.to_str()) {
+            Some("daemon")
+                if arguments
+                    .get(command_index + 1)
+                    .is_some_and(|argument| argument == "run") =>
+            {
+                run_daemon(&data_root)
+            }
+            Some("daemon")
+                if arguments
+                    .get(command_index + 1)
+                    .is_some_and(|argument| argument == "disable") =>
+            {
+                disable_daemon(&data_root)
+            }
+            Some("daemon")
+                if arguments
+                    .get(command_index + 1)
+                    .is_some_and(|argument| argument == "status") =>
+            {
+                daemon_status(&data_root)
+            }
+            Some("upgrade")
+                if arguments
+                    .get(command_index + 1)
+                    .is_some_and(|argument| argument == "--candidate") =>
+            {
+                let candidate = arguments
+                    .get(command_index + 2)
+                    .ok_or("expected a candidate path")?;
+                run_upgrade(&data_root, Path::new(candidate))
             }
             _ => Err("unsupported v0.25 fixture command".into()),
         }
@@ -51,7 +88,6 @@ mod unix {
                 "released": false,
                 "started_at_ms": 1,
                 "binary": executable,
-                "binary_sha256": sha256_file(&executable)?,
                 "data_root": data_root,
             }),
         )?;
@@ -73,6 +109,53 @@ mod unix {
         }
     }
 
+    fn disable_daemon(data_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let lock_path = data_root.join("daemon/daemon.lock");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path)?)?;
+        let pid = lock["pid"].as_u64().ok_or("daemon lock has no pid")?;
+        let pid = libc::pid_t::try_from(pid).map_err(|_| "daemon pid is invalid")?;
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        lock["released"] = serde_json::Value::Bool(true);
+        write_json(&lock_path, &lock)?;
+        Ok(())
+    }
+
+    fn daemon_status(data_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let lock_path = data_root.join("daemon/daemon.lock");
+        let lock = fs::read(&lock_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let running = lock.as_ref().is_some_and(|lock| {
+            lock["released"] != true
+                && lock["pid"]
+                    .as_u64()
+                    .and_then(|pid| libc::pid_t::try_from(pid).ok())
+                    .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+        });
+        println!(
+            "{}",
+            json!({
+                "schema_version": 1,
+                "daemon": {
+                    "running": running,
+                },
+            })
+        );
+        Ok(())
+    }
+
     fn run_upgrade(data_root: &Path, candidate: &Path) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(data_root)?;
         let lock_path = data_root.join("upgrade.lock");
@@ -86,7 +169,12 @@ mod unix {
         fs::set_permissions(&staged, permissions)?;
         let output = Command::new(&staged).arg("--version").output()?;
         if !output.status.success() || !String::from_utf8_lossy(&output.stdout).contains("1.0.0") {
-            return Err("staged v1 version probe failed".into());
+            return Err(format!(
+                "staged v1 version probe failed (status {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
         }
         if env::var_os("CTX_V025_ABORT_AFTER_PROBE_FOR_TESTS").is_some() {
             process::exit(86);

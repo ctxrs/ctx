@@ -1,9 +1,46 @@
 use super::*;
 
 #[cfg(unix)]
+mod legacy;
+#[cfg(unix)]
+use legacy::verify_legacy_v025_identity;
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ResidualDaemonIdentityPolicy {
+    CurrentDigest,
+    LegacyV025,
+}
+
+#[cfg(unix)]
 pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     data_root: &Path,
     expected_executable: &Path,
+) -> Result<()> {
+    terminate_identity_verified_unix_daemon(
+        data_root,
+        expected_executable,
+        ResidualDaemonIdentityPolicy::CurrentDigest,
+    )
+}
+
+#[cfg(unix)]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    data_root: &Path,
+    expected_executable: &Path,
+) -> Result<()> {
+    terminate_identity_verified_unix_daemon(
+        data_root,
+        expected_executable,
+        ResidualDaemonIdentityPolicy::LegacyV025,
+    )
+}
+
+#[cfg(unix)]
+fn terminate_identity_verified_unix_daemon(
+    data_root: &Path,
+    expected_executable: &Path,
+    identity_policy: ResidualDaemonIdentityPolicy,
 ) -> Result<()> {
     let lock_path = daemon_lock_path(data_root);
     let value = read_pid_lock_json(&lock_path)
@@ -11,8 +48,13 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     let pid = pid_from_lock_json(&value)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
     let signal_target = UnixSignalTarget::open(pid)?;
-    verify_residual_daemon_identity(data_root, expected_executable, pid, &value)?;
-    signal_target.signal(data_root, expected_executable, libc::SIGTERM)?;
+    verify_residual_daemon_identity(data_root, expected_executable, pid, &value, identity_policy)?;
+    signal_target.signal(
+        data_root,
+        expected_executable,
+        identity_policy,
+        libc::SIGTERM,
+    )?;
     let term_deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
     while daemon_lock_is_active(data_root) && Instant::now() < term_deadline {
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
@@ -21,7 +63,12 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
         return Ok(());
     }
 
-    signal_target.signal(data_root, expected_executable, libc::SIGKILL)?;
+    signal_target.signal(
+        data_root,
+        expected_executable,
+        identity_policy,
+        libc::SIGKILL,
+    )?;
     Ok(())
 }
 
@@ -46,6 +93,7 @@ impl UnixSignalTarget {
         &self,
         data_root: &Path,
         expected_executable: &Path,
+        identity_policy: ResidualDaemonIdentityPolicy,
         signal: libc::c_int,
     ) -> Result<()> {
         let pid = match self {
@@ -53,7 +101,7 @@ impl UnixSignalTarget {
             Self::PidFd(pidfd) => pidfd.pid,
             Self::ReverifiedPid(pid) => *pid,
         };
-        reverify_residual_daemon_identity(data_root, expected_executable, pid)?;
+        reverify_residual_daemon_identity(data_root, expected_executable, pid, identity_policy)?;
         match self {
             #[cfg(target_os = "linux")]
             Self::PidFd(pidfd) => pidfd.signal(signal),
@@ -126,6 +174,7 @@ fn reverify_residual_daemon_identity(
     data_root: &Path,
     expected_executable: &Path,
     expected_pid: u32,
+    identity_policy: ResidualDaemonIdentityPolicy,
 ) -> Result<()> {
     let current = read_pid_lock_json(&daemon_lock_path(data_root))
         .ok_or_else(|| anyhow!("ctx daemon identity disappeared before termination signal"))?;
@@ -134,7 +183,13 @@ fn reverify_residual_daemon_identity(
             "ctx daemon ownership changed before termination signal; refusing to signal"
         ));
     }
-    verify_residual_daemon_identity(data_root, expected_executable, expected_pid, &current)
+    verify_residual_daemon_identity(
+        data_root,
+        expected_executable,
+        expected_pid,
+        &current,
+        identity_policy,
+    )
 }
 
 #[cfg(unix)]
@@ -143,6 +198,7 @@ fn verify_residual_daemon_identity(
     expected_executable: &Path,
     pid: u32,
     value: &Value,
+    identity_policy: ResidualDaemonIdentityPolicy,
 ) -> Result<()> {
     if pid == process::id() {
         return Err(anyhow!("refusing to terminate the current ctx process"));
@@ -183,6 +239,16 @@ fn verify_residual_daemon_identity(
             "ctx daemon lock executable is not the installed ctx executable"
         ));
     }
+    match identity_policy {
+        ResidualDaemonIdentityPolicy::CurrentDigest => verify_recorded_digest_identity(pid, value),
+        ResidualDaemonIdentityPolicy::LegacyV025 => {
+            verify_legacy_v025_identity(data_root, expected_executable, recorded_binary, pid, value)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn verify_recorded_digest_identity(pid: u32, value: &Value) -> Result<()> {
     let recorded_sha256 = value
         .get("binary_sha256")
         .and_then(Value::as_str)
@@ -249,6 +315,16 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
             .context("terminate identity-verified residual ctx daemon");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    _data_root: &Path,
+    _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "legacy automatic daemon replacement is not supported on Windows"
+    ))
 }
 
 #[cfg(windows)]
@@ -325,6 +401,16 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
 ) -> Result<()> {
     Err(anyhow!(
         "this platform cannot identity-verify residual daemon termination"
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    _data_root: &Path,
+    _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "this platform cannot identity-verify legacy daemon termination"
     ))
 }
 

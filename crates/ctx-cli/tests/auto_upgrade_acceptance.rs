@@ -108,6 +108,10 @@ mod unix {
 
     fn start_v025_daemon(temp: &FiniteDaemonTestRoot, target: &Path) -> Child {
         let root = data_root(temp);
+        start_v025_daemon_at_root(temp, target, &root)
+    }
+
+    fn start_v025_daemon_at_root(temp: &FiniteDaemonTestRoot, target: &Path, root: &Path) -> Child {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("config.toml"),
@@ -116,7 +120,17 @@ mod unix {
         .unwrap();
         let mut command = hermetic_std_command(temp, target);
         let child = command
-            .args(["--data-root", root.to_str().unwrap(), "daemon"])
+            .args([
+                "--data-root",
+                root.to_str().unwrap(),
+                "daemon",
+                "run",
+                "--idle-exit-seconds",
+                "600",
+                "--loop-interval-seconds",
+                "2",
+                "--json",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -126,10 +140,30 @@ mod unix {
             fs::read(root.join("daemon/daemon.lock"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .and_then(|value| value["pid"].as_u64())
-                == Some(u64::from(child.id()))
+                .is_some_and(|value| {
+                    value["pid"].as_u64() == Some(u64::from(child.id()))
+                        && value.get("binary_sha256").is_none()
+                })
         });
         child
+    }
+
+    fn read_v025_daemon_lock(root: &Path) -> Value {
+        serde_json::from_slice(&fs::read(root.join("daemon/daemon.lock")).unwrap()).unwrap()
+    }
+
+    fn write_v025_daemon_lock(root: &Path, value: &Value) {
+        let mut bytes = serde_json::to_vec_pretty(value).unwrap();
+        bytes.push(b'\n');
+        fs::write(root.join("daemon/daemon.lock"), bytes).unwrap();
+    }
+
+    fn stop_v025_daemon(child: &mut Child) {
+        if process_is_running(child.id()) {
+            stop_daemon(child.id());
+        }
+        let status = child.wait().unwrap();
+        assert!(!status.success());
     }
 
     fn run_v025_upgrade(
@@ -909,8 +943,121 @@ mod unix {
             true
         );
         assert_eq!(status["daemon"]["pid"], replacement_pid.unwrap());
+        let human = ctx_from_binary(&temp, &target)
+            .args(["daemon", "status"])
+            .output()
+            .unwrap();
+        assert!(human.status.success(), "{human:?}");
+        let human_stdout = String::from_utf8(human.stdout).unwrap();
+        assert!(!human_stdout.trim().is_empty());
+        assert!(serde_json::from_str::<Value>(&human_stdout).is_err());
         assert!(!root.join("Store").exists());
         stop_daemon(replacement_pid.unwrap());
+    }
+
+    #[test]
+    fn v025_automatic_upgrade_rejects_unrelated_same_binary_lock_pid() {
+        let temp = finite_daemon_test_root();
+        let target = install_v025_fixture(&temp);
+        let old_bytes = fs::read(&target).unwrap();
+        let root = data_root(&temp);
+        let unrelated_root = temp.path().join("unrelated-data");
+        let mut owner = start_v025_daemon(&temp, &target);
+        let mut unrelated = start_v025_daemon_at_root(&temp, &target, &unrelated_root);
+
+        let original_lock = read_v025_daemon_lock(&root);
+        let mut spoofed_lock = original_lock.clone();
+        spoofed_lock["pid"] = Value::from(unrelated.id());
+        write_v025_daemon_lock(&root, &spoofed_lock);
+
+        let output = run_v025_upgrade(&temp, &target, false);
+        let owner_survived = process_is_running(owner.id());
+        let unrelated_survived = process_is_running(unrelated.id());
+        let target_unchanged = fs::read(&target).unwrap() == old_bytes;
+        write_v025_daemon_lock(&root, &original_lock);
+        stop_v025_daemon(&mut owner);
+        stop_v025_daemon(&mut unrelated);
+
+        assert!(!output.status.success(), "{output:?}");
+        assert!(owner_survived, "the actual lock owner was signaled");
+        assert!(
+            unrelated_survived,
+            "an unrelated same-binary daemon was signaled"
+        );
+        assert!(
+            target_unchanged,
+            "managed executable changed after rejection"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("process data root does not match its held lock"),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn v025_automatic_upgrade_rejects_same_bytes_different_inode_owner() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let temp = finite_daemon_test_root();
+        let target = install_v025_fixture(&temp);
+        let old_bytes = fs::read(&target).unwrap();
+        let mut owner = start_v025_daemon(&temp, &target);
+        let owner_inode = fs::metadata(format!("/proc/{}/exe", owner.id()))
+            .unwrap()
+            .ino();
+        let replacement = target.with_extension("same-image");
+        fs::copy(&target, &replacement).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&replacement, &target).unwrap();
+        assert_ne!(fs::metadata(&target).unwrap().ino(), owner_inode);
+
+        let output = run_v025_upgrade(&temp, &target, false);
+        let owner_survived = process_is_running(owner.id());
+        let target_unchanged = fs::read(&target).unwrap() == old_bytes;
+        stop_v025_daemon(&mut owner);
+
+        assert!(!output.status.success(), "{output:?}");
+        assert!(owner_survived, "the stale-inode owner was signaled");
+        assert!(
+            target_unchanged,
+            "managed executable changed after rejection"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("executable inode does not match"),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn v025_automatic_upgrade_does_not_downgrade_recorded_digest_verification() {
+        let temp = finite_daemon_test_root();
+        let target = install_v025_fixture(&temp);
+        let old_bytes = fs::read(&target).unwrap();
+        let root = data_root(&temp);
+        let mut owner = start_v025_daemon(&temp, &target);
+        let original_lock = read_v025_daemon_lock(&root);
+        let mut mismatched_lock = original_lock.clone();
+        mismatched_lock["binary_sha256"] = Value::String("0".repeat(64));
+        write_v025_daemon_lock(&root, &mismatched_lock);
+
+        let output = run_v025_upgrade(&temp, &target, false);
+        let owner_survived = process_is_running(owner.id());
+        let target_unchanged = fs::read(&target).unwrap() == old_bytes;
+        write_v025_daemon_lock(&root, &original_lock);
+        stop_v025_daemon(&mut owner);
+
+        assert!(!output.status.success(), "{output:?}");
+        assert!(owner_survived, "digest-mismatched owner was signaled");
+        assert!(
+            target_unchanged,
+            "managed executable changed after rejection"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("owner image does not match its held ctx daemon lock"),
+            "{output:?}"
+        );
     }
 
     #[test]
@@ -947,7 +1094,7 @@ mod unix {
     }
 
     #[test]
-    fn status_rejects_and_autostart_recovers_deleted_old_owner_image() {
+    fn status_and_autostart_fail_closed_for_deleted_legacy_owner_image() {
         let temp = finite_daemon_test_root();
         let target = install_v025_fixture(&temp);
         let mut old_daemon = start_v025_daemon(&temp, &target);
@@ -983,12 +1130,27 @@ mod unix {
         assert_eq!(stale["daemon"]["recoverable"], true);
         assert_eq!(stale["daemon"]["reason"], "daemon_owner_identity_mismatch");
 
+        let rejected = ctx_from_binary(&temp, &target)
+            .args(["daemon", "enable", "--format=json"])
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success(), "{rejected:?}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains("a live ctx daemon is owned by a different binary image"),
+            "{rejected:?}"
+        );
+        assert!(
+            process_is_running(old_pid),
+            "ambiguous deleted-inode owner was signaled"
+        );
+        stop_v025_daemon(&mut old_daemon);
+        assert!(!process_is_running(old_pid));
+
         ctx_from_binary(&temp, &target)
             .args(["daemon", "enable", "--format=json"])
             .assert()
             .success();
-        assert!(!old_daemon.wait().unwrap().success());
-        assert!(!process_is_running(old_pid));
         let root = data_root(&temp);
         let mut replacement_pid = None;
         wait_for("recovered v1 owner", Duration::from_secs(15), || {

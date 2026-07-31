@@ -121,12 +121,12 @@ pub(in crate::semantic) fn process_state(_pid: u32) -> ProcessState {
 }
 
 #[cfg(target_os = "linux")]
-fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+pub(in crate::semantic) fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(format!("/proc/{pid}/exe")))
 }
 
 #[cfg(target_os = "macos")]
-fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+pub(in crate::semantic) fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     use std::ffi::CStr;
 
     const MAX_PATH_BYTES: usize = 4096;
@@ -149,8 +149,45 @@ fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
         .map(|path| std::path::PathBuf::from(path.to_string_lossy().into_owned()))
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+#[cfg(target_os = "freebsd")]
+pub(in crate::semantic) fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PATHNAME,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut buffer = vec![0_u8; libc::PATH_MAX as usize];
+    let mut length = buffer.len();
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buffer.as_mut_ptr().cast(),
+            &raw mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 || length == 0 {
+        return None;
+    }
+    let end = buffer[..length]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(length);
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buffer[..end],
+    )))
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))
+))]
+pub(in crate::semantic) fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     [format!("/proc/{pid}/file"), format!("/proc/{pid}/exe")]
         .into_iter()
         .map(std::path::PathBuf::from)
@@ -158,7 +195,7 @@ fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(windows)]
-fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+pub(in crate::semantic) fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{
@@ -185,7 +222,7 @@ fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
+pub(in crate::semantic) fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
     None
 }
 
