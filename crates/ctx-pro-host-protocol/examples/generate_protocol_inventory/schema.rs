@@ -92,7 +92,13 @@ pub(super) fn inventory() -> Value {
             "StatusRequest": fields(&["requested_core_generation_id"], &[]),
             "StatusResult": fields(&[
                 "currentness", "requested_core_generation_id", "core_receipt", "coverage",
-                "access", "supported_operations", "available_operations"
+                "repository_coverage", "access", "supported_operations",
+                "available_operations"
+            ], &[]),
+            "RepositoryCoverage": fields(&[
+                "repository_candidate_events", "logical_binding_events",
+                "certified_live_root_access_events", "file_evidence_events",
+                "exact_commit_evidence_events", "exact_pull_request_evidence_events"
             ], &[]),
             "ProAccessStatus": fields(&["entitlement", "graph_key", "local_repository"], &[]),
             "CoreSourceState": fields(
@@ -174,10 +180,25 @@ pub(super) fn inventory() -> Value {
         },
         "status_contract": {
             "axes": [
-                "core_projection_currentness", "materialized_target_coverage", "access",
-                "supported_operations", "available_operations"
+                "core_projection_currentness", "materialized_target_coverage",
+                "repository_coverage", "access", "supported_operations",
+                "available_operations"
             ],
-            "availability": "available_is_a_subset_of_supported_and_requires_current_complete_coverage_and_available_access",
+            "repository_coverage_axes": [
+                "repository_candidate_events", "logical_binding_events",
+                "certified_live_root_access_events", "file_evidence_events",
+                "exact_commit_evidence_events", "exact_pull_request_evidence_events"
+            ],
+            "coverage_bound": "each_repository_coverage_event_count_is_at_most_the_receipt_event_count_and_is_zero_without_a_receipt",
+            "operation_prerequisites": {
+                "global": ["current_complete_projection", "entitlement", "graph_key"],
+                "file_blame": [
+                    "local_repository", "certified_live_root_access_events", "file_evidence_events"
+                ],
+                "commit_blame": ["exact_commit_evidence_events"],
+                "pull_request_blame": ["exact_pull_request_evidence_events"]
+            },
+            "availability": "available_is_a_supported_subset_that_satisfies_each_operation_prerequisite_and_ready_operations_may_be_conservatively_omitted",
             "terminal_quiet": "current_empty_or_abstained_is_terminal_and_advertises_no_available_blame_operation"
         },
         "representative_frames": {

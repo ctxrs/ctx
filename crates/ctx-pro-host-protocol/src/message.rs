@@ -221,10 +221,8 @@ pub struct ProAccessStatus {
 }
 
 impl ProAccessStatus {
-    fn all_available(&self) -> bool {
-        self.entitlement == ProAccessState::Available
-            && self.graph_key == ProAccessState::Available
-            && self.local_repository == ProAccessState::Available
+    fn global_prerequisites_available(&self) -> bool {
+        self.entitlement == ProAccessState::Available && self.graph_key == ProAccessState::Available
     }
 }
 
@@ -236,6 +234,67 @@ pub enum ProOperation {
     PullRequestBlame,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCoverage {
+    pub repository_candidate_events: u64,
+    pub logical_binding_events: u64,
+    pub certified_live_root_access_events: u64,
+    pub file_evidence_events: u64,
+    pub exact_commit_evidence_events: u64,
+    pub exact_pull_request_evidence_events: u64,
+}
+
+impl RepositoryCoverage {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn validate_for_receipt(
+        &self,
+        receipt: Option<&CoreMaterializationReceipt>,
+    ) -> Result<(), ProtocolError> {
+        let Some(receipt) = receipt else {
+            if self.is_empty() {
+                return Ok(());
+            }
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "repository coverage requires a completed Core receipt",
+            ));
+        };
+        for (label, count) in [
+            (
+                "repository candidate events",
+                self.repository_candidate_events,
+            ),
+            ("logical binding events", self.logical_binding_events),
+            (
+                "certified live-root access events",
+                self.certified_live_root_access_events,
+            ),
+            ("file evidence events", self.file_evidence_events),
+            (
+                "exact commit evidence events",
+                self.exact_commit_evidence_events,
+            ),
+            (
+                "exact pull-request evidence events",
+                self.exact_pull_request_evidence_events,
+            ),
+        ] {
+            if count > receipt.event_count {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    format!("repository coverage {label} exceeds Core receipt event count"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResult {
@@ -243,6 +302,7 @@ pub struct StatusResult {
     pub requested_core_generation_id: Option<String>,
     pub core_receipt: Option<CoreMaterializationReceipt>,
     pub coverage: MaterializedCoverage,
+    pub repository_coverage: RepositoryCoverage,
     pub access: ProAccessStatus,
     pub supported_operations: BTreeSet<ProOperation>,
     pub available_operations: BTreeSet<ProOperation>,
@@ -253,6 +313,8 @@ impl StatusResult {
         if let Some(receipt) = &self.core_receipt {
             receipt.validate()?;
         }
+        self.repository_coverage
+            .validate_for_receipt(self.core_receipt.as_ref())?;
         if let Some(generation) = &self.requested_core_generation_id {
             validate_lower_sha256(generation, "requested Core generation")?;
         }
@@ -326,14 +388,45 @@ impl StatusResult {
                 "available Pro operations must be a subset of supported operations",
             ));
         }
-        let blame_ready = self.currentness == CoreProjectionCurrentness::Current
+        let globally_ready = self.currentness == CoreProjectionCurrentness::Current
             && self.coverage == MaterializedCoverage::Complete
-            && self.access.all_available();
-        if !blame_ready && !self.available_operations.is_empty() {
+            && self.access.global_prerequisites_available();
+        if !globally_ready && !self.available_operations.is_empty() {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
-                "unready Core coverage or access cannot advertise available blame operations",
+                "unready Core coverage, entitlement, or graph key cannot advertise available blame operations",
             ));
+        }
+        for operation in &self.available_operations {
+            let prerequisites_available = match operation {
+                ProOperation::FileBlame => {
+                    self.access.local_repository == ProAccessState::Available
+                        && self.repository_coverage.certified_live_root_access_events > 0
+                        && self.repository_coverage.file_evidence_events > 0
+                }
+                ProOperation::CommitBlame => {
+                    self.repository_coverage.exact_commit_evidence_events > 0
+                }
+                ProOperation::PullRequestBlame => {
+                    self.repository_coverage.exact_pull_request_evidence_events > 0
+                }
+            };
+            if !prerequisites_available {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    match operation {
+                        ProOperation::FileBlame => {
+                            "file blame requires local-repository access, certified live-root access, and file evidence"
+                        }
+                        ProOperation::CommitBlame => {
+                            "commit blame requires exact commit evidence"
+                        }
+                        ProOperation::PullRequestBlame => {
+                            "pull-request blame requires exact pull-request evidence"
+                        }
+                    },
+                ));
+            }
         }
         Ok(())
     }

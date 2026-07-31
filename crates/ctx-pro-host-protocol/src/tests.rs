@@ -45,6 +45,17 @@ fn operations() -> BTreeSet<ProOperation> {
     ])
 }
 
+fn repository_coverage(event_count: u64) -> RepositoryCoverage {
+    RepositoryCoverage {
+        repository_candidate_events: event_count,
+        logical_binding_events: event_count,
+        certified_live_root_access_events: event_count,
+        file_evidence_events: event_count,
+        exact_commit_evidence_events: event_count,
+        exact_pull_request_evidence_events: event_count,
+    }
+}
+
 #[test]
 fn status_axes_preserve_terminal_empty_without_advertising_blame() {
     let generation = "a".repeat(64);
@@ -53,6 +64,7 @@ fn status_axes_preserve_terminal_empty_without_advertising_blame() {
         requested_core_generation_id: Some(generation.clone()),
         core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Empty,
+        repository_coverage: RepositoryCoverage::default(),
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
@@ -63,8 +75,13 @@ fn status_axes_preserve_terminal_empty_without_advertising_blame() {
     invalid.available_operations.insert(ProOperation::FileBlame);
     assert_eq!(invalid.validate().unwrap_err().class, ErrorClass::Sequence);
 
+    let mut abstained = quiet.clone();
+    abstained.coverage = MaterializedCoverage::Abstained;
+    abstained.validate().unwrap();
+
     let ready = StatusResult {
         coverage: MaterializedCoverage::Complete,
+        repository_coverage: repository_coverage(2),
         available_operations: operations(),
         ..quiet
     };
@@ -78,6 +95,7 @@ fn status_currentness_is_bound_to_requested_and_receipt_generations() {
         requested_core_generation_id: Some("d".repeat(64)),
         core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Partial,
+        repository_coverage: RepositoryCoverage::default(),
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
@@ -100,6 +118,7 @@ fn available_operations_are_a_supported_ready_subset() {
         requested_core_generation_id: Some("a".repeat(64)),
         core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Complete,
+        repository_coverage: repository_coverage(2),
         access: access(ProAccessState::Available),
         supported_operations: BTreeSet::from([ProOperation::CommitBlame]),
         available_operations: BTreeSet::from([ProOperation::FileBlame]),
@@ -110,7 +129,95 @@ fn available_operations_are_a_supported_ready_subset() {
     );
     status.available_operations = BTreeSet::from([ProOperation::CommitBlame]);
     status.access.local_repository = ProAccessState::Unavailable;
+    status.validate().unwrap();
+
+    status.repository_coverage.exact_commit_evidence_events = 0;
     assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    status.repository_coverage = repository_coverage(2);
+    status.supported_operations = operations();
+    status.available_operations = BTreeSet::from([ProOperation::FileBlame]);
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    status.access.local_repository = ProAccessState::Available;
+    status.repository_coverage.certified_live_root_access_events = 0;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    status.repository_coverage.certified_live_root_access_events = 1;
+    status.repository_coverage.file_evidence_events = 0;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    status.repository_coverage.file_evidence_events = 1;
+    status.validate().unwrap();
+
+    status.available_operations = BTreeSet::from([ProOperation::PullRequestBlame]);
+    status.access.local_repository = ProAccessState::Unavailable;
+    status.validate().unwrap();
+    status
+        .repository_coverage
+        .exact_pull_request_evidence_events = 0;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    status.available_operations = BTreeSet::from([ProOperation::CommitBlame]);
+    status.repository_coverage = repository_coverage(2);
+    status.access.entitlement = ProAccessState::Locked;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    status.access.entitlement = ProAccessState::Available;
+    status.access.graph_key = ProAccessState::Unavailable;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    status.access = access(ProAccessState::Available);
+    status.available_operations.clear();
+    status.validate().unwrap();
+}
+
+#[test]
+fn repository_coverage_is_zero_without_and_bounded_by_a_receipt() {
+    let mut status = StatusResult {
+        currentness: CoreProjectionCurrentness::Partial,
+        requested_core_generation_id: Some("a".repeat(64)),
+        core_receipt: None,
+        coverage: MaterializedCoverage::Partial,
+        repository_coverage: RepositoryCoverage::default(),
+        access: access(ProAccessState::Available),
+        supported_operations: operations(),
+        available_operations: BTreeSet::new(),
+    };
+    status.validate().unwrap();
+
+    status.repository_coverage.repository_candidate_events = 1;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    status.core_receipt = Some(receipt('a'));
+    for coverage in [
+        RepositoryCoverage {
+            repository_candidate_events: 3,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            logical_binding_events: 3,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            certified_live_root_access_events: 3,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            file_evidence_events: 3,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            exact_commit_evidence_events: 3,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            exact_pull_request_evidence_events: 3,
+            ..RepositoryCoverage::default()
+        },
+    ] {
+        status.repository_coverage = coverage;
+        assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    }
+
+    status.repository_coverage = repository_coverage(2);
+    status.validate().unwrap();
 }
 
 #[test]

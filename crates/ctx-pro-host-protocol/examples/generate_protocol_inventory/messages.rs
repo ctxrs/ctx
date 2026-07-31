@@ -28,6 +28,17 @@ fn operations() -> BTreeSet<ProOperation> {
     ])
 }
 
+fn repository_coverage(event_count: u64) -> RepositoryCoverage {
+    RepositoryCoverage {
+        repository_candidate_events: event_count,
+        logical_binding_events: event_count,
+        certified_live_root_access_events: event_count,
+        file_evidence_events: event_count,
+        exact_commit_evidence_events: event_count,
+        exact_pull_request_evidence_events: event_count,
+    }
+}
+
 fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
     vec![
         (
@@ -134,6 +145,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 requested_core_generation_id: Some("a".repeat(64)),
                 core_receipt: Some(receipt()),
                 coverage: MaterializedCoverage::Complete,
+                repository_coverage: repository_coverage(1),
                 access: access(ProAccessState::Available),
                 supported_operations: operations(),
                 available_operations: operations(),

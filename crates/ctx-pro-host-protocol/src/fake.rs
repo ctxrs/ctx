@@ -125,6 +125,7 @@ impl FakeHelper {
                     requested_core_generation_id: None,
                     core_receipt: None,
                     coverage: MaterializedCoverage::NotMaterialized,
+                    repository_coverage: Default::default(),
                     access: ProAccessStatus {
                         entitlement: ProAccessState::Available,
                         graph_key: ProAccessState::Available,
