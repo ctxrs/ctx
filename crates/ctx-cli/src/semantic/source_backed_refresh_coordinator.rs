@@ -50,6 +50,7 @@ mod capture_refresh;
 mod coordinator_state;
 mod current_state;
 mod old_store_retirement;
+mod recovery;
 
 use capture_refresh::{
     execute_capture_owned_refresh, execute_source_backed_refresh, hydration_failure_queues_refresh,
@@ -400,6 +401,7 @@ fn complete_verified_source_epoch_with(
 }
 
 pub(in crate::semantic) fn reconcile_verified_source_epoch(data_root: &Path) -> Result<()> {
+    recovery::reconcile_persisted_refresh_job(data_root)?;
     if !old_store_retirement::is_required(data_root)? {
         return Ok(());
     }
@@ -938,6 +940,10 @@ pub(crate) fn pin_active_verified_generation(
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_retained_generation_tests.rs"]
 mod retained_generation_tests;
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_recovery.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests.rs"]

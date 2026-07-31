@@ -146,13 +146,25 @@ impl SourceBackedRefreshCoordinator {
     }
 
     pub(in crate::semantic) fn recover_published_resolver(&self, data_root: &Path) -> Result<()> {
-        let Some((generation_id, resolver)) = recover_capture_owned_resolver(data_root)? else {
-            return Ok(());
-        };
-        self.install_recovered_resolver(generation_id, resolver);
+        recovery::reconcile_persisted_refresh_job(data_root)?;
+        if let Some(recovered) = recover_capture_owned_resolver(data_root)? {
+            retain_daemon_cycle_verified_index(
+                &source_backed_index_root(data_root),
+                &recovered.verified_index,
+            );
+            let mut state = self.lock_state();
+            state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
+                generation_id: recovered.generation_id,
+                source_manifest: Some(recovered.source_manifest),
+                resolver: recovered.resolver,
+                verified_index: Mutex::new(Some(recovered.verified_index)),
+            }));
+        }
+        self.recover_interrupted_request(data_root)?;
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn install_recovered_resolver(
         &self,
         generation_id: String,
@@ -165,6 +177,59 @@ impl SourceBackedRefreshCoordinator {
             resolver,
             verified_index: Mutex::new(None),
         }));
+    }
+
+    fn recover_interrupted_request(&self, data_root: &Path) -> Result<()> {
+        let path = daemon_source_backed_refresh_job_path(data_root);
+        let Some(job) = read_daemon_job_status(&path) else {
+            return Ok(());
+        };
+        if !recovery::persisted_job_needs_replay(&job) {
+            return Ok(());
+        }
+        let requested_catalog = job
+            .get("requested_explicit_source_catalog")
+            .map(ExplicitSourceCatalogAuthority::from_json)
+            .transpose()
+            .context("restore interrupted source refresh catalog authority")?;
+        let observed_generation = self.observed_published_generation(data_root)?;
+        let fallback = if requested_catalog.is_some() {
+            source_catalog_refresh_runtime_metadata(data_root)
+        } else {
+            source_refresh_runtime_metadata(data_root)
+        };
+        let metadata = SourceRefreshRuntimeMetadata {
+            daemon_mode: job
+                .get("daemon_mode")
+                .and_then(Value::as_str)
+                .and_then(DaemonMode::parse)
+                .unwrap_or(fallback.daemon_mode),
+            trigger: match job.get("trigger").and_then(Value::as_str) {
+                Some("import") => "import",
+                Some("periodic") => "periodic",
+                _ => "search",
+            },
+            trigger_provenance: match job.get("trigger_provenance").and_then(Value::as_str) {
+                Some("explicit_source_catalog") => "explicit_source_catalog",
+                Some("daemon_scheduler") => "daemon_scheduler",
+                Some("autostart") => "autostart",
+                _ => "manual",
+            },
+        };
+        let queued = self.enqueue_with_catalog_metadata(
+            observed_generation,
+            metadata,
+            requested_catalog,
+            false,
+        )?;
+        let request_id = queued
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("recovered source refresh has no request ID"))?;
+        let queued_job = self
+            .job_status(request_id)
+            .ok_or_else(|| anyhow!("recovered source refresh has no job state"))?;
+        write_daemon_job_status(&path, &queued_job)
     }
 
     /// Preserves the capture resolver's typed failure while arranging for
@@ -256,13 +321,21 @@ impl SourceBackedRefreshCoordinator {
         let run = self.run_next_with(
             |request_id, coordinator| {
                 request_id_cell.replace(Some(request_id.to_owned()));
-                let requested_catalog = coordinator.requested_explicit_source_catalog(request_id);
+                let requested_catalog =
+                    coordinator.freeze_requested_explicit_source_catalog(data_root, request_id)?;
+                let running_job = coordinator
+                    .job_status(request_id)
+                    .ok_or_else(|| anyhow!("running source refresh has no job state"))?;
+                write_daemon_job_status(
+                    &daemon_source_backed_refresh_job_path(data_root),
+                    &running_job,
+                )?;
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
                     data_root,
                     request_id,
                     coordinator,
-                    requested_catalog.as_ref(),
+                    Some(&requested_catalog),
                 )?;
                 let probe_started = StdInstant::now();
                 publication_probe_attempted.set(true);
@@ -297,7 +370,22 @@ impl SourceBackedRefreshCoordinator {
             },
             |generation_id| {
                 let retirement_started = StdInstant::now();
-                let result = verified_index
+                let result = request_id_cell
+                    .borrow()
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("published source refresh has no request ID"))
+                    .and_then(|request_id| {
+                        self.job_status(request_id)
+                            .ok_or_else(|| anyhow!("published source refresh has no job state"))
+                    })
+                    .and_then(|job| {
+                        write_daemon_job_status(
+                            &daemon_source_backed_refresh_job_path(data_root),
+                            &job,
+                        )
+                    })
+                    .and_then(|()| {
+                        verified_index
                     .borrow()
                     .as_ref()
                     .ok_or_else(|| {
@@ -309,6 +397,7 @@ impl SourceBackedRefreshCoordinator {
                             generation_id,
                             verified.as_ref(),
                         )
+                    })
                     });
                 if let Some(request_id) = request_id_cell.borrow().as_deref() {
                     self.set_retirement_timing(
@@ -501,6 +590,25 @@ impl SourceBackedRefreshCoordinator {
         let state = self.lock_state();
         find_attempt(&state, request_id)
             .and_then(|attempt| attempt.requested_explicit_source_catalog.clone())
+    }
+
+    fn freeze_requested_explicit_source_catalog(
+        &self,
+        data_root: &Path,
+        request_id: &str,
+    ) -> Result<ExplicitSourceCatalogAuthority> {
+        if let Some(catalog) = self.requested_explicit_source_catalog(request_id) {
+            return Ok(catalog);
+        }
+        let catalog = load_explicit_source_catalog_authority(data_root)?;
+        let mut state = self.lock_state();
+        let attempt = find_attempt_mut(&mut state, request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
+        if let Some(existing) = attempt.requested_explicit_source_catalog.as_ref() {
+            return Ok(existing.clone());
+        }
+        attempt.requested_explicit_source_catalog = Some(catalog.clone());
+        Ok(catalog)
     }
 
     fn job_status(&self, request_id: &str) -> Option<Value> {
