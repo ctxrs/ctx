@@ -322,9 +322,9 @@ fn every_capture_provider_emits_without_usage_suppression() {
 }
 
 #[test]
-fn source_backed_publication_emits_only_global_authoritative_facts() {
+fn core_publication_emits_only_global_authoritative_facts() {
     let mut collector = ProviderRefreshCollector::default();
-    collector.record_source_backed_publication(ProviderRefreshTrigger::Import, false);
+    collector.record_core_publication(ProviderRefreshTrigger::Import, false);
     collector.refresh_duration = Duration::from_secs(2);
 
     let events = collector.finish();

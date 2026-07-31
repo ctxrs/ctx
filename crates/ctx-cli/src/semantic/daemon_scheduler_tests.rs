@@ -26,10 +26,9 @@ use crate::{
 };
 
 use super::{
-    daemon_job_should_backoff, daemon_mode_runs_source_backed_pro_catch_up,
-    daemon_mode_runs_source_backed_relational_catch_up,
-    daemon_mode_runs_source_backed_semantic_projection, daemon_semantic_job_path,
-    daemon_source_backed_refresh_job_path, persist_pro_status, persist_relational_status,
+    daemon_core_refresh_job_path, daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
+    daemon_mode_runs_core_relational_catch_up, daemon_mode_runs_core_semantic_projection,
+    daemon_semantic_job_path, persist_pro_status, persist_relational_status,
     prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
     record_daemon_job_retry, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pro_catch_up_with_retry, write_daemon_job_status,
@@ -279,7 +278,6 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
             calls: calls.clone(),
-            history_refresh: None,
             relational_projection: Some(json!({
                 "status": "completed",
                 "pending": false,
@@ -341,7 +339,7 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
         .recv_timeout(Duration::from_secs(10))
         .expect("relational catch-up did not reach the deterministic blocker");
 
-    let core_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+    let core_job = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root))
         .expect("Core terminal receipt");
     let relational_job =
         super::read_relational_status(&data_root).expect("relational pending receipt");
@@ -420,7 +418,6 @@ fn install_jobs(
 ) -> super::super::daemon::DaemonTestJobHookGuard {
     install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls,
-        history_refresh: None,
         relational_projection,
         semantic_index,
         relational_blocker: None,
@@ -446,8 +443,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
         Some(&coordinator),
     )
     .unwrap();
-    let core_job =
-        read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path())).unwrap();
+    let core_job = read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap();
     let generation = core_job["published_generation"]
         .as_str()
         .unwrap()
@@ -594,8 +590,8 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         Some(&coordinator),
     )
     .unwrap();
-    let generation = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
-        .unwrap()["published_generation"]
+    let generation = read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap()
+        ["published_generation"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -669,30 +665,24 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
 
 #[test]
 fn source_refresh_only_mode_excludes_source_backed_pro_catch_up() {
-    assert!(daemon_mode_runs_source_backed_pro_catch_up(
-        DaemonMode::Full
-    ));
-    assert!(!daemon_mode_runs_source_backed_pro_catch_up(
+    assert!(daemon_mode_runs_core_pro_catch_up(DaemonMode::Full));
+    assert!(!daemon_mode_runs_core_pro_catch_up(
         DaemonMode::SourceRefreshOnly
     ));
 }
 
 #[test]
 fn source_refresh_only_mode_excludes_source_backed_relational_catch_up() {
-    assert!(daemon_mode_runs_source_backed_relational_catch_up(
-        DaemonMode::Full
-    ));
-    assert!(!daemon_mode_runs_source_backed_relational_catch_up(
+    assert!(daemon_mode_runs_core_relational_catch_up(DaemonMode::Full));
+    assert!(!daemon_mode_runs_core_relational_catch_up(
         DaemonMode::SourceRefreshOnly
     ));
 }
 
 #[test]
 fn source_refresh_only_mode_excludes_source_backed_semantic_projection() {
-    assert!(daemon_mode_runs_source_backed_semantic_projection(
-        DaemonMode::Full
-    ));
-    assert!(!daemon_mode_runs_source_backed_semantic_projection(
+    assert!(daemon_mode_runs_core_semantic_projection(DaemonMode::Full));
+    assert!(!daemon_mode_runs_core_semantic_projection(
         DaemonMode::SourceRefreshOnly
     ));
 }
@@ -884,7 +874,7 @@ fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
     let temp = tempfile::tempdir().unwrap();
     let generation = publish_empty_core_generation(temp.path());
     write_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(temp.path()),
+        &daemon_core_refresh_job_path(temp.path()),
         &json!({
             "status": "completed",
             "reason": "unchanged",
@@ -948,8 +938,7 @@ fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
     assert_eq!(restarted.relational_retry.consecutive_failures, 0);
     assert_eq!(restarted.history_retry.consecutive_failures, 1);
     assert_eq!(
-        read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path())).unwrap()
-            ["status"],
+        read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap()["status"],
         "completed"
     );
 }
@@ -965,7 +954,7 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
     );
     persist_relational_status(temp.path(), &relational).unwrap();
     write_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(temp.path()),
+        &daemon_core_refresh_job_path(temp.path()),
         &json!({
             "status": "completed",
             "reason": "unchanged",

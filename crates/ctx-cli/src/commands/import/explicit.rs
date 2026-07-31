@@ -10,16 +10,14 @@ use crate::{
         ProviderRefreshTrigger,
     },
     progress::{format_bytes, ProgressReporter},
-    semantic::{
-        autostart_daemon_and_wait, converge_source_backed_relational_generation,
-        SourceBackedRefreshMode,
-    },
-    DaemonTriggerCommandArg, ImportArgs,
+    ImportArgs,
 };
 
 use super::{
-    catalog::source_stats, explicit_source_for_import, upsert_explicit_source, ImportReport,
-    ImportRunOptions, ImportTotals, ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
+    catalog::source_stats,
+    core_refresh::{wait_for_import_core_refresh, ImportCoreRefreshRequest},
+    explicit_source_for_import, upsert_explicit_source, ImportReport, ImportRunOptions,
+    ImportTotals, ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
 };
 
 pub(crate) struct ExplicitSourceCatalogImportContext<'a> {
@@ -57,23 +55,17 @@ pub(crate) fn run_explicit_source_catalog_import(
 
     let started = Instant::now();
     let upsert = upsert_explicit_source(&context.data_root, &source)?;
-    if !context.args.no_daemon {
-        autostart_daemon_and_wait(
-            &context.data_root,
-            context.config,
-            DaemonTriggerCommandArg::Import,
-        )?;
-    }
-    let refresh = SourceBackedRefreshMode::Wait
-        .coordinate_explicit_source_catalog(&context.data_root, &upsert.authority)
-        .context("publish explicit source through daemon-owned source refresh")?;
+    let refresh = wait_for_import_core_refresh(
+        &context.data_root,
+        context.config,
+        context.args.no_daemon,
+        ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
+    )?;
     let receipt = refresh
         .receipt
         .as_ref()
         .context("explicit source refresh has no authoritative terminal receipt")?;
     let published_generation = refresh.pin.generation_id().to_owned();
-    converge_source_backed_relational_generation(&context.data_root, &published_generation)
-        .context("converge required relational projection after explicit source publication")?;
 
     let summary = ProviderImportSummary {
         imported: usize::from(receipt.generation_changed),
@@ -111,10 +103,9 @@ pub(crate) fn run_explicit_source_catalog_import(
         },
         ..ImportTotals::default()
     };
-    context.provider_refreshes.record_source_backed_publication(
-        ProviderRefreshTrigger::Import,
-        receipt.generation_changed,
-    );
+    context
+        .provider_refreshes
+        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
     context.telemetry.sources_seen = Some(count_bucket(1));
     context.telemetry.source_files = Some(count_bucket(stats.files as u64));
     context.telemetry.source_bytes = Some(bytes_bucket(stats.bytes));

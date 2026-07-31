@@ -24,9 +24,9 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
         return Ok(
-            run_pending_source_backed_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(
-                || DaemonIteration::new(false, false, DaemonCycleStateV1::unknown()),
-            ),
+            run_pending_core_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(|| {
+                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
+            }),
         );
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
@@ -40,23 +40,17 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         ));
     }
     if source_refresh_requested {
-        return run_full_source_backed_refresh(data_root, runtime, source_refresh, false);
+        return run_core_refresh(data_root, runtime, source_refresh, false);
     }
-    if let Some(iteration) = run_pending_source_backed_relational_catch_up(data_root, runtime)? {
+    if let Some(iteration) = run_pending_core_relational_catch_up(data_root, runtime)? {
+        return Ok(iteration);
+    }
+    if let Some(iteration) = run_pending_core_pro_catch_up(data_root, runtime, source_refresh)? {
         return Ok(iteration);
     }
     if let Some(iteration) =
-        run_pending_source_backed_pro_catch_up(data_root, runtime, source_refresh)?
+        run_pending_core_semantic_catch_up(args, data_root, runtime, deadline, semantic_enabled)?
     {
-        return Ok(iteration);
-    }
-    if let Some(iteration) = run_pending_source_backed_semantic_catch_up(
-        args,
-        data_root,
-        runtime,
-        deadline,
-        semantic_enabled,
-    )? {
         return Ok(iteration);
     }
     if runtime.sidecar_drain.generation.take().is_some() {
@@ -67,9 +61,9 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         ));
     }
     if !runtime.history_retry.ready() {
-        let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
-        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
-        let state = daemon_source_backed_cycle_state(&job);
+        let job = core_refresh_retry_backoff_job(data_root, &runtime.history_retry);
+        write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
+        let state = daemon_core_cycle_state(&job);
         return Ok(DaemonIteration::new(false, false, state));
     }
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
@@ -79,14 +73,14 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    run_full_source_backed_refresh(data_root, runtime, source_refresh, true)
+    run_core_refresh(data_root, runtime, source_refresh, true)
 }
 
-fn run_pending_source_backed_relational_catch_up(
+fn run_pending_core_relational_catch_up(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
 ) -> Result<Option<DaemonIteration>> {
-    if !daemon_mode_runs_source_backed_relational_catch_up(runtime.config.daemon.mode) {
+    if !daemon_mode_runs_core_relational_catch_up(runtime.config.daemon.mode) {
         return Ok(None);
     }
     let Some(generation) = pin_published_generation(data_root)? else {
@@ -120,7 +114,7 @@ fn run_pending_source_backed_relational_catch_up(
     ))))
 }
 
-fn run_pending_source_backed_semantic_catch_up(
+fn run_pending_core_semantic_catch_up(
     args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
@@ -128,7 +122,7 @@ fn run_pending_source_backed_semantic_catch_up(
     semantic_enabled: bool,
 ) -> Result<Option<DaemonIteration>> {
     if !semantic_enabled
-        || !daemon_mode_runs_source_backed_semantic_projection(runtime.config.daemon.mode)
+        || !daemon_mode_runs_core_semantic_projection(runtime.config.daemon.mode)
         || runtime.semantic_blocked_job.is_some()
         || !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS)
     {
@@ -174,12 +168,12 @@ fn run_pending_source_backed_semantic_catch_up(
     ))))
 }
 
-fn run_pending_source_backed_pro_catch_up(
+fn run_pending_core_pro_catch_up(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
 ) -> Result<Option<DaemonIteration>> {
-    if !daemon_mode_runs_source_backed_pro_catch_up(runtime.config.daemon.mode) {
+    if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
         return Ok(None);
     }
     let Some(authority) =
@@ -219,7 +213,7 @@ fn run_pending_source_backed_pro_catch_up(
     ))))
 }
 
-fn run_pending_source_backed_refresh(
+fn run_pending_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
@@ -232,7 +226,7 @@ fn run_pending_source_backed_refresh(
         run.job.get("status").and_then(Value::as_str) == Some("failed")
     );
     let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
-    write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
+    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
     Ok(Some(DaemonIteration::new(
         run.did_work,
         run.failed,
@@ -240,7 +234,7 @@ fn run_pending_source_backed_refresh(
     )))
 }
 
-fn run_full_source_backed_refresh(
+fn run_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
@@ -250,12 +244,12 @@ fn run_full_source_backed_refresh(
         Some(coordinator) => {
             if enqueue_periodic {
                 if let Err(error) = coordinator.enqueue_periodic(data_root) {
-                    return finish_full_source_backed_refresh(
+                    return finish_core_refresh(
                         data_root,
                         runtime,
-                        source_backed_refresh_failed_job(
+                        core_refresh_failed_job(
                             data_root,
-                            format!("schedule periodic source-backed refresh: {error:#}"),
+                            format!("schedule periodic Core refresh: {error:#}"),
                         ),
                         false,
                     );
@@ -266,17 +260,17 @@ fn run_full_source_backed_refresh(
         None => None,
     };
     let Some(run) = run else {
-        return finish_full_source_backed_refresh(
+        return finish_core_refresh(
             data_root,
             runtime,
-            source_backed_refresh_failed_job(
+            core_refresh_failed_job(
                 data_root,
-                "daemon source-backed refresh coordinator is unavailable".to_owned(),
+                "daemon Core refresh engine is unavailable".to_owned(),
             ),
             false,
         );
     };
-    finish_full_source_backed_refresh(data_root, runtime, run.job, run.did_work)
+    finish_core_refresh(data_root, runtime, run.job, run.did_work)
 }
 
 fn run_relational_catch_up_with_retry(
@@ -397,28 +391,28 @@ fn prepare_pro_retry_for_generation(
     }
 }
 
-fn daemon_mode_runs_source_backed_pro_catch_up(mode: crate::config::DaemonMode) -> bool {
+fn daemon_mode_runs_core_pro_catch_up(mode: crate::config::DaemonMode) -> bool {
     !mode.runs_only_source_refresh()
 }
 
-fn daemon_mode_runs_source_backed_relational_catch_up(mode: crate::config::DaemonMode) -> bool {
+fn daemon_mode_runs_core_relational_catch_up(mode: crate::config::DaemonMode) -> bool {
     !mode.runs_only_source_refresh()
 }
 
-fn daemon_mode_runs_source_backed_semantic_projection(mode: crate::config::DaemonMode) -> bool {
+fn daemon_mode_runs_core_semantic_projection(mode: crate::config::DaemonMode) -> bool {
     !mode.runs_only_source_refresh()
 }
 
-fn finish_full_source_backed_refresh(
+fn finish_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     job: Value,
     did_work: bool,
 ) -> Result<DaemonIteration> {
     let job = record_daemon_job_retry(&mut runtime.history_retry, job);
-    write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
+    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
     let failed = daemon_job_failed(&job);
-    let state = daemon_source_backed_cycle_state(&job);
+    let state = daemon_core_cycle_state(&job);
     let published_generation = (!failed
         && job.get("status").and_then(Value::as_str) == Some("completed"))
     .then(|| {
@@ -437,10 +431,10 @@ fn finish_full_source_backed_refresh(
     }
 }
 
-fn daemon_source_backed_cycle_state(job: &Value) -> DaemonCycleStateV1 {
+fn daemon_core_cycle_state(job: &Value) -> DaemonCycleStateV1 {
     let history_backoff = daemon_job_in_retry_backoff(job);
     DaemonCycleStateV1::new(
-        daemon_source_backed_freshness(job, history_backoff),
+        daemon_core_freshness(job, history_backoff),
         DaemonBacklogV1::Unknown,
         DaemonCoverageV1::Unknown,
         if history_backoff {
@@ -461,7 +455,7 @@ fn daemon_job_in_retry_backoff(job: &Value) -> bool {
                 > 0)
 }
 
-fn daemon_source_backed_freshness(job: &Value, backoff: bool) -> DaemonHistoryFreshnessV1 {
+fn daemon_core_freshness(job: &Value, backoff: bool) -> DaemonHistoryFreshnessV1 {
     if daemon_job_failed(job) {
         return DaemonHistoryFreshnessV1::Failed;
     }
@@ -486,7 +480,7 @@ pub(super) fn daemon_foreground_query_preempts(
 }
 
 pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, data_root: &Path) {
-    let status = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    let status = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
     runtime.history_retry.restore(status.as_ref());
 }
 
@@ -506,19 +500,16 @@ pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
         || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready())
 }
 
-fn source_backed_refresh_failed_job(data_root: &Path, message: String) -> Value {
-    source_backed_scheduler_job(data_root, "failed", None, Some(message))
+fn core_refresh_failed_job(data_root: &Path, message: String) -> Value {
+    core_scheduler_job(data_root, "failed", None, Some(message))
 }
 
-fn source_backed_refresh_retry_backoff_job(
-    data_root: &Path,
-    backoff: &DaemonRetryBackoff,
-) -> Value {
-    let mut job = source_backed_scheduler_job(
+fn core_refresh_retry_backoff_job(data_root: &Path, backoff: &DaemonRetryBackoff) -> Value {
+    let mut job = core_scheduler_job(
         data_root,
         "skipped",
         Some("retry_backoff"),
-        read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root)).and_then(|job| {
+        read_daemon_job_status(&daemon_core_refresh_job_path(data_root)).and_then(|job| {
             job.get("last_error")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
@@ -528,17 +519,17 @@ fn source_backed_refresh_retry_backoff_job(
     job
 }
 
-fn source_backed_scheduler_job(
+fn core_scheduler_job(
     data_root: &Path,
     status: &str,
     reason: Option<&str>,
     last_error: Option<String>,
 ) -> Value {
-    let previous = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    let previous = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
     compact_json(json!({
         "mode": "background",
         "owner": "daemon",
-        "kind": "source_backed",
+        "kind": "core_refresh",
         "status": status,
         "reason": reason,
         "last_run_at_ms": utc_now().timestamp_millis(),
@@ -712,7 +703,7 @@ use super::{
         daemon_semantic_failed_job, daemon_semantic_retry_backoff_job, run_daemon_semantic_job,
     },
     paths_status::{
-        daemon_semantic_job_path, daemon_source_backed_refresh_job_path, read_daemon_job_status,
+        daemon_core_refresh_job_path, daemon_semantic_job_path, read_daemon_job_status,
         write_daemon_job_status,
     },
     query_service::DaemonQueryActivity,

@@ -19,8 +19,12 @@ pub(super) fn daemon_query_socket_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_QUERY_SOCKET_FILE)
 }
 
-pub(super) fn daemon_source_backed_refresh_job_path(data_root: &Path) -> PathBuf {
+pub(super) fn daemon_core_refresh_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join("core-refresh.json")
+}
+
+pub(super) fn daemon_source_backed_refresh_job_path(data_root: &Path) -> PathBuf {
+    daemon_core_refresh_job_path(data_root)
 }
 
 pub(super) fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
@@ -554,23 +558,8 @@ pub(super) fn daemon_report_with_disabled_status(
             .clone()
             .or_else(|| Some("manual".to_owned()))
     };
-    let suppressed_job = |kind: &str, reason: &str| {
-        compact_json(json!({
-            "status": "disabled",
-            "enabled": false,
-            "kind": kind,
-            "reason": reason,
-            "daemon_mode": daemon_mode.as_str(),
-        }))
-    };
-    let legacy_history_reason = if daemon_mode.runs_only_source_refresh() {
-        "daemon_mode_source_refresh_only"
-    } else {
-        "history_epoch_source_backed"
-    };
     let jobs = json!({
-        "history_refresh": suppressed_job("history_refresh", legacy_history_reason),
-        "source_backed_refresh": daemon_source_backed_refresh_job_report(
+        "core_refresh": daemon_core_refresh_job_report(
             data_root,
             disabled_overrides_lifecycle
         ),
@@ -631,7 +620,7 @@ pub(super) fn daemon_report_with_disabled_status(
         "config_reload": config_reload,
         "lock_path": lock_path,
         "lock_identity": lock_identity,
-        "source_refresh_endpoint": daemon_source_refresh_endpoint_report(data_root),
+        "core_refresh_endpoint": daemon_core_refresh_endpoint_report(data_root),
         "supervisor": super::daemon_supervisor::daemon_supervisor_report(data_root),
         "wakeup": super::daemon_wakeup::daemon_wakeup_report(data_root),
         "status_path": status_path,
@@ -759,12 +748,12 @@ fn daemon_semantic_job_report(
     }))
 }
 
-pub(super) fn daemon_source_backed_refresh_job_report(
+pub(super) fn daemon_core_refresh_job_report(
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
 ) -> Value {
     let daemon_enabled = daemon_enabled_for_status(data_root);
-    let status_value = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    let status_value = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
     let job = status_value.as_ref();
     let disabled = !daemon_enabled && disabled_overrides_lifecycle;
     compact_json(json!({
@@ -821,7 +810,7 @@ pub(super) fn daemon_source_backed_refresh_job_report(
     }))
 }
 
-fn daemon_source_refresh_endpoint_report(data_root: &Path) -> Value {
+fn daemon_core_refresh_endpoint_report(data_root: &Path) -> Value {
     let identity_path = daemon_root_path(data_root).join("source-refresh-endpoint.json");
     let identity = fs::read_to_string(&identity_path)
         .ok()

@@ -44,7 +44,7 @@ fn recovered_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, St
     .generation_id;
     let catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
     super::super::paths_status::write_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(&data_root),
+        &daemon_core_refresh_job_path(&data_root),
         &json!({
             "mode": "background",
             "owner": "daemon",
@@ -72,9 +72,17 @@ fn recovered_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, St
 #[test]
 fn durable_state_path_is_purpose_based() {
     assert_eq!(
-        daemon_jobs_path(Path::new("ctx-data")).join(SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE),
+        daemon_jobs_path(Path::new("ctx-data")).join(PRO_CATCH_UP_STATUS_FILE),
         Path::new("ctx-data/daemon/jobs/pro-catch-up.json")
     );
+}
+
+#[test]
+fn status_contract_has_no_resolver_or_source_manifest_authority() {
+    let production = include_str!("source_status.rs");
+    assert!(!production.contains("resolver_report"));
+    assert!(!production.contains("\"resolver\""));
+    assert!(!production.contains("source_manifest"));
 }
 
 #[test]
@@ -273,7 +281,7 @@ fn recovered_publication_is_ready_in_json_and_human_status() {
 }
 
 #[test]
-fn pro_source_manifest_receipt_is_generation_bound() {
+fn pro_core_receipt_is_generation_bound() {
     let ready_job = json!({
         "status": "completed",
         "core_generation_id": "generation-1",
@@ -305,7 +313,7 @@ fn pro_source_manifest_receipt_is_generation_bound() {
     let retry =
         pro_projection_report_from_job(Some("generation-1"), &retry_job, "pro-catch-up.json");
 
-    assert_eq!(ready["authority"], "source_manifest");
+    assert_eq!(ready["authority"], "core_generation");
     assert_eq!(ready["receipt"]["status"], "ready");
     assert_eq!(ready["receipt"]["generation_matches"], true);
     assert_eq!(stale["status"], "stale");
