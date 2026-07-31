@@ -491,6 +491,7 @@ pub(crate) struct JsonlFamilyRejectedLeaf {
     source_path: PathBuf,
     authority_path: PathBuf,
     proof: TypedKey,
+    rejected_records: u64,
 }
 
 impl JsonlFamilyRejectedLeaf {
@@ -498,11 +499,13 @@ impl JsonlFamilyRejectedLeaf {
         source_path: PathBuf,
         authority_path: PathBuf,
         proof: TypedKey,
+        rejected_records: u64,
     ) -> Self {
         Self {
             source_path,
             authority_path,
             proof,
+            rejected_records,
         }
     }
 }
@@ -720,9 +723,25 @@ fn capture(
         ));
     }
     if opening.leaves().is_empty() && !opening.rejected_leaves().is_empty() {
+        let rejected_records =
+            opening
+                .rejected_leaves()
+                .iter()
+                .try_fold(0_u64, |total, leaf| {
+                    total.checked_add(leaf.rejected_records).ok_or_else(|| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            "provider JSONL rejected-record count overflow",
+                        )
+                    })
+                })?;
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::InvalidSource,
-            "provider JSONL root contains only rejected identity leaves",
+            format!(
+                "direct JSONL route rejected {rejected_records} records across {} sources; \
+                 all provider-native session identity leaves were rejected",
+                opening.rejected_leaves().len()
+            ),
         ));
     }
     let bases = base_sources_for_root(adapter, &opening, sink).map_err(route_invalid)?;
