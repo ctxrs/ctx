@@ -834,6 +834,23 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert!(!missing_topic.contains("\\n"));
     assert!(missing_topic.as_bytes().contains(&0x1b));
 
+    let missing_topic_json = ctx(&temp)
+        .args(["--color=always", "docs", "show", "cli", "--format=json"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(missing_topic_json.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(missing_topic_json.stderr).unwrap(),
+        concat!(
+            "Error: unknown ctx docs topic: cli\n",
+            "nearest topics: cli-reference slash-command-integrations mcp-integrations\n",
+            "try: ctx docs list\n",
+            "try: ctx docs search cli\n",
+        )
+    );
+
     let man = ctx(&temp)
         .args(["docs", "man", "--print", "ctx"])
         .assert()
