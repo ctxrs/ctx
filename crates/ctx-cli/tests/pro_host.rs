@@ -62,34 +62,43 @@ fn blame_commit_negotiates_the_exact_protocol_and_returns_typed_json() {
     assert!(value.get("suggested_next_commands").is_none());
 }
 
-#[test]
-fn missing_blame_resource_has_stable_cli_diagnostic_in_human_and_json_modes() {
+fn missing_resource_command() -> (tempfile::TempDir, Command) {
     let root = tempdir().unwrap();
     initialize_current_query_store(root.path());
     let helper = root.path().join("ctx-pro-blame-missing-resource");
     support::write_blame_error_helper(&helper, "resource_not_found");
+    let mut command = Command::cargo_bin("ctx").unwrap();
+    command.env("CTX_PRO_HELPER", &helper).args([
+        "--data-root",
+        root.path().to_str().unwrap(),
+        "blame",
+        "commit",
+        "0123456789abcdef",
+    ]);
+    (root, command)
+}
 
-    for (format, expected_stderr) in [
-        (None, "✗ resource_not_found\n"),
-        (Some("--format=json"), "Error: resource_not_found\n"),
-    ] {
-        let mut command = Command::cargo_bin("ctx").unwrap();
-        command.env("CTX_PRO_HELPER", &helper).args([
-            "--data-root",
-            root.path().to_str().unwrap(),
-            "blame",
-            "commit",
-            "0123456789abcdef",
-        ]);
-        if let Some(format) = format {
-            command.arg(format);
-        }
-        command
-            .assert()
-            .failure()
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::eq(expected_stderr));
-    }
+#[test]
+fn missing_blame_resource_has_trusted_human_diagnostic() {
+    let (_root, mut command) = missing_resource_command();
+    command
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::eq(
+            "✗ No indexed Pro resource matches the requested blame target.\nThe target is valid but is not present in the materialized Pro graph.\n",
+        ));
+}
+
+#[test]
+fn missing_blame_resource_keeps_stable_json_mode_code() {
+    let (_root, mut command) = missing_resource_command();
+    command
+        .arg("--format=json")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::eq("Error: resource_not_found\n"));
 }
 
 #[test]

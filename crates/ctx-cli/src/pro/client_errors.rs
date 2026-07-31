@@ -1,6 +1,9 @@
 use anyhow::anyhow;
 use ctx_pro_host_protocol::{ErrorClass, ProtocolError};
 
+pub(crate) const RESOURCE_NOT_FOUND_DIAGNOSTIC: &str =
+    "No indexed Pro resource matches the requested blame target.";
+
 pub(super) fn protocol_error(error: ProtocolError) -> anyhow::Error {
     let code = match error.class {
         ErrorClass::EntitlementExpired => "entitlement_expired",
@@ -29,6 +32,13 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
     error
         .chain()
         .find_map(|cause| stable_error_code_from_text(&cause.to_string()))
+}
+
+pub(crate) fn stable_error_diagnostic(error: &anyhow::Error) -> Option<&'static str> {
+    match stable_error_code(error)? {
+        "resource_not_found" => Some(RESOURCE_NOT_FOUND_DIAGNOSTIC),
+        _ => None,
+    }
 }
 
 fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
@@ -118,5 +128,19 @@ mod tests {
             assert_eq!(error.to_string(), "referral request failed");
             assert_eq!(stable_error_code(&error), Some(code));
         }
+    }
+
+    #[test]
+    fn missing_resource_has_trusted_prose_without_exposing_helper_detail() {
+        let error = protocol_error(ProtocolError::new(
+            ErrorClass::ResourceNotFound,
+            "untrusted helper detail at /secret/graph/path",
+        ));
+        assert_eq!(stable_error_code(&error), Some("resource_not_found"));
+        assert_eq!(
+            stable_error_diagnostic(&error),
+            Some(RESOURCE_NOT_FOUND_DIAGNOSTIC)
+        );
+        assert!(!error.to_string().contains("untrusted helper detail"));
     }
 }
