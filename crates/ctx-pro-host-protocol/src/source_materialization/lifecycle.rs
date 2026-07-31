@@ -152,10 +152,10 @@ impl SourceProgressReceipt {
         let source_count = u32::try_from(progress.len()).map_err(|_| {
             ProtocolError::new(ErrorClass::Bounds, "source progress count overflowed")
         })?;
-        let page_count =
-            u32::try_from(progress.len().div_ceil(MAX_SOURCE_PROGRESS_PAGE_ITEMS)).map_err(
-                |_| ProtocolError::new(ErrorClass::Bounds, "source progress page count overflowed"),
-            )?;
+        let page_count = u32::try_from(progress.len().div_ceil(MAX_SOURCE_PROGRESS_PAGE_ITEMS))
+            .map_err(|_| {
+                ProtocolError::new(ErrorClass::Bounds, "source progress page count overflowed")
+            })?;
         let receipt = Self {
             source_count,
             page_count,
@@ -622,8 +622,7 @@ impl SourcePagesMaterialized {
             ));
         }
         if materialized_facts
-            > MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS
-                .saturating_mul(MAX_SOURCE_FACTS_PER_RECORD)
+            > MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS.saturating_mul(MAX_SOURCE_FACTS_PER_RECORD)
         {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,

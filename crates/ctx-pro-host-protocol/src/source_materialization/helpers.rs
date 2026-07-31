@@ -132,14 +132,11 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
-fn source_progress_aggregate_sha256(
-    progress: &[SourceProgress],
-) -> Result<String, ProtocolError> {
-    let source_count = u32::try_from(progress.len()).map_err(|_| {
-        ProtocolError::new(ErrorClass::Bounds, "source progress count overflowed")
-    })?;
-    let page_count =
-        u32::try_from(progress.len().div_ceil(MAX_SOURCE_PROGRESS_PAGE_ITEMS)).map_err(|_| {
+fn source_progress_aggregate_sha256(progress: &[SourceProgress]) -> Result<String, ProtocolError> {
+    let source_count = u32::try_from(progress.len())
+        .map_err(|_| ProtocolError::new(ErrorClass::Bounds, "source progress count overflowed"))?;
+    let page_count = u32::try_from(progress.len().div_ceil(MAX_SOURCE_PROGRESS_PAGE_ITEMS))
+        .map_err(|_| {
             ProtocolError::new(ErrorClass::Bounds, "source progress page count overflowed")
         })?;
     let mut digest = Sha256::new();

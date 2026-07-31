@@ -199,8 +199,7 @@ impl SourceWorktreeRootLocator {
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
             && matches!(bytes[2], b'/' | b'\\');
-        let windows_unc_absolute =
-            bytes.starts_with(br"\\") || bytes.starts_with(b"//");
+        let windows_unc_absolute = bytes.starts_with(br"\\") || bytes.starts_with(b"//");
         if !(unix_absolute || windows_drive_absolute || windows_unc_absolute)
             || self.absolute_path.chars().any(char::is_control)
             || self

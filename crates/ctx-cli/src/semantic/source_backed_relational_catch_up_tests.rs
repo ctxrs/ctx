@@ -701,6 +701,13 @@ fn generation_mismatch_is_persistent_and_never_creates_a_fallback_database() {
 
 #[test]
 fn foreground_wait_requires_exact_ready_generation_and_surfaces_daemon_failure() {
+    let foreground = tempfile::tempdir().unwrap();
+    let foreground_source = source();
+    let foreground_generation = initial_generation(foreground.path(), &foreground_source);
+    converge_required_generation(foreground.path(), &foreground_generation).unwrap();
+    assert!(read_status(foreground.path())
+        .is_some_and(|status| status.is_completed_for(&foreground_generation)));
+
     let temp = tempfile::tempdir().unwrap();
     let source = source();
     let generation = initial_generation(temp.path(), &source);

@@ -121,6 +121,21 @@ pub(crate) fn wait_for_completed_generation(
     )
 }
 
+/// Converges the required relational projection for an exact Core generation.
+///
+/// Import owns this disposable projection in the foreground so a successful
+/// command always fulfills its synchronous Core contract. SQLite's immediate
+/// transaction serializes a concurrent daemon catch-up of the same generation.
+pub(crate) fn converge_required_generation(
+    data_root: &Path,
+    core_generation_id: &str,
+) -> Result<()> {
+    if generation_needs_catch_up(data_root, core_generation_id) {
+        run_after_core_publication(data_root, core_generation_id)?;
+    }
+    wait_for_completed_generation(data_root, core_generation_id, false)
+}
+
 fn wait_for_completed_generation_with(
     data_root: &Path,
     core_generation_id: &str,
