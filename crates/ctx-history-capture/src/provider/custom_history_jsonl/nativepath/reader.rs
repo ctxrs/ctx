@@ -2,7 +2,6 @@
 
 use std::{
     collections::BTreeMap,
-    fs::File,
     io::{BufReader, Read, Seek, SeekFrom, Write},
 };
 
@@ -243,7 +242,8 @@ fn core_record(
         session.is_primary,
         CUSTOM_SOURCE_BACKED_PARSER_REVISION,
         std::mem::take(&mut event.body),
-    )?;
+    )
+    .map_err(core_contract)?;
     record.parent_session_id = parent_session_id;
     record.provider_session_id = Some(custom_history_internal_session_id(
         &source_record.provider_key,

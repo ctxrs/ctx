@@ -232,7 +232,7 @@ fn bounded_session_coordinate_queries_ignore_pathological_nonselected_cardinalit
         if sequence == SELECTED_SEQUENCE {
             selected_event_id = Some(event.event_id.as_uuid());
         }
-        writer.add_document(event).unwrap();
+        writer.add_core_record(event).unwrap();
     }
     writer
         .certify_source(certificate(&source, 1, EVENT_COUNT))
