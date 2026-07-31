@@ -31,7 +31,7 @@ mod search;
 mod show;
 
 pub(super) use locate::render_locate_document;
-pub(super) use search::render_search_document;
+pub(super) use search::{render_search_document, render_search_not_ready_document};
 pub(super) use show::render_show_document;
 
 pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {

@@ -26,8 +26,8 @@ use crate::{
 use super::{
     render::{enforce_json_output_limit, render_show_document, timestamp_json, write_show_value},
     shared::{
-        event_source_json, open_index, resolve_event, resolve_session, session_source_json,
-        source_path_exists, validate_ctx_id, validate_session_selector,
+        event_source_json, open_index, resolve_event, resolve_lookup_for_output, resolve_session,
+        session_source_json, source_path_exists, validate_ctx_id, validate_session_selector,
     },
 };
 
@@ -77,11 +77,17 @@ pub(crate) fn run_show(
             Ok(())
         }
         ShowTarget::Session(args) => {
-            let session = resolve_show_session(
-                &index,
-                args.id.as_deref(),
-                args.provider_session.as_deref(),
-                args.provider.map(ProviderArg::capture_provider),
+            let human_output = args.format == OutputFormat::Text && args.out.is_none();
+            let session = resolve_lookup_for_output(
+                resolve_show_session(
+                    &index,
+                    args.id.as_deref(),
+                    args.provider_session.as_deref(),
+                    args.provider.map(ProviderArg::capture_provider),
+                ),
+                human_output,
+                r#"ctx search "<query>" --verbose"#,
+                ui,
             )?;
             let value = session_json(
                 &index,

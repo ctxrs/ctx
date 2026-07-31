@@ -2,7 +2,9 @@ use serde_json::Value;
 
 use crate::{
     transcript::shell_quote_arg,
-    ui::{Document, Line, RenderContext, Span, Token},
+    ui::{
+        diagnostic, Action, Diagnostic, DiagnosticLevel, Document, Line, RenderContext, Span, Token,
+    },
 };
 
 use super::human::{push_action, push_field, push_heading, push_prefixed, push_wrapped, short_id};
@@ -10,6 +12,34 @@ use super::human::{push_action, push_field, push_heading, push_prefixed, push_wr
 const CARD_INDENT: usize = 3;
 const CARD_LABEL_WIDTH: usize = 7;
 const VERBOSE_LABEL_WIDTH: usize = 16;
+
+pub(in crate::commands::source_index) fn render_search_not_ready_document(
+    context: &RenderContext,
+) -> Document {
+    let mut document = diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Error,
+            summary: "History search is not ready",
+            detail: Some(
+                "There is no current searchable generation. Set up ctx to discover agent history, or import history if setup is already complete.",
+            ),
+            fields: &[],
+            action: Some(Action {
+                command: "ctx setup",
+            }),
+        },
+    );
+    document.push_blank();
+    push_action(
+        &mut document,
+        context,
+        0,
+        "Already set up?",
+        "ctx import --all",
+    );
+    document
+}
 
 pub(in crate::commands::source_index) fn render_search_document(
     value: &Value,

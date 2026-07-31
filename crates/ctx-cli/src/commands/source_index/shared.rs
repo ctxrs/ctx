@@ -5,22 +5,75 @@ use ctx_history_index::{EventRecord, SessionRecord, VerifiedIndex};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{output::compact_json, transcript::normalize_uuid_prefix};
+use crate::{
+    output::compact_json,
+    transcript::normalize_uuid_prefix,
+    ui::{diagnostic, Action, Diagnostic, DiagnosticLevel, Field, RenderContext, Ui},
+};
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MissingLookupKind {
+    Event,
+    Session,
+}
+
+impl MissingLookupKind {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Event => "event",
+            Self::Session => "session",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(super) struct MissingLookupError {
+    kind: MissingLookupKind,
+    requested: String,
+    message: String,
+}
+
+impl MissingLookupError {
+    fn exact(kind: MissingLookupKind, requested: impl Into<String>) -> Self {
+        let requested = requested.into();
+        let message = format!(
+            "{} {requested} was not found in the source-backed Core generation",
+            kind.noun()
+        );
+        Self {
+            kind,
+            requested,
+            message,
+        }
+    }
+
+    fn prefix(kind: MissingLookupKind, requested: impl Into<String>) -> Self {
+        let requested = requested.into();
+        let message = format!(
+            "{} id prefix {requested:?} was not found in the source-backed Core generation",
+            kind.noun()
+        );
+        Self {
+            kind,
+            requested,
+            message,
+        }
+    }
+}
+
 pub(super) fn resolve_event(index: &VerifiedIndex, id: &str) -> Result<EventRecord> {
     if let Ok(uuid) = Uuid::parse_str(id.trim()) {
         return index.event_by_id(uuid)?.ok_or_else(|| {
-            anyhow!("event {uuid} was not found in the source-backed Core generation")
+            MissingLookupError::exact(MissingLookupKind::Event, uuid.to_string()).into()
         });
     }
     let prefix = validate_ctx_id(id, "event")?;
     match index.events_by_id_prefix(&prefix)?.as_slice() {
-        [] => Err(anyhow!(
-            "event id prefix {prefix:?} was not found in the source-backed Core generation"
-        )),
+        [] => Err(MissingLookupError::prefix(MissingLookupKind::Event, prefix).into()),
         [event] => Ok(event.clone()),
         matches => Err(anyhow!(
             "event id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_event_id",
@@ -33,14 +86,12 @@ pub(super) fn resolve_event(index: &VerifiedIndex, id: &str) -> Result<EventReco
 pub(super) fn resolve_session(index: &VerifiedIndex, id: &str) -> Result<SessionRecord> {
     if let Ok(uuid) = Uuid::parse_str(id.trim()) {
         return index.session_by_id(uuid)?.ok_or_else(|| {
-            anyhow!("session {uuid} was not found in the source-backed Core generation")
+            MissingLookupError::exact(MissingLookupKind::Session, uuid.to_string()).into()
         });
     }
     let prefix = validate_ctx_id(id, "session")?;
     match index.sessions_by_id_prefix(&prefix)?.as_slice() {
-        [] => Err(anyhow!(
-            "session id prefix {prefix:?} was not found in the source-backed Core generation"
-        )),
+        [] => Err(MissingLookupError::prefix(MissingLookupKind::Session, prefix).into()),
         [session] => Ok(session.clone()),
         matches => Err(anyhow!(
             "session id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_session_id",
@@ -48,6 +99,57 @@ pub(super) fn resolve_session(index: &VerifiedIndex, id: &str) -> Result<Session
             matches[1].session_id
         )),
     }
+}
+
+pub(super) fn resolve_lookup_for_output<T>(
+    result: Result<T>,
+    human_output: bool,
+    recovery_command: &str,
+    ui: &mut Ui,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if human_output => {
+            let Some(missing) = error.downcast_ref::<MissingLookupError>() else {
+                return Err(error);
+            };
+            let document = render_missing_lookup(ui.stderr_context(), missing, recovery_command);
+            ui.write_stderr(&document)?;
+            Err(crate::dispatch::rendered_cli_error())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn render_missing_lookup(
+    context: &RenderContext,
+    missing: &MissingLookupError,
+    recovery_command: &str,
+) -> crate::ui::Document {
+    let (summary, detail, label) = match missing.kind {
+        MissingLookupKind::Event => (
+            "Event not found",
+            "This event is not in the current searchable generation. Search for text from the event, then retry with a returned event ID.",
+            "Requested event",
+        ),
+        MissingLookupKind::Session => (
+            "Session not found",
+            "This session is not in the current searchable generation. Search for text from the session, then retry with a returned session ID.",
+            "Requested session",
+        ),
+    };
+    diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Error,
+            summary,
+            detail: Some(detail),
+            fields: &[Field::new(label, &missing.requested)],
+            action: Some(Action {
+                command: recovery_command,
+            }),
+        },
+    )
 }
 
 pub(super) fn validate_ctx_id(id: &str, kind: &str) -> Result<String> {
