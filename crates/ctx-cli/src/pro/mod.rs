@@ -88,17 +88,15 @@ pub(crate) fn human_blame_result<T>(
     ui: &mut Ui,
 ) -> Result<T> {
     if !human_output {
-        return result;
+        return result.map_err(actionable_error);
     }
     let error = match result {
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
-    if stable_error_code(&error) != Some("resource_not_found") {
-        return Err(error);
-    }
-    let Some(document) = human_actionable_error_document(ui.stderr_context(), &error, "") else {
-        return Err(error);
+    let Some(document) = human_actionable_error_document(ui.stderr_context(), &error, "ctx pro")
+    else {
+        return Err(actionable_error(error));
     };
     ui.write_stderr(&document)?;
     Err(crate::dispatch::rendered_cli_error())
@@ -110,8 +108,8 @@ fn human_actionable_error_document(
     retry_command: &str,
 ) -> Option<Document> {
     let code = stable_error_code(error)?;
-    let detail = sanitized_error_detail(error, code);
-    let presentation = human_error_presentation(code, detail.as_deref(), retry_command)?;
+    let signals = trusted_error_signals(error, code);
+    let presentation = human_error_presentation(code, signals, retry_command)?;
     let mut document = outcome(
         context,
         Outcome {
@@ -135,15 +133,57 @@ fn human_actionable_error_document(
 
 const MAX_HUMAN_ERROR_DETAIL_BYTES: usize = 256;
 
-fn sanitized_error_detail(error: &anyhow::Error, code: &str) -> Option<String> {
-    error.chain().find_map(|cause| {
+#[derive(Debug, Default, Clone, Copy)]
+struct TrustedErrorSignals {
+    has_detail: bool,
+    billing_customer: bool,
+    workos_sign_in: bool,
+    reserved_referral_codename: bool,
+    verified_referral_email: bool,
+    checkout_account_changed: bool,
+    malformed_commercial_error: bool,
+    interrupted_deletion: bool,
+    unsupported_platform: bool,
+}
+
+fn trusted_error_signals(error: &anyhow::Error, code: &str) -> TrustedErrorSignals {
+    let mut signals = TrustedErrorSignals::default();
+    for cause in error.chain() {
         let message = cause.to_string();
-        let detail = message.strip_prefix(code)?.strip_prefix(':')?.trim();
-        (!detail.is_empty()
-            && detail.len() <= MAX_HUMAN_ERROR_DETAIL_BYTES
-            && !detail.chars().any(char::is_control))
-        .then(|| detail.to_owned())
-    })
+        let Some(detail) = message
+            .strip_prefix(code)
+            .and_then(|message| message.strip_prefix(':'))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if detail.is_empty()
+            || detail.len() > MAX_HUMAN_ERROR_DETAIL_BYTES
+            || detail.chars().any(char::is_control)
+        {
+            continue;
+        }
+        let detail = detail.to_ascii_lowercase();
+        // Cause text can select a bounded, trusted presentation variant, but it is never
+        // retained by `TrustedErrorSignals` or passed to the renderer.
+        signals.has_detail = true;
+        signals.billing_customer |= detail.contains("billing customer");
+        signals.workos_sign_in |= detail.contains("workos")
+            || detail.contains("device authorization")
+            || detail.contains("sign-in");
+        signals.reserved_referral_codename |=
+            detail.contains("referral codename") && detail.contains("reserved");
+        signals.verified_referral_email |=
+            detail.contains("verified") && detail.contains("email") && detail.contains("referral");
+        signals.checkout_account_changed |=
+            detail.contains("commercial account changed during checkout");
+        signals.malformed_commercial_error |= detail.contains("commercial api error response")
+            || detail.contains("commercial api error is malformed");
+        signals.interrupted_deletion |= detail.contains("interrupted pro deletion");
+        signals.unsupported_platform |=
+            detail.contains("unsupported") && detail.contains("platform");
+    }
+    signals
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,14 +196,50 @@ struct HumanErrorPresentation<'a> {
 
 fn human_error_presentation<'a>(
     code: &str,
-    detail: Option<&str>,
+    signals: TrustedErrorSignals,
     retry_command: &'a str,
 ) -> Option<HumanErrorPresentation<'a>> {
     let referral_operation = referral_operation(retry_command);
-    let lower_detail = detail.unwrap_or_default().to_ascii_lowercase();
-    let has_cause = detail.is_some();
 
     let presentation = match code {
+        "authentication_denied" => HumanErrorPresentation {
+            title: "ctx Pro sign-in was denied",
+            detail: Some(
+                "The device authorization was rejected. No sign-in session was accepted.",
+            ),
+            hint: "Start a fresh ctx Pro sign-in.",
+            action: Some("ctx pro"),
+        },
+        "pro_not_installed" => HumanErrorPresentation {
+            title: "ctx Pro is not set up",
+            detail: Some("The signed Pro helper is not installed."),
+            hint: "Set up ctx Pro.",
+            action: Some("ctx pro"),
+        },
+        "entitlement_expired" => HumanErrorPresentation {
+            title: "ctx Pro is locked",
+            detail: Some(
+                "Local Pro data is preserved, but Pro queries remain unavailable until access is restored.",
+            ),
+            hint: "Restore ctx Pro access.",
+            action: Some("ctx pro manage"),
+        },
+        "key_store_unavailable" if signals.interrupted_deletion => HumanErrorPresentation {
+            title: "A previous ctx Pro deletion is incomplete",
+            detail: Some(
+                "Setup and data preservation remain blocked until secure local deletion is completed.",
+            ),
+            hint: "Finish deleting local Pro data.",
+            action: Some("ctx pro uninstall --delete-data"),
+        },
+        "key_store_unavailable" => HumanErrorPresentation {
+            title: "The secure key store is unavailable",
+            detail: Some(
+                "ctx Pro could not access its existing credentials. Repair the selected persistent key store before retrying.",
+            ),
+            hint: "After secure storage is available, resume ctx Pro setup.",
+            action: Some("ctx pro"),
+        },
         "helper_crashed" => HumanErrorPresentation {
             title: "The ctx Pro helper stopped unexpectedly",
             detail: Some("No untrusted helper output was accepted."),
@@ -204,8 +280,7 @@ fn human_error_presentation<'a>(
             hint: "Resume ctx Pro setup to check access or continue checkout.",
             action: Some("ctx pro"),
         },
-        "commercial_identity_conflict"
-            if has_cause && lower_detail.contains("billing customer") =>
+        "commercial_identity_conflict" if signals.has_detail && signals.billing_customer =>
         {
             HumanErrorPresentation {
                 title: "This billing account belongs to another ctx Pro sign-in",
@@ -242,6 +317,14 @@ fn human_error_presentation<'a>(
             hint: "Start a fresh ctx Pro sign-in.",
             action: Some("ctx pro"),
         },
+        "cancelled" => HumanErrorPresentation {
+            title: "ctx Pro uninstall was cancelled",
+            detail: Some(
+                "No uninstall choice was received. ctx Pro and local Pro data were left unchanged.",
+            ),
+            hint: "Run uninstall again and answer the confirmation prompt.",
+            action: Some("ctx pro uninstall"),
+        },
         "rate_limited" if referral_operation.is_some() => HumanErrorPresentation {
             title: "The referral service is temporarily rate limited",
             detail: Some("No referral or payout state was changed."),
@@ -251,11 +334,7 @@ fn human_error_presentation<'a>(
         "service_unavailable" if referral_operation.is_some() => {
             referral_service_unavailable(referral_operation?, retry_command)
         }
-        "service_unavailable"
-            if has_cause
-                && (lower_detail.contains("workos")
-                || lower_detail.contains("device authorization")
-                || lower_detail.contains("sign-in")) =>
+        "service_unavailable" if signals.has_detail && signals.workos_sign_in =>
         {
             HumanErrorPresentation {
                 title: "The ctx Pro sign-in service is temporarily unavailable",
@@ -318,9 +397,13 @@ fn human_error_presentation<'a>(
             hint: "Check the current referral balance and payout state.",
             action: Some("ctx referral status"),
         },
-        "invalid_request"
-            if lower_detail.contains("referral codename")
-                && lower_detail.contains("reserved") =>
+        "invalid_request" if signals.unsupported_platform => HumanErrorPresentation {
+            title: "ctx Pro is not available on this platform",
+            detail: Some("No compatible signed helper is published for this release target."),
+            hint: "",
+            action: None,
+        },
+        "invalid_request" if signals.reserved_referral_codename =>
         {
             HumanErrorPresentation {
                 title: "That referral codename is reserved",
@@ -337,10 +420,7 @@ fn human_error_presentation<'a>(
                 action: Some("ctx referral create <codename>"),
             }
         }
-        "authentication_required"
-            if lower_detail.contains("verified")
-                && lower_detail.contains("email")
-                && lower_detail.contains("referral") =>
+        "authentication_required" if signals.verified_referral_email =>
         {
             HumanErrorPresentation {
                 title: "A verified WorkOS email is required for referrals",
@@ -359,8 +439,7 @@ fn human_error_presentation<'a>(
             hint: "Sign in to ctx Pro, then retry the referral command.",
             action: Some("ctx pro"),
         },
-        "invalid_response"
-            if lower_detail.contains("commercial account changed during checkout") =>
+        "invalid_response" if signals.checkout_account_changed =>
         {
             HumanErrorPresentation {
                 title: "Checkout used a different ctx Pro account",
@@ -372,7 +451,7 @@ fn human_error_presentation<'a>(
             }
         }
         "invalid_response" if referral_operation.is_some() => {
-            referral_invalid_response(referral_operation?, &lower_detail, retry_command)
+            referral_invalid_response(referral_operation?, signals, retry_command)
         }
         "invalid_response" => HumanErrorPresentation {
             title: "ctx Pro returned an invalid response",
@@ -437,7 +516,7 @@ fn referral_service_unavailable<'a>(
 
 fn referral_invalid_response<'a>(
     operation: ReferralOperation,
-    lower_message: &str,
+    signals: TrustedErrorSignals,
     retry_command: &'a str,
 ) -> HumanErrorPresentation<'a> {
     let (title, detail) = match operation {
@@ -445,15 +524,10 @@ fn referral_invalid_response<'a>(
             "Referral creation returned an invalid response",
             "The referral creation result failed validation. No codename was accepted.",
         ),
-        ReferralOperation::Status
-            if lower_message.contains("commercial api error response")
-                || lower_message.contains("commercial api error is malformed") =>
-        {
-            (
-                "The referral service returned an invalid response",
-                "The service error failed validation. No referral data was accepted.",
-            )
-        }
+        ReferralOperation::Status if signals.malformed_commercial_error => (
+            "The referral service returned an invalid response",
+            "The service error failed validation. No referral data was accepted.",
+        ),
         ReferralOperation::Status => (
             "Referral status returned an invalid response",
             "The referral aggregate failed validation. No balances were shown.",
@@ -609,6 +683,91 @@ mod tests {
             assert_eq!(strip_ansi(&styled), plain);
             assert!(!plain.contains("commercial_identity_conflict"), "{plain}");
             assert!(!plain.contains("protocol_mismatch"), "{plain}");
+        }
+    }
+
+    #[test]
+    fn audited_pro_failures_use_only_trusted_human_copy_and_recovery() {
+        for (raw, title, detail, action) in [
+            (
+                "authentication_denied: WorkOS sign-in was denied at /private/auth",
+                "ctx Pro sign-in was denied",
+                "No sign-in session was accepted",
+                Some("ctx pro"),
+            ),
+            (
+                "pro_not_installed: no Pro helper at /private/helper",
+                "ctx Pro is not set up",
+                "signed Pro helper is not installed",
+                Some("ctx pro"),
+            ),
+            (
+                "entitlement_expired: private entitlement detail at /private/grant",
+                "ctx Pro is locked",
+                "Local Pro data is preserved",
+                Some("ctx pro manage"),
+            ),
+            (
+                "key_store_unavailable: selected store failed at /private/vault",
+                "The secure key store is unavailable",
+                "Repair the selected persistent key store",
+                Some("ctx pro"),
+            ),
+            (
+                "key_store_unavailable: interrupted Pro deletion must be completed with `ctx pro uninstall --delete-data`; /private/cleanup",
+                "A previous ctx Pro deletion is incomplete",
+                "secure local deletion is completed",
+                Some("ctx pro uninstall --delete-data"),
+            ),
+            (
+                "cancelled: uninstall confirmation was not provided at /private/prompt",
+                "ctx Pro uninstall was cancelled",
+                "local Pro data were left unchanged",
+                Some("ctx pro uninstall"),
+            ),
+            (
+                "invalid_request: qualification helpers are unsupported on this platform at /private/target",
+                "ctx Pro is not available on this platform",
+                "No compatible signed helper is published",
+                None,
+            ),
+            (
+                "helper_upgrade_required: incompatible helper at /private/helper",
+                "The ctx Pro helper needs repair",
+                "compatible signed helper",
+                Some("ctx pro"),
+            ),
+            (
+                "invalid_response: malformed helper frame at /private/helper",
+                "ctx Pro returned an invalid response",
+                "No untrusted service or helper result was accepted",
+                Some("ctx pro"),
+            ),
+        ] {
+            let error = anyhow!(raw).context("outer failure at /private/context");
+            let rendered = human_actionable_error_document(
+                &context(80, crate::ui::ColorMode::Never),
+                &error,
+                "ctx pro",
+            )
+            .unwrap_or_else(|| panic!("missing trusted human presentation for {raw}"))
+            .render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            let code = raw.split(':').next().unwrap();
+            let headline = rendered.lines().next().unwrap_or_default();
+
+            assert!(headline.starts_with(&format!("✗ {title}")), "{raw}: {rendered}");
+            assert!(normalized.contains(detail), "{raw}: {rendered}");
+            assert!(!headline.starts_with(&format!("✗ {code}:")), "{raw}: {rendered}");
+            assert!(!rendered.contains("/private"), "{raw}: {rendered}");
+            assert!(!rendered.contains(raw), "{raw}: {rendered}");
+            match action {
+                Some(action) => assert!(
+                    rendered.contains(&format!("Next\n  {action}\n")),
+                    "{raw}: {rendered}"
+                ),
+                None => assert!(!rendered.contains("\nNext\n"), "{raw}: {rendered}"),
+            }
         }
     }
 
@@ -857,6 +1016,7 @@ mod tests {
             RenderContext::for_test(crate::ui::TestContext::pipe(crate::ui::StreamKind::Stderr));
         let mut ui = Ui::with_writers(std::io::sink(), pipe, std::io::sink(), pipe);
         for raw in [
+            "authentication_denied: WorkOS sign-in was denied",
             "checkout_expired",
             "checkout_timeout",
             "service_unavailable",
@@ -866,7 +1026,13 @@ mod tests {
             "referral_not_eligible",
             "referral_payout_unavailable",
             "referral_unavailable",
+            "pro_not_installed: no Pro helper at /private/helper",
+            "entitlement_expired: private entitlement detail",
+            "key_store_unavailable: private key-store detail",
             "key_store_locked: selected store is locked",
+            "cancelled: uninstall confirmation was not provided",
+            "invalid_request: qualification helpers are unsupported on this platform",
+            "helper_upgrade_required: private helper detail",
             "commercial_identity_conflict: bounded safe cause",
             "authentication_expired: WorkOS device authorization expired",
             "invalid_response: referral payout result is invalid",

@@ -73,6 +73,7 @@ fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
         "corrupt_graph" => Some("corrupt_graph"),
         "invalid_request" => Some("invalid_request"),
         "invalid_response" => Some("invalid_response"),
+        "authentication_denied" => Some("authentication_denied"),
         "authentication_expired" => Some("authentication_expired"),
         "authentication_required" => Some("authentication_required"),
         "rate_limited" => Some("rate_limited"),
@@ -116,6 +117,7 @@ mod tests {
     #[test]
     fn commercial_and_referral_codes_survive_anyhow_context_without_changing_error_text() {
         for code in [
+            "authentication_denied",
             "authentication_expired",
             "checkout_expired",
             "checkout_timeout",
