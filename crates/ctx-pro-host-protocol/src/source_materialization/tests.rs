@@ -197,6 +197,24 @@ fn worktree_root_locator_requires_a_bounded_normalized_absolute_path() {
     }
 }
 
+#[test]
+fn worktree_root_locator_requires_a_worktree_identity() {
+    let context = SourceRepositoryContext {
+        repository_id: "repository-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        object_format: Some("sha1".to_owned()),
+        worktree_root: Some(
+            SourceWorktreeRootLocator::new("/workspace/repository".to_owned()).unwrap(),
+        ),
+    };
+
+    assert_eq!(
+        context.validate().unwrap_err().class,
+        ErrorClass::InvalidRequest
+    );
+}
+
 fn related_session_id() -> StableEntityId {
     let source = SourceKey::derive(
         "fixture",
