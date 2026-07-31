@@ -32,14 +32,12 @@ macro_rules! eprintln {
 mod analytics;
 mod cli;
 mod commands;
-mod complete_content;
 mod config;
 mod deprecated_controls;
 mod dispatch;
 mod docs;
 mod execution_capabilities;
 mod history_source_plugins;
-mod hydration_error;
 mod identity;
 mod install_marker;
 mod integrations;
@@ -47,6 +45,7 @@ mod local_usage;
 mod mcp;
 mod net;
 mod output;
+mod presentation_limit;
 mod pro;
 mod process_environment;
 mod progress;
@@ -68,9 +67,9 @@ mod parser_prop_tests;
 
 pub(crate) use cli::{
     Cli, DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg,
-    DaemonTriggerCommandArg, DoctorArgs, FormatArgs, ImportArgs, LocateArgs, LocateTarget,
-    SearchArgs, SearchBackendArg, SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatsArgs,
-    StatusArgs, UsageStatusMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    DaemonTriggerCommandArg, DoctorArgs, FormatArgs, ImportArgs, SearchArgs, SearchBackendArg,
+    SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatsArgs, StatusArgs, UsageStatusMode,
+    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 pub(crate) use commands::search::RefreshArg;
 pub(crate) use commands::sql::raw_sql_result_json;

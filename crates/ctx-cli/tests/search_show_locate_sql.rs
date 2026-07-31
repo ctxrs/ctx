@@ -156,7 +156,7 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1, "{search:#}");
     assert_eq!(results[0]["provider"], provider, "{search:#}");
@@ -480,18 +480,7 @@ fn fresh_sql_is_read_only_and_initializes_no_legacy_store() {
 fn show_does_not_initialize_store() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", "deadbeef"]));
-    assert!(stderr.contains("source-backed Core index is not initialized"));
-    assert!(!temp.path().join("work.sqlite").exists());
-}
-
-#[test]
-fn locate_does_not_initialize_store() {
-    let temp = tempdir();
-    let stderr = failure_stderr(ctx(&temp).args(["locate", "event", "deadbeef"]));
-    assert!(
-        stderr.contains("source-backed Core index is not initialized"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("Core index is not initialized"));
     assert!(!temp.path().join("work.sqlite").exists());
 }
 
@@ -582,7 +571,7 @@ fn fresh_home_search_mvp_flow() {
     let ctx_event_id = first_result["ctx_event_id"].as_str().unwrap().to_owned();
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap().to_owned();
     assert!(first_result["provider_session_id"].is_string());
-    assert!(first_result["source_path"].is_string());
+    assert!(first_result.get("source_path").is_none());
     assert_session_suggested_next_commands(first_result);
     assert!(first_result["citations"][0]["ctx_event_id"].is_string());
     assert!(first_result["citations"][0]["ctx_session_id"].is_string());
@@ -724,16 +713,6 @@ fn fresh_home_search_mvp_flow() {
         "{oversized_window}"
     );
 
-    let locate_event =
-        json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--format=json"]));
-    assert_eq!(locate_event["schema_version"], 1);
-    assert_eq!(locate_event["payload_type"], "event_location");
-    assert_eq!(locate_event["ctx_event_id"], ctx_event_id);
-    assert_eq!(locate_event["ctx_session_id"], ctx_session_id);
-    assert_eq!(locate_event["provider"], "codex");
-    assert!(locate_event["provider_session_id"].is_string());
-    assert!(locate_event["source"]["path"].is_string());
-
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["schema_version"], 2);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
@@ -830,21 +809,6 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             "--format=json",
         ]));
     assert!(!shown_event["events"].as_array().unwrap().is_empty());
-
-    let (_, locate_session_output_bytes) =
-        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
-            "locate",
-            "session",
-            &ctx_session_id,
-            "--format=json",
-        ]));
-    let (_, locate_event_output_bytes) =
-        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
-            "locate",
-            "event",
-            &ctx_event_id,
-            "--format=json",
-        ]));
 
     let (sources, sources_output_bytes) = measured_json_output(
         ctx(&temp)
@@ -948,17 +912,6 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
     assert_eq!(
         totals("show_event", "success", "not_applicable"),
         (1, 0, 0, show_event_output_bytes as i64, 0, 0)
-    );
-    assert_eq!(
-        totals("locate", "success", "not_applicable"),
-        (
-            2,
-            0,
-            0,
-            locate_session_output_bytes.saturating_add(locate_event_output_bytes) as i64,
-            0,
-            0,
-        )
     );
     assert_eq!(
         totals("sources", "success", "not_applicable"),

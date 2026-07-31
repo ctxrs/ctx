@@ -3,7 +3,6 @@ ID                01900000-0000-7000-8000-000000000001
 Provider          codex
 Provider session  demo-unicode-session
 Mode              lite
-Content           complete
 
 1. user message
    Time   2026-07-30T12:00:00.000Z

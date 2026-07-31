@@ -143,7 +143,7 @@ pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query:
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1, "{search:#}");
     assert_eq!(results[0]["provider"], provider, "{search:#}");

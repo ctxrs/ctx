@@ -75,8 +75,6 @@ pub(crate) enum CommandRoot {
     Import(ImportArgs),
     #[command(about = "Show an indexed session or event")]
     Show(ShowArgs),
-    #[command(about = "Locate evidence for an indexed session or event")]
-    Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
     #[command(
@@ -262,41 +260,6 @@ pub(crate) enum ShowTarget {
     Session(ShowSessionArgs),
     #[command(about = "Show one event or a surrounding event window")]
     Event(ShowEventArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocateArgs {
-    #[command(subcommand)]
-    pub(crate) target: LocateTarget,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum LocateTarget {
-    #[command(about = "Locate provider/source metadata for a session")]
-    Session(LocateSessionArgs),
-    #[command(about = "Locate provider/source metadata for an event")]
-    Event(LocateEventArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocateSessionArgs {
-    #[arg(help = "ctx session id or unambiguous id prefix")]
-    pub(crate) id: Option<String>,
-    #[arg(long, value_parser = parse_provider_arg)]
-    #[arg(hide_possible_values = true)]
-    pub(crate) provider: Option<ProviderArg>,
-    #[arg(long = "provider-session")]
-    pub(crate) provider_session: Option<String>,
-    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
-    pub(crate) format: JsonOutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocateEventArgs {
-    #[arg(help = "ctx event id or unambiguous id prefix")]
-    pub(crate) id: String,
-    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
-    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]

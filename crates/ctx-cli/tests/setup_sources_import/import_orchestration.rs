@@ -464,7 +464,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
         "off",
         "--format=json",
     ]));
-    assert_eq!(native_search["retrieval"]["index"], "source_backed");
+    assert_eq!(native_search["retrieval"]["index"], "core");
     assert_eq!(
         native_search["retrieval"]["generation_id"],
         native_generation
@@ -556,7 +556,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
         "off",
         "--format=json",
     ]));
-    assert_eq!(explicit_search["retrieval"]["index"], "source_backed");
+    assert_eq!(explicit_search["retrieval"]["index"], "core");
     assert_eq!(
         explicit_search["retrieval"]["generation_id"],
         explicit_generation
@@ -1052,7 +1052,7 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
         "off",
         "--format=json",
     ]));
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
     assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
     let result = &search["results"][0];
@@ -1072,8 +1072,7 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
     assert_eq!(shown_event["payload_type"], "event_window");
     assert_eq!(shown_event["ctx_event_id"], event_id);
     assert_eq!(shown_event["ctx_session_id"], session_id);
-    assert_eq!(shown_event["event"]["content"]["origin"], "provider_source");
-    assert_eq!(shown_event["event"]["content"]["source_verified"], true);
+    assert_eq!(shown_event["event"]["content"]["policy_status"], "selected");
 
     let shown_session =
         json_output(ctx(temp).args(["show", "session", &session_id, "--format", "json"]));

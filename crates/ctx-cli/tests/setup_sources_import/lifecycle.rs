@@ -223,7 +223,7 @@ fn setup_wait_indexes_committed_provider_sqlite_wal_content() {
         "off",
         "--format=json",
     ]));
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_eq!(search["retrieval"]["generation_id"], generation);
     assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
     drop(writer);

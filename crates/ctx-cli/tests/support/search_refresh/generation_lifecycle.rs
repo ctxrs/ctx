@@ -677,7 +677,7 @@ fn search_refresh_wait_publishes_verified_empty_source_generation() {
         json_output(ctx(&temp).args(["search", "anything", "--refresh", "wait", "--format=json"]));
     assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
     assert_eq!(search["freshness"]["source_count"], 0, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_eq!(search["retrieval"]["indexed_documents"], 0, "{search:#}");
     assert!(
         search["results"].as_array().is_some_and(Vec::is_empty),

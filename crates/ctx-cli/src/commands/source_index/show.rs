@@ -1,23 +1,19 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::{CaptureProvider, EventType};
-use ctx_history_index::{EventRecord, SessionRecord, VerifiedIndex};
+use ctx_history_core::{CaptureProvider, CoreContentPolicyStatus, EventType};
+use ctx_history_index::{CoreEventRecord, SessionRecord, VerifiedIndex};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
     analytics::{count_bucket, ShowTelemetry},
-    complete_content::{
-        enforce_complete_content_output_limit, ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-    },
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, OutputFormat},
+    presentation_limit::{
+        enforce_presentation_output_limit, serialized_json_bytes, CLI_PRESENTATION_MAX_OUTPUT_BYTES,
+    },
     provider_args::ProviderArg,
-    semantic::PinnedSourceBackedGeneration,
     transcript::TranscriptMode,
     ui::{canonical_human_output_bytes, Ui},
     ShowArgs, ShowTarget,
@@ -26,15 +22,9 @@ use crate::{
 use super::{
     render::{enforce_json_output_limit, render_show_document, timestamp_json, write_show_value},
     shared::{
-        event_source_json, open_index, resolve_event, resolve_session, session_source_json,
-        source_path_exists, validate_ctx_id, validate_session_selector,
+        open_index, resolve_core_event, resolve_session, validate_ctx_id, validate_session_selector,
     },
 };
-
-#[derive(Debug)]
-pub(super) struct ResolvedIndexContent {
-    pub(super) text: String,
-}
 
 pub(crate) fn run_show(
     args: ShowArgs,
@@ -47,17 +37,14 @@ pub(crate) fn run_show(
     let index = open_index(&data_root)?;
     match args.target {
         ShowTarget::Event(args) => {
-            let selected = resolve_event(&index, &args.id)?;
+            let selected = resolve_core_event(&index, &args.id)?;
             let events = event_window(&index, &selected, args.before, args.after, args.window)?;
             telemetry.events_returned = Some(count_bucket(events.len() as u64));
             let value = event_window_json(
-                &index,
-                &data_root,
                 &selected,
                 &events,
-                args.content,
                 args.format,
-                CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+                CLI_PRESENTATION_MAX_OUTPUT_BYTES,
             )?;
             let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let result_count = events.len();
@@ -85,14 +72,12 @@ pub(crate) fn run_show(
             )?;
             let value = session_json(
                 &index,
-                &data_root,
                 &session,
                 SessionJsonOptions {
                     mode: args.mode,
-                    content: args.content,
                     format: args.format,
                     max_events: None,
-                    output_limit_bytes: CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+                    output_limit_bytes: CLI_PRESENTATION_MAX_OUTPUT_BYTES,
                 },
             )?;
             telemetry.events_returned = value["events"]
@@ -127,12 +112,7 @@ pub(crate) fn run_show(
 fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {
     let document = render_show_document(value, ui.stdout_context());
     let output_bytes = canonical_show_output_bytes(value);
-    enforce_complete_content_output_limit(
-        ContentPolicy::Complete,
-        output_bytes,
-        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-        event_id,
-    )?;
+    enforce_presentation_output_limit(output_bytes, CLI_PRESENTATION_MAX_OUTPUT_BYTES, event_id)?;
     ui.write_stdout(&document)?;
     Ok(output_bytes)
 }
@@ -173,14 +153,14 @@ pub(super) fn resolve_show_session(
         }
         (None, None) => {
             return Err(anyhow!(
-                "source-backed session lookup requires a ctx session ID or --provider-session"
+                "Core session lookup requires a ctx session ID or --provider-session"
             ));
         }
     };
     if let Some(provider) = provider {
         if session.provider != provider.as_str() {
             return Err(anyhow!(
-                "source-backed session {} belongs to provider {}, not {}",
+                "Core session {} belongs to provider {}, not {}",
                 session.session_id,
                 session.provider,
                 provider
@@ -196,7 +176,7 @@ fn select_show_provider_session(
 ) -> Result<SessionRecord> {
     match matches.as_slice() {
         [] => Err(anyhow!(
-            "provider session {provider_session_id:?} was not found in the source-backed Core generation"
+            "provider session {provider_session_id:?} was not found in the Core generation"
         )),
         [session] => Ok(session.clone()),
         matches => Err(anyhow!(
@@ -211,7 +191,6 @@ pub(crate) fn mcp_show_session(
     data_root: &Path,
     id: &str,
     mode: TranscriptMode,
-    content: ContentPolicy,
     max_events: usize,
     output_limit_bytes: usize,
 ) -> Result<Value> {
@@ -219,11 +198,9 @@ pub(crate) fn mcp_show_session(
     let session = resolve_session(&index, id)?;
     let value = session_json(
         &index,
-        data_root,
         &session,
         SessionJsonOptions {
             mode,
-            content,
             format: OutputFormat::Json,
             max_events: Some(max_events),
             output_limit_bytes,
@@ -245,28 +222,18 @@ pub(crate) fn mcp_show_event(
     before: usize,
     after: usize,
     window: Option<usize>,
-    content: ContentPolicy,
     output_limit_bytes: usize,
 ) -> Result<Value> {
     let index = open_index(data_root)?;
-    let selected = resolve_event(&index, id)?;
+    let selected = resolve_core_event(&index, id)?;
     let events = event_window(&index, &selected, before, after, window)?;
-    let value = event_window_json(
-        &index,
-        data_root,
-        &selected,
-        &events,
-        content,
-        OutputFormat::Json,
-        output_limit_bytes,
-    )?;
+    let value = event_window_json(&selected, &events, OutputFormat::Json, output_limit_bytes)?;
     enforce_json_output_limit(&value, output_limit_bytes, selected.event_id.as_uuid())?;
     Ok(value)
 }
 
 struct SessionJsonOptions {
     mode: TranscriptMode,
-    content: ContentPolicy,
     format: OutputFormat,
     max_events: Option<usize>,
     output_limit_bytes: usize,
@@ -274,30 +241,22 @@ struct SessionJsonOptions {
 
 fn session_json(
     index: &VerifiedIndex,
-    data_root: &Path,
     session: &SessionRecord,
     options: SessionJsonOptions,
 ) -> Result<Value> {
-    let mut events = index.events_for_session(session.session_id.as_uuid())?;
-    let source = session_source_json(session, events.first());
+    // Bulk-Core integration seam: replace this ordered full-session read with
+    // metadata-first selection plus a bounded Core fetch when that API lands.
+    let mut events = index.core_events_for_session(session.session_id.as_uuid())?;
     let truncated = options.max_events.is_some_and(|limit| events.len() > limit);
     if let Some(limit) = options.max_events {
         events.truncate(limit);
     }
     let selected = select_session_events(&events, options.mode);
-    let rendered = render_event_values(
-        index,
-        data_root,
-        &selected,
-        options.content,
-        options.output_limit_bytes,
-    )?;
+    let rendered = render_event_values(&selected, options.output_limit_bytes)?;
     Ok(session_transcript_value(
         session,
         options.mode,
-        options.content,
         options.format,
-        source,
         rendered,
         truncated,
         options.max_events,
@@ -308,9 +267,7 @@ fn session_json(
 pub(super) fn session_transcript_value(
     session: &SessionRecord,
     mode: TranscriptMode,
-    content: ContentPolicy,
     format: OutputFormat,
-    source: Value,
     rendered: Vec<Value>,
     truncated: bool,
     max_events: Option<usize>,
@@ -323,7 +280,6 @@ pub(super) fn session_transcript_value(
         "provider": session.provider,
         "provider_session_id": session.provider_session_id,
         "mode": mode.as_str(),
-        "content_policy": content.as_str(),
         "format": format.as_str(),
         "session": {
             "id": session.session_id.as_uuid(),
@@ -333,7 +289,6 @@ pub(super) fn session_transcript_value(
             "provider": session.provider,
             "provider_session_id": session.provider_session_id,
             "source_format": session.source_format,
-            "source_path": session.source_path,
             "parent_ctx_session_id": session.parent_session_id.map(|id| id.as_uuid()),
             "root_ctx_session_id": session.root_session_id.as_uuid(),
             "branch": session.branch,
@@ -341,9 +296,7 @@ pub(super) fn session_transcript_value(
             "is_primary": session.is_primary,
             "workspace": session.workspace,
             "cwd": session.cwd,
-            "source_exists": source_path_exists(session.source_path.as_deref()),
         },
-        "source": source,
         "events": rendered,
         "truncated": truncated.then(|| json!({
             "events": true,
@@ -353,22 +306,18 @@ pub(super) fn session_transcript_value(
 }
 
 fn event_window_json(
-    index: &VerifiedIndex,
-    data_root: &Path,
-    selected: &EventRecord,
-    events: &[EventRecord],
-    content: ContentPolicy,
+    selected: &CoreEventRecord,
+    events: &[CoreEventRecord],
     format: OutputFormat,
     output_limit_bytes: usize,
 ) -> Result<Value> {
     let references = events.iter().collect::<Vec<_>>();
-    let rendered = render_event_values(index, data_root, &references, content, output_limit_bytes)?;
-    event_window_value(selected, content, format, rendered)
+    let rendered = render_event_values(&references, output_limit_bytes)?;
+    event_window_value(selected, format, rendered)
 }
 
 pub(super) fn event_window_value(
-    selected: &EventRecord,
-    content: ContentPolicy,
+    selected: &CoreEventRecord,
     format: OutputFormat,
     rendered: Vec<Value>,
 ) -> Result<Value> {
@@ -378,41 +327,56 @@ pub(super) fn event_window_value(
             event["ctx_event_id"].as_str() == Some(&selected.event_id.as_uuid().to_string())
         })
         .cloned()
-        .ok_or_else(|| anyhow!("selected source-backed event is absent from its event window"))?;
+        .ok_or_else(|| anyhow!("selected event is absent from its pinned Core event window"))?;
     Ok(compact_json(json!({
         "schema_version": 1,
         "target": "event",
         "payload_type": "event_window",
         "ctx_event_id": selected.event_id.as_uuid(),
         "ctx_session_id": selected.session_id.as_uuid(),
-        "content_policy": content.as_str(),
         "format": format.as_str(),
         "event": selected_value,
-        "source": event_source_json(selected),
         "events": rendered,
     })))
 }
 
-fn render_event_values(
-    index: &VerifiedIndex,
-    data_root: &Path,
-    events: &[&EventRecord],
-    policy: ContentPolicy,
+pub(super) fn render_event_values(
+    events: &[&CoreEventRecord],
     output_limit_bytes: usize,
 ) -> Result<Vec<Value>> {
-    let resolved = resolve_contents(index, data_root, events, output_limit_bytes)?;
-    events
-        .iter()
-        .zip(resolved)
-        .map(|(event, resolved)| Ok(render_event_value(event, resolved.text, policy)))
-        .collect()
+    let mut rendered = Vec::with_capacity(events.len());
+    let mut serialized_event_bytes = 2_usize;
+    for event in events {
+        let content = &event.core_record.content;
+        let content_bytes = serialized_json_bytes(&content.normalized_body)?
+            .saturating_add(serialized_json_bytes(&content.structured_content)?);
+        enforce_presentation_output_limit(
+            serialized_event_bytes.saturating_add(content_bytes),
+            output_limit_bytes,
+            event.event_id.as_uuid(),
+        )?;
+
+        let value = render_event_value(event);
+        serialized_event_bytes = serialized_event_bytes
+            .saturating_add(usize::from(!rendered.is_empty()))
+            .saturating_add(serialized_json_bytes(&value)?);
+        enforce_presentation_output_limit(
+            serialized_event_bytes,
+            output_limit_bytes,
+            event.event_id.as_uuid(),
+        )?;
+        rendered.push(value);
+    }
+    Ok(rendered)
 }
 
-pub(super) fn render_event_value(
-    event: &EventRecord,
-    text: String,
-    policy: ContentPolicy,
-) -> Value {
+pub(super) fn render_event_value(event: &CoreEventRecord) -> Value {
+    let content = &event.core_record.content;
+    let (policy_status, policy_reason, complete) = match &content.policy_status {
+        CoreContentPolicyStatus::Selected => ("selected", None, true),
+        CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), true),
+        CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
+    };
     compact_json(json!({
         "ctx_event_id": event.event_id.as_uuid(),
         "item_id": event.event_id.as_uuid(),
@@ -421,7 +385,6 @@ pub(super) fn render_event_value(
         "provider": event.provider,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
-        "source_path": event.source_path,
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": event.root_session_id.as_uuid(),
         "branch": event.branch,
@@ -434,124 +397,30 @@ pub(super) fn render_event_value(
         "workspace": event.workspace,
         "cwd": event.cwd,
         "touched_files": event.touched_files,
-        "source_id": event.locator.source().identity().as_uuid(),
-        "source_exists": source_path_exists(event.source_path.as_deref()),
-        "source": event_source_json(event),
-        "text": text,
+        "text": content.normalized_body.as_deref(),
+        "structured_content": content.structured_content.as_ref(),
         "content": {
-            "requested": policy.as_str(),
-            "complete": true,
-            "origin": "provider_source",
-            "stored_truncated": false,
-            "source_verified": true,
-            "complete_content_available": true,
+            "complete": complete,
+            "policy_status": policy_status,
+            "policy_reason": policy_reason,
         },
     }))
 }
 
-fn resolve_contents(
-    index: &VerifiedIndex,
-    data_root: &Path,
-    events: &[&EventRecord],
-    output_limit_bytes: usize,
-) -> Result<Vec<ResolvedIndexContent>> {
-    if events.is_empty() {
-        return Ok(Vec::new());
-    }
-    let hydrated =
-        PinnedSourceBackedGeneration::hydrate_source_complete_events(index, data_root, events)?;
-    resolved_contents_from_map(events, output_limit_bytes, hydrated)
-}
-
-fn resolved_contents_from_map(
-    events: &[&EventRecord],
-    output_limit_bytes: usize,
-    mut hydrated: HashMap<Uuid, String>,
-) -> Result<Vec<ResolvedIndexContent>> {
-    let mut output_bytes = 0usize;
-    let mut resolved = Vec::with_capacity(events.len());
-    for event in events {
-        let text = hydrated
-            .remove(&event.event_id.as_uuid())
-            .filter(|text| !text.is_empty())
-            .ok_or_else(|| {
-                anyhow!(
-                    "generation-bound source hydration omitted complete event {}",
-                    event.event_id
-                )
-            })?;
-        output_bytes = output_bytes.saturating_add(text.len());
-        if output_bytes > output_limit_bytes {
-            return Err(anyhow!(
-                "source-backed complete content exceeds the {output_limit_bytes}-byte output limit at event {}",
-                event.event_id
-            ));
-        }
-        resolved.push(ResolvedIndexContent { text });
-    }
-    if !hydrated.is_empty() {
-        return Err(anyhow!(
-            "generation-bound source hydration returned unrequested events"
-        ));
-    }
-    Ok(resolved)
-}
-
-#[cfg(test)]
-pub(super) fn resolve_complete_contents(
-    events: &[&EventRecord],
-    output_limit_bytes: usize,
-    resolver: &dyn ctx_history_core::ContentSourceResolver,
-) -> Result<Vec<ResolvedIndexContent>> {
-    use ctx_history_core::{BatchHydrationRequest, EventHydrationRequest};
-
-    let requests = events
-        .iter()
-        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let request = BatchHydrationRequest::new(requests)?;
-    let result = resolver.hydrate_batch(&request).map_err(|failure| {
-        anyhow!(
-            "hydrate ordered generation-bound source batch: {:?}: {}",
-            failure.kind,
-            failure.detail
-        )
-    })?;
-    result
-        .validate_for_request(&request)
-        .map_err(|failure| anyhow!("validate generation-bound source batch: {}", failure.detail))?;
-    let mut hydrated = HashMap::with_capacity(events.len());
-    for (event, record) in events.iter().zip(result.into_records()) {
-        let text = String::from_utf8(record.provider_bytes).map_err(|error| {
-            anyhow!(
-                "provider registry returned non-UTF-8 exact content for {} event {}: {}",
-                event.provider,
-                event.event_id,
-                error.utf8_error()
-            )
-        })?;
-        if hydrated.insert(event.event_id.as_uuid(), text).is_some() {
-            return Err(anyhow!(
-                "generation-bound source batch duplicated event {}",
-                event.event_id
-            ));
-        }
-    }
-    resolved_contents_from_map(events, output_limit_bytes, hydrated)
-}
-
 fn event_window(
     index: &VerifiedIndex,
-    selected: &EventRecord,
+    selected: &CoreEventRecord,
     before: usize,
     after: usize,
     window: Option<usize>,
-) -> Result<Vec<EventRecord>> {
-    let events = index.events_for_session(selected.session_id.as_uuid())?;
+) -> Result<Vec<CoreEventRecord>> {
+    // Bulk-Core integration seam: resolve the bounded sequence window from
+    // metadata, then fetch only that window once the limited API is available.
+    let events = index.core_events_for_session(selected.session_id.as_uuid())?;
     let position = events
         .iter()
         .position(|event| event.event_id == selected.event_id)
-        .ok_or_else(|| anyhow!("selected source-backed event is absent from its session"))?;
+        .ok_or_else(|| anyhow!("selected event is absent from its pinned Core session"))?;
     let (before, after) = window
         .map(|window| (window, window))
         .unwrap_or((before, after));
@@ -563,7 +432,10 @@ fn event_window(
     Ok(events[start..end].to_vec())
 }
 
-fn select_session_events(events: &[EventRecord], mode: TranscriptMode) -> Vec<&EventRecord> {
+fn select_session_events(
+    events: &[CoreEventRecord],
+    mode: TranscriptMode,
+) -> Vec<&CoreEventRecord> {
     match mode {
         TranscriptMode::Log => events.iter().collect(),
         TranscriptMode::Full => events

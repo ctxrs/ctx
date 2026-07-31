@@ -103,7 +103,7 @@ fn file_only_search_returns_touched_file_matches() {
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["provider"], "codex");
-    assert_eq!(results[0]["source_exists"], true);
+    assert!(results[0].get("source_exists").is_none());
 }
 
 #[test]
@@ -174,5 +174,5 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
         "file-filtered search should return results with trimmed path"
     );
     assert_eq!(results[0]["provider"], "codex");
-    assert!(results[0]["source_path"].is_string());
+    assert!(results[0].get("source_path").is_none());
 }

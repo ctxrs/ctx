@@ -7,25 +7,24 @@ use std::{
 
 use support::*;
 
-const BEGIN_SENTINEL: &str = "CTX_HYDRATION_BEGIN-";
-const END_SENTINEL: &str = "-CTX_HYDRATION_END";
-const SOURCE_INDEX_QUERY: &str = "sourceindexsentinel";
-const SOURCE_INDEX_PROVIDER_SESSION_ID: &str = "019fa000-0000-7000-8000-000000000091";
+const BEGIN_SENTINEL: &str = "CTX_CORE_BEGIN-";
+const END_SENTINEL: &str = "-CTX_CORE_END";
+const CORE_QUERY: &str = "selfcontainedcoresentinel";
+const PROVIDER_SESSION_ID: &str = "019fa000-0000-7000-8000-000000000091";
 
-struct SourceIndexedMessage {
-    _daemon: SourceHydrationDaemon,
+struct CorePublishedMessage {
     temp: TempDir,
-    source: PathBuf,
+    removed_source: PathBuf,
     event_id: String,
     session_id: String,
     complete_text: String,
 }
 
-struct SourceHydrationDaemon {
+struct PublicationDaemon {
     child: Option<Child>,
 }
 
-impl SourceHydrationDaemon {
+impl PublicationDaemon {
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -34,13 +33,13 @@ impl SourceHydrationDaemon {
     }
 }
 
-impl Drop for SourceHydrationDaemon {
+impl Drop for PublicationDaemon {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-fn start_source_hydration_daemon(temp: &TempDir) -> SourceHydrationDaemon {
+fn start_publication_daemon(temp: &TempDir) -> PublicationDaemon {
     let root = data_root(temp);
     fs::create_dir_all(&root).unwrap();
     fs::write(
@@ -81,10 +80,10 @@ fn start_source_hydration_daemon(temp: &TempDir) -> SourceHydrationDaemon {
             Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => panic!("start isolated source-hydration daemon: {error}"),
+            Err(error) => panic!("start isolated publication daemon: {error}"),
         }
     };
-    let mut daemon = SourceHydrationDaemon { child: Some(child) };
+    let mut daemon = PublicationDaemon { child: Some(child) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
@@ -98,7 +97,7 @@ fn start_source_hydration_daemon(temp: &TempDir) -> SourceHydrationDaemon {
                 .unwrap()
                 .read_to_string(&mut stderr)
                 .unwrap();
-            panic!("source-hydration daemon exited before becoming ready ({exit}): {stderr}");
+            panic!("publication daemon exited before becoming ready ({exit}): {stderr}");
         }
         let status = ctx(temp)
             .args(["daemon", "status", "--format=json"])
@@ -114,21 +113,19 @@ fn start_source_hydration_daemon(temp: &TempDir) -> SourceHydrationDaemon {
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for source-hydration daemon readiness: {status:#?}"
+            "timed out waiting for publication daemon readiness: {status:#?}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
 }
 
-fn source_indexed_codex_message() -> SourceIndexedMessage {
+fn published_codex_message_with_removed_provider_file() -> CorePublishedMessage {
     let temp = tempdir();
     let source_root = temp.path().join(".codex/sessions");
-    let source = source_root.join(format!(
-        "2026/07/28/rollout-{SOURCE_INDEX_PROVIDER_SESSION_ID}.jsonl"
-    ));
+    let source = source_root.join(format!("2026/07/28/rollout-{PROVIDER_SESSION_ID}.jsonl"));
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     let complete_text = format!(
-        "{SOURCE_INDEX_QUERY} {BEGIN_SENTINEL}{}{END_SENTINEL}",
+        "{CORE_QUERY} {BEGIN_SENTINEL}{}{END_SENTINEL}",
         "y".repeat(20_000)
     );
     let records = [
@@ -136,9 +133,9 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
             "timestamp": "2026-07-28T12:00:00Z",
             "type": "session_meta",
             "payload": {
-                "id": SOURCE_INDEX_PROVIDER_SESSION_ID,
+                "id": PROVIDER_SESSION_ID,
                 "timestamp": "2026-07-28T12:00:00Z",
-                "cwd": "/workspace/source-index",
+                "cwd": "/workspace/self-contained-core",
                 "originator": "codex_cli_rs",
                 "cli_version": "0.1.0",
                 "source": "cli",
@@ -164,10 +161,11 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
         .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
         .collect::<String>();
     fs::write(&source, transcript).unwrap();
-    let daemon = start_source_hydration_daemon(&temp);
+
+    let mut daemon = start_publication_daemon(&temp);
     let bootstrap = json_output(ctx(&temp).args([
         "search",
-        SOURCE_INDEX_QUERY,
+        CORE_QUERY,
         "--provider",
         "codex",
         "--refresh",
@@ -175,34 +173,50 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
         "--format=json",
     ]));
     assert_eq!(bootstrap["payload_type"], "search_results");
-    assert_eq!(bootstrap["retrieval"]["index"], "source_backed");
+    assert_eq!(bootstrap["retrieval"]["index"], "core");
     let result = bootstrap["results"]
         .as_array()
         .and_then(|results| results.first())
-        .expect("source-backed bootstrap search result");
-    assert_eq!(result["provider"], "codex");
-    assert_eq!(
-        result["provider_session_id"],
-        SOURCE_INDEX_PROVIDER_SESSION_ID
-    );
+        .expect("published Core bootstrap search result");
     let event_id = result["ctx_event_id"].as_str().unwrap().to_owned();
     let session_id = result["ctx_session_id"].as_str().unwrap().to_owned();
 
-    SourceIndexedMessage {
-        _daemon: daemon,
+    daemon.stop();
+    fs::remove_file(&source).unwrap();
+    assert!(!source.exists());
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[daemon]\nenabled = false\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+
+    CorePublishedMessage {
         temp,
-        source,
+        removed_source: source,
         event_id,
         session_id,
         complete_text,
     }
 }
 
-fn assert_no_legacy_store(fixture: &SourceIndexedMessage) {
+fn assert_no_legacy_store(fixture: &CorePublishedMessage) {
+    assert!(!fixture.removed_source.exists());
     assert!(
         !fixture.temp.path().join("work.sqlite").exists(),
-        "source-generation show must not initialize or read the legacy Store"
+        "Core search/show must not initialize or read the legacy Store"
     );
+}
+
+fn assert_core_event(event: &Value, fixture: &CorePublishedMessage) {
+    assert_eq!(event["ctx_event_id"], fixture.event_id);
+    assert_eq!(event["provider_session_id"], PROVIDER_SESSION_ID);
+    assert_eq!(event["text"], fixture.complete_text);
+    assert_eq!(event["content"]["complete"], true);
+    assert_eq!(event["content"]["policy_status"], "selected");
+    assert!(event.get("source").is_none(), "{event:#}");
+    assert!(event.get("source_path").is_none(), "{event:#}");
+    assert!(event["content"].get("origin").is_none(), "{event:#}");
+    assert!(event.get("preview").is_none(), "{event:#}");
 }
 
 fn mcp_initialize() -> Value {
@@ -218,372 +232,140 @@ fn mcp_initialize() -> Value {
     })
 }
 
-fn mcp_show_event(fixture: &SourceIndexedMessage, content: &str) -> Value {
+fn mcp_call(fixture: &CorePublishedMessage, id: &str, name: &str, arguments: Value) -> Value {
     let responses = mcp_roundtrip(
         &fixture.temp,
         &[
             mcp_initialize(),
             json!({
                 "jsonrpc": "2.0",
-                "id": "show-event",
+                "id": id,
                 "method": "tools/call",
-                "params": {
-                    "name": "show_event",
-                    "arguments": {
-                        "ctx_event_id": &fixture.event_id[..8],
-                        "content": content
-                    }
-                }
+                "params": { "name": name, "arguments": arguments }
             }),
         ],
     );
     responses[1].clone()
 }
 
-fn mcp_show_session(fixture: &SourceIndexedMessage, content: &str) -> Value {
-    let responses = mcp_roundtrip(
-        &fixture.temp,
-        &[
-            mcp_initialize(),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "show-session",
-                "method": "tools/call",
-                "params": {
-                    "name": "show_session",
-                    "arguments": {
-                        "ctx_session_id": &fixture.session_id[..8],
-                        "mode": "full",
-                        "content": content
-                    }
-                }
-            }),
-        ],
-    );
-    responses[1].clone()
-}
-
-fn assert_provider_authoritative_event(
-    event: &Value,
-    fixture: &SourceIndexedMessage,
-    requested: &str,
-) {
-    assert_eq!(event["ctx_event_id"], fixture.event_id);
-    assert_eq!(event["text"], fixture.complete_text);
-    assert_eq!(event["content"]["requested"], requested);
-    assert_eq!(event["content"]["complete"], true);
-    assert_eq!(event["content"]["origin"], "provider_source");
-    assert_eq!(event["content"]["source_verified"], true);
-    assert_eq!(event["content"]["complete_content_available"], true);
-    assert!(
-        event.get("preview").is_none(),
-        "show must not duplicate hydrated text in a preview field: {event:#}"
-    );
-    assert_eq!(event["content"]["stored_truncated"], false, "{event:#}");
-}
-
 #[test]
-fn cli_show_hydrates_exact_provider_source_for_both_policy_tokens_without_preview() {
-    let fixture = source_indexed_codex_message();
-    let event_prefix = &fixture.event_id[..8];
+fn cli_search_and_show_use_complete_core_after_provider_file_removal() {
+    let fixture = published_codex_message_with_removed_provider_file();
 
-    for policy in ["indexed", "complete"] {
-        let event = json_output(ctx(&fixture.temp).args([
-            "show",
-            "event",
-            event_prefix,
-            "--content",
-            policy,
-            "--format=json",
-        ]));
-        assert_eq!(event["payload_type"], "event_window");
-        assert_eq!(event["content_policy"], policy);
-        assert_provider_authoritative_event(&event["event"], &fixture, policy);
-
-        let session = json_output(ctx(&fixture.temp).args([
-            "show",
-            "session",
-            &fixture.session_id[..8],
-            "--mode",
-            "full",
-            "--content",
-            policy,
-            "--format=json",
-        ]));
-        assert_eq!(session["payload_type"], "session_transcript");
-        assert_eq!(session["ctx_session_id"], fixture.session_id);
-        assert_eq!(session["provider"], "codex");
-        assert_eq!(session["content_policy"], policy);
-        assert_eq!(
-            session["provider_session_id"],
-            SOURCE_INDEX_PROVIDER_SESSION_ID
-        );
-        assert_provider_authoritative_event(&session["events"][0], &fixture, policy);
-    }
-
-    let text = ctx(&fixture.temp)
-        .args(["show", "event", event_prefix])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    assert!(String::from_utf8(text).unwrap().contains(END_SENTINEL));
-
-    let export_path = fixture.temp.path().join("nested/transcript.md");
-    ctx(&fixture.temp)
-        .args([
-            "show",
-            "session",
-            &fixture.session_id,
-            "--mode",
-            "full",
-            "--format",
-            "markdown",
-            "--out",
-            export_path.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    let exported = fs::read_to_string(export_path).unwrap();
-    assert!(exported.contains(&format!(
-        "# codex session {SOURCE_INDEX_PROVIDER_SESSION_ID}"
-    )));
-    assert!(exported.contains(END_SENTINEL));
-
-    let jsonl = ctx(&fixture.temp)
-        .args([
-            "show",
-            "session",
-            &fixture.session_id,
-            "--mode",
-            "full",
-            "--format=jsonl",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let jsonl: Value = serde_json::from_slice(&jsonl).unwrap();
-    assert_eq!(jsonl["payload_type"], "session_transcript_event");
-    assert_provider_authoritative_event(&jsonl["event"], &fixture, "indexed");
-    assert_no_legacy_store(&fixture);
-}
-
-#[test]
-fn cli_show_session_resolves_exact_provider_session_with_complete_hydration() {
-    let fixture = source_indexed_codex_message();
-
-    for provider in [None, Some("codex")] {
-        let mut command = ctx(&fixture.temp);
-        command.args([
-            "show",
-            "session",
-            "--provider-session",
-            SOURCE_INDEX_PROVIDER_SESSION_ID,
-        ]);
-        if let Some(provider) = provider {
-            command.args(["--provider", provider]);
-        }
-        let session =
-            json_output(command.args(["--mode", "full", "--content", "complete", "--format=json"]));
-        assert_eq!(session["payload_type"], "session_transcript");
-        assert_eq!(session["ctx_session_id"], fixture.session_id);
-        assert_eq!(session["provider"], "codex");
-        assert_eq!(
-            session["provider_session_id"],
-            SOURCE_INDEX_PROVIDER_SESSION_ID
-        );
-        assert_provider_authoritative_event(&session["events"][0], &fixture, "complete");
-    }
-
-    let stderr = failure_stderr(ctx(&fixture.temp).args([
-        "show",
-        "session",
-        "--provider-session",
-        SOURCE_INDEX_PROVIDER_SESSION_ID,
-        "--provider",
-        "claude",
-        "--format=json",
-    ]));
-    assert!(
-        stderr.contains("was not found in the source-backed Core generation"),
-        "{stderr}"
-    );
-    assert_no_legacy_store(&fixture);
-}
-
-#[test]
-fn mcp_show_hydrates_exact_provider_source_for_both_policy_tokens_without_preview() {
-    let fixture = source_indexed_codex_message();
-
-    for policy in ["indexed", "complete"] {
-        let event_response = mcp_show_event(&fixture, policy);
-        let event = &event_response["result"]["structuredContent"];
-        assert_eq!(event["payload_type"], "event_window");
-        assert_eq!(event["content_policy"], policy);
-        assert_provider_authoritative_event(&event["event"], &fixture, policy);
-        assert_useful_mcp_text(
-            &event_response["result"],
-            &["ctx show event", &fixture.event_id, BEGIN_SENTINEL],
-        );
-
-        let session_response = mcp_show_session(&fixture, policy);
-        let session = &session_response["result"]["structuredContent"];
-        assert_eq!(session["payload_type"], "session_transcript");
-        assert_eq!(session["ctx_session_id"], fixture.session_id);
-        assert_eq!(session["content_policy"], policy);
-        assert_provider_authoritative_event(&session["events"][0], &fixture, policy);
-        assert_useful_mcp_text(
-            &session_response["result"],
-            &["ctx show session", &fixture.session_id, "provider: codex"],
-        );
-    }
-    assert_no_legacy_store(&fixture);
-}
-
-#[test]
-fn stale_locator_hydration_fails_closed_for_both_policy_tokens() {
-    let fixture = source_indexed_codex_message();
-    let original = fs::read_to_string(&fixture.source).unwrap();
-    let changed = original.replacen(BEGIN_SENTINEL, "STALE_LOCATOR_BEGIN-", 1);
-    assert_ne!(changed, original);
-    fs::write(&fixture.source, changed).unwrap();
-
-    for policy in ["indexed", "complete"] {
-        let stderr = failure_stderr(ctx(&fixture.temp).args([
-            "show",
-            "event",
-            &fixture.event_id,
-            "--content",
-            policy,
-            "--format=json",
-        ]));
-        assert!(stderr.contains("stale_source_evidence"), "{stderr}");
-        assert!(!stderr.contains(END_SENTINEL));
-
-        let response = mcp_show_event(&fixture, policy);
-        assert_eq!(response["result"]["isError"], true);
-        let error = response["result"]["structuredContent"]["error"]
-            .as_str()
-            .unwrap();
-        assert!(error.contains("stale_source_evidence"), "{error}");
-        assert!(!error.contains(END_SENTINEL));
-    }
-    assert_no_legacy_store(&fixture);
-}
-
-#[test]
-fn unavailable_source_hydration_fails_closed_for_both_policy_tokens() {
-    let mut fixture = source_indexed_codex_message();
-    fixture._daemon.stop();
-
-    for policy in ["indexed", "complete"] {
-        let stderr = failure_stderr(ctx(&fixture.temp).args([
-            "show",
-            "event",
-            &fixture.event_id,
-            "--content",
-            policy,
-            "--format=json",
-        ]));
-        assert!(stderr.contains("temporarily_unavailable"), "{stderr}");
-        assert!(!stderr.contains(END_SENTINEL));
-
-        let response = mcp_show_event(&fixture, policy);
-        assert_eq!(response["result"]["isError"], true);
-        let error = response["result"]["structuredContent"]["error"]
-            .as_str()
-            .unwrap();
-        assert!(error.contains("temporarily_unavailable"), "{error}");
-        assert!(!error.contains(END_SENTINEL));
-    }
-    assert_no_legacy_store(&fixture);
-}
-
-#[test]
-fn confirmed_source_deletion_retires_show_without_store_fallback() {
-    let fixture = source_indexed_codex_message();
-    fs::remove_file(&fixture.source).unwrap();
-    let refreshed = json_output(ctx(&fixture.temp).args([
+    let search = json_output(ctx(&fixture.temp).args([
         "search",
-        SOURCE_INDEX_QUERY,
+        CORE_QUERY,
         "--provider",
         "codex",
         "--refresh",
-        "wait",
+        "off",
         "--format=json",
     ]));
-    assert_eq!(
-        refreshed["freshness"]["status"], "completed",
-        "{refreshed:#}"
-    );
-    assert_eq!(
-        refreshed["retrieval"]["indexed_documents"], 0,
-        "{refreshed:#}"
-    );
-    assert!(
-        refreshed["results"].as_array().is_some_and(Vec::is_empty),
-        "{refreshed:#}"
-    );
+    let result = &search["results"][0];
+    assert_eq!(search["retrieval"]["index"], "core");
+    assert_eq!(result["provider_session_id"], PROVIDER_SESSION_ID);
+    assert_eq!(result["snippet_truncated"], true);
+    assert!(result["snippet"].as_str().unwrap().contains(BEGIN_SENTINEL));
+    assert!(!result["snippet"].as_str().unwrap().contains(END_SENTINEL));
+    assert!(result.get("source_path").is_none());
+    assert!(result["citations"][0].get("source_path").is_none());
 
-    let stderr = failure_stderr(ctx(&fixture.temp).args([
+    let event = json_output(ctx(&fixture.temp).args([
         "show",
         "event",
-        &fixture.event_id,
+        &fixture.event_id[..8],
         "--format=json",
     ]));
-    assert!(
-        stderr.contains("was not found in the source-backed Core generation"),
-        "{stderr}"
-    );
+    assert_core_event(&event["event"], &fixture);
 
-    let response = mcp_show_event(&fixture, "indexed");
-    assert_eq!(response["result"]["isError"], true);
-    let error = response["result"]["structuredContent"]["error"]
+    let session = json_output(ctx(&fixture.temp).args([
+        "show",
+        "session",
+        &fixture.session_id[..8],
+        "--mode",
+        "full",
+        "--format=json",
+    ]));
+    assert_eq!(session["ctx_session_id"], fixture.session_id);
+    assert_eq!(session["provider_session_id"], PROVIDER_SESSION_ID);
+    assert_core_event(&session["events"][0], &fixture);
+
+    let resumed = json_output(ctx(&fixture.temp).args([
+        "show",
+        "session",
+        "--provider-session",
+        PROVIDER_SESSION_ID,
+        "--provider",
+        "codex",
+        "--mode",
+        "full",
+        "--format=json",
+    ]));
+    assert_eq!(resumed["ctx_session_id"], fixture.session_id);
+    assert_eq!(resumed["provider_session_id"], PROVIDER_SESSION_ID);
+    assert!(resumed["events"][0]["text"]
         .as_str()
-        .unwrap();
-    assert!(
-        error.contains("was not found in the source-backed Core generation"),
-        "{error}"
-    );
+        .unwrap()
+        .contains(END_SENTINEL));
+    assert!(fixture.complete_text.len() > 16 * 1024);
     assert_no_legacy_store(&fixture);
 }
 
 #[test]
-fn show_requires_a_source_generation_without_initializing_the_store() {
+fn mcp_search_and_show_use_complete_core_after_provider_file_removal() {
+    let fixture = published_codex_message_with_removed_provider_file();
+
+    let search_response = mcp_call(
+        &fixture,
+        "search",
+        "search",
+        json!({"query": CORE_QUERY, "provider": "codex", "backend": "lexical"}),
+    );
+    let search = &search_response["result"]["structuredContent"];
+    assert_eq!(search["retrieval"]["index"], "core");
+    assert_eq!(
+        search["results"][0]["provider_session_id"],
+        PROVIDER_SESSION_ID
+    );
+    assert_eq!(search["results"][0]["snippet_truncated"], true);
+    assert!(search["results"][0]["citations"][0]
+        .get("source_path")
+        .is_none());
+
+    let event_response = mcp_call(
+        &fixture,
+        "show-event",
+        "show_event",
+        json!({"ctx_event_id": &fixture.event_id[..8]}),
+    );
+    assert_core_event(
+        &event_response["result"]["structuredContent"]["event"],
+        &fixture,
+    );
+
+    let session_response = mcp_call(
+        &fixture,
+        "show-session",
+        "show_session",
+        json!({
+            "ctx_session_id": &fixture.session_id[..8],
+            "mode": "full"
+        }),
+    );
+    let session = &session_response["result"]["structuredContent"];
+    assert_eq!(session["provider_session_id"], PROVIDER_SESSION_ID);
+    assert_core_event(&session["events"][0], &fixture);
+
+    assert!(fixture.complete_text.len() > 16 * 1024);
+    assert_no_legacy_store(&fixture);
+}
+
+#[test]
+fn show_requires_a_core_generation_without_initializing_the_store() {
     let temp = tempdir();
     let event_id = "019fa000-0000-7000-8000-000000000099";
 
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", event_id]));
-    assert!(
-        stderr.contains("source-backed Core index is not initialized"),
-        "{stderr}"
-    );
-
-    let responses = mcp_roundtrip(
-        &temp,
-        &[
-            mcp_initialize(),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "show-event",
-                "method": "tools/call",
-                "params": {
-                    "name": "show_event",
-                    "arguments": {"ctx_event_id": event_id}
-                }
-            }),
-        ],
-    );
-    assert_eq!(responses[1]["result"]["isError"], true);
-    assert!(responses[1]["result"]["structuredContent"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("source-backed Core index is not initialized"));
-    assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "missing source generations must fail without initializing the Store"
-    );
+    assert!(stderr.contains("Core index is not initialized"), "{stderr}");
+    assert!(!temp.path().join("work.sqlite").exists());
 }

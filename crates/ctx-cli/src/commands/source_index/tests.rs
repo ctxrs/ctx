@@ -1,111 +1,46 @@
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::{Cell, RefCell},
+        cell::Cell,
         collections::HashMap,
         fs,
     };
 
-    use ctx_history_capture::{
-        complete_content::{CompleteContentError, CompleteContentErrorKind},
-        ingest_codex_source_backed_v0,
-    };
+    use ctx_history_capture::ingest_codex_source_backed_v0;
     use ctx_history_core::{
-        database_path, derive_event_id, derive_session_id, BatchHydrationRequest,
-        BatchHydrationResult, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
-        EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+        database_path, derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput,
         LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
         ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-        SourceRecordLocator, StableEntityId, TypedKey,
+        SourceRecordLocator, TypedKey,
     };
     use ctx_history_index::{
-        EventSearchFilters, GenerationWriter, LexicalDocument, SessionRecord, WriterOptions,
+        EventSearchFilters, GenerationWriter, LexicalDocument, WriterOptions,
     };
     use serde_json::json;
     use tempfile::tempdir;
 
     use crate::{
-        cli::{LocateEventArgs, LocateSessionArgs},
         commands::show::{ShowEventArgs, ShowSessionArgs},
-        output::{JsonOutputFormat, OutputFormat},
+        output::OutputFormat,
         transcript::TranscriptMode,
-        LocateTarget, ShowTarget,
+        ShowTarget,
     };
 
     use super::*;
     use super::{
-        locate::{locate_event_value, locate_session_value, validate_locate_target},
         render::{render_show_document, search_json},
         search::{
-            search_context_observation_with_hydrator, NormalizedSearchQuery, SearchCollection,
-            SearchHit, SearchResultWindow,
+            NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow,
         },
-        shared::session_source_json,
         show::{
             canonical_show_output_bytes, event_window_value, render_event_value,
+            render_event_values,
             session_transcript_value, validate_show_target,
         },
     };
 
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";
-
-    #[derive(Default)]
-    struct MockContentResolver {
-        bodies: HashMap<StableEntityId, Vec<u8>>,
-        calls: RefCell<Vec<(String, String)>>,
-        batch_calls: Cell<usize>,
-    }
-
-    impl MockContentResolver {
-        fn with_body(mut self, event: &EventRecord, body: impl Into<Vec<u8>>) -> Self {
-            self.bodies.insert(event.event_id, body.into());
-            self
-        }
-    }
-
-    impl ContentSourceResolver for MockContentResolver {
-        fn hydrate_event(
-            &self,
-            request: &EventHydrationRequest,
-        ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-            self.calls.borrow_mut().push((
-                request.locator().source().provider().to_owned(),
-                request.locator().source().source_format().to_owned(),
-            ));
-            let provider_bytes =
-                self.bodies
-                    .get(&request.event_id())
-                    .cloned()
-                    .ok_or_else(|| HydrationFailure {
-                        kind: HydrationFailureKind::MissingRecord,
-                        detail: "mock provider record is absent".to_owned(),
-                    })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes,
-            })
-        }
-
-        fn hydrate_batch(
-            &self,
-            request: &BatchHydrationRequest,
-        ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
-            self.batch_calls
-                .set(self.batch_calls.get().saturating_add(1));
-            let records = request
-                .events()
-                .iter()
-                .map(|event| self.hydrate_event(event))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let result = BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
-                kind: HydrationFailureKind::InvalidLocator,
-                detail: error.to_string(),
-            })?;
-            result.validate_for_request(request)?;
-            Ok(result)
-        }
-    }
 
     fn fixture_event(
         provider: CaptureProvider,
@@ -172,6 +107,34 @@ mod tests {
             workspace: None,
             cwd: None,
             touched_files: Vec::new(),
+        }
+    }
+
+    fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEventRecord {
+        let document = LexicalDocument {
+            event_id: event.event_id,
+            session_id: event.session_id,
+            parent_session_id: event.parent_session_id,
+            root_session_id: event.root_session_id,
+            source: event.locator.source().clone(),
+            locator: event.locator.clone(),
+            provider_session_id: event.provider_session_id.clone(),
+            branch: event.branch.clone(),
+            source_path: event.source_path.clone(),
+            agent_type: event.agent_type.clone(),
+            is_primary: event.is_primary,
+            event_sequence: event.event_sequence,
+            occurred_at_unix_ms: event.occurred_at_unix_ms,
+            event_type: event.event_type.clone(),
+            role: event.role.clone(),
+            body: body.into(),
+            workspace: event.workspace.clone(),
+            cwd: event.cwd.clone(),
+            touched_files: event.touched_files.clone(),
+        };
+        CoreEventRecord {
+            event: event.clone(),
+            core_record: document.to_core_record().unwrap(),
         }
     }
 
@@ -314,7 +277,6 @@ mod tests {
             provider: None,
             provider_session: provider_session.map(str::to_owned),
             mode: TranscriptMode::Lite,
-            content: ContentPolicy::Indexed,
             format: OutputFormat::Json,
             out: None,
         }
@@ -326,25 +288,8 @@ mod tests {
             before: 0,
             after: 0,
             window: None,
-            content: ContentPolicy::Indexed,
             format: OutputFormat::Json,
         }
-    }
-
-    fn locate_session_target(id: Option<&str>, provider_session: Option<&str>) -> LocateTarget {
-        LocateTarget::Session(LocateSessionArgs {
-            id: id.map(str::to_owned),
-            provider: None,
-            provider_session: provider_session.map(str::to_owned),
-            format: JsonOutputFormat::Json,
-        })
-    }
-
-    fn locate_event_target(id: &str) -> LocateTarget {
-        LocateTarget::Event(LocateEventArgs {
-            id: id.to_owned(),
-            format: JsonOutputFormat::Json,
-        })
     }
 
     #[test]
@@ -384,15 +329,13 @@ mod tests {
     }
 
     #[test]
-    fn search_schema_v1_snapshot_has_timestamp_result_window_and_source_provenance() {
+    fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let index = open_index(temp.path()).unwrap();
-        let source_path = temp.path().join("search-source.jsonl");
-        fs::write(&source_path, "source").unwrap();
-        let mut event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 31, 1);
-        event.source_path = Some(source_path.display().to_string());
+        let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 31, 1);
         let event_id = event.event_id.as_uuid();
+        let core_event = fixture_core_event(&event, "Core-owned search snippet");
         let mut source_request = request(RefreshArg::Off);
         source_request.query = "  primary query ".to_owned();
         source_request.terms = vec!["term with spaces".to_owned()];
@@ -423,7 +366,7 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([(event_id, "hydrated source snippet".to_owned())]),
+            &HashMap::from([(event_id, core_event)]),
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -465,10 +408,13 @@ mod tests {
         assert!(value.get("cursor").is_none());
         assert!(value["result_window"].get("cursor").is_none());
         let result = &value["results"][0];
-        assert_eq!(result["source_path"], source_path.display().to_string());
-        assert_eq!(result["source_exists"], true);
+        assert_eq!(result["snippet"], "Core-owned search snippet");
+        assert_eq!(result["snippet_truncated"], false);
+        assert!(result.get("source_path").is_none());
+        assert!(result.get("source_exists").is_none());
         assert!(result.get("cursor").is_none());
-        assert_eq!(result["citations"][0]["source_exists"], true);
+        assert!(result["citations"][0].get("source_path").is_none());
+        assert!(result["citations"][0].get("source_exists").is_none());
         assert!(result["citations"][0].get("cursor").is_none());
         let commands = result["suggested_next_commands"].as_array().unwrap();
         assert!(commands.iter().all(|command| {
@@ -494,6 +440,8 @@ mod tests {
         let second = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 42, 1);
         let first_id = first.event_id.as_uuid();
         let second_id = second.event_id.as_uuid();
+        let first_core = fixture_core_event(&first, "first shaped result");
+        let second_core = fixture_core_event(&second, "second shaped result");
         let mut source_request = request(RefreshArg::Off);
         source_request.limit = 2;
         let collection = SearchCollection {
@@ -529,8 +477,8 @@ mod tests {
             &collection,
             &EventSearchFilters::default(),
             &HashMap::from([
-                (first_id, "first shaped result".to_owned()),
-                (second_id, "second shaped result".to_owned()),
+                (first_id, first_core),
+                (second_id, second_core),
             ]),
             "existing_generation",
             1,
@@ -548,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn show_schema_v1_snapshots_restore_source_and_content_shapes() {
+    fn show_schema_v1_reads_complete_normalized_core_content() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let index = open_index(temp.path()).unwrap();
@@ -559,25 +507,17 @@ mod tests {
             .next()
             .unwrap();
         let events = index
-            .events_for_session(session.session_id.as_uuid())
+            .core_events_for_session(session.session_id.as_uuid())
             .unwrap();
         let selected = events.first().unwrap();
 
         let session_value = session_transcript_value(
             &session,
             TranscriptMode::Log,
-            ContentPolicy::Indexed,
             OutputFormat::Json,
-            session_source_json(&session, events.first()),
             events
                 .iter()
-                .map(|event| {
-                    render_event_value(
-                        event,
-                        "injected provider-authoritative content".to_owned(),
-                        ContentPolicy::Indexed,
-                    )
-                })
+                .map(render_event_value)
                 .collect(),
             false,
             None,
@@ -585,7 +525,6 @@ mod tests {
         assert_eq!(
             sorted_json_keys(&session_value),
             vec![
-                "content_policy",
                 "ctx_session_id",
                 "events",
                 "format",
@@ -595,7 +534,6 @@ mod tests {
                 "provider_session_id",
                 "schema_version",
                 "session",
-                "source",
                 "target",
             ]
         );
@@ -604,165 +542,46 @@ mod tests {
             session_value["session"]["item_id"],
             session.session_id.as_uuid().to_string()
         );
-        assert_eq!(session_value["source"]["exists"], true);
+        assert_eq!(session_value["provider_session_id"], TEST_SESSION_ID);
+        assert!(session_value.get("source").is_none());
 
-        for policy in [ContentPolicy::Indexed, ContentPolicy::Complete] {
-            let event_value = event_window_value(
-                selected,
-                policy,
-                OutputFormat::Json,
-                vec![render_event_value(
-                    selected,
-                    "injected provider-authoritative content".to_owned(),
-                    policy,
-                )],
-            )
-            .unwrap();
-            assert_eq!(
-                sorted_json_keys(&event_value),
-                vec![
-                    "content_policy",
-                    "ctx_event_id",
-                    "ctx_session_id",
-                    "event",
-                    "events",
-                    "format",
-                    "payload_type",
-                    "schema_version",
-                    "source",
-                    "target",
-                ]
-            );
-            assert_eq!(
-                sorted_json_keys(&event_value["event"]["content"]),
-                vec![
-                    "complete",
-                    "complete_content_available",
-                    "origin",
-                    "requested",
-                    "source_verified",
-                    "stored_truncated",
-                ]
-            );
-            assert_eq!(
-                event_value["event"]["content"],
-                json!({
-                    "requested": policy.as_str(),
-                    "complete": true,
-                    "origin": "provider_source",
-                    "stored_truncated": false,
-                    "source_verified": true,
-                    "complete_content_available": true,
-                })
-            );
-            assert_eq!(event_value["event"]["source"]["exists"], true);
-            assert!(event_value["source"].get("cursor").is_none());
-            assert!(event_value["event"].get("cursor").is_none());
-        }
-    }
-
-    #[test]
-    fn locate_schema_v1_exposes_safe_provenance_and_deleted_source_availability() {
-        let temp = tempdir().unwrap();
-        let source_path = temp.path().join("deleted-source.jsonl");
-        fs::write(&source_path, "source").unwrap();
-        let mut event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 32, 1);
-        event.source_path = Some(source_path.display().to_string());
-        let session = SessionRecord {
-            session_id: event.session_id,
-            parent_session_id: event.parent_session_id,
-            root_session_id: event.root_session_id,
-            provider: event.provider.clone(),
-            source_format: event.source_format.clone(),
-            provider_session_id: event.provider_session_id.clone(),
-            branch: event.branch.clone(),
-            source_path: event.source_path.clone(),
-            agent_type: event.agent_type.clone(),
-            is_primary: event.is_primary,
-            workspace: event.workspace.clone(),
-            cwd: event.cwd.clone(),
-            first_event_sequence: event.event_sequence,
-            first_occurred_at_unix_ms: event.occurred_at_unix_ms,
-        };
-        let session_value = locate_session_value(&session, Some(&event));
+        let event_value = event_window_value(
+            selected,
+            OutputFormat::Json,
+            vec![render_event_value(selected)],
+        )
+        .unwrap();
         assert_eq!(
-            sorted_json_keys(&session_value),
+            sorted_json_keys(&event_value),
             vec![
-                "agent_type",
-                "ctx_session_id",
-                "payload_type",
-                "provider",
-                "provider_session_id",
-                "resume",
-                "root_ctx_session_id",
-                "schema_version",
-                "source",
-                "target",
-            ]
-        );
-        assert_eq!(
-            session_value["source"]["source_id"],
-            event.locator.source().identity().as_uuid().to_string()
-        );
-        assert_eq!(session_value["source"]["exists"], true);
-
-        let present = locate_event_value(&event);
-        assert_eq!(
-            sorted_json_keys(&present),
-            vec![
-                "complete_content",
                 "ctx_event_id",
                 "ctx_session_id",
-                "event_type",
+                "event",
+                "events",
+                "format",
                 "payload_type",
-                "provider",
-                "provider_session_id",
-                "resume",
-                "role",
                 "schema_version",
-                "sequence",
-                "source",
-                "source_record",
                 "target",
             ]
         );
         assert_eq!(
-            sorted_json_keys(&present["source"]),
-            vec![
-                "exists",
-                "path",
-                "provider",
-                "provider_session_id",
-                "source_format",
-                "source_id",
-            ]
+            sorted_json_keys(&event_value["event"]["content"]),
+            vec!["complete", "policy_status"]
         );
         assert_eq!(
-            sorted_json_keys(&present["source_record"]),
-            vec!["kind", "namespace"]
-        );
-        assert!(present["source_record"].get("locator").is_none());
-        assert!(present["source_record"].get("record_digest").is_none());
-        assert_eq!(
-            present["complete_content"],
+            event_value["event"]["content"],
             json!({
-                "locator_available": true,
-                "available": true,
-                "source_authority": "provider",
-                "source_family": "provider_native",
-                "locator_kind": "provider_native",
+                "complete": true,
+                "policy_status": "selected",
             })
         );
-
-        fs::remove_file(&source_path).unwrap();
-        let deleted = locate_event_value(&event);
-        assert_eq!(deleted["source"]["exists"], false);
-        assert_eq!(deleted["complete_content"]["locator_available"], true);
-        assert_eq!(deleted["complete_content"]["available"], false);
+        assert_eq!(event_value["event"]["provider_session_id"], TEST_SESSION_ID);
+        assert!(event_value["event"].get("source").is_none());
+        assert!(event_value["event"].get("cursor").is_none());
     }
 
     #[test]
-    fn show_and_locate_selector_shapes_validate_before_pristine_root_access() {
+    fn show_selector_shapes_validate_before_pristine_root_access() {
         for target in [
             ShowTarget::Session(show_session_args(None, None)),
             ShowTarget::Session(show_session_args(
@@ -778,19 +597,6 @@ mod tests {
             );
             assert!(!error.contains("index is not initialized"), "{error}");
         }
-        for target in [
-            locate_session_target(None, None),
-            locate_session_target(Some("deadbeef"), Some("provider-session")),
-        ] {
-            let error = validate_locate_target(&target).unwrap_err().to_string();
-            assert!(
-                error.contains("requires a ctx session ID or --provider-session")
-                    || error.contains("not both"),
-                "{error}"
-            );
-            assert!(!error.contains("index is not initialized"), "{error}");
-        }
-
         let show_identity = validate_show_target(&ShowTarget::Event(show_event_args("not-an-id")))
             .unwrap_err()
             .to_string();
@@ -798,41 +604,24 @@ mod tests {
             show_identity.contains("event id must be"),
             "{show_identity}"
         );
-        let locate_identity = validate_locate_target(&locate_event_target("not-an-id"))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            locate_identity.contains("event id must be"),
-            "{locate_identity}"
-        );
-        for error in [
-            validate_show_target(&ShowTarget::Session(show_session_args(
-                Some("not-an-id"),
-                None,
-            )))
-            .unwrap_err()
-            .to_string(),
-            validate_locate_target(&locate_session_target(Some("not-an-id"), None))
-                .unwrap_err()
-                .to_string(),
-        ] {
-            assert!(error.contains("session id must be"), "{error}");
-            assert!(!error.contains("index is not initialized"), "{error}");
-        }
-        for error in [
+        let session_identity = validate_show_target(&ShowTarget::Session(show_session_args(
+            Some("not-an-id"),
+            None,
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(session_identity.contains("session id must be"), "{session_identity}");
+        assert!(!session_identity.contains("index is not initialized"));
+
+        let provider_identity =
             validate_show_target(&ShowTarget::Session(show_session_args(None, Some("   "))))
                 .unwrap_err()
-                .to_string(),
-            validate_locate_target(&locate_session_target(None, Some("   ")))
-                .unwrap_err()
-                .to_string(),
-        ] {
-            assert!(
-                error.contains("provider session ID must not be empty"),
-                "{error}"
-            );
-            assert!(!error.contains("index is not initialized"), "{error}");
-        }
+                .to_string();
+        assert!(
+            provider_identity.contains("provider session ID must not be empty"),
+            "{provider_identity}"
+        );
+        assert!(!provider_identity.contains("index is not initialized"));
     }
 
     #[test]
@@ -979,24 +768,13 @@ mod tests {
         let generation = outcome.pin.generation_id().to_owned();
 
         fs::remove_file(index_root(temp.path()).join("meta.json")).unwrap();
-        let (value, collection, index) = search_existing_generation_with_hydrator(
+        let (value, collection, index) = search_existing_generation(
             &request(RefreshArg::Off),
             outcome.pin.into_index(),
             temp.path(),
             0.35,
             outcome.status,
             outcome.source_count,
-            |_index, _data_root, events| {
-                Ok(events
-                    .iter()
-                    .map(|event| {
-                        (
-                            event.event_id.as_uuid(),
-                            "exact injected search body".to_owned(),
-                        )
-                    })
-                    .collect())
-            },
         )
         .unwrap();
 
@@ -1006,50 +784,47 @@ mod tests {
     }
 
     #[test]
-    fn search_context_bytes_use_snippets_and_deduplicated_complete_sessions_not_json() {
+    fn search_context_bytes_use_core_snippets_and_complete_core_sessions_not_json() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
-        let (value, collection, index) = search_existing_generation_with_hydrator(
+        let (value, collection, index) = search_existing_generation(
             &request(RefreshArg::Off),
             open_index(temp.path()).unwrap(),
             temp.path(),
             0.35,
             "existing_generation",
             1,
-            |_index, _data_root, events| {
-                Ok(events
-                    .iter()
-                    .map(|event| (event.event_id.as_uuid(), "short snippet".to_owned()))
-                    .collect())
-            },
         )
         .unwrap();
-        let complete_event_count = Cell::new(0_usize);
-        let observation = search_context_observation_with_hydrator(
-            &value,
-            &collection,
-            &index,
-            temp.path(),
-            |_index, _data_root, events| {
-                complete_event_count.set(events.len());
-                Ok(events
-                    .iter()
-                    .map(|event| (event.event_id.as_uuid(), "x".repeat(100)))
-                    .collect())
-            },
-        );
+        let observation = search_context_observation(&value, &collection, &index);
         let delivered = value["results"]
             .as_array()
             .unwrap()
             .iter()
             .map(|result| result["snippet"].as_str().unwrap().len())
             .sum::<usize>();
+        let session_id = collection.result_window.hits[0].event.session_id.as_uuid();
+        let complete_bytes = index
+            .core_events_for_session(session_id)
+            .unwrap()
+            .iter()
+            .map(|event| {
+                event.core_record.content.normalized_body.as_ref().map_or(0, String::len)
+                    + event
+                        .core_record
+                        .content
+                        .structured_content
+                        .as_ref()
+                        .map(|value| serde_json::to_vec(value).unwrap().len())
+                        .unwrap_or(0)
+            })
+            .sum::<usize>();
         assert_eq!(
             observation.metadata_for_test(),
             (
                 crate::local_usage::ContextCoverage::Complete,
                 delivered as u64,
-                (complete_event_count.get() * 100) as u64,
+                complete_bytes as u64,
             )
         );
         assert_ne!(
@@ -1057,105 +832,6 @@ mod tests {
             serde_json::to_vec(&value["results"]).unwrap().len(),
             "JSON keys and framing must not enter canonical context bytes"
         );
-    }
-
-    #[test]
-    fn refresh_off_surfaces_typed_resolver_unavailable_without_retrying() {
-        let temp = tempdir().unwrap();
-        write_test_generation(temp.path());
-        let wait_calls = Cell::new(0);
-        let error = match search_with_hydration_retry_with(
-            &request(RefreshArg::Off),
-            temp.path(),
-            0.35,
-            RefreshOutcome {
-                pin: PinnedSourceBackedGeneration::from_index(open_index(temp.path()).unwrap()),
-                status: "existing_generation",
-                source_count: 0,
-            },
-            search_existing_generation,
-            |_request, _data_root| {
-                wait_calls.set(wait_calls.get() + 1);
-                panic!("refresh off must not retry source discovery")
-            },
-        ) {
-            Ok(_) => panic!("refresh-off hydration unexpectedly succeeded"),
-            Err(error) => error,
-        };
-
-        assert!(PinnedSourceBackedGeneration::source_hydration_retryable(
-            &error
-        ));
-        assert!(format!("{error:#}").contains("resolver_service_unavailable"));
-        assert_eq!(wait_calls.get(), 0);
-    }
-
-    #[test]
-    fn background_search_retries_hydration_once_after_daemon_wait_repin() {
-        let temp = tempdir().unwrap();
-        write_test_generation(temp.path());
-        let run_calls = Cell::new(0);
-        let wait_calls = Cell::new(0);
-        let outcome = search_with_hydration_retry_with(
-            &request(RefreshArg::Background),
-            temp.path(),
-            0.35,
-            RefreshOutcome {
-                pin: PinnedSourceBackedGeneration::from_index(open_index(temp.path()).unwrap()),
-                status: "daemon_background",
-                source_count: 1,
-            },
-            |request, index, data_root, semantic_weight, status, source_count| {
-                run_calls.set(run_calls.get() + 1);
-                if run_calls.get() == 1 {
-                    search_existing_generation(
-                        request,
-                        index,
-                        data_root,
-                        semantic_weight,
-                        status,
-                        source_count,
-                    )
-                } else {
-                    search_existing_generation_with_hydrator(
-                        request,
-                        index,
-                        data_root,
-                        semantic_weight,
-                        status,
-                        source_count,
-                        |_index, _data_root, events| {
-                            Ok(events
-                                .iter()
-                                .map(|event| {
-                                    (
-                                        event.event_id.as_uuid(),
-                                        "exact source after daemon repin".to_owned(),
-                                    )
-                                })
-                                .collect())
-                        },
-                    )
-                }
-            },
-            |_request, data_root| {
-                wait_calls.set(wait_calls.get() + 1);
-                Ok(RefreshOutcome {
-                    pin: PinnedSourceBackedGeneration::from_index(open_index(data_root)?),
-                    status: "published",
-                    source_count: 1,
-                })
-            },
-        )
-        .unwrap();
-
-        assert_eq!(outcome.3, "published");
-        assert_eq!(
-            outcome.0["results"][0]["snippet"],
-            "exact source after daemon repin"
-        );
-        assert_eq!(run_calls.get(), 2);
-        assert_eq!(wait_calls.get(), 1);
     }
 
     #[test]
@@ -1206,72 +882,6 @@ mod tests {
             .expect("semantic-only errors remain typed");
         assert_eq!(not_ready.code(), "semantic_store_missing");
         assert!(not_ready.detail().contains("flat-F32"));
-
-        let mut embedding = vec![0.0; 384];
-        embedding[0] = 1.0;
-        let exact_source_texts = index
-            .semantic_event_page(None, ctx_history_index::MAX_SEMANTIC_EVENT_PAGE_ITEMS)
-            .unwrap()
-            .items
-            .into_iter()
-            .map(|event| {
-                (
-                    event.event_id.as_uuid(),
-                    format!("exact provider fixture text containing {TEST_QUERY}"),
-                )
-            })
-            .collect();
-        PinnedSourceBackedGeneration::install_source_generation_flat_fixture(
-            &index,
-            temp.path(),
-            &embedding,
-            exact_source_texts,
-        )
-        .unwrap();
-        assert!(temp.path().join("search").join("semantic").is_dir());
-        assert!(
-            !temp.path().join("semantic-vectors").exists(),
-            "the fresh source epoch must not open or reuse the legacy vector root"
-        );
-
-        for backend in [SearchBackendArg::Semantic, SearchBackendArg::Hybrid] {
-            let mut source_request = request(RefreshArg::Off);
-            source_request.backend = Some(backend);
-            let filters = index_search_filters(&source_request, &index).unwrap();
-            let collection = collect_search_hits_with_backend_using(
-                &source_request,
-                &index,
-                temp.path(),
-                0.35,
-                &filters,
-                |index, data_root, _query, filters, candidate_limit| {
-                    PinnedSourceBackedGeneration::semantic_candidates_for_source_generation_with_embedding(
-                        index,
-                        data_root,
-                        filters,
-                        candidate_limit,
-                        &embedding,
-                    )
-                },
-            )
-            .unwrap();
-            assert_eq!(collection.requested_backend, backend);
-            assert_eq!(collection.effective_backend, backend);
-            assert_eq!(collection.semantic_status, "ready");
-            assert_eq!(collection.result_window.hits.len(), 1);
-            let diagnostics = collection.semantic_diagnostics.unwrap();
-            assert_eq!(diagnostics["query_count"], 1);
-            let query_diagnostics = &diagnostics["queries"][0]["diagnostics"];
-            assert_eq!(query_diagnostics["vector_backend"], "flat_f32");
-            assert_eq!(
-                query_diagnostics["core_generation_id"],
-                index.generation_id()
-            );
-            assert!(query_diagnostics["flat_generation"].as_u64().unwrap() > 0);
-            assert!(query_diagnostics["flat_generation_hash"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
-        }
 
         assert!(
             !database_path(temp.path().to_path_buf()).exists(),
@@ -1342,76 +952,43 @@ mod tests {
     }
 
     #[test]
-    fn complete_content_hydrates_typed_locators_for_multiple_providers() {
-        let codex = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 1);
-        let warp = fixture_event(CaptureProvider::Warp, "warp_sqlite", 2, 2);
-        let resolver = MockContentResolver::default()
-            .with_body(&codex, "complete Codex source")
-            .with_body(&warp, "complete Warp source");
-        let resolved = resolve_complete_contents(&[&codex, &warp], usize::MAX, &resolver).unwrap();
-
-        assert_eq!(resolved[0].text, "complete Codex source");
-        assert_eq!(resolved[1].text, "complete Warp source");
-        assert_eq!(resolver.batch_calls.get(), 1);
-        assert_eq!(
-            resolver.calls.into_inner(),
-            vec![
-                ("codex".to_owned(), "codex_session_jsonl".to_owned()),
-                ("warp".to_owned(), "warp_sqlite".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn complete_content_fails_when_exact_source_is_unavailable() {
-        let event = fixture_event(CaptureProvider::Warp, "warp_sqlite", 3, 3);
-        let error =
-            resolve_complete_contents(&[&event], usize::MAX, &MockContentResolver::default())
-                .unwrap_err();
-
-        assert!(format!("{error:#}").contains("mock provider record is absent"));
-    }
-
-    #[test]
-    fn complete_content_rejects_non_utf8_provider_bytes() {
-        let event = fixture_event(CaptureProvider::Warp, "warp_sqlite", 4, 4);
-        let resolver = MockContentResolver::default().with_body(&event, vec![b'o', b'k', 0x80]);
-        let error = resolve_complete_contents(&[&event], usize::MAX, &resolver).unwrap_err();
-
-        assert!(format!("{error:#}").contains("non-UTF-8 exact content"));
-    }
-
-    #[test]
-    fn complete_content_preserves_the_cumulative_output_limit() {
-        let first = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 5, 5);
-        let second = fixture_event(CaptureProvider::Warp, "warp_sqlite", 6, 6);
-        let resolver = MockContentResolver::default()
-            .with_body(&first, "four")
-            .with_body(&second, "five");
-        let error = resolve_complete_contents(&[&first, &second], 7, &resolver).unwrap_err();
-
-        assert!(format!("{error:#}").contains("exceeds the 7-byte output limit"));
-        assert!(format!("{error:#}").contains(&second.event_id.to_string()));
-    }
-
-    #[test]
-    fn show_json_output_limit_is_typed_for_both_policy_tokens() {
+    fn show_json_output_limit_is_typed() {
         let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 7, 7);
-        for policy in [ContentPolicy::Indexed, ContentPolicy::Complete] {
-            let value = json!({
-                "content_policy": policy.as_str(),
-                "events": [{
-                    "ctx_event_id": event.event_id.as_uuid(),
-                    "text": "provider source",
-                }],
-            });
-            let error = enforce_json_output_limit(&value, 1, event.event_id.as_uuid()).unwrap_err();
-            let typed = error
-                .downcast_ref::<CompleteContentError>()
-                .expect("show output bound should preserve the typed content error");
-            assert_eq!(typed.kind, CompleteContentErrorKind::ContentTooLarge);
-            assert_eq!(typed.event_id, event.event_id.as_uuid());
-        }
+        let value = json!({
+            "events": [{
+                "ctx_event_id": event.event_id.as_uuid(),
+                "text": "Core content",
+            }],
+        });
+        let error = enforce_json_output_limit(&value, 1, event.event_id.as_uuid()).unwrap_err();
+        let typed = error
+            .downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
+            .expect("show output bound should preserve the presentation-limit error");
+        assert_eq!(typed.event_id, event.event_id.as_uuid());
+        assert_eq!(typed.maximum_bytes, 1);
+    }
+
+    #[test]
+    fn core_show_accepts_content_beyond_16k_and_preflights_the_output_limit() {
+        let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 8, 8);
+        let body = format!("BEGIN-{}-END", "x".repeat(20 * 1024));
+        let core_event = fixture_core_event(&event, &body);
+
+        let rendered = render_event_values(
+            &[&core_event],
+            crate::presentation_limit::CLI_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(rendered[0]["text"], body);
+
+        let error = render_event_values(&[&core_event], 1024)
+            .unwrap_err();
+        let typed = error
+            .downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
+            .expect("Core body should be bounded before event JSON construction");
+        assert_eq!(typed.event_id, event.event_id.as_uuid());
+        assert_eq!(typed.maximum_bytes, 1024);
+        assert!(typed.actual_bytes > 20 * 1024);
     }
 
     #[test]
@@ -1429,7 +1006,6 @@ mod tests {
     fn show_human_output_limit_uses_one_unbounded_canonical_measurement() {
         let value = json!({
             "target": "event",
-            "content_policy": "complete",
             "events": [{
                 "ctx_event_id": "01900001-0000-7000-8000-000000000002",
                 "role": "assistant",
@@ -1458,20 +1034,14 @@ mod tests {
         );
         assert_eq!(canonical_show_output_bytes(&value), expected);
         let event_id = uuid::Uuid::parse_str("01900001-0000-7000-8000-000000000002").unwrap();
-        crate::complete_content::enforce_complete_content_output_limit(
-            ContentPolicy::Complete,
+        crate::presentation_limit::enforce_presentation_output_limit(
             canonical_show_output_bytes(&value),
             expected,
             event_id,
         )
         .unwrap();
         assert!(
-            crate::complete_content::enforce_complete_content_output_limit(
-                ContentPolicy::Complete,
-                narrow,
-                expected,
-                event_id,
-            )
+            crate::presentation_limit::enforce_presentation_output_limit(narrow, expected, event_id)
             .is_err(),
             "a live-width count would incorrectly reject the same logical output"
         );

@@ -29,7 +29,6 @@ fn help_exposes_session_retrieval_commands() {
         "show",
         "search",
         "docs",
-        "locate",
         "mcp",
         "sql",
         "integrations",
@@ -67,6 +66,7 @@ fn help_exposes_session_retrieval_commands() {
         "update",
         "uninstall",
         "skill",
+        "locate",
     ] {
         assert!(
             !commands.lines().any(|line| {
@@ -118,7 +118,7 @@ fn status_and_stats_help_keep_health_controls_separate_from_read_only_reporting(
 }
 
 #[test]
-fn show_help_exposes_explicit_content_fidelity() {
+fn show_help_has_no_noop_content_selector() {
     let temp = tempdir();
     for target in ["session", "event"] {
         let output = ctx(&temp)
@@ -129,10 +129,21 @@ fn show_help_exposes_explicit_content_fidelity() {
             .stdout
             .clone();
         let help = String::from_utf8(output).unwrap();
-        assert!(help.contains("--content <CONTENT>"), "{help}");
-        assert!(help.contains("indexed, complete"), "{help}");
-        assert!(help.contains("verified local provider sources"), "{help}");
+        assert!(!help.contains("--content"), "{help}");
+        assert!(!help.contains("indexed, complete"), "{help}");
     }
+
+    ctx(&temp)
+        .args([
+            "show",
+            "event",
+            "00000000-0000-0000-0000-000000000000",
+            "--content",
+            "complete",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '--content'"));
 }
 
 #[test]
@@ -167,83 +178,6 @@ fn pro_uninstall_help_uses_local_pro_data_terminology() {
     );
     assert!(!help.contains("encrypted graph"), "{help}");
     assert!(!help.contains("credentials"), "{help}");
-}
-
-#[test]
-fn complete_content_json_failure_is_one_parseable_error_object() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("codex-sessions");
-    let source = Path::new(&fixture).join("2026/06/23/root.jsonl");
-    let original = fs::read_to_string(&source).unwrap();
-    let indexed_message = "Fix the onboarding bug and make sure local history search stays useful.";
-    let expanded_message = format!("{indexed_message}{}", "x".repeat(20_000));
-    let expanded = original.replacen(indexed_message, &expanded_message, 1);
-    assert_ne!(expanded, original);
-    fs::write(&source, &expanded).unwrap();
-    json_output(ctx_with_enabled_daemon(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "onboarding",
-        "--provider",
-        "codex",
-        "--events",
-        "--refresh",
-        "off",
-        "--format=json",
-    ]));
-    let event_id = search["results"][0]["ctx_event_id"].as_str().unwrap();
-    let changed = expanded.replacen("Fix the onboarding bug", "Mix the onboarding bug", 1);
-    assert_ne!(changed, expanded);
-    fs::write(source, changed).unwrap();
-
-    let output = ctx(&temp)
-        .args([
-            "show",
-            "event",
-            event_id,
-            "--content",
-            "complete",
-            "--format=json",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        output.stdout.is_empty(),
-        "JSON failure wrote partial stdout"
-    );
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
-        panic!(
-            "JSON failure was not parseable ({error}); status={:?}, stdout={:?}, stderr={:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    assert_eq!(error["error"], "source_changed/stale_source_evidence");
-    assert_eq!(error["error_code"], "source_changed");
-    assert_eq!(error["failure_kind"], "stale_source_evidence");
-    assert_eq!(
-        error["detail"],
-        "the source identity changed after indexing"
-    );
-    assert_eq!(error["retryable"], true);
-    assert!(error.get("ctx_event_id").is_none());
-    assert_eq!(
-        output.stderr.iter().filter(|byte| **byte == b'\n').count(),
-        1
-    );
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("Error:"));
 }
 
 #[test]
@@ -477,7 +411,6 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             ],
         ),
         ("show", vec!["Usage: ctx show", "session", "event"]),
-        ("locate", vec!["Usage: ctx locate", "session", "event"]),
         (
             "docs",
             vec![
@@ -602,8 +535,6 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["import", "--help"],
         &["show", "session", "--help"],
         &["show", "event", "--help"],
-        &["locate", "session", "--help"],
-        &["locate", "event", "--help"],
         &["search", "--help"],
         &["pro", "--help"],
         &["pro", "setup", "--help"],
@@ -969,11 +900,7 @@ fn docs_show_out_creates_parent_directories() {
 #[test]
 fn provider_session_lookup_requires_explicit_provider_flags_in_help() {
     let temp = tempdir();
-    for args in [
-        vec!["show", "session", "--help"],
-        vec!["locate", "session", "--help"],
-        vec!["locate", "event", "--help"],
-    ] {
+    for args in [vec!["show", "session", "--help"]] {
         let output = ctx(&temp)
             .args(args.clone())
             .assert()
@@ -986,22 +913,9 @@ fn provider_session_lookup_requires_explicit_provider_flags_in_help() {
             "--provider <PROVIDER>",
             "--provider-session <PROVIDER_SESSION>",
         ] {
-            if args.as_slice() == ["locate", "event", "--help"] {
-                continue;
-            }
             assert!(
                 help.contains(needle),
                 "{args:?} help missing {needle} in\n{help}"
-            );
-        }
-        if args[0] == "locate" {
-            assert!(
-                help.contains("[possible values: text, json]"),
-                "{args:?} help should restrict locate formats to text/json in\n{help}"
-            );
-            assert!(
-                !help.contains("markdown") && !help.contains("jsonl"),
-                "{args:?} help leaked unsupported locate formats in\n{help}"
             );
         }
         if args.as_slice() == ["show", "session", "--help"] {
@@ -1028,24 +942,14 @@ fn provider_session_rejects_whitespace_only_value() {
         .assert()
         .success();
 
-    for args in [
-        vec![
-            "show",
-            "session",
-            "--provider",
-            "codex",
-            "--provider-session",
-            " ",
-        ],
-        vec![
-            "locate",
-            "session",
-            "--provider",
-            "codex",
-            "--provider-session",
-            " ",
-        ],
-    ] {
+    for args in [vec![
+        "show",
+        "session",
+        "--provider",
+        "codex",
+        "--provider-session",
+        " ",
+    ]] {
         let stderr = failure_stderr(ctx(&temp).args(&args));
         assert_eq!(
             stderr, "✗ provider session ID must not be empty\n",
@@ -1079,6 +983,7 @@ fn removed_public_commands_are_rejected() {
         "related",
         "timeline",
         "facts",
+        "locate",
     ] {
         assert!(
             !commands.contains(removed),
@@ -1095,6 +1000,7 @@ fn removed_public_commands_are_rejected() {
         vec!["related", "commit", "abc"],
         vec!["timeline", "commit", "abc"],
         vec!["facts", "commit", "abc"],
+        vec!["locate", "event", "00000000-0000-0000-0000-000000000000"],
     ] {
         ctx(&temp).args(args.clone()).assert().failure().stderr(
             predicate::str::contains("unrecognized subcommand")

@@ -45,14 +45,10 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
         "wait",
         "--format=json",
     ]));
-    assert_eq!(
-        unchanged["results"][0]["source_exists"], true,
-        "exact no-op must retain truthful current-source availability: {unchanged:#}"
-    );
-    assert_eq!(
-        unchanged["results"][0]["citations"][0]["source_exists"], true,
-        "exact no-op citation must retain truthful current-source availability: {unchanged:#}"
-    );
+    assert!(unchanged["results"][0].get("source_exists").is_none());
+    assert!(unchanged["results"][0]["citations"][0]
+        .get("source_exists")
+        .is_none());
     assert_eq!(generation_id(&unchanged), initial_generation);
     assert_eq!(
         unchanged["retrieval"]["indexed_documents"], initial_documents,
@@ -776,7 +772,7 @@ fn source_refresh_daemon_stop_start_resumes_exact_generation() {
         status["daemon"]["running"] == false
     });
     assert_eq!(stopped["daemon"]["running"], false, "{stopped:#}");
-    let offline = failure_stderr(ctx(&temp).args([
+    let offline = json_output(ctx(&temp).args([
         "search",
         query,
         "--provider",
@@ -785,14 +781,8 @@ fn source_refresh_daemon_stop_start_resumes_exact_generation() {
         "off",
         "--format=json",
     ]));
-    assert!(
-        offline.contains("source_unreadable/temporarily_unavailable"),
-        "{offline}"
-    );
-    assert!(
-        offline.contains("source hydration is temporarily unavailable"),
-        "{offline}"
-    );
+    assert_source_backed_search_show_oracle(&temp, &offline, "pi", query, 1, "message");
+    assert_eq!(assert_published_generation(&offline, "off"), generation);
 
     let restarted = restart_source_refresh_daemon(&temp);
     assert_ne!(restarted.pid(), first_pid);

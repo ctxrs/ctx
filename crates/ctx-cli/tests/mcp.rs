@@ -196,14 +196,9 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     let search_tool = tools.iter().find(|tool| tool["name"] == "search").unwrap();
     for name in ["show_session", "show_event"] {
         let show_tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
-        assert_eq!(
-            show_tool["inputSchema"]["properties"]["content"]["enum"],
-            json!(["indexed", "complete"])
-        );
-        assert_eq!(
-            show_tool["inputSchema"]["properties"]["content"]["default"],
-            "indexed"
-        );
+        assert!(show_tool["inputSchema"]["properties"]
+            .get("content")
+            .is_none());
     }
     let providers = search_tool["inputSchema"]["properties"]["provider"]["enum"]
         .as_array()
@@ -903,7 +898,7 @@ fn mcp_search_applies_source_backed_identity_filters() {
 
     for response in &responses[1..4] {
         let search = &response["result"]["structuredContent"];
-        assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+        assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
         assert_eq!(search["filters"]["provider"], "custom", "{search:#}");
         assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
     }
@@ -921,7 +916,7 @@ fn mcp_search_applies_source_backed_identity_filters() {
     );
     for response in &responses[4..] {
         let search = &response["result"]["structuredContent"];
-        assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+        assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
         assert_eq!(search["results"].as_array().map(Vec::len), Some(0));
     }
     assert!(
@@ -1271,6 +1266,15 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
             "show_event",
             json!({"ctx_event_id": "not-a-uuid"}),
             "invalid ctx_event_id",
+        ),
+        (
+            "removed-show-content",
+            "show_event",
+            json!({
+                "ctx_event_id": "00000000-0000-0000-0000-000000000000",
+                "content": "complete"
+            }),
+            "unknown argument content",
         ),
         (
             "bad-since",
