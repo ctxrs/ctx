@@ -229,6 +229,8 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_exact_hydration(
 
 #[test]
 fn zed_lexical_document_retains_full_tail_beyond_legacy_preview_fields() {
+    const TAIL: &str = "zedpostsixteenkilobytesentinel";
+
     let source = zed_source_key().unwrap();
     let session_id = zed_session_identity(&source, "thread-full-body").unwrap();
     let context = ZedSessionProjectionContextV0 {
@@ -248,7 +250,11 @@ fn zed_lexical_document_retains_full_tail_beyond_legacy_preview_fields() {
         parent_session_id: None,
         root_session_id: session_id,
     };
-    let full_body = format!("{}zed-tail", "zed full body ".repeat(400));
+    let full_body = format!(
+        r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
+        "x".repeat(17_000)
+    );
+    assert!(full_body.find(TAIL).unwrap() > 16 * 1_024);
     let event = ZedNativeEvent::from_draft(
         1,
         "thread-full-body",
@@ -270,7 +276,13 @@ fn zed_lexical_document_retains_full_tail_beyond_legacy_preview_fields() {
     let document =
         zed_lexical_document(&source, [0x5a; 32], "/tmp/threads.db", &context, event).unwrap();
     assert_eq!(document.body, full_body);
-    assert!(document.body.ends_with("zed-tail"));
+    let structured: serde_json::Value = serde_json::from_str(&document.body).unwrap();
+    assert_eq!(
+        structured
+            .pointer("/arguments/tail")
+            .and_then(serde_json::Value::as_str),
+        Some(TAIL)
+    );
 }
 
 #[test]

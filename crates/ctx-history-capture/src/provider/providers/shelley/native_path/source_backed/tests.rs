@@ -6,6 +6,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
+use serde_json::{json, Value};
 
 use crate::{
     refresh_source_backed_generation, register_shelley_source_backed_route, ProviderCatalogSupport,
@@ -396,9 +397,22 @@ fn large_shelley_projection_emits_first_page_with_page_bounded_result_memory() {
 
 #[test]
 fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
+    const TAIL: &str = "shelleypostsixteenkilobytesentinel";
+
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let original = format!("{}shelley-tail", "x".repeat(4_096));
-    let database = create_fixture(temp.path(), &original);
+    let tool_input = json!({
+        "padding": "x".repeat(17_000),
+        "tail": TAIL,
+    });
+    let native_body = json!({
+        "Type": "ContentTypeToolUse",
+        "ToolName": "write_file",
+        "ToolInput": tool_input,
+    })
+    .to_string();
+    let original = format!("tool call: write_file\ntool input: {tool_input}");
+    assert!(original.find(TAIL).unwrap() > 16 * 1_024);
+    let database = create_fixture(temp.path(), &native_body);
     let adapter = discover_shelley_source_backed_exact_cwd(
         crate::test_provider_sqlite_data_root(),
         temp.path(),
@@ -410,7 +424,16 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
     assert_eq!(cold_documents.len(), 1);
     let cold = &cold_documents[0];
     assert_eq!(cold.body, original);
-    assert!(cold.body.ends_with("shelley-tail"));
+    let structured: Value = serde_json::from_str(
+        cold.body
+            .strip_prefix("tool call: write_file\ntool input: ")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        structured.pointer("/tail").and_then(Value::as_str),
+        Some(TAIL)
+    );
     assert_eq!(cold.provider_session_id.as_deref(), Some("conversation-1"));
     assert_eq!(cold.parent_session_id, None);
     assert_eq!(cold.root_session_id, cold.session_id);

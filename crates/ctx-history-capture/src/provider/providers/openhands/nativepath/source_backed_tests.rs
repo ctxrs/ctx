@@ -48,9 +48,15 @@ fn project(root: &Path) -> OpenHandsSourceBackedResultV2<Vec<TestProjection>> {
 
 #[test]
 fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
+    const TAIL: &str = "openhandspostsixteenkilobytesentinel";
+
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("profile");
-    let full_body = format!("{}openhands-tail", "x".repeat(9_000));
+    let full_body = format!(
+        r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
+        "x".repeat(17_000)
+    );
+    assert!(full_body.find(TAIL).unwrap() > 16 * 1_024);
     write_event(
         &root,
         "conversation-cold",
@@ -107,7 +113,13 @@ fn cold_projection_preserves_full_body_outcomes_counts_and_exact_semantics() {
     assert_eq!(projection.source.counts().rejected_records, 0);
     assert_eq!(projection.source.counts().indexed_documents, 3);
     assert_eq!(projection.documents[0].body, full_body);
-    assert!(projection.documents[0].body.ends_with("openhands-tail"));
+    let structured: Value = serde_json::from_str(&projection.documents[0].body).unwrap();
+    assert_eq!(
+        structured
+            .pointer("/arguments/tail")
+            .and_then(Value::as_str),
+        Some(TAIL)
+    );
     assert_eq!(projection.documents[1].body, "failure output");
     assert_eq!(projection.documents[2].body, "OpenHands command timed out");
     assert!(projection

@@ -136,6 +136,8 @@ fn source_events(index_root: &Path, source: &SourceKey) -> Vec<EventRecord> {
 
 #[test]
 fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
+    const TAIL: &str = "rovodevpostsixteenkilobytesentinel";
+
     let temp = tempdir().unwrap();
     let root = temp.path().join(".rovodev/sessions");
     let index_root = temp.path().join("index");
@@ -146,7 +148,11 @@ fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
         None,
         &[json!({"id": "root-message", "role": "user", "content": "root"})],
     );
-    let full_body = format!("full-prefix-{}-rovodev-tail", "x".repeat(3_000));
+    let full_body = format!(
+        r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
+        "x".repeat(17_000)
+    );
+    assert!(full_body.find(TAIL).unwrap() > 16 * 1_024);
     let context_path = write_session(
         &root,
         "child",
@@ -186,6 +192,12 @@ fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
 
     let events = source_events(&index_root, &child_source);
     assert_eq!(events.len(), 2);
+    let candidates = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .search_event_candidates(TAIL, 10)
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].event.event_id, events[0].event_id);
     let root_source = rovodev_source_key("root-thread").unwrap();
     let root_session_id = rovodev_session_identity(&root_source, "root-thread").unwrap();
     let child_session_id = rovodev_session_identity(&child_source, "child-thread").unwrap();
@@ -243,9 +255,14 @@ fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
             .collect::<Vec<_>>()
     );
     assert_eq!(hydrated.records()[0].provider_bytes, b"exact response");
-    assert!(hydrated.records()[1]
-        .provider_bytes
-        .ends_with(b"rovodev-tail"));
+    assert_eq!(hydrated.records()[1].provider_bytes, full_body.as_bytes());
+    let structured: Value = serde_json::from_slice(&hydrated.records()[1].provider_bytes).unwrap();
+    assert_eq!(
+        structured
+            .pointer("/arguments/tail")
+            .and_then(Value::as_str),
+        Some(TAIL)
+    );
 
     let missing_locator = SourceRecordLocator::new(
         child_source,

@@ -162,6 +162,54 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn warp_indexes_complete_structured_body_beyond_16k() {
+    const TAIL: &str = "warppostsixteenkilobytesentinel";
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("warp.sqlite");
+    let index_root = temp.path().join("index");
+    let writer = create_source(&database);
+    let structured_body = format!(
+        r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
+        "x".repeat(17_000)
+    );
+    assert!(structured_body.find(TAIL).unwrap() > 16 * 1_024);
+    insert_task(
+        &writer,
+        "task-complete-body",
+        "message-complete-body",
+        &structured_body,
+    );
+    let registry = registry(&database);
+    let receipt = refresh_source_backed_generation(&index_root, &registry, options()).unwrap();
+
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let candidates = index.search_event_candidates(TAIL, 10).unwrap();
+    assert_eq!(candidates.len(), 1);
+    let source = receipt.sources[0].observation().source();
+    let event = index
+        .source_event_page(source, None, 10)
+        .unwrap()
+        .items
+        .remove(0);
+    assert_eq!(candidates[0].event.event_id, event.event_id);
+
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_event(&request)
+        .unwrap();
+    assert_eq!(hydrated.provider_bytes, structured_body.as_bytes());
+    let structured: serde_json::Value = serde_json::from_slice(&hydrated.provider_bytes).unwrap();
+    assert_eq!(
+        structured
+            .pointer("/arguments/tail")
+            .and_then(serde_json::Value::as_str),
+        Some(TAIL)
+    );
+}
+
+#[test]
 fn warp_active_wal_noop_replace_delete_and_batch_hydration() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("warp.sqlite");
