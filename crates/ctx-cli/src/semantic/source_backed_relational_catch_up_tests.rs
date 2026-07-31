@@ -1,3 +1,8 @@
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
+
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy,
@@ -15,6 +20,34 @@ use crate::source_sql::SqlCompatibility;
 
 const PROVIDER_TEXT: &str = "provider-body-sentinel-must-not-enter-relational";
 const PREVIEW_TEXT: &str = "provider-preview-sentinel-must-not-enter-relational";
+
+#[test]
+fn concurrent_catch_up_owners_serialize_the_complete_projection_run() {
+    const OWNERS: usize = 8;
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let generation = initial_generation(temp.path(), &source);
+    let barrier = Arc::new(Barrier::new(OWNERS));
+    let handles = (0..OWNERS)
+        .map(|_| {
+            let data_root = temp.path().to_path_buf();
+            let generation = generation.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                run_after_core_publication(&data_root, &generation)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let completed = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("catch-up owner panicked").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(completed.iter().filter(|run| run.did_work).count(), 1);
+    assert!(read_status(temp.path()).is_some_and(|status| status.is_completed_for(&generation)));
+    assert!(ready_projection_metadata(temp.path(), &generation).is_some());
+}
 
 #[test]
 fn durable_state_path_is_purpose_based() {

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ctx_history_core::SourceKey;
 use ctx_history_index::{
     EventRecord, SourceEventCursor, SourceEventPage, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
@@ -27,7 +27,8 @@ use crate::source_sql::sql_compatibility_path;
 
 use super::{
     paths_status::{
-        daemon_jobs_path, daemon_report, read_daemon_job_status, write_daemon_job_status,
+        daemon_jobs_path, daemon_report, open_or_create_pid_lock_file, read_daemon_job_status,
+        write_daemon_job_status,
     },
     source_backed_refresh_coordinator::{
         daemon_cycle_verified_index, nonzero_duration_micros, open_verified_index,
@@ -36,6 +37,7 @@ use super::{
 };
 
 const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "relational-catch-up.json";
+const SOURCE_BACKED_RELATIONAL_LOCK_FILE: &str = "relational-catch-up.lock";
 const CERTIFICATE_DIGEST_BYTES: usize = 32;
 const SOURCE_BACKED_RELATIONAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SOURCE_BACKED_RELATIONAL_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -86,10 +88,37 @@ struct ProjectionOutcome {
     did_work: bool,
 }
 
+struct RelationalCatchUpLock {
+    file: fs::File,
+}
+
+impl RelationalCatchUpLock {
+    fn acquire(data_root: &Path) -> Result<Self> {
+        let jobs = daemon_jobs_path(data_root);
+        fs::create_dir_all(&jobs)
+            .with_context(|| format!("create relational catch-up jobs root {}", jobs.display()))?;
+        ctx_history_core::platform_security::restrict_private_directory(&jobs)
+            .with_context(|| format!("secure relational catch-up jobs root {}", jobs.display()))?;
+        let path = jobs.join(SOURCE_BACKED_RELATIONAL_LOCK_FILE);
+        let (file, _) = open_or_create_pid_lock_file(&path)
+            .with_context(|| format!("open relational catch-up lock {}", path.display()))?;
+        fs2::FileExt::lock_exclusive(&file)
+            .with_context(|| format!("acquire relational catch-up lock {}", path.display()))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RelationalCatchUpLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
 pub(super) fn run_after_core_publication(
     data_root: &Path,
     core_generation_id: &str,
 ) -> Result<SourceBackedRelationalCatchUpRun> {
+    let _lock = RelationalCatchUpLock::acquire(data_root)?;
     run_with(data_root, core_generation_id, project_exact_core_generation)
 }
 
