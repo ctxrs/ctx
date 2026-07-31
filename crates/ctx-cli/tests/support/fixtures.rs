@@ -46,7 +46,9 @@ pub(crate) fn materialized_fixture(category: &str, name: &str) -> String {
             .unwrap()
             .as_nanos()
     );
-    let mut target = materialized_root.join(unique);
+    let private_root = materialized_root.join(unique);
+    fs::create_dir_all(&private_root).unwrap();
+    let mut target = private_root.join("fixture");
     if source.is_file() {
         if let Some(extension) = source.extension() {
             target.set_extension(extension);
