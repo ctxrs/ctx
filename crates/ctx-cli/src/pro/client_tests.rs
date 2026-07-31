@@ -7,7 +7,7 @@ fn source_receipt(generation: char) -> ctx_pro_host_protocol::SourceManifestRece
         core_generation_id: generation.to_string().repeat(64),
         manifest_aggregate_sha256: "b".repeat(64),
         materializer_revision: "materializer-v1".to_owned(),
-        progress: Vec::new(),
+        progress: ctx_pro_host_protocol::SourceProgressReceipt::from_progress(&[]).unwrap(),
     }
 }
 

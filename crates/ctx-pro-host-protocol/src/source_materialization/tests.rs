@@ -12,7 +12,7 @@ use uuid::Uuid;
 use super::*;
 use crate::{
     read_frame, write_frame, Capability, HelperEnvelope, HelperMessage, HostEnvelope, HostMessage,
-    MAX_FRAME_PAYLOAD_BYTES,
+    StatusResult, MAX_FRAME_PAYLOAD_BYTES,
 };
 
 fn certified_source() -> CertifiedSource {
@@ -88,6 +88,62 @@ fn certified_source_at(index: u32, revision_bytes: usize) -> CertifiedSource {
         Some(frontier),
     )
     .unwrap()
+}
+
+fn provider_native_source_at(index: u32, key_bytes: usize) -> CertifiedSource {
+    let key_prefix = format!("{index:08x}:");
+    let source = SourceKey::derive(
+        "fixture",
+        "fixture_jsonl",
+        "fixture-v1",
+        1,
+        SourceAnchor::ProviderNative {
+            namespace: "fixture-source".to_owned(),
+            key: TypedKey::Utf8(format!(
+                "{key_prefix}{}",
+                "x".repeat(key_bytes.saturating_sub(key_prefix.len()))
+            )),
+        },
+    )
+    .unwrap();
+    let observation =
+        SourceObservation::new(source, "fixture-revision-v1", index.to_be_bytes().to_vec())
+            .unwrap();
+    let mut digest = [9_u8; 32];
+    digest[..4].copy_from_slice(&index.to_be_bytes());
+    let frontier = SourceFrontier::new(
+        "fixture-frontier-v1",
+        TypedKey::U64(u64::from(index) + 1),
+        10,
+        digest,
+    )
+    .unwrap();
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "fixture-parser-v1",
+        digest,
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 10,
+            ..ScannedSourceCounts::default()
+        },
+        Some(frontier),
+    )
+    .unwrap()
+}
+
+fn terminal_progress(source: &CertifiedSource) -> SourceProgress {
+    SourceProgress {
+        source: source.observation().source().clone(),
+        source_epoch: 1,
+        certified_revision_sha256: certified_source_revision_sha256(source).unwrap(),
+        frontier: source.frontier().cloned(),
+        materializer_revision: "fixture-materializer-v1".to_owned(),
+        terminal: true,
+    }
 }
 
 fn source_record(content: &[u8], event_sequence: u64) -> SourceRecord {
@@ -341,7 +397,7 @@ fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() 
                 core_generation_id: manifest.core_generation_id,
                 manifest_aggregate_sha256: "b".repeat(64),
                 materializer_revision: "fixture-materializer-v1".to_owned(),
-                progress: vec![progress(true)],
+                progress: SourceProgressReceipt::from_progress(&[progress(true)]).unwrap(),
             },
             replayed: false,
         }),
@@ -508,6 +564,159 @@ fn source_manifest_admission_pages_a_3464_source_production_fixture_deterministi
     }));
     assert_eq!(pages, build_pages());
     header.validate_contents(&sources, &[]).unwrap();
+}
+
+#[test]
+fn source_progress_pages_bound_the_full_5863_source_activation_and_status_lifecycle() {
+    const SOURCE_COUNT: usize = 5_863;
+    const SOURCE_KEY_BYTES: usize = 4 * 1024;
+    let mut sources = (0..u32::try_from(SOURCE_COUNT).unwrap())
+        .map(|index| provider_native_source_at(index, SOURCE_KEY_BYTES))
+        .collect::<Vec<_>>();
+    sources.sort_by_key(source_identity_digest);
+    let progress = sources.iter().map(terminal_progress).collect::<Vec<_>>();
+    let legacy_progress_bytes = serde_json::to_vec(&progress).unwrap().len();
+    assert!(
+        legacy_progress_bytes > MAX_SOURCE_CONTROL_WIRE_BYTES,
+        "fixture must reproduce the retired source-count-scaled failure"
+    );
+    let page_count = u32::try_from(SOURCE_COUNT.div_ceil(MAX_SOURCE_MANIFEST_PAGE_ITEMS)).unwrap();
+    let header = SourceManifestHeader::new(
+        "a".repeat(64),
+        1,
+        1,
+        1,
+        1,
+        "b".repeat(64),
+        page_count,
+        &sources,
+        &[],
+    )
+    .unwrap();
+    let admission = SourceManifestAdmissionReceipt {
+        header: header.clone(),
+        page_count: header.page_count,
+        terminal_chain_sha256: "c".repeat(64),
+    };
+    let progress_receipt = SourceProgressReceipt::from_progress(&progress).unwrap();
+    assert_eq!(
+        usize::try_from(progress_receipt.page_count).unwrap(),
+        SOURCE_COUNT.div_ceil(MAX_SOURCE_PROGRESS_PAGE_ITEMS)
+    );
+
+    for (page_index, entries) in progress.chunks(MAX_SOURCE_PROGRESS_PAGE_ITEMS).enumerate() {
+        let page = SourceProgressPage::new(
+            &progress_receipt,
+            u32::try_from(page_index).unwrap(),
+            entries.to_vec(),
+            page_index % 2 == 0,
+        )
+        .unwrap();
+        page.validate_for(&progress_receipt).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_SOURCE_PROGRESS_PAGE_WIRE_BYTES);
+    }
+    progress_receipt
+        .validate_contents(&progress, Some("fixture-materializer-v1"), true)
+        .unwrap();
+
+    let admitted = SourceManifestAdmitted {
+        receipt: admission.clone(),
+        materializer_revision: "fixture-materializer-v1".to_owned(),
+        progress: progress_receipt.clone(),
+        replayed: true,
+    };
+    admitted.validate().unwrap();
+    let activation = FinishAdmittedSourceManifestRequest {
+        admission,
+        expected_progress: progress_receipt.clone(),
+    };
+    activation.validate().unwrap();
+    let final_response = SourceManifestFinished {
+        receipt: SourceManifestReceipt {
+            core_generation_id: header.core_generation_id,
+            manifest_aggregate_sha256: header.aggregate_sha256,
+            materializer_revision: "fixture-materializer-v1".to_owned(),
+            progress: progress_receipt,
+        },
+        replayed: true,
+    };
+    final_response.validate().unwrap();
+    let status = StatusResult {
+        state: crate::GraphState::Ready,
+        authority: crate::MaterializationAuthority::Source,
+        source_receipt: Some(final_response.receipt.clone()),
+    };
+    status.validate().unwrap();
+
+    let admitted_bytes = serde_json::to_vec(&admitted).unwrap().len();
+    let activation_bytes = serde_json::to_vec(&activation).unwrap().len();
+    let final_response_bytes = serde_json::to_vec(&final_response).unwrap().len();
+    let status_bytes = serde_json::to_vec(&status).unwrap().len();
+    let final_envelope = HelperEnvelope {
+        sequence: u64::MAX,
+        request_id: Uuid::from_u128(1),
+        message: HelperMessage::SourceManifestFinished(final_response),
+    };
+    let final_payload_bytes = serde_json::to_vec(&final_envelope).unwrap().len();
+    let mut final_frame = Vec::new();
+    write_frame(&mut final_frame, &final_envelope).unwrap();
+    eprintln!(
+        "5863-source bytes: legacy_progress={legacy_progress_bytes} admitted={admitted_bytes} activation={activation_bytes} final_response={final_response_bytes} status={status_bytes} final_payload={final_payload_bytes} final_frame={} cap={MAX_SOURCE_CONTROL_WIRE_BYTES}",
+        final_frame.len()
+    );
+    for encoded in [
+        admitted_bytes,
+        activation_bytes,
+        final_response_bytes,
+        status_bytes,
+        final_payload_bytes,
+    ] {
+        assert!(encoded <= MAX_SOURCE_CONTROL_WIRE_BYTES);
+    }
+    assert!(final_payload_bytes < MAX_FRAME_PAYLOAD_BYTES);
+}
+
+#[test]
+fn source_progress_pages_reject_oversize_order_digest_and_corrupt_replay() {
+    let mut sources = (0..65)
+        .map(|index| certified_source_at(index, 4))
+        .collect::<Vec<_>>();
+    sources.sort_by_key(source_identity_digest);
+    let progress = sources.iter().map(terminal_progress).collect::<Vec<_>>();
+    let receipt = SourceProgressReceipt::from_progress(&progress).unwrap();
+
+    assert_eq!(
+        SourceProgressPage::new(&receipt, 0, progress.clone(), false)
+            .unwrap_err()
+            .class,
+        ErrorClass::Bounds
+    );
+    let mut out_of_order = progress[..MAX_SOURCE_PROGRESS_PAGE_ITEMS].to_vec();
+    out_of_order.swap(0, 1);
+    assert_eq!(
+        SourceProgressPage::new(&receipt, 0, out_of_order, false)
+            .unwrap_err()
+            .class,
+        ErrorClass::InvalidRequest
+    );
+    let mut corrupt = SourceProgressPage::new(
+        &receipt,
+        0,
+        progress[..MAX_SOURCE_PROGRESS_PAGE_ITEMS].to_vec(),
+        true,
+    )
+    .unwrap();
+    corrupt.progress[0].source_epoch += 1;
+    assert_eq!(
+        corrupt.validate_for(&receipt).unwrap_err().class,
+        ErrorClass::InvalidRequest
+    );
+    let mut wrong_receipt = receipt;
+    wrong_receipt.aggregate_sha256 = "f".repeat(64);
+    assert_eq!(
+        corrupt.validate_for(&wrong_receipt).unwrap_err().class,
+        ErrorClass::Sequence
+    );
 }
 
 #[test]

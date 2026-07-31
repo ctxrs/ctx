@@ -510,7 +510,7 @@ mod tests {
             core_generation_id: generation_id.to_owned(),
             manifest_aggregate_sha256: "b".repeat(64),
             materializer_revision: "test-source-materializer".to_owned(),
-            progress: Vec::new(),
+            progress: ctx_pro_host_protocol::SourceProgressReceipt::from_progress(&[]).unwrap(),
         }
     }
 

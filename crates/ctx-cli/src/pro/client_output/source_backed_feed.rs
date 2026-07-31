@@ -10,10 +10,11 @@ use ctx_pro_host_protocol::{
     certified_source_revision_sha256, AdmitSourceManifestPageRequest,
     BeginSourceManifestAdmissionRequest, DeleteSourceRequest, FinishAdmittedSourceManifestRequest,
     FinishSourceManifestAdmissionRequest, FinishSourceManifestRequest,
-    MaterializeSourcePageRequest, PrepareSourceRequest, SourceDeleted, SourceDisposition,
-    SourceManifest, SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
-    SourceManifestFinished, SourceManifestHeader, SourceManifestPage, SourceManifestPageAdmitted,
-    SourceManifestReceipt, SourcePageMaterialized, SourcePrepared, SourceProgress, SourceRecord,
+    MaterializeSourcePageRequest, PrepareSourceRequest, ReadSourceProgressPageRequest,
+    SourceDeleted, SourceDisposition, SourceManifest, SourceManifestAdmissionBegan,
+    SourceManifestAdmitted, SourceManifestBegan, SourceManifestFinished, SourceManifestHeader,
+    SourceManifestPage, SourceManifestPageAdmitted, SourceManifestReceipt, SourcePageMaterialized,
+    SourcePrepared, SourceProgress, SourceProgressPage, SourceProgressReceipt, SourceRecord,
     SourceRemoval,
 };
 
@@ -109,6 +110,11 @@ pub(super) trait SourceBackedProAdmissionConsumer: SourceBackedProPageConsumer {
         &mut self,
         header: &SourceManifestHeader,
     ) -> Result<SourceManifestAdmitted>;
+
+    fn read_source_progress_page(
+        &mut self,
+        request: &ReadSourceProgressPageRequest,
+    ) -> Result<SourceProgressPage>;
 
     fn finish_admitted_source_manifest(
         &mut self,
@@ -231,6 +237,27 @@ impl SourceBackedProAdmissionConsumer for ProtocolSourceBackedProConsumer {
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => {
                 bail!("invalid_response: helper returned a non-source-admitted response")
+            }
+        }
+    }
+
+    fn read_source_progress_page(
+        &mut self,
+        request: &ReadSourceProgressPageRequest,
+    ) -> Result<SourceProgressPage> {
+        request
+            .validate()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        match self.exchange(HostMessage::ReadSourceProgressPage(request.clone()))? {
+            HelperMessage::SourceProgressPage(result) => {
+                result
+                    .validate_for(&request.progress)
+                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                Ok(result)
+            }
+            HelperMessage::Error(error) => Err(protocol_error(error)),
+            _ => {
+                bail!("invalid_response: helper returned a non-source-progress-page response")
             }
         }
     }
@@ -425,7 +452,7 @@ where
         expected_progress: final_sources.clone(),
     };
     finish
-        .validate()
+        .validate_contents()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
     let finished = consumer.finish_source_manifest(&finish)?;
     let receipt = finished.receipt;
@@ -455,7 +482,7 @@ fn validate_consumer_state(
     state: &SourceManifestBegan,
 ) -> Result<()> {
     state
-        .validate()
+        .validate_contents()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
     if state.core_generation_id != manifest.core_generation_id {
         bail!("invalid_response: Pro began the wrong source manifest");
@@ -554,25 +581,15 @@ fn validate_source_backed_receipt(
     expected_sources: &[SourceBackedProProgress],
     receipt: &SourceBackedProReceipt,
 ) -> Result<()> {
+    let expected_progress = SourceProgressReceipt::from_progress(expected_sources)
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
     if receipt.core_generation_id != manifest.core_generation_id
         || receipt.materializer_revision != materializer_revision
-        || receipt.progress.len() != expected_sources.len()
-        || !receipt
-            .progress
-            .iter()
-            .zip(expected_sources)
-            .all(|(actual, expected)| source_progress_exact_eq(actual, expected))
+        || receipt.progress != expected_progress
     {
         bail!("invalid_response: Pro published the wrong source-backed receipt");
     }
     Ok(())
-}
-
-fn source_progress_exact_eq(
-    left: &SourceBackedProProgress,
-    right: &SourceBackedProProgress,
-) -> bool {
-    left.exact_eq(right)
 }
 
 pub(super) fn sync_source_backed_pro_feed_deferred_paged<P>(

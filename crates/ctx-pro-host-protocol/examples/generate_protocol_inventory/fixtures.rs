@@ -210,7 +210,8 @@ pub(super) fn source_receipt() -> SourceManifestReceipt {
         core_generation_id: "a".repeat(64),
         manifest_aggregate_sha256: source_manifest_header().aggregate_sha256,
         materializer_revision: "golden-source-materializer-v1".to_owned(),
-        progress: vec![source_progress(true)],
+        progress: SourceProgressReceipt::from_progress(&[source_progress(true)])
+            .expect("golden source progress receipt"),
     }
 }
 
