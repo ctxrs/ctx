@@ -146,6 +146,23 @@ fn terminal_progress(source: &CertifiedSource) -> SourceProgress {
     }
 }
 
+fn materialization_request_at(
+    index: u32,
+    core_generation_id: &str,
+) -> MaterializeSourcePageRequest {
+    let source = certified_source_at(index, 4);
+    let mut expected_prior = terminal_progress(&source);
+    expected_prior.frontier = None;
+    expected_prior.terminal = false;
+    MaterializeSourcePageRequest {
+        core_generation_id: core_generation_id.to_owned(),
+        expected_prior,
+        next_frontier: source.frontier().cloned(),
+        terminal: true,
+        records: Vec::new(),
+    }
+}
+
 fn source_record(content: &[u8], event_sequence: u64) -> SourceRecord {
     let source = certified_source().observation().source().clone();
     let session_key =
@@ -329,6 +346,109 @@ fn removal() -> SourceRemoval {
 }
 
 #[test]
+fn source_materialization_batches_fail_closed_on_bounds_duplicate_order_generation_and_cas() {
+    let generation = "a".repeat(64);
+    let mut pages = vec![
+        materialization_request_at(1, &generation),
+        materialization_request_at(2, &generation),
+    ];
+    pages.sort_by_key(|page| page.expected_prior.source.identity().digest());
+    let first = pages.remove(0);
+    let second = pages.remove(0);
+    let request = MaterializeSourcePagesRequest {
+        pages: vec![first.clone(), second.clone()],
+    };
+    request.validate().unwrap();
+
+    let mut oversize = (0..=MAX_SOURCE_MATERIALIZATION_BATCH_ITEMS)
+        .map(|index| materialization_request_at(u32::try_from(index).unwrap(), &generation))
+        .collect::<Vec<_>>();
+    oversize.sort_by_key(|page| page.expected_prior.source.identity().digest());
+    assert_eq!(
+        MaterializeSourcePagesRequest { pages: oversize }
+            .validate()
+            .unwrap_err()
+            .class,
+        ErrorClass::Bounds
+    );
+    assert_eq!(
+        MaterializeSourcePagesRequest {
+            pages: vec![first.clone(), first.clone()],
+        }
+        .validate()
+        .unwrap_err()
+        .class,
+        ErrorClass::InvalidRequest
+    );
+    assert_eq!(
+        MaterializeSourcePagesRequest {
+            pages: vec![second.clone(), first.clone()],
+        }
+        .validate()
+        .unwrap_err()
+        .class,
+        ErrorClass::InvalidRequest
+    );
+    let mut wrong_generation = second.clone();
+    wrong_generation.core_generation_id = "b".repeat(64);
+    assert_eq!(
+        MaterializeSourcePagesRequest {
+            pages: vec![first.clone(), wrong_generation],
+        }
+        .validate()
+        .unwrap_err()
+        .class,
+        ErrorClass::Sequence
+    );
+
+    let acknowledge = |page: &MaterializeSourcePageRequest, replayed| SourcePageMaterialized {
+        core_generation_id: page.core_generation_id.clone(),
+        progress: page.next_progress(),
+        accepted_records: u32::try_from(page.records.len()).unwrap(),
+        materialized_facts: 0,
+        replayed,
+    };
+    let response = SourcePagesMaterialized {
+        core_generation_id: generation.clone(),
+        pages: vec![acknowledge(&first, false), acknowledge(&second, false)],
+    };
+    response.validate_for(&request).unwrap();
+    let replay = SourcePagesMaterialized {
+        core_generation_id: generation.clone(),
+        pages: vec![acknowledge(&first, true), acknowledge(&second, true)],
+    };
+    replay.validate_for(&request).unwrap();
+
+    let mut out_of_order = response.clone();
+    out_of_order.pages.reverse();
+    assert_eq!(
+        out_of_order.validate_for(&request).unwrap_err().class,
+        ErrorClass::InvalidRequest
+    );
+    let mut wrong_response_generation = response.clone();
+    wrong_response_generation.core_generation_id = "c".repeat(64);
+    assert_eq!(
+        wrong_response_generation
+            .validate_for(&request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+    let mut wrong_cas = response.clone();
+    wrong_cas.pages[0].accepted_records = 1;
+    assert_eq!(
+        wrong_cas.validate_for(&request).unwrap_err().class,
+        ErrorClass::InvalidRequest
+    );
+    let mut partial_replay = response;
+    partial_replay.pages[0].replayed = true;
+    assert_eq!(
+        partial_replay.validate_for(&request).unwrap_err().class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
 fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() {
     let manifest = manifest();
     let prepared = progress(false);
@@ -341,12 +461,14 @@ fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() 
             disposition: SourceDisposition::NewSource,
             expected_prior: None,
         }),
-        HostMessage::MaterializeSourcePage(MaterializeSourcePageRequest {
-            core_generation_id: manifest.core_generation_id.clone(),
-            expected_prior: prepared.clone(),
-            next_frontier: certified_source().frontier().cloned(),
-            terminal: true,
-            records: vec![source_record(b"message", 1)],
+        HostMessage::MaterializeSourcePages(MaterializeSourcePagesRequest {
+            pages: vec![MaterializeSourcePageRequest {
+                core_generation_id: manifest.core_generation_id.clone(),
+                expected_prior: prepared.clone(),
+                next_frontier: certified_source().frontier().cloned(),
+                terminal: true,
+                records: vec![source_record(b"message", 1)],
+            }],
         }),
         HostMessage::DeleteSource(DeleteSourceRequest {
             core_generation_id: manifest.core_generation_id.clone(),
@@ -354,7 +476,11 @@ fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() 
             expected_prior: progress(true),
         }),
     ];
-    let tags = ["prepare_source", "materialize_source_page", "delete_source"];
+    let tags = [
+        "prepare_source",
+        "materialize_source_pages",
+        "delete_source",
+    ];
     for (index, (message, tag)) in requests.into_iter().zip(tags).enumerate() {
         let envelope = HostEnvelope {
             sequence: index as u64,
@@ -379,12 +505,15 @@ fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() 
             progress: prepared.clone(),
             replayed: false,
         }),
-        HelperMessage::SourcePageMaterialized(SourcePageMaterialized {
+        HelperMessage::SourcePagesMaterialized(SourcePagesMaterialized {
             core_generation_id: manifest.core_generation_id.clone(),
-            progress: progress(true),
-            accepted_records: 1,
-            materialized_facts: 3,
-            replayed: false,
+            pages: vec![SourcePageMaterialized {
+                core_generation_id: manifest.core_generation_id.clone(),
+                progress: progress(true),
+                accepted_records: 1,
+                materialized_facts: 3,
+                replayed: false,
+            }],
         }),
         HelperMessage::SourceDeleted(SourceDeleted {
             core_generation_id: manifest.core_generation_id.clone(),
@@ -404,7 +533,7 @@ fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() 
     ];
     let tags = [
         "source_prepared",
-        "source_page_materialized",
+        "source_pages_materialized",
         "source_deleted",
         "source_manifest_finished",
     ];
@@ -429,7 +558,11 @@ fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() 
 
 #[test]
 fn retired_whole_manifest_wire_kinds_are_rejected() {
-    for kind in ["begin_source_manifest", "finish_source_manifest"] {
+    for kind in [
+        "begin_source_manifest",
+        "finish_source_manifest",
+        "materialize_source_page",
+    ] {
         assert!(
             serde_json::from_value::<HostMessage>(json!({"kind": kind, "body": {}})).is_err(),
             "retired host message kind {kind} must be rejected"
@@ -437,6 +570,10 @@ fn retired_whole_manifest_wire_kinds_are_rejected() {
     }
     assert!(serde_json::from_value::<HelperMessage>(
         json!({"kind": "source_manifest_began", "body": {}})
+    )
+    .is_err());
+    assert!(serde_json::from_value::<HelperMessage>(
+        json!({"kind": "source_page_materialized", "body": {}})
     )
     .is_err());
 }
@@ -456,7 +593,9 @@ fn source_backed_pro_maximum_content_stays_below_frame_limit_after_encoding() {
     let envelope = HostEnvelope {
         sequence: u64::MAX,
         request_id: Uuid::from_u128(1),
-        message: HostMessage::MaterializeSourcePage(request),
+        message: HostMessage::MaterializeSourcePages(MaterializeSourcePagesRequest {
+            pages: vec![request],
+        }),
     };
     let encoded = serde_json::to_vec(&envelope).unwrap();
     assert!(encoded.len() <= MAX_SOURCE_PAGE_WIRE_BYTES + 512);

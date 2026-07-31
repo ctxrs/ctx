@@ -295,7 +295,7 @@ impl SourceRecord {
         Ok(record)
     }
 
-    fn validate_and_count_bytes(&self) -> Result<usize, ProtocolError> {
+    pub fn validate_and_count_bytes(&self) -> Result<usize, ProtocolError> {
         let event = EventHydrationRequest::new(self.event_id, self.locator.clone())
             .map_err(|error| invalid_contract("source record event locator", error))?;
         SessionHydrationRequest::new(self.session_id, vec![event])

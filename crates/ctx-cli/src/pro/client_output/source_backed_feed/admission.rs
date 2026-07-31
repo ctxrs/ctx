@@ -20,11 +20,11 @@ where
         SourceBackedProPageConsumer::prepare_source(self.inner, request)
     }
 
-    fn materialize_source_page(
+    fn materialize_source_pages(
         &mut self,
-        request: &MaterializeSourcePageRequest,
-    ) -> Result<SourcePageMaterialized> {
-        SourceBackedProPageConsumer::materialize_source_page(self.inner, request)
+        request: &MaterializeSourcePagesRequest,
+    ) -> Result<SourcePagesMaterialized> {
+        SourceBackedProPageConsumer::materialize_source_pages(self.inner, request)
     }
 
     fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted> {

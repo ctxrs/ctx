@@ -84,13 +84,15 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             }),
         ),
         (
-            "materialize_source_page",
-            HostMessage::MaterializeSourcePage(MaterializeSourcePageRequest {
-                core_generation_id: "a".repeat(64),
-                expected_prior: source_progress(false),
-                next_frontier: source_progress(true).frontier,
-                terminal: true,
-                records: vec![source_record()],
+            "materialize_source_pages",
+            HostMessage::MaterializeSourcePages(MaterializeSourcePagesRequest {
+                pages: vec![MaterializeSourcePageRequest {
+                    core_generation_id: "a".repeat(64),
+                    expected_prior: source_progress(false),
+                    next_frontier: source_progress(true).frontier,
+                    terminal: true,
+                    records: vec![source_record()],
+                }],
             }),
         ),
         (
@@ -209,13 +211,16 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             }),
         ),
         (
-            "source_page_materialized",
-            HelperMessage::SourcePageMaterialized(SourcePageMaterialized {
+            "source_pages_materialized",
+            HelperMessage::SourcePagesMaterialized(SourcePagesMaterialized {
                 core_generation_id: "a".repeat(64),
-                progress: source_progress(true),
-                accepted_records: 1,
-                materialized_facts: 3,
-                replayed: false,
+                pages: vec![SourcePageMaterialized {
+                    core_generation_id: "a".repeat(64),
+                    progress: source_progress(true),
+                    accepted_records: 1,
+                    materialized_facts: 3,
+                    replayed: false,
+                }],
             }),
         ),
         (
