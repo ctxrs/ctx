@@ -235,6 +235,12 @@ impl SourceRepositoryContext {
         validate_optional_identity(self.worktree_id.as_deref(), "source worktree ID")?;
         validate_optional_identity(self.object_format.as_deref(), "source object format")?;
         if let Some(locator) = &self.worktree_root {
+            if self.worktree_id.is_none() {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "source repository worktree-root locator requires a worktree ID",
+                ));
+            }
             locator.validate()?;
         }
         Ok(())
