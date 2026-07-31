@@ -1,9 +1,6 @@
 use std::fs;
 
-use ctx_history_core::{
-    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
-    NativeRecordCoordinate, TypedKey,
-};
+use ctx_history_core::{CaptureProvider, CoreRecord};
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -173,14 +170,12 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     let (documents, _) = drain(&adapter);
     assert!(documents
         .iter()
-        .any(|document| document.body.contains("Shelley active WAL sentinel")));
+        .any(|document| body(document).contains("Shelley active WAL sentinel")));
     assert_eq!(sqlite_persistent_bytes(&path), before);
     drop(writer);
 }
 
-fn drain(
-    adapter: &ShelleySourceBackedAdapter,
-) -> (Vec<LexicalDocument>, ShelleySourceBackedReceipt) {
+fn drain(adapter: &ShelleySourceBackedAdapter) -> (Vec<CoreRecord>, ShelleySourceBackedReceipt) {
     let mut scan = adapter.start_scan().unwrap();
     let mut documents = Vec::new();
     while let Some(page) = scan.next_page().unwrap() {
@@ -189,6 +184,10 @@ fn drain(
     }
     let receipt = scan.finish().unwrap();
     (documents, receipt)
+}
+
+fn body(record: &CoreRecord) -> &str {
+    record.content.normalized_body.as_deref().unwrap()
 }
 
 fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
@@ -215,7 +214,7 @@ fn shelley_query_shape(counters: ShelleyQueryCounters) -> [u64; 6] {
 }
 
 #[test]
-fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration() {
+fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_core_replay() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = create_fixture(temp.path(), "message-1");
     let connection = Connection::open(&database).unwrap();
@@ -264,10 +263,7 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration(
     assert_eq!(documents.len(), 40);
     assert_eq!(receipt.certificate.counts().complete_records, 40);
     assert_eq!(
-        documents
-            .iter()
-            .map(|document| document.body.as_str())
-            .collect::<Vec<_>>(),
+        documents.iter().map(body).collect::<Vec<_>>(),
         (1..=40)
             .map(|rowid| format!("message-{rowid}"))
             .collect::<Vec<_>>()
@@ -275,23 +271,9 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration(
     assert_eq!(documents[1].event_sequence, 8 * 4_096 + released_bucket);
     assert_ne!(documents[2].event_sequence, documents[1].event_sequence);
     assert_ne!(documents[2].event_sequence & (1_u64 << 63), 0);
-    for (index, document) in documents.iter().enumerate() {
-        let rowid = i64::try_from(index).unwrap() + 1;
-        assert!(matches!(
-            document.locator.coordinate(),
-            NativeRecordCoordinate::ProviderSqlite {
-                logical_relation,
-                primary_key: TypedKey::Composite(parts),
-                row_version: None,
-            } if logical_relation == SHELLEY_COMPOUND_LOCATOR_RELATION
-                && parts.as_slice()
-                    == [
-                        TypedKey::Bool(rowid == 1),
-                        TypedKey::I64(rowid),
-                        TypedKey::I64(1),
-                    ]
-        ));
-    }
+    assert!(documents
+        .iter()
+        .all(|record| record.native_event_id.is_some()));
     let cold_work = shelley_query_counters();
     assert_eq!(shelley_query_shape(cold_work), [4, 3, 3, 3, 6, 40]);
     assert_eq!(cold_work.pages_emitted, 1);
@@ -307,8 +289,8 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration(
             .map(|document| (
                 document.event_id,
                 document.event_sequence,
-                document.locator.coordinate().clone(),
-                document.body.clone(),
+                document.native_event_id.clone(),
+                body(document).to_owned(),
             ))
             .collect::<Vec<_>>(),
         documents
@@ -316,8 +298,8 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration(
             .map(|document| (
                 document.event_id,
                 document.event_sequence,
-                document.locator.coordinate().clone(),
-                document.body.clone(),
+                document.native_event_id.clone(),
+                body(document).to_owned(),
             ))
             .collect::<Vec<_>>()
     );
@@ -331,20 +313,6 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_replay_and_hydration(
     assert_eq!(replay_work.peak_buffered_rows, 40);
     assert!(replay_work.peak_buffered_bytes > 0);
     assert_eq!(replay_work.hydration_snapshot_opens, 0);
-
-    reset_shelley_query_counters();
-    let exact = adapter.hydrate(&documents[39].locator).unwrap();
-    assert_eq!(exact.text, "message-40");
-    assert_eq!(
-        exact.native_record_digest,
-        *documents[39].locator.record_digest()
-    );
-    let hydration_work = shelley_query_counters();
-    assert_eq!(shelley_query_shape(hydration_work), [1, 1, 1, 1, 2, 1]);
-    assert_eq!(hydration_work.pages_emitted, 0);
-    assert_eq!(hydration_work.peak_buffered_rows, 0);
-    assert_eq!(hydration_work.peak_buffered_bytes, 0);
-    assert_eq!(hydration_work.hydration_snapshot_opens, 1);
 }
 
 #[test]
@@ -423,9 +391,9 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
     let (cold_documents, cold_receipt) = drain(&adapter);
     assert_eq!(cold_documents.len(), 1);
     let cold = &cold_documents[0];
-    assert_eq!(cold.body, original);
+    assert_eq!(body(cold), original);
     let structured: Value = serde_json::from_str(
-        cold.body
+        body(cold)
             .strip_prefix("tool call: write_file\ntool input: ")
             .unwrap(),
     )
@@ -438,9 +406,12 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
     assert_eq!(cold.parent_session_id, None);
     assert_eq!(cold.root_session_id, cold.session_id);
     assert_eq!(cold.branch, None);
-    assert_eq!(cold.source_path.as_deref(), database.to_str());
     assert_eq!(cold.agent_type, AgentType::Primary.as_str());
     assert!(cold.is_primary);
+    assert!(cold.native_event_id.is_some());
+    assert!(!serde_json::to_string(cold)
+        .unwrap()
+        .contains(database.to_string_lossy().as_ref()));
     assert_eq!(
         cold_receipt.certificate.counts(),
         ScannedSourceCounts {
@@ -452,29 +423,6 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
             certified_bytes: cold_receipt.certificate.counts().certified_bytes,
         }
     );
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = cold.locator.coordinate()
-    else {
-        panic!("expected Shelley SQLite locator");
-    };
-    assert_eq!(logical_relation, SHELLEY_COMPOUND_LOCATOR_RELATION);
-    assert_eq!(
-        primary_key,
-        &TypedKey::Composite(vec![
-            TypedKey::Bool(true),
-            TypedKey::I64(1),
-            TypedKey::I64(1),
-        ])
-    );
-    assert!(row_version.is_none());
-
-    let exact = adapter.hydrate(&cold.locator).unwrap();
-    assert_eq!(exact.text, original);
-    assert_eq!(exact.native_record_digest, *cold.locator.record_digest());
-
     let replacement = "replacement exact Shelley body";
     Connection::open(&database)
         .unwrap()
@@ -492,22 +440,12 @@ fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
         cold_receipt.certificate.content_digest(),
         replacement_receipt.certificate.content_digest()
     );
-    assert_ne!(
-        cold.locator.record_digest(),
-        replaced.locator.record_digest()
-    );
-    assert!(matches!(
-        adapter.hydrate(&cold.locator),
-        Err(ShelleySourceBackedError::StaleRecordEvidence)
-    ));
-    assert_eq!(
-        adapter.hydrate(&replaced.locator).unwrap().text,
-        replacement
-    );
+    assert_eq!(body(replaced), replacement);
+    assert_eq!(cold.native_event_id, replaced.native_event_id);
 }
 
 #[test]
-fn shelley_route_cold_noop_rewrite_and_grouped_hydration_are_exact() {
+fn shelley_route_cold_noop_and_rewrite_keep_complete_core_records() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let provider_root = temp.path().join("provider");
     let data_root = temp.path().join("data");
@@ -554,50 +492,29 @@ fn shelley_route_cold_noop_rewrite_and_grouped_hydration_are_exact() {
         .observation()
         .source()
         .clone();
-    let mut events = verified.source_event_page(&source, None, 40).unwrap().items;
+    let mut events = verified
+        .core_source_event_page(&source, None, 40)
+        .unwrap()
+        .items;
     assert_eq!(events.len(), 40);
     events.reverse();
-    let requests = events
-        .iter()
-        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
-        .collect::<Vec<_>>();
-    let batch = BatchHydrationRequest::new(requests).unwrap();
-
-    reset_shelley_query_counters();
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(&batch)
-        .unwrap()
-        .into_records();
-    assert_eq!(hydrated.len(), events.len());
-    for (record, event) in hydrated.iter().zip(&events) {
-        assert_eq!(record.event_id, event.event_id);
-        let NativeRecordCoordinate::ProviderSqlite { primary_key, .. } = event.locator.coordinate()
-        else {
-            panic!("expected Shelley SQLite coordinate");
-        };
-        let TypedKey::Composite(parts) = primary_key else {
-            panic!("expected Shelley compound coordinate");
-        };
-        let TypedKey::I64(rowid) = parts[1] else {
-            panic!("expected Shelley message rowid");
-        };
-        let expected = if rowid == 1 {
-            "message-1-wal".to_owned()
-        } else {
-            format!("message-{rowid}-{}", "x".repeat(32))
-        };
-        assert_eq!(
-            String::from_utf8(record.provider_bytes.clone()).unwrap(),
-            expected
-        );
-    }
-    let hydration_work = shelley_query_counters();
-    assert_eq!(shelley_query_shape(hydration_work), [3, 3, 3, 3, 6, 40]);
-    assert_eq!(hydration_work.pages_emitted, 0);
-    assert_eq!(hydration_work.peak_buffered_rows, 0);
-    assert_eq!(hydration_work.peak_buffered_bytes, 0);
-    assert_eq!(hydration_work.hydration_snapshot_opens, 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| {
+                record.core_record.content.normalized_body.as_deref() == Some("message-1-wal")
+            })
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|record| {
+        record
+            .core_record
+            .content
+            .normalized_body
+            .as_deref()
+            .is_some()
+    }));
     assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
 
     writer
@@ -618,7 +535,14 @@ fn shelley_route_cold_noop_rewrite_and_grouped_hydration_are_exact() {
     assert_eq!(rewrite_work.pages_emitted, 1);
     assert_eq!(rewrite_work.hydration_snapshot_opens, 0);
     assert_eq!(sqlite_persistent_bytes(&database), rewritten_persistent);
-    assert!(registry.resolver_registry().hydrate_batch(&batch).is_err());
+    let replacement_records = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_source_event_page(&source, None, 40)
+        .unwrap()
+        .items;
+    assert!(replacement_records.iter().any(|record| {
+        record.core_record.content.normalized_body.as_deref() == Some("replacement-40")
+    }));
     drop(writer);
 }
 
@@ -696,7 +620,10 @@ fn shelley_source_backed_lineage_uses_native_parent_and_root_threads() {
     assert_eq!(nested.agent_type, AgentType::Subagent.as_str());
     assert!(!nested.is_primary);
     assert_eq!(nested.branch, None);
-    assert_eq!(nested.source_path.as_deref(), database.to_str());
+    assert!(nested.native_event_id.is_some());
+    assert!(!serde_json::to_string(nested)
+        .unwrap()
+        .contains(database.to_string_lossy().as_ref()));
 }
 
 #[test]
@@ -716,7 +643,7 @@ fn shelley_source_backed_releases_pages_before_terminal_source_certification() {
     assert!(page
         .documents
         .iter()
-        .any(|document| document.body.contains("before replacement")));
+        .any(|document| body(document).contains("before replacement")));
     assert_eq!(page.counts.complete_records, 64);
     assert!(scan.sqlite_snapshot.is_some());
     assert!(scan.receipt.is_none());

@@ -1,74 +1,8 @@
-use std::{
-    fs::Metadata,
-    path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use serde::{Deserialize, Serialize};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{common::io::path_has_component, CaptureError, Result};
 
 pub(super) const OPENHANDS_MAX_PATH_BYTES: usize = 7 * 1024;
-
-/// Legacy wire evidence retained only for stable OpenHands leaf locators.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct OpenHandsObservedTime {
-    pub(super) before_epoch: bool,
-    pub(super) seconds: u64,
-    pub(super) nanos: u32,
-}
-
-impl OpenHandsObservedTime {
-    fn from_system_time(value: SystemTime) -> Self {
-        match value.duration_since(UNIX_EPOCH) {
-            Ok(duration) => Self {
-                before_epoch: false,
-                seconds: duration.as_secs(),
-                nanos: duration.subsec_nanos(),
-            },
-            Err(error) => {
-                let duration = error.duration();
-                Self {
-                    before_epoch: true,
-                    seconds: duration.as_secs(),
-                    nanos: duration.subsec_nanos(),
-                }
-            }
-        }
-    }
-}
-
-/// The serialized V1 observation remains a locator input even though source
-/// no-op detection now uses the stronger shared ordinary-file observation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct OpenHandsFileObservation {
-    pub(super) length: u64,
-    pub(super) modified: OpenHandsObservedTime,
-    pub(super) readonly: bool,
-    pub(super) device: Option<u64>,
-    pub(super) inode: Option<u64>,
-}
-
-impl OpenHandsFileObservation {
-    pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-
-        #[cfg(unix)]
-        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
-        #[cfg(not(unix))]
-        let (device, inode) = (None, None);
-
-        Ok(Self {
-            length: metadata.len(),
-            modified: OpenHandsObservedTime::from_system_time(metadata.modified()?),
-            readonly: metadata.permissions().readonly(),
-            device,
-            inode,
-        })
-    }
-}
 
 pub(super) fn normalized_openhands_authority_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {

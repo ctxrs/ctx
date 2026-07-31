@@ -11,12 +11,10 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -28,8 +26,7 @@ use crate::{
         SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence,
         SqliteSourceReadSnapshot,
     },
-    CaptureError, OutputOutcome, ProviderAdapterContext, MAX_PROVIDER_SQLITE_VALUE_BYTES,
-    SHELLEY_SQLITE_SOURCE_FORMAT,
+    CaptureError, OutputOutcome, MAX_PROVIDER_SQLITE_VALUE_BYTES, SHELLEY_SQLITE_SOURCE_FORMAT,
 };
 
 #[cfg(test)]
@@ -52,8 +49,6 @@ use super::{
     ShelleyMessage, ShelleyUnit, SHELLEY_PAGE_MAX_BYTES, SHELLEY_PAGE_MAX_UNITS,
 };
 
-mod hydration;
-
 const SHELLEY_SOURCE_ANCHOR_NAMESPACE: &str = "shelley.exact-cwd-slot";
 const SHELLEY_SOURCE_ANCHOR_KEY: &str = "shelley.db";
 const SHELLEY_SOURCE_SCHEMA_VARIANT: &str = "shelley-exact-cwd-sqlite-v1";
@@ -62,7 +57,6 @@ const SHELLEY_LOGICAL_SESSION_KIND: &str = "shelley-conversation";
 const SHELLEY_NATIVE_SESSION_NAMESPACE: &str = "shelley.conversation";
 const SHELLEY_LOGICAL_EVENT_KIND: &str = "shelley-message";
 const SHELLEY_NATIVE_MESSAGE_NAMESPACE: &str = "shelley.message";
-const SHELLEY_COMPOUND_LOCATOR_RELATION: &str = "shelley-compound-message-row-v1";
 const SHELLEY_CERTIFIED_STREAM_DOMAIN: &[u8] = b"ctx-shelley-source-backed-stream-v1\0";
 const SHELLEY_MAX_LINEAGE_DEPTH: usize = 256;
 const SHELLEY_LINEAGE_LABEL_MAX_CHARS: usize = 256;
@@ -77,18 +71,10 @@ pub(crate) enum ShelleySourceBackedError {
     SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
-    #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
     #[error("Shelley source-backed scan was not drained to terminal certification")]
     ScanIncomplete,
     #[error("Shelley source-backed counts overflowed")]
     CountOverflow,
-    #[error("Shelley source-backed locator does not address a compound message row")]
-    InvalidLocator,
-    #[error("Shelley source-backed locator no longer addresses a message row")]
-    MissingRecord,
-    #[error("Shelley source-backed locator record evidence is stale")]
-    StaleRecordEvidence,
     #[error("Shelley source-backed projection produced no bounded lexical body")]
     MissingLexicalBody,
     #[error("Shelley source-backed conversation lineage is invalid: {0}")]
@@ -147,12 +133,6 @@ impl ShelleySourceBackedAdapter {
              user_version={sqlite_user_version}\0schema={schema_fingerprint}"
         )
         .into_bytes();
-        let context = ProviderAdapterContext {
-            machine_id: "shelley-source-backed".to_owned(),
-            source_path: Some(self.database_path.clone()),
-            source_root: Some(self.exact_cwd.clone()),
-            imported_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
-        };
         let mut content_digest = Sha256::new();
         content_digest.update(SHELLEY_CERTIFIED_STREAM_DOMAIN);
 
@@ -164,7 +144,6 @@ impl ShelleySourceBackedAdapter {
             conversation_select,
             message_select,
             has_message_sequence_id,
-            context,
             after_rowid: None,
             pending_units: VecDeque::new(),
             source_exhausted: false,
@@ -227,7 +206,6 @@ pub(crate) struct ShelleySourceBackedScan {
     conversation_select: Vec<String>,
     message_select: Vec<String>,
     has_message_sequence_id: bool,
-    context: ProviderAdapterContext,
     after_rowid: Option<i64>,
     pending_units: VecDeque<(ShelleyUnit<ShelleyMessage>, [u8; 32])>,
     source_exhausted: bool,
@@ -350,10 +328,8 @@ impl ShelleySourceBackedScan {
                     );
                     let record_digest = shelley_logical_record_digest(&values);
                     let lineage = self.resolve_document_lineage(&value.conversation);
-                    match lineage.and_then(|lineage| {
-                        build_document(&self.source, &self.context, &value, record_digest, &lineage)
-                    }) {
-                        Ok(Some(document)) => {
+                    match lineage.and_then(|lineage| build_record(&self.source, &value, &lineage)) {
+                        Ok(Some(record)) => {
                             self.hash_record(
                                 rowid,
                                 scanner_digest,
@@ -362,7 +338,7 @@ impl ShelleySourceBackedScan {
                             );
                             checked_add_count(&mut page.counts.retained_records, 1)?;
                             checked_add_count(&mut page.counts.indexed_documents, 1)?;
-                            page.documents.push(document);
+                            page.documents.push(record);
                         }
                         Ok(None) => {
                             self.hash_record(
@@ -375,7 +351,6 @@ impl ShelleySourceBackedScan {
                         }
                         Err(
                             error @ (ShelleySourceBackedError::Projection(_)
-                            | ShelleySourceBackedError::Resolver(_)
                             | ShelleySourceBackedError::MissingLexicalBody
                             | ShelleySourceBackedError::InvalidLineage(_)),
                         ) => {
@@ -589,7 +564,7 @@ impl ShelleySourceBackedScan {
 
 #[derive(Debug)]
 pub(crate) struct ShelleySourceBackedPage {
-    pub(crate) documents: Vec<LexicalDocument>,
+    pub(crate) documents: Vec<CoreRecord>,
     pub(crate) rejections: Vec<ShelleySourceBackedRejection>,
     pub(crate) counts: ScannedSourceCounts,
     pub(crate) retained_bytes: usize,
@@ -604,13 +579,6 @@ pub(crate) struct ShelleySourceBackedRejection {
 #[derive(Debug, Clone)]
 pub(crate) struct ShelleySourceBackedReceipt {
     pub(crate) certificate: CertifiedSource,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ShelleyHydratedMessage {
-    pub(crate) text: String,
-    pub(crate) native_record_digest: [u8; 32],
-    pub(crate) event_id: StableEntityId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -649,24 +617,24 @@ fn shelley_session_identity(
 fn shelley_event_identity(
     source: &SourceKey,
     message: &super::super::relationships::ShelleyMessageRow,
-) -> ShelleySourceBackedResult<StableEntityId> {
+) -> ShelleySourceBackedResult<(StableEntityId, TypedKey)> {
     let session_id = shelley_session_identity(source, &message.conversation_id)?;
-    let native_item_key = NativeItemKey::composite(
-        SHELLEY_NATIVE_MESSAGE_NAMESPACE,
-        vec![
-            TypedKey::utf8(message.conversation_id.clone())?,
-            TypedKey::I64(message.sequence_id),
-            TypedKey::utf8(message.message_id.clone())?,
-        ],
-    )?;
-    derive_event_id(EventIdentityInput {
+    let native_parts = vec![
+        TypedKey::utf8(message.conversation_id.clone())?,
+        TypedKey::I64(message.sequence_id),
+        TypedKey::utf8(message.message_id.clone())?,
+    ];
+    let native_item_key =
+        NativeItemKey::composite(SHELLEY_NATIVE_MESSAGE_NAMESPACE, native_parts.clone())?;
+    let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
         logical_item_kind: SHELLEY_LOGICAL_EVENT_KIND,
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })
-    .map_err(Into::into)
+    .map_err(ShelleySourceBackedError::from)?;
+    Ok((event_id, TypedKey::composite(native_parts)?))
 }
 
 fn open_root_authorized_snapshot(
@@ -720,13 +688,11 @@ fn shelley_lineage_label(provider_session_id: &str) -> String {
         .collect()
 }
 
-fn build_document(
+fn build_record(
     source: &SourceKey,
-    context: &ProviderAdapterContext,
     value: &ShelleyMessage,
-    record_digest: [u8; 32],
     lineage: &ShelleyDocumentLineage,
-) -> ShelleySourceBackedResult<Option<LexicalDocument>> {
+) -> ShelleySourceBackedResult<Option<CoreRecord>> {
     let native_body = shelley_message_body(&value.message);
     let event_type = shelley_event_type(&value.message, &native_body);
     if shelley_output_classification(&value.message)
@@ -741,23 +707,7 @@ fn build_document(
         return Ok(None);
     }
     let role = shelley_event_role(&value.message.entry_type);
-    let event_id = shelley_event_identity(source, &value.message)?;
-    let primary_key = TypedKey::composite(vec![
-        TypedKey::Bool(value.parent_bearing),
-        TypedKey::I64(value.message.rowid),
-        TypedKey::I64(value.conversation.rowid),
-    ])?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: SHELLEY_COMPOUND_LOCATOR_RELATION.to_owned(),
-            primary_key,
-            row_version: None,
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
+    let (event_id, native_event_id) = shelley_event_identity(source, &value.message)?;
     let body = shelley_message_complete_text(&value.message)
         .unwrap_or_else(|| format!("Shelley {} message", value.message.entry_type));
     if body.trim().is_empty() {
@@ -769,55 +719,32 @@ fn build_document(
         chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     );
     let occurred_at = shelley_timestamp(value.message.created_at.as_deref(), started_at);
-    Ok(Some(LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: lineage.session_id,
-        parent_session_id: lineage.parent_session_id,
-        root_session_id: lineage.root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(value.message.conversation_id.clone()),
-        branch: None,
-        source_path: context
-            .source_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        agent_type: lineage.agent_type.clone(),
-        is_primary: lineage.is_primary,
-        event_sequence: value.provider_event_index,
-        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        event_type: event_type.as_str().to_owned(),
-        role: role.map(|role| role.as_str().to_owned()),
+        lineage.session_id,
+        lineage.root_session_id,
+        source.clone(),
+        value.provider_event_index,
+        event_type.as_str(),
+        lineage.agent_type.clone(),
+        lineage.is_primary,
+        SHELLEY_SOURCE_PARSER_REVISION,
         body,
-        workspace: cwd.clone(),
-        cwd,
-        touched_files: Vec::new(),
-    }))
-}
-
-fn decode_compound_locator(
-    locator: &SourceRecordLocator,
-) -> ShelleySourceBackedResult<(bool, i64, i64)> {
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(ShelleySourceBackedError::InvalidLocator);
-    };
-    if logical_relation != SHELLEY_COMPOUND_LOCATOR_RELATION || row_version.is_some() {
-        return Err(ShelleySourceBackedError::InvalidLocator);
-    }
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(ShelleySourceBackedError::InvalidLocator);
-    };
-    let [TypedKey::Bool(parent_bearing), TypedKey::I64(message_rowid), TypedKey::I64(conversation_rowid)] =
-        parts.as_slice()
-    else {
-        return Err(ShelleySourceBackedError::InvalidLocator);
-    };
-    Ok((*parent_bearing, *message_rowid, *conversation_rowid))
+    )
+    .map_err(|error| {
+        ShelleySourceBackedError::Capture(CaptureError::InvalidPayload(error.to_string()))
+    })?;
+    record.parent_session_id = lineage.parent_session_id;
+    record.provider_session_id = Some(value.message.conversation_id.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
+    record.role = role.map(|role| role.as_str().to_owned());
+    record.workspace = cwd.clone();
+    record.cwd = cwd;
+    record.validate_contract().map_err(|error| {
+        ShelleySourceBackedError::Capture(CaptureError::InvalidPayload(error.to_string()))
+    })?;
+    Ok(Some(record))
 }
 
 fn checked_add_count(target: &mut u64, value: u64) -> ShelleySourceBackedResult<()> {
