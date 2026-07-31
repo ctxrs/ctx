@@ -282,6 +282,20 @@ class ObserverTests(unittest.TestCase):
             list(self.root_parent.glob("ctx-cli-ux-observe.*")), []
         )
 
+    def test_exited_adopted_child_is_reaped_before_leak_classification(self) -> None:
+        receipt = self.run_fixture("exited-orphan")
+
+        self.assertEqual(
+            receipt["observed"]["termination"],
+            {"kind": "exit", "exit_code": 0},
+        )
+        self.assertEqual(
+            receipt["cleanup"]["descendant_processes_detected"], 0
+        )
+        self.assertEqual(
+            receipt["cleanup"]["descendant_processes_remaining"], 0
+        )
+
     def test_cli_writes_low_level_receipt_and_rejects_timeout(self) -> None:
         output = self.root_parent / "receipt.json"
         completed = subprocess.run(
