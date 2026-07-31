@@ -10,9 +10,10 @@ use std::{
 #[cfg(test)]
 use ctx_history_core::SourceRecordLocator;
 use ctx_history_core::{
-    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailure,
-    HydrationFailureKind, StableEntityId,
+    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, EventHydrationRequest,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, StableEntityId,
 };
+use ctx_history_index::{EventRecord, VerifiedIndex};
 use serde_json::{json, Value};
 
 use crate::output::compact_json;
@@ -72,6 +73,79 @@ enum SourceHydrationWorkFailure {
     Resolver(HydrationFailure),
 }
 
+struct GenerationBoundHydrationResolver<'a, R> {
+    index: &'a VerifiedIndex,
+    resolver: &'a R,
+}
+
+impl<R> GenerationBoundHydrationResolver<'_, R> {
+    fn validate(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<(), HydrationFailure> {
+        let event = self
+            .index
+            .event_by_id(request.event_id().as_uuid())
+            .map_err(|error| HydrationFailure {
+                kind: HydrationFailureKind::TemporarilyUnavailable,
+                detail: format!(
+                    "read generation-bound hydration event {}: {error}",
+                    request.event_id()
+                ),
+            })?
+            .ok_or_else(|| HydrationFailure {
+                kind: HydrationFailureKind::MissingRecord,
+                detail: format!(
+                    "source generation omitted hydration event {}",
+                    request.event_id()
+                ),
+            })?;
+        validate_generation_bound_request(&event, request)
+    }
+}
+
+impl<R> ContentSourceResolver for GenerationBoundHydrationResolver<'_, R>
+where
+    R: ContentSourceResolver,
+{
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+        self.validate(request)?;
+        self.resolver.hydrate_event(request)
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
+        for event in request.events() {
+            self.validate(event)?;
+        }
+        self.resolver.hydrate_batch(request)
+    }
+}
+
+fn validate_generation_bound_request(
+    event: &EventRecord,
+    request: &EventHydrationRequest,
+) -> std::result::Result<(), HydrationFailure> {
+    if request.event_id() != event.event_id
+        || request.locator() != &event.locator
+        || request.source_path_hint() != event.source_path.as_deref()
+    {
+        return Err(HydrationFailure {
+            kind: HydrationFailureKind::InvalidLocator,
+            detail: format!(
+                "hydration locator for {} does not match the active source generation",
+                request.event_id()
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub(in crate::semantic) fn handle_source_hydration_batch(
     data_root: &Path,
     source_refresh: &SourceBackedRefreshCoordinator,
@@ -116,7 +190,26 @@ pub(in crate::semantic) fn handle_source_hydration_batch(
             true,
         );
     }
-    handle_source_hydration_batch_with(request, generation_id, retained.resolver(), |failure| {
+    let Some(index) = retained.verified_index() else {
+        let failure = HydrationFailure {
+            kind: HydrationFailureKind::TemporarilyUnavailable,
+            detail: format!(
+                "daemon resolver for source generation {generation_id} has no verified index authority"
+            ),
+        };
+        source_refresh.handle_hydration_failure(data_root, generation_id, failure.clone());
+        return source_hydration_protocol_failure(
+            "resolver_generation_unavailable",
+            hydration_failure_kind_name(failure.kind),
+            &failure.detail,
+            source_refresh.has_pending_request(),
+        );
+    };
+    let resolver = GenerationBoundHydrationResolver {
+        index: index.as_ref(),
+        resolver: retained.resolver(),
+    };
+    handle_source_hydration_batch_with(request, generation_id, &resolver, |failure| {
         source_refresh.handle_hydration_failure(data_root, generation_id, failure.clone());
         source_refresh.has_pending_request()
     })
