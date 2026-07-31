@@ -284,6 +284,45 @@ fn recoverable_failure_surfaces_error_and_one_restart_action() {
 }
 
 #[test]
+fn enabled_daemon_without_observed_lifecycle_is_not_a_failure() {
+    let report = json!({
+        "enabled": true,
+        "status": "unknown",
+        "running": false,
+        "semantic_runtime_active": false,
+        "config_reload": {"status": "unknown"},
+        "jobs": {
+            "history_refresh": {
+                "status": "disabled",
+                "reason": "history_epoch_source_backed"
+            },
+            "source_backed_refresh": {"status": "unknown"},
+            "semantic_index": {"status": "disabled"}
+        }
+    });
+
+    for width in [32, 48, 80, 120] {
+        let plain_context = context(width);
+        let document = render_status(&plain_context, &report);
+        let plain = document.render_plain();
+        let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized.starts_with(
+            "! Daemon is enabled but has not started No daemon lifecycle state has been observed yet."
+        ));
+        assert!(normalized.contains("Service Status not started"));
+        assert!(normalized.contains("History refresh Status disabled"));
+        assert!(normalized.contains("Semantic Status disabled"));
+        assert!(!plain.contains("Daemon failed"));
+        assert!(!plain.contains("Status  failed"));
+        assert!(!plain.contains("ctx daemon enable"));
+        assert!(!plain.contains("\nNext\n"));
+        assert_eq!(strip_ansi(&document.render(&styled_context(width))), plain);
+        assert_fits(&document, &plain_context);
+    }
+}
+
+#[test]
 fn source_rejections_are_visible_without_internal_provenance() {
     let mut report = running_report();
     report["jobs"]["history_refresh"] = json!({

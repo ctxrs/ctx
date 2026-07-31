@@ -13,6 +13,7 @@ enum DaemonPresentation {
     Partial,
     Failed,
     Completed,
+    NotStarted,
     Stopped,
     Disabled,
 }
@@ -96,6 +97,8 @@ pub(in crate::semantic) fn render_daemon_status_human(
         DaemonPresentation::Completed
     } else if !enabled || status == "disabled" {
         DaemonPresentation::Disabled
+    } else if !running && status == "unknown" {
+        DaemonPresentation::NotStarted
     } else if service_failed {
         DaemonPresentation::Failed
     } else if running
@@ -156,6 +159,11 @@ pub(in crate::semantic) fn render_daemon_status_human(
             Some("Automatic history refresh is not running."),
         ),
         DaemonPresentation::Completed => (OutcomeState::Success, "Daemon run completed", None),
+        DaemonPresentation::NotStarted => (
+            OutcomeState::Warning,
+            "Daemon is enabled but has not started",
+            Some("No daemon lifecycle state has been observed yet."),
+        ),
         DaemonPresentation::Stopped => (OutcomeState::Neutral, "Daemon is not running", None),
         DaemonPresentation::Disabled => (
             OutcomeState::Neutral,
@@ -578,6 +586,8 @@ fn service_state(
         ("failed (recoverable)", Token::Error)
     } else if running {
         ("running", Token::Success)
+    } else if status == "unknown" {
+        ("not started", Token::Warning)
     } else {
         ("failed", Token::Error)
     }
