@@ -7,7 +7,7 @@ use tantivy::schema::{
 
 use crate::{Fields, IndexError, LexicalDocument, Result};
 
-const BASE_FIELD_VALUES: usize = 31;
+const BASE_FIELD_VALUES: usize = 32;
 
 #[derive(Clone)]
 pub(super) struct IndexSourceFields {
@@ -134,6 +134,7 @@ impl IndexDocument {
         fields: Fields,
         document: LexicalDocument,
         locator_bytes: Vec<u8>,
+        core_record_bytes: Vec<u8>,
         identities: EncodedDocumentIdentities,
         source: IndexSourceFields,
     ) -> Self {
@@ -198,6 +199,7 @@ impl IndexDocument {
             target.add_text(fields.touched_file_filter, touched_file.to_lowercase());
             target.add_text(fields.touched_file, touched_file);
         }
+        target.add_bytes(fields.core_record, core_record_bytes);
         target
     }
 }

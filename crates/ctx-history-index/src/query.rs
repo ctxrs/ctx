@@ -10,8 +10,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    NativeRecordCoordinate, SourceKey, SourceRecordLocator, StableEntityId, StableEntityKind,
-    TypedKey,
+    CoreRecord, NativeRecordCoordinate, SourceKey, SourceRecordLocator, StableEntityId,
+    StableEntityKind, TypedKey,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{
@@ -80,14 +80,35 @@ pub struct SourceEventPage {
     pub terminal: bool,
 }
 
-/// Stable metadata-only candidate policy for source-backed semantic projection.
+/// One deterministic page of complete Core records for an exact source.
+#[derive(Debug, Clone)]
+pub struct CoreSourceEventPage {
+    pub generation_id: String,
+    pub source: SourceKey,
+    pub items: Vec<CoreEventRecord>,
+    pub next_cursor: Option<SourceEventCursor>,
+    pub terminal: bool,
+}
+
+impl From<CoreSourceEventPage> for SourceEventPage {
+    fn from(page: CoreSourceEventPage) -> Self {
+        Self {
+            generation_id: page.generation_id,
+            source: page.source,
+            items: page.items.into_iter().map(|record| record.event).collect(),
+            next_cursor: page.next_cursor,
+            terminal: page.terminal,
+        }
+    }
+}
+
+/// Stable metadata-only candidate policy for semantic projection from Core.
 ///
-/// The lexical index cannot decide whether user-message content is meaningful
-/// because it does not store source text. Downstream semantic projection must
-/// hydrate the exact locator and apply the generation policy's hydrated content
-/// filter before chunking or embedding. This contract is independent of lexical
-/// query terms, scores, and ranking. Future candidate changes must add a new
-/// enum variant instead of changing the meaning of this variant.
+/// Candidate enumeration remains metadata-only. Downstream semantic projection
+/// reads complete stored Core content and applies the generation policy's Core
+/// content filter before chunking or embedding. This contract is independent
+/// of lexical query terms, scores, and ranking. Future candidate changes must
+/// add a new enum variant instead of changing the meaning of this variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticEligibility {
@@ -141,8 +162,7 @@ impl SemanticEventCursor {
 pub struct SemanticEventPage {
     pub generation_id: String,
     pub eligibility: SemanticEligibility,
-    /// Exact count of metadata candidates before source hydration and content
-    /// filtering.
+    /// Exact count of metadata candidates before Core content filtering.
     pub eligible_total: u64,
     pub items: Vec<EventRecord>,
     pub next_cursor: Option<SemanticEventCursor>,
@@ -152,6 +172,36 @@ pub struct SemanticEventPage {
 impl SemanticEventPage {
     pub fn eligible_count(&self) -> usize {
         self.items.len()
+    }
+}
+
+/// One deterministic page of complete Core semantic candidates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSemanticEventPage {
+    pub generation_id: String,
+    pub eligibility: SemanticEligibility,
+    pub eligible_total: u64,
+    pub items: Vec<CoreEventRecord>,
+    pub next_cursor: Option<SemanticEventCursor>,
+    pub terminal: bool,
+}
+
+impl CoreSemanticEventPage {
+    pub fn eligible_count(&self) -> usize {
+        self.items.len()
+    }
+}
+
+impl From<CoreSemanticEventPage> for SemanticEventPage {
+    fn from(page: CoreSemanticEventPage) -> Self {
+        Self {
+            generation_id: page.generation_id,
+            eligibility: page.eligibility,
+            eligible_total: page.eligible_total,
+            items: page.items.into_iter().map(|record| record.event).collect(),
+            next_cursor: page.next_cursor,
+            terminal: page.terminal,
+        }
     }
 }
 
@@ -242,6 +292,24 @@ pub struct EventRecord {
     pub touched_files: Vec<String>,
 }
 
+/// One verified event plus its complete generation-owned Core data.
+///
+/// The wrapper preserves `EventRecord` as a temporary metadata/locator compile
+/// bridge while downstream lanes move to the self-contained record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEventRecord {
+    pub event: EventRecord,
+    pub core_record: CoreRecord,
+}
+
+impl std::ops::Deref for CoreEventRecord {
+    type Target = EventRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSearchCandidate {
     pub event: EventRecord,
@@ -271,7 +339,20 @@ pub(super) fn stored_event_record(
     address: DocAddress,
     fields: Fields,
 ) -> Result<EventRecord> {
+    Ok(stored_core_event_record(searcher, address, fields)?.event)
+}
+
+pub(super) fn stored_core_event_record(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<CoreEventRecord> {
     let document: TantivyDocument = searcher.doc(address)?;
+    let core_record = CoreRecord::decode_stored(required_bytes(
+        &document,
+        fields.core_record,
+        "core_record",
+    )?)?;
     let event_id = stored_identity(
         &document,
         fields.event_identity,
@@ -295,20 +376,57 @@ pub(super) fn stored_event_record(
     )?)?;
     locator.validate_contract()?;
     let stored_source = required_string(&document, fields.source_key, "source_key")?;
-    if stored_source != source_token(locator.source())
-        || event_id.source_digest() != locator.source().identity().digest()
-        || session_id.source_digest() != locator.source().identity().digest()
-        || event_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
-        || session_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
+    if stored_source != source_token(&core_record.source)
+        || !locator.source().exact_descriptor_eq(&core_record.source)
+        || event_id != core_record.event_id
+        || session_id != core_record.session_id
     {
-        return Err(IndexError::InvalidStoredDocumentField("native_locator"));
+        return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }
 
     let provider = required_string(&document, fields.provider, "provider")?;
     let source_format = required_string(&document, fields.source_format, "source_format")?;
-    if provider != locator.source().provider() || source_format != locator.source().source_format()
+    if provider != core_record.source.provider()
+        || source_format != core_record.source.source_format()
     {
         return Err(IndexError::InvalidStoredDocumentField("provider"));
+    }
+    let parent_session_id = optional_stored_identity(
+        &document,
+        fields.parent_session_identity,
+        fields.parent_session_id,
+        "parent_session_identity",
+    )?;
+    let root_session_id = stored_identity_without_digest(
+        &document,
+        fields.root_session_identity,
+        fields.root_session_id,
+        "root_session_identity",
+    )?;
+    let provider_session_id = optional_string(&document, fields.provider_session_id)?;
+    let branch = optional_string(&document, fields.branch)?;
+    let agent_type = required_string(&document, fields.agent_type, "agent_type")?;
+    let is_primary = required_bool(&document, fields.is_primary, "is_primary")?;
+    let event_sequence = required_u64(&document, fields.event_sequence, "event_sequence")?;
+    let occurred_at_unix_ms = optional_i64(&document, fields.occurred_at_unix_ms)?;
+    let event_type = required_string(&document, fields.event_type, "event_type")?;
+    let role = optional_string(&document, fields.role)?;
+    let workspace = optional_string(&document, fields.workspace)?;
+    let cwd = optional_string(&document, fields.cwd)?;
+    if parent_session_id != core_record.parent_session_id
+        || root_session_id != core_record.root_session_id
+        || provider_session_id != core_record.provider_session_id
+        || branch != core_record.branch
+        || agent_type != core_record.agent_type
+        || is_primary != core_record.is_primary
+        || event_sequence != core_record.event_sequence
+        || occurred_at_unix_ms != core_record.occurred_at_unix_ms
+        || event_type != core_record.event_type
+        || role != core_record.role
+        || workspace != core_record.workspace
+        || cwd != core_record.cwd
+    {
+        return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }
     let touched_files = document
         .get_all(fields.touched_file)
@@ -321,70 +439,63 @@ pub(super) fn stored_event_record(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(EventRecord {
-        event_id,
-        session_id,
-        parent_session_id: optional_stored_identity(
-            &document,
-            fields.parent_session_identity,
-            fields.parent_session_id,
-            "parent_session_identity",
-        )?,
-        root_session_id: stored_identity_without_digest(
-            &document,
-            fields.root_session_identity,
-            fields.root_session_id,
-            "root_session_identity",
-        )?,
-        locator,
-        provider,
-        source_format,
-        provider_session_id: optional_string(&document, fields.provider_session_id)?,
-        branch: optional_string(&document, fields.branch)?,
-        source_path: optional_string(&document, fields.source_path)?,
-        agent_type: required_string(&document, fields.agent_type, "agent_type")?,
-        is_primary: required_bool(&document, fields.is_primary, "is_primary")?,
-        event_sequence: required_u64(&document, fields.event_sequence, "event_sequence")?,
-        occurred_at_unix_ms: optional_i64(&document, fields.occurred_at_unix_ms)?,
-        event_type: required_string(&document, fields.event_type, "event_type")?,
-        role: optional_string(&document, fields.role)?,
-        workspace: optional_string(&document, fields.workspace)?,
-        cwd: optional_string(&document, fields.cwd)?,
-        touched_files,
+    Ok(CoreEventRecord {
+        event: EventRecord {
+            event_id,
+            session_id,
+            parent_session_id,
+            root_session_id,
+            locator,
+            provider,
+            source_format,
+            provider_session_id,
+            branch,
+            source_path: optional_string(&document, fields.source_path)?,
+            agent_type,
+            is_primary,
+            event_sequence,
+            occurred_at_unix_ms,
+            event_type,
+            role,
+            workspace,
+            cwd,
+            touched_files,
+        },
+        core_record,
     })
 }
 
-struct EventIdentityCandidate {
+struct CoreEventIdentityCandidate {
     identity: [u8; StableEntityId::CANONICAL_LEN],
     digest_term: String,
-    event: EventRecord,
+    record: CoreEventRecord,
 }
 
-impl EventIdentityCandidate {
-    fn new(event: EventRecord, digest_term: String) -> Result<Self> {
+impl CoreEventIdentityCandidate {
+    fn new(record: CoreEventRecord, digest_term: String) -> Result<Self> {
         Ok(Self {
-            identity: event.event_id.encode_canonical()?,
+            identity: record.event_id.encode_canonical()?,
             digest_term,
-            event,
+            record,
         })
     }
 }
 
-impl PartialEq for EventIdentityCandidate {
+impl PartialEq for CoreEventIdentityCandidate {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 }
 
-impl Eq for EventIdentityCandidate {}
+impl Eq for CoreEventIdentityCandidate {}
 
-impl PartialOrd for EventIdentityCandidate {
+impl PartialOrd for CoreEventIdentityCandidate {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for EventIdentityCandidate {
+impl Ord for CoreEventIdentityCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
         self.identity.cmp(&other.identity)
     }
@@ -861,10 +972,16 @@ fn validate_event_sort_fast_fields(searcher: &tantivy::Searcher) -> Result<()> {
 }
 
 fn sort_events_for_session(events: &mut [EventRecord]) {
-    events.sort_by(|left, right| {
-        left.event_sequence
-            .cmp(&right.event_sequence)
-            .then_with(|| left.occurred_at_unix_ms.cmp(&right.occurred_at_unix_ms))
-            .then_with(|| left.event_id.as_uuid().cmp(&right.event_id.as_uuid()))
-    });
+    events.sort_by(compare_session_events);
+}
+
+fn sort_core_events_for_session(events: &mut [CoreEventRecord]) {
+    events.sort_by(|left, right| compare_session_events(&left.event, &right.event));
+}
+
+fn compare_session_events(left: &EventRecord, right: &EventRecord) -> Ordering {
+    left.event_sequence
+        .cmp(&right.event_sequence)
+        .then_with(|| left.occurred_at_unix_ms.cmp(&right.occurred_at_unix_ms))
+        .then_with(|| left.event_id.as_uuid().cmp(&right.event_id.as_uuid()))
 }

@@ -112,6 +112,7 @@ macro_rules! text_enum {
 
 pub mod archive;
 mod content_ref;
+mod core_record;
 pub mod dtos;
 pub mod history_jsonl;
 pub mod paths;
@@ -125,6 +126,16 @@ pub mod sync;
 
 pub use archive::SessionHistoryArchive;
 pub use content_ref::ContentRef;
+pub use core_record::{
+    core_record_contract_fingerprint, CoreContent, CoreContentPolicyStatus, CoreRecord,
+    CoreRecordError, CoreRecordResult, GitObjectFormat, GitObjectId, RepositoryAbstention,
+    RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
+    RepositoryCandidateEvidence, RepositoryEvidence, RepositoryEvidenceConfidence,
+    RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryLocalRootAuthorization, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    CORE_REPOSITORY_CONTRACT_REVISION, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+};
 pub use dtos::{
     AgentType, Artifact, ArtifactKind, CitationReference, Confidence, ContextCitation,
     ContextCitationType, ContextLinks, ContextPagination, ContextTruncation, Event, EventRole,

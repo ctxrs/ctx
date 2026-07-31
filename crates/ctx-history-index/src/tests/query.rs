@@ -63,6 +63,27 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
+    let core_ordered = index
+        .core_events_for_session(first.session_id.as_uuid())
+        .unwrap();
+    assert_eq!(
+        core_ordered
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        ordered
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        core_ordered[0]
+            .core_record
+            .content
+            .normalized_body
+            .as_deref(),
+        Some("atomic generation")
+    );
     let session = index
         .session_by_id(first.session_id.as_uuid())
         .unwrap()
@@ -178,6 +199,10 @@ fn session_event_budget_declines_before_materializing_an_oversized_session() {
         .events_for_session_if_bounded(session_id, 2)
         .unwrap()
         .is_none());
+    assert!(index
+        .core_events_for_session_if_bounded(session_id, 2)
+        .unwrap()
+        .is_none());
     assert_eq!(
         index
             .events_for_session_if_bounded(session_id, 3)
@@ -186,6 +211,14 @@ fn session_event_budget_declines_before_materializing_an_oversized_session() {
             .len(),
         3
     );
+    let core = index
+        .core_events_for_session_if_bounded(session_id, 3)
+        .unwrap()
+        .unwrap();
+    assert_eq!(core.len(), 3);
+    assert!(core.iter().all(|record| {
+        record.core_record.content.normalized_body.as_deref() == Some("bounded body")
+    }));
 }
 
 #[test]
@@ -249,8 +282,22 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
 
     let first_page = index.source_event_page(&target, None, 2).unwrap();
+    let core_first_page = index.core_source_event_page(&target, None, 2).unwrap();
     assert_eq!(first_page.generation_id, index.generation_id());
+    assert_eq!(core_first_page.generation_id, first_page.generation_id);
+    assert_eq!(core_first_page.terminal, first_page.terminal);
+    assert_eq!(
+        core_first_page
+            .next_cursor
+            .as_ref()
+            .map(SourceEventCursor::after),
+        first_page
+            .next_cursor
+            .as_ref()
+            .map(SourceEventCursor::after)
+    );
     assert!(first_page.source.exact_descriptor_eq(&target));
+    assert!(core_first_page.source.exact_descriptor_eq(&target));
     assert!(!first_page.terminal);
     assert_eq!(
         first_page
@@ -260,6 +307,19 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
             .collect::<Vec<_>>(),
         expected[..2]
     );
+    assert_eq!(
+        core_first_page
+            .items
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        expected[..2]
+    );
+    assert!(core_first_page.items.iter().all(|record| record
+        .core_record
+        .content
+        .normalized_body
+        .is_some()));
     assert!(first_page
         .items
         .iter()
@@ -271,13 +331,26 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     assert!(cursor.source().exact_descriptor_eq(&target));
     assert_eq!(cursor.after(), expected[1]);
     let final_page = index.source_event_page(&target, Some(&cursor), 2).unwrap();
+    let core_final_page = index
+        .core_source_event_page(&target, Some(&cursor), 2)
+        .unwrap();
     assert!(final_page.terminal);
+    assert_eq!(core_final_page.terminal, final_page.terminal);
     assert!(final_page.next_cursor.is_none());
+    assert!(core_final_page.next_cursor.is_none());
     assert_eq!(
         final_page
             .items
             .iter()
             .map(|event| event.event_id)
+            .collect::<Vec<_>>(),
+        expected[2..]
+    );
+    assert_eq!(
+        core_final_page
+            .items
+            .iter()
+            .map(|record| record.event_id)
             .collect::<Vec<_>>(),
         expected[2..]
     );
@@ -482,14 +555,23 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
 
     let first_page = index.semantic_event_page(None, 2).unwrap();
+    let core_first_page = index.core_semantic_event_page(None, 2).unwrap();
     assert_eq!(first_page.generation_id, index.generation_id());
+    assert_eq!(core_first_page.generation_id, first_page.generation_id);
     assert_eq!(
         first_page.eligibility,
         SemanticEligibility::UserMessageCandidateV2
     );
+    assert_eq!(core_first_page.eligibility, first_page.eligibility);
     assert_eq!(first_page.eligible_total, 4);
+    assert_eq!(core_first_page.eligible_total, first_page.eligible_total);
     assert_eq!(first_page.eligible_count(), 2);
+    assert_eq!(
+        core_first_page.eligible_count(),
+        first_page.eligible_count()
+    );
     assert!(!first_page.terminal);
+    assert_eq!(core_first_page.terminal, first_page.terminal);
     assert_eq!(
         first_page
             .items
@@ -498,6 +580,29 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
             .collect::<Vec<_>>(),
         expected[..2]
     );
+    assert_eq!(
+        core_first_page
+            .items
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        expected[..2]
+    );
+    assert_eq!(
+        core_first_page
+            .next_cursor
+            .as_ref()
+            .map(SemanticEventCursor::after),
+        first_page
+            .next_cursor
+            .as_ref()
+            .map(SemanticEventCursor::after)
+    );
+    assert!(core_first_page.items.iter().all(|record| record
+        .core_record
+        .content
+        .normalized_body
+        .is_some()));
     assert_eq!(first_page.items[0].locator.source(), &source);
     assert_eq!(
         first_page.items[0].root_session_id,
@@ -510,8 +615,14 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     assert_eq!(cursor.after(), expected[1]);
 
     let final_page = index.semantic_event_page(Some(&cursor), 2).unwrap();
+    let core_final_page = index.core_semantic_event_page(Some(&cursor), 2).unwrap();
     assert_eq!(final_page.eligible_total, 4);
+    assert_eq!(core_final_page.eligible_total, final_page.eligible_total);
     assert_eq!(final_page.eligible_count(), 2);
+    assert_eq!(
+        core_final_page.eligible_count(),
+        final_page.eligible_count()
+    );
     assert_eq!(
         final_page
             .items
@@ -520,8 +631,18 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
             .collect::<Vec<_>>(),
         expected[2..]
     );
+    assert_eq!(
+        core_final_page
+            .items
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        expected[2..]
+    );
     assert!(final_page.terminal);
+    assert_eq!(core_final_page.terminal, final_page.terminal);
     assert!(final_page.next_cursor.is_none());
+    assert!(core_final_page.next_cursor.is_none());
     assert_eq!(index.semantic_eligible_event_count().unwrap(), 4);
 }
 
@@ -839,7 +960,7 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
 }
 
 #[test]
-fn full_body_is_searchable_but_never_stored_or_returned() {
+fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let body = format!("{} tailonlyneedle", "界".repeat(16_384));
@@ -856,6 +977,40 @@ fn full_body_is_searchable_but_never_stored_or_returned() {
         .unwrap()
         .unwrap();
     assert_eq!(record.locator, expected.locator);
+    let core_record = index
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        core_record.content.normalized_body.as_deref(),
+        Some(body.as_str())
+    );
+    assert!(core_record.repository_bindings.is_empty());
+    assert!(core_record.repository_abstentions.is_empty());
+    let source_page = index.core_source_event_page(&source, None, 1).unwrap();
+    let semantic_page = index.core_semantic_event_page(None, 1).unwrap();
+    let session_events = index
+        .core_events_for_session(expected.session_id.as_uuid())
+        .unwrap();
+    let bounded_session_events = index
+        .core_events_for_session_if_bounded(expected.session_id.as_uuid(), 1)
+        .unwrap()
+        .unwrap();
+    assert!(source_page.terminal);
+    assert!(semantic_page.terminal);
+    assert_eq!(semantic_page.eligible_total, 1);
+    for record in [
+        &source_page.items[0],
+        &semantic_page.items[0],
+        &session_events[0],
+        &bounded_session_events[0],
+    ] {
+        assert_eq!(record.event_id, expected.event_id);
+        assert_eq!(
+            record.core_record.content.normalized_body.as_deref(),
+            Some(body.as_str())
+        );
+    }
     assert_eq!(
         index.search_event_candidates("tailonlyneedle", 10).unwrap()[0]
             .event
@@ -864,6 +1019,8 @@ fn full_body_is_searchable_but_never_stored_or_returned() {
     );
 
     let fields = fields_from_schema(index.searcher.schema()).unwrap();
+    assert!(index.searcher.schema().get_field("body_preview").is_err());
+    assert!(index.searcher.schema().get_field("body").is_err());
     let address = index
         .searcher
         .search(&AllQuery, &DocSetCollector)
@@ -873,6 +1030,21 @@ fn full_body_is_searchable_but_never_stored_or_returned() {
         .unwrap();
     let stored: TantivyDocument = index.searcher.doc(address).unwrap();
     assert!(stored.get_first(fields.body_search).is_none());
+    assert!(stored.get_first(fields.core_record).is_some());
+
+    drop(index);
+    let reopened = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let reopened_records = reopened
+        .core_events_for_session(expected.session_id.as_uuid())
+        .unwrap();
+    assert_eq!(
+        reopened_records[0]
+            .core_record
+            .content
+            .normalized_body
+            .as_deref(),
+        Some(body.as_str())
+    );
 }
 
 #[test]

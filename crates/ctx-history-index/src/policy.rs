@@ -1,4 +1,4 @@
-//! Canonical policy for source-backed lexical and semantic generations.
+//! Canonical policy for self-contained Core lexical and semantic generations.
 //!
 //! The compact JSON encoding of [`SourceGenerationPolicy`] is hashed into each
 //! lexical generation manifest. Any generation-affecting policy change must
@@ -8,10 +8,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 1;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 5;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 2;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 6;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
-pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 1;
+pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 2;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
 pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 2;
@@ -45,6 +45,10 @@ impl SourceGenerationPolicy {
 #[serde(deny_unknown_fields)]
 pub struct LexicalGenerationPolicy {
     pub event_projector_revision: u32,
+    pub core_record_version: u32,
+    pub core_normalization_revision: u32,
+    pub core_content_policy_revision: u32,
+    pub core_repository_contract_revision: u32,
     pub included_event_classes: [SourceEventClass; 11],
     pub body_selection: LexicalBodySelection,
     pub indexed_body_limit: LexicalIndexedBodyLimit,
@@ -60,8 +64,8 @@ pub struct SemanticGenerationPolicy {
     pub eligibility_revision: u32,
     pub candidate_event_classes: [SourceEventClass; 1],
     pub candidate_roles: [SourceEventRole; 1],
-    /// Filter applied after the exact source locator is hydrated.
-    pub hydrated_content_filter: SemanticHydratedContentFilter,
+    /// Filter applied after complete content is read from stored Core.
+    pub core_content_filter: SemanticCoreContentFilter,
     pub chunking_revision: u32,
     pub chunk_target_chars: u32,
     pub chunk_overlap_chars: u32,
@@ -96,12 +100,12 @@ pub enum LexicalIndexedBodyLimit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoredSourceContent {
-    None,
+    CompleteCoreRecordV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SemanticHydratedContentFilter {
+pub enum SemanticCoreContentFilter {
     PolicySelectedMeaningfulTextV1,
 }
 
@@ -132,6 +136,10 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
         policy_version: SOURCE_GENERATION_POLICY_VERSION,
         lexical: LexicalGenerationPolicy {
             event_projector_revision: SOURCE_EVENT_PROJECTOR_REVISION,
+            core_record_version: ctx_history_core::CORE_RECORD_VERSION,
+            core_normalization_revision: ctx_history_core::CORE_NORMALIZATION_REVISION,
+            core_content_policy_revision: ctx_history_core::CORE_CONTENT_POLICY_REVISION,
+            core_repository_contract_revision: ctx_history_core::CORE_REPOSITORY_CONTRACT_REVISION,
             included_event_classes: [
                 SourceEventClass::Message,
                 SourceEventClass::ToolCall,
@@ -147,7 +155,7 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
             ],
             body_selection: LexicalBodySelection::FullPolicySelectedMeaningfulText,
             indexed_body_limit: LEXICAL_INDEXED_BODY_LIMIT,
-            stored_content: StoredSourceContent::None,
+            stored_content: StoredSourceContent::CompleteCoreRecordV1,
             schema_revision: LEXICAL_SCHEMA_REVISION,
             tokenizer_revision: LEXICAL_TOKENIZER_REVISION,
         },
@@ -155,7 +163,7 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
             eligibility_revision: SEMANTIC_ELIGIBILITY_REVISION,
             candidate_event_classes: [SourceEventClass::Message],
             candidate_roles: [SourceEventRole::User],
-            hydrated_content_filter: SemanticHydratedContentFilter::PolicySelectedMeaningfulTextV1,
+            core_content_filter: SemanticCoreContentFilter::PolicySelectedMeaningfulTextV1,
             chunking_revision: SEMANTIC_CHUNKING_REVISION,
             chunk_target_chars: SEMANTIC_CHUNK_TARGET_CHARS as u32,
             chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
@@ -194,7 +202,7 @@ mod tests {
         );
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "a17e860b6d719dfde065256ec070970b3d12e4d76ff0e59f16aabbc1666b71b9"
+            "a3334827a3ff8760b059bee6b6632e2a030e719fe023f4e399cd810d68d3b2e4"
         );
     }
 

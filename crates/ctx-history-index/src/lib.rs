@@ -1,4 +1,4 @@
-//! Atomic source-backed lexical generations.
+//! Atomic self-contained lexical Core generations.
 //!
 //! A Tantivy commit names a durable immutable source-revision manifest, so
 //! readers observe either the previous complete generation or the next one.
@@ -32,12 +32,12 @@ pub(crate) use identity::{
 pub use policy::{
     current_source_generation_policy, current_source_generation_policy_hash,
     EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
-    LexicalIndexedBodyLimit, SemanticGenerationPolicy, SemanticHydratedContentFilter,
-    SourceEventClass, SourceEventRole, SourceGenerationPolicy, StoredSourceContent,
-    LEXICAL_INDEXED_BODY_LIMIT, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
-    SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS,
-    SEMANTIC_EMBEDDING_CONTRACT_REVISION, SEMANTIC_EMBEDDING_DIMENSIONS, SEMANTIC_EMBEDDING_MODEL,
-    SEMANTIC_EMBEDDING_MODEL_REVISION, SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
+    LexicalIndexedBodyLimit, SemanticCoreContentFilter, SemanticGenerationPolicy, SourceEventClass,
+    SourceEventRole, SourceGenerationPolicy, StoredSourceContent, LEXICAL_INDEXED_BODY_LIMIT,
+    LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION, SEMANTIC_CHUNK_OVERLAP_CHARS,
+    SEMANTIC_CHUNK_TARGET_CHARS, SEMANTIC_EMBEDDING_CONTRACT_REVISION,
+    SEMANTIC_EMBEDDING_DIMENSIONS, SEMANTIC_EMBEDDING_MODEL, SEMANTIC_EMBEDDING_MODEL_REVISION,
+    SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
 };
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
@@ -47,9 +47,10 @@ pub(crate) use publication::{
     verify_searcher_structure, write_manifest,
 };
 pub use query::{
-    AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
-    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor,
-    SourceEventPage, MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    AgentScope, CoreEventRecord, CoreSemanticEventPage, CoreSourceEventPage, EventRecord,
+    EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, SemanticEligibility,
+    SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor, SourceEventPage,
+    MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
 pub(crate) use schema::{
@@ -616,6 +617,7 @@ impl GenerationWriter {
         if matches!(&pending_source.mode, PendingSourceMode::Retain { .. }) {
             return Err(IndexError::DocumentSourceNotActive);
         }
+        let core_record_bytes = document.to_core_record()?.encode_stored()?;
         let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
             validate_event_identity_against_base(
@@ -669,6 +671,7 @@ impl GenerationWriter {
             self.fields,
             document,
             locator_bytes,
+            core_record_bytes,
             encoded_identities,
             index_fields,
         );

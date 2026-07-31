@@ -384,6 +384,7 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
             identity: IDENTITY_VERSION,
             schema: 3,
             analyzer: LEXICAL_ANALYZER_VERSION,
+            core_record: ctx_history_core::CORE_RECORD_VERSION,
         }
     ));
 }
@@ -401,9 +402,45 @@ fn current_manifest_roundtrips_with_exact_policy_hash() {
         current_source_generation_policy_hash().unwrap()
     );
     assert_eq!(
+        roundtrip.core_record_version,
+        ctx_history_core::CORE_RECORD_VERSION
+    );
+    assert_eq!(
+        roundtrip.core_record_contract_fingerprint,
+        ctx_history_core::core_record_contract_fingerprint()
+    );
+    assert_eq!(
         roundtrip.generation_id().unwrap(),
         manifest.generation_id().unwrap()
     );
+}
+
+#[test]
+fn verified_open_rejects_mismatched_core_contract_fingerprint() {
+    let temp = tempdir().unwrap();
+    let source = source("core-fingerprint-mismatch.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let mut mismatched_manifest = pinned.manifest().clone();
+    mismatched_manifest.core_record_contract_fingerprint = "0".repeat(64);
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(temp.path(), &index, mismatched_manifest, &[], Vec::new());
+
+    let error = match VerifiedIndex::open(temp.path()) {
+        Ok(_) => panic!("mismatched Core fingerprint generation unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        IndexError::CoreRecordContractMismatch { expected, actual }
+            if expected == ctx_history_core::core_record_contract_fingerprint()
+                && actual == "0".repeat(64)
+    ));
 }
 
 #[test]
@@ -574,8 +611,53 @@ fn verified_generation_rejects_forged_source_ownership() {
     };
     assert!(matches!(
         error,
-        IndexError::InvalidStoredDocumentField("native_locator")
+        IndexError::InvalidStoredDocumentField("core_record")
     ));
+}
+
+#[test]
+fn verified_generation_rejects_malformed_stored_core_record() {
+    let temp = tempdir().unwrap();
+    let source = source("malformed-core.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_document(document(&source, 1, "complete body"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
+    let address = pinned
+        .searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let mut forged = TantivyDocument::default();
+    for (field, value) in document.field_values() {
+        if field != fields.core_record {
+            forged.add_field_value(field, value);
+        }
+    }
+    forged.add_bytes(fields.core_record, b"{");
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![certificate(&source, 2, 1)]).unwrap(),
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    let error = match VerifiedIndex::open(temp.path()) {
+        Ok(_) => panic!("malformed stored Core generation unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
