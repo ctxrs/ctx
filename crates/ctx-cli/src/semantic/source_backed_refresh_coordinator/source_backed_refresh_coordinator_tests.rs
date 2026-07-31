@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use ctx_history_capture::{
-    DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport, ProviderImportSupport,
-    ProviderSource, ProviderSourceKind,
+    provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind,
 };
 use rusqlite::Connection;
 
@@ -451,6 +451,9 @@ fn missing_roots_are_nonblocking_but_detected_selector_gaps_block_publication() 
     let error = reject_blocking_automatic_registry_issues(&[selector_gap]).unwrap_err();
     assert!(format!("{error:#}").contains("injected selector gap"));
 }
+
+#[path = "codex_union_tests.rs"]
+mod codex_union_tests;
 
 #[test]
 fn duplicate_concurrent_requests_launch_one_writer() {
