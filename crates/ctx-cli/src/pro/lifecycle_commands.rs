@@ -16,6 +16,8 @@ use serde_json::json;
 
 #[path = "lifecycle_commands/render.rs"]
 mod render;
+#[path = "lifecycle_commands/setup_replay.rs"]
+mod setup_replay;
 
 use super::{
     default_helper_path, install_marker_path, install_verified_bundle, previous_helper_path,
@@ -59,6 +61,7 @@ use render::{
     browser_notice as render_browser_notice, manage as render_manage_human,
     setup as render_setup_human, uninstall as render_uninstall_human,
 };
+use setup_replay::{record_helper_smoke, reusable_setup_access_state, write_setup_result};
 
 #[derive(Debug, Args)]
 pub(crate) struct ProArgs {
@@ -408,6 +411,27 @@ fn run_setup(
     telemetry: &mut ProLifecycleTelemetryV1,
     ui: &mut Ui,
 ) -> Result<()> {
+    if let Some(account_state) =
+        reusable_setup_access_state(&status(data_root), trial_only, referral_codename)
+    {
+        telemetry.reconcile = ProReconcileOutcomeV1::Current;
+        telemetry.access_state = ProAccessStateV1::from_safe_name(&account_state);
+        let mut materialization = ProMaterializationTelemetryV1::started();
+        let report = materialize(data_root, &mut materialization);
+        if materialization.helper_connection != ProHelperConnectionOutcomeV1::NotAttempted {
+            telemetry.helper_connection = materialization.helper_connection;
+        }
+        telemetry.materialization = Some(materialization);
+        return write_setup_result(
+            data_root,
+            &account_state,
+            false,
+            report.map_err(crate::pro::actionable_error)?,
+            json_output,
+            ui,
+        );
+    }
+
     let trust = service.release_trust()?;
     let target = default_helper_path(data_root);
     telemetry.reconcile = ProReconcileOutcomeV1::Failed;
@@ -499,39 +523,14 @@ fn run_setup(
     }
     telemetry.materialization = Some(materialization);
     let report = report.map_err(crate::pro::actionable_error)?;
-    let value = json!({
-        "schema_version": 1,
-        "payload_type": "pro_setup",
-        "ok": true,
-        "account_state": plan.account_state,
-        "helper_updated": helper_updated,
-        "graph": report,
-        "status": lifecycle_status_json(data_root),
-    });
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else {
-        let document = render_setup_human(ui.stdout_context(), &plan.account_state);
-        ui.write_stdout(&document)?;
-    }
-    Ok(())
-}
-
-fn record_helper_smoke(
-    smoke: Result<crate::pro::client::HelperSmoke>,
-    telemetry: &mut ProLifecycleTelemetryV1,
-) -> Result<crate::pro::client::HelperSmoke> {
-    match smoke {
-        Ok(smoke) => {
-            telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
-            Ok(smoke)
-        }
-        Err(error) => {
-            telemetry.helper_connection =
-                crate::analytics::pro_helper_connection_outcome(stable_error_code(&error));
-            Err(error)
-        }
-    }
+    write_setup_result(
+        data_root,
+        &plan.account_state,
+        helper_updated,
+        report,
+        json_output,
+        ui,
+    )
 }
 
 fn run_manage(

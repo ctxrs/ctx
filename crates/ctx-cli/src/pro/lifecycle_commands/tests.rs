@@ -589,6 +589,29 @@ fn lifecycle_status_keeps_readiness_separate_from_access_transitions() {
 }
 
 #[test]
+fn ready_materialized_setup_replay_skips_commercial_mutation_only_for_current_access() {
+    for access_state in ["trial", "active", "canceling_paid"] {
+        assert_eq!(
+            reusable_setup_access_state(&pro_status(access_state), false, None).as_deref(),
+            Some(access_state)
+        );
+    }
+
+    assert!(reusable_setup_access_state(&pro_status("active"), true, None).is_none());
+    assert!(
+        reusable_setup_access_state(&pro_status("active"), false, Some("agent-smith")).is_none()
+    );
+    assert!(reusable_setup_access_state(&pro_status("offline_grace"), false, None).is_none());
+
+    let mut stale = pro_status("active");
+    stale.materialized = false;
+    assert!(reusable_setup_access_state(&stale, false, None).is_none());
+    stale.materialized = true;
+    stale.ready = false;
+    assert!(reusable_setup_access_state(&stale, false, None).is_none());
+}
+
+#[test]
 fn lifecycle_status_distinguishes_invalid_artifacts_from_never_installed() {
     let mut invalid = pro_status("active");
     invalid.installed = false;
