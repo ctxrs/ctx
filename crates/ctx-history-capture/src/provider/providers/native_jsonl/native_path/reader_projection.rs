@@ -298,12 +298,51 @@ fn direct_jsonl_event_text(
     event_type: EventType,
     entry_type: &str,
 ) -> String {
+    if event_type == EventType::ToolCall {
+        if let Some(text) = direct_jsonl_structured_tool_call_text(provider, value) {
+            return text;
+        }
+    }
     match provider {
         CaptureProvider::FactoryAiDroid => super::factory_droid_event_text(value),
         CaptureProvider::Qoder => super::qoder_parser::qoder_event_text(value, event_type),
         CaptureProvider::QwenCode => super::qwen_code::qwen_code_event_text(value),
         _ => native_jsonl_event_text(provider, value, event_type, entry_type),
     }
+}
+
+fn direct_jsonl_structured_tool_call_text(
+    provider: CaptureProvider,
+    value: &Value,
+) -> Option<String> {
+    let selected = match provider {
+        CaptureProvider::Antigravity => {
+            direct_jsonl_selected_object(value, &["content", "thinking", "tool_calls"])
+        }
+        CaptureProvider::Tabnine => direct_jsonl_selected_object(value, &["content", "toolCalls"]),
+        CaptureProvider::CopilotCli => value.get("data").cloned(),
+        CaptureProvider::FactoryAiDroid | CaptureProvider::Qoder | CaptureProvider::QwenCode => {
+            value
+                .pointer("/message/content")
+                .or_else(|| value.get("content"))
+                .cloned()
+        }
+        CaptureProvider::Windsurf => value.get("code_action").cloned(),
+        _ => None,
+    }?;
+    Some(selected.to_string())
+}
+
+fn direct_jsonl_selected_object(value: &Value, fields: &[&str]) -> Option<Value> {
+    let selected = fields
+        .iter()
+        .filter_map(|field| {
+            value
+                .get(*field)
+                .map(|selected| ((*field).to_owned(), selected.clone()))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    (!selected.is_empty()).then(|| Value::Object(selected))
 }
 
 fn direct_jsonl_lexical_text(

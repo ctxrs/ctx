@@ -10,12 +10,13 @@ use crate::test_support_paths::tempdir;
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
-    const SENTINEL: &str = "WINDSURF_SOURCE_BACKED_SENTINEL";
+    const TAIL_TERM: &str = "windsurftailneedle";
 
     let temp = tempdir().unwrap();
     let root = temp.path().join("transcripts");
     let transcript = transcript_path(&root);
-    let source_record = user_input(0, SENTINEL);
+    let source_record = code_action(0, TAIL_TERM);
+    let expected_body = source_record.get("code_action").unwrap().to_string();
     write_transcript(&transcript, std::slice::from_ref(&source_record));
     let mut expected_record = serde_json::to_vec(&source_record).unwrap();
     expected_record.push(b'\n');
@@ -24,13 +25,14 @@ fn source_backed_cold_projection_and_exact_locator() {
         windsurf_source_backed_adapter(),
         &root,
         "windsurf-hook-trajectory",
-        SENTINEL,
+        &expected_body,
+        TAIL_TERM,
         &expected_record,
         None,
         "windsurf-hook-trajectory",
         "primary",
         true,
-        "e0190d935691dcdfb294672fd2a821f694be6edaf3b81d848959fa7df56c9125",
+        "7e3cca82c92cea15497b4ff3734c2ad22636e8445c5283dfb493d39d061d191a",
     );
 }
 
@@ -38,13 +40,34 @@ fn transcript_path(root: &Path) -> PathBuf {
     root.join("windsurf-hook-trajectory.jsonl")
 }
 
-fn user_input(step: u64, content: &str) -> Value {
+fn code_action(step: u64, tail_term: &str) -> Value {
     json!({
         "status": "done",
-        "type": "user_input",
+        "type": "code_action",
         "timestamp": format!("2026-07-25T12:00:{step:02}Z"),
-        "user_input": {"user_response": content},
+        "code_action": {
+            "path": "src/complete.rs",
+            "arguments": {
+                "padding": "s".repeat(17_000),
+                "zz_tail": tail_term,
+            },
+        },
     })
+}
+
+#[test]
+fn fallback_normalization_retains_selected_text_beyond_16k() {
+    const TAIL_TERM: &str = "windsurffallbacktailneedle";
+
+    let value = json!({
+        "type": "summary",
+        "summary": "x".repeat(17_000),
+        "details": {"zz_tail": TAIL_TERM},
+    });
+    let body = windsurf_event_text(&value, "summary");
+
+    assert!(body.contains(TAIL_TERM));
+    assert!(body.split_once(TAIL_TERM).unwrap().0.chars().count() > 16 * 1024);
 }
 
 fn write_transcript(path: &Path, records: &[Value]) {

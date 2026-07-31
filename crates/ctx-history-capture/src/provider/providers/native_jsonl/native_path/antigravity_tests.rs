@@ -10,14 +10,17 @@ use crate::test_support_paths::tempdir;
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
+    const TAIL_TERM: &str = "antigravitytailneedle";
+
     let temp = tempdir().unwrap();
     let root = temp.path().join("brain");
     let transcript = transcript_path(&root);
-    let sentinel = format!(
-        "ANTIGRAVITY_SOURCE_BACKED_SENTINEL {}antigravity-tail",
-        "full-body ".repeat(400)
-    );
-    let source_record = record(0, "USER_INPUT", &sentinel);
+    let source_record = tool_call(0, TAIL_TERM);
+    let expected_body = json!({
+        "content": source_record.get("content").unwrap(),
+        "tool_calls": source_record.get("tool_calls").unwrap(),
+    })
+    .to_string();
     write_transcript(&transcript, std::slice::from_ref(&source_record));
     let mut expected_record = serde_json::to_vec(&source_record).unwrap();
     expected_record.push(b'\n');
@@ -26,13 +29,14 @@ fn source_backed_cold_projection_and_exact_locator() {
         antigravity_source_backed_adapter(),
         &root,
         "agy-life",
-        &sentinel,
+        &expected_body,
+        TAIL_TERM,
         &expected_record,
         None,
         "agy-life",
         "primary",
         true,
-        "5d13599441e0003221f51f2fa833f230dac8ca8cb1a09f13e5629855d90a8182",
+        "40914e1730adb5d141a1533b20ad3e7e906380f707511fb973be0f367c93615b",
     );
 }
 
@@ -41,14 +45,21 @@ fn transcript_path(root: &Path) -> PathBuf {
         .join(".system_generated/logs/transcript_full.jsonl")
 }
 
-fn record(step: u64, kind: &str, content: &str) -> Value {
+fn tool_call(step: u64, tail_term: &str) -> Value {
     json!({
         "step_index": step,
-        "source": if kind == "USER_INPUT" { "user" } else { "planner" },
-        "type": kind,
+        "source": "planner",
+        "type": "CODE_ACTION",
         "status": "ok",
         "created_at": format!("2026-07-25T12:00:{step:02}Z"),
-        "content": content,
+        "content": "apply the complete structured edit",
+        "tool_calls": [{
+            "name": "write_to_file",
+            "args": {
+                "padding": "a".repeat(17_000),
+                "zz_tail": tail_term,
+            },
+        }],
     })
 }
 

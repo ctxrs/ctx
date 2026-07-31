@@ -10,12 +10,16 @@ use crate::test_support_paths::tempdir;
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
-    const SENTINEL: &str = "FACTORY_DROID_SOURCE_BACKED_SENTINEL";
+    const TAIL_TERM: &str = "factorydroidtailneedle";
 
     let temp = tempdir().unwrap();
     let root = temp.path().join(".factory/sessions");
     let transcript = transcript_path(&root);
-    let source_record = message("source-backed-user", "user", SENTINEL);
+    let source_record = tool_call("source-backed-tool", TAIL_TERM);
+    let expected_body = source_record
+        .pointer("/message/content")
+        .unwrap()
+        .to_string();
     write_transcript(
         &transcript,
         &[
@@ -30,13 +34,14 @@ fn source_backed_cold_projection_and_exact_locator() {
         factory_droid_source_backed_adapter(),
         &root,
         "droid-life",
-        SENTINEL,
+        &expected_body,
+        TAIL_TERM,
         &expected_record,
         Some("droid-parent"),
         "droid-parent",
         "subagent",
         false,
-        "d9fa2d0a583e01f3081ce69ad92f55590e84cfb8ff54fcc192f10a42ee54b122",
+        "6b324614c0b96f21a92b22e9232c880fa1cc37520f7d02778538e3aa902f427f",
     );
 }
 
@@ -57,14 +62,22 @@ fn child_header(session_id: &str, parent: &str) -> Value {
     })
 }
 
-fn message(id: &str, role: &str, text: &str) -> Value {
+fn tool_call(id: &str, tail_term: &str) -> Value {
     json!({
         "type": "message",
         "id": id,
         "timestamp": "2026-07-25T12:00:01Z",
         "message": {
-            "role": role,
-            "content": [{"type": "text", "text": text}],
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "factory-call",
+                "name": "write_file",
+                "input": {
+                    "padding": "f".repeat(17_000),
+                    "zz_tail": tail_term,
+                },
+            }],
         },
         "model": "factory/droid",
     })
