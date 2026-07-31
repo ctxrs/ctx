@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use ctx_pro_host_protocol::{
     CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage, ProAccessState,
-    ProAccessStatus, ProOperation,
+    ProAccessStatus, ProOperation, RepositoryCoverage,
 };
 
 fn receipt(generation: char) -> CoreMaterializationReceipt {
@@ -28,6 +28,18 @@ fn status(coverage: MaterializedCoverage) -> StatusResult {
         requested_core_generation_id: Some("a".repeat(64)),
         core_receipt: Some(receipt('a')),
         coverage,
+        repository_coverage: if coverage == MaterializedCoverage::Complete {
+            RepositoryCoverage {
+                repository_candidate_events: 1,
+                logical_binding_events: 1,
+                certified_live_root_access_events: 1,
+                file_evidence_events: 1,
+                exact_commit_evidence_events: 1,
+                exact_pull_request_evidence_events: 1,
+            }
+        } else {
+            RepositoryCoverage::default()
+        },
         access: ProAccessStatus {
             entitlement: ProAccessState::Available,
             graph_key: ProAccessState::Available,
