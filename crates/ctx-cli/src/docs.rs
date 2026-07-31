@@ -271,7 +271,7 @@ const TOPICS: &[DocTopic] = &[
         id: "provider-support",
         title: "Provider Support",
         audience: "human-agent",
-        summary: "Current Supported provider imports and source formats.",
+        summary: "Currently supported provider imports and source formats.",
         tags: &["providers", "matrix"],
         source_path: "docs/provider-support.md",
         body: include_str!("../../../docs/provider-support.md"),
