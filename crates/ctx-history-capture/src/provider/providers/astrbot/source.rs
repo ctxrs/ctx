@@ -16,8 +16,8 @@ const ASTRBOT_SET_READ_ROWS: usize = 256;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AstrBotQueryCounters {
     pub(crate) candidate_set_reads: u64,
-    pub(crate) hydration_set_reads: u64,
-    pub(crate) hydrated_rows: u64,
+    pub(crate) row_set_reads: u64,
+    pub(crate) decoded_rows: u64,
 }
 
 #[cfg(test)]
@@ -25,8 +25,8 @@ thread_local! {
     static ASTRBOT_QUERY_COUNTERS: std::cell::Cell<AstrBotQueryCounters> =
         const { std::cell::Cell::new(AstrBotQueryCounters {
             candidate_set_reads: 0,
-            hydration_set_reads: 0,
-            hydrated_rows: 0,
+            row_set_reads: 0,
+            decoded_rows: 0,
         }) };
 }
 
@@ -49,20 +49,20 @@ fn record_candidate_set_read() {
     });
 }
 
-fn record_hydration_set_read() {
+fn record_row_set_read() {
     #[cfg(test)]
     ASTRBOT_QUERY_COUNTERS.with(|slot| {
         let mut counters = slot.get();
-        counters.hydration_set_reads += 1;
+        counters.row_set_reads += 1;
         slot.set(counters);
     });
 }
 
-fn record_hydrated_row() {
+fn record_decoded_row() {
     #[cfg(test)]
     ASTRBOT_QUERY_COUNTERS.with(|slot| {
         let mut counters = slot.get();
-        counters.hydrated_rows += 1;
+        counters.decoded_rows += 1;
         slot.set(counters);
     });
 }
@@ -70,10 +70,10 @@ fn record_hydrated_row() {
 pub(super) struct AstrBotSql {
     pub(super) conversation_candidate_initial: String,
     pub(super) conversation_candidate_after: String,
-    pub(super) conversation_hydration: String,
+    pub(super) conversation_rows: String,
     pub(super) platform_message_candidate_initial: Option<String>,
     pub(super) platform_message_candidate_after: Option<String>,
-    pub(super) platform_message_hydration: Option<String>,
+    pub(super) platform_message_rows: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,7 +126,7 @@ impl AstrBotSql {
              from projected p where p.physical_rowid > ?1 \
              order by p.physical_rowid limit ?2"
         );
-        let conversation_hydration = format!(
+        let conversation_rows = format!(
             "{conversation_cte} select physical_rowid, row_id, inner_conversation_id, conversation_id, \
              platform_id, user_id, content, title, persona_id, token_usage, created_at, \
              updated_at from projected"
@@ -134,7 +134,7 @@ impl AstrBotSql {
         let (
             platform_message_candidate_initial,
             platform_message_candidate_after,
-            platform_message_hydration,
+            platform_message_rows,
         ) = if sqlite_table_exists(conn, "platform_message_history")? {
             let columns = sqlite_table_columns(conn, "platform_message_history")?;
             let projection = astrbot_platform_message_projection(&columns);
@@ -178,10 +178,10 @@ impl AstrBotSql {
         Ok(Self {
             conversation_candidate_initial,
             conversation_candidate_after,
-            conversation_hydration,
+            conversation_rows,
             platform_message_candidate_initial,
             platform_message_candidate_after,
-            platform_message_hydration,
+            platform_message_rows,
         })
     }
 }
@@ -259,7 +259,7 @@ pub(super) fn with_astrbot_length_preflight<T>(
 ) -> Result<T> {
     // SQLITE_LIMIT_LENGTH can reject even integer-only octet_length inspection of an oversized
     // stored value. AstrBot candidate/setup queries return only rowids, order keys, and byte
-    // counts, so lift the limit only around metadata preflight and restore it before hydration.
+    // counts, so lift the limit only around metadata preflight and restore it before row reads.
     let _guard = SqliteLengthPreflightGuard::new(conn);
     query().map_err(CaptureError::from)
 }
@@ -341,19 +341,6 @@ where
     )
 }
 
-pub(super) fn hydrate_conversation(
-    conn: &Connection,
-    sql: &str,
-    physical_rowid: i64,
-) -> Result<ConversationRow> {
-    let mut hydrated = None;
-    visit_conversations(conn, sql, &[physical_rowid], |_, row| -> Result<()> {
-        hydrated = Some(row);
-        Ok(())
-    })?;
-    hydrated.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
-}
-
 pub(super) fn visit_platform_messages<E>(
     conn: &Connection,
     sql: &str,
@@ -402,12 +389,12 @@ where
     }
     if physical_rowids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(E::from(CaptureError::SystemInvariant(
-            "AstrBot hydration set must be strictly ordered",
+            "AstrBot row set must be strictly ordered",
         )));
     }
 
     for physical_rowids in physical_rowids.chunks(ASTRBOT_SET_READ_ROWS) {
-        record_hydration_set_read();
+        record_row_set_read();
         let placeholders = std::iter::repeat_n("?", physical_rowids.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -426,7 +413,7 @@ where
                     rusqlite::Error::QueryReturnedNoRows,
                 )));
             }
-            record_hydrated_row();
+            record_decoded_row();
             visit(physical_rowid, value)?;
         }
         if expected.next().is_some() {
