@@ -721,6 +721,22 @@ fn sixteen_sources_coalesce_four_provider_pages_into_one_atomic_helper_batch() {
         vec![64; 16]
     );
     assert!(batch.pages.iter().all(|page| page.terminal));
+    for page in &batch.pages {
+        assert!(
+            page.records.windows(2).all(|records| {
+                let left = (
+                    records[0].metadata.event_sequence,
+                    records[0].event_id.digest(),
+                );
+                let right = (
+                    records[1].metadata.event_sequence,
+                    records[1].event_id.digest(),
+                );
+                left < right
+            }),
+            "coalescing must merge individually ordered provider pages into one strict stable order"
+        );
+    }
     assert_eq!(
         batch
             .pages
@@ -1346,9 +1362,14 @@ fn synthetic_materialization_batch_fixture(
                     .expect("synthetic batch frontier"),
                 )
             };
-            let first_sequence = page_index * RECORDS_PER_PROVIDER_PAGE + 1;
-            let records = (first_sequence..first_sequence + RECORDS_PER_PROVIDER_PAGE)
-                .map(|sequence| synthetic_record_at(source.observation().source(), sequence))
+            // Provider frontier order and stable event order are independent.
+            // Interleave the page ranges so each page is internally ordered
+            // while their concatenation is not.
+            let records = (0..RECORDS_PER_PROVIDER_PAGE)
+                .map(|record_index| {
+                    let sequence = page_index + 1 + record_index.saturating_mul(PAGES_PER_SOURCE);
+                    synthetic_record_at(source.observation().source(), sequence)
+                })
                 .collect();
             pages.push(SourceBackedProviderPage {
                 source: source.observation().source().clone(),
