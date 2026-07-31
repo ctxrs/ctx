@@ -146,7 +146,7 @@ pub(crate) struct GeminiRetainedEvent {
     pub(crate) safe_file_touches: Vec<String>,
 }
 
-/// Internal result-hydration mode retained by the sparse diagnostic parser.
+/// Internal result-decoding mode retained by the sparse diagnostic parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GeminiNativePathProfile {
     CoreOnly,

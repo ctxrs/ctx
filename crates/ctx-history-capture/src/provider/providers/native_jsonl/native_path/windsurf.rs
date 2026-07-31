@@ -161,7 +161,3 @@ pub(crate) const fn windsurf_source_backed_adapter() -> super::DirectJsonlFamily
         "windsurf-direct-native-jsonl-v1",
     )
 }
-
-#[cfg(test)]
-#[path = "windsurf_tests.rs"]
-mod tests;

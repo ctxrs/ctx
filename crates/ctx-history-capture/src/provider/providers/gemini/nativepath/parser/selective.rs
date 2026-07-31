@@ -1,12 +1,12 @@
 use super::*;
 
-mod hydration;
+mod decoding;
 mod output;
 
-use hydration::parse_timestamp;
-pub(super) use hydration::{
-    hydrate_result_record, hydrate_retained_event, nonempty, retained_event_bytes,
-    GeminiHydrationError,
+use decoding::parse_timestamp;
+pub(super) use decoding::{
+    decode_result_record, decode_retained_event, nonempty, retained_event_bytes,
+    GeminiDecodingError,
 };
 use output::*;
 
@@ -207,7 +207,7 @@ struct GeminiHeaderDto {
     directories: Vec<String>,
 }
 
-pub(super) fn hydrate_header(
+pub(super) fn decode_header(
     payload: &[u8],
     layout: &GeminiTranscriptLayout,
 ) -> std::result::Result<GeminiSession, String> {
@@ -445,7 +445,7 @@ struct ProbedGeminiResult {
     outputs: Vec<ProbedGeminiOutput>,
 }
 
-pub(super) struct HydratedGeminiResult {
+pub(super) struct DecodedGeminiResult {
     pub(super) events: Vec<(GeminiRetainedEvent, usize)>,
     pub(super) outputs: Vec<(ProOutputObservation, usize)>,
     pub(super) output_reservations: Vec<(u32, usize)>,

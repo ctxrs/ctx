@@ -9,7 +9,3 @@ pub(crate) const fn qoder_source_backed_adapter() -> super::DirectJsonlFamilyAda
         "qoder-direct-native-jsonl-v1",
     )
 }
-
-#[cfg(test)]
-#[path = "qoder_tests.rs"]
-mod tests;

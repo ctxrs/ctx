@@ -42,7 +42,7 @@ pub(super) struct KimiWireObservation {
 
 impl KimiWireObservation {
     // Direct-path observation remains the parity oracle for admitted-handle
-    // hydration and platform metadata checks.
+    // complete-content decoding and platform metadata checks.
     #[allow(dead_code)]
     pub(super) fn read(path: &Path) -> Result<Self> {
         Self::from_layout(KimiWireLayout::read(path)?)

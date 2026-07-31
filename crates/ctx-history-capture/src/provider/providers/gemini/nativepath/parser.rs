@@ -88,7 +88,7 @@ thread_local! {
     static TEST_RECORD_READS: Cell<u64> = const { Cell::new(0) };
     static TEST_PREFIX_BYTES_HASHED: Cell<u64> = const { Cell::new(0) };
     static TEST_RESULT_SELECTIVE_PASSES: Cell<u64> = const { Cell::new(0) };
-    static TEST_RESULT_FULL_HYDRATIONS: Cell<u64> = const { Cell::new(0) };
+    static TEST_RESULT_FULL_DECODINGS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -96,7 +96,7 @@ pub(super) fn reset_gemini_parse_counters() {
     TEST_RECORD_READS.set(0);
     TEST_PREFIX_BYTES_HASHED.set(0);
     TEST_RESULT_SELECTIVE_PASSES.set(0);
-    TEST_RESULT_FULL_HYDRATIONS.set(0);
+    TEST_RESULT_FULL_DECODINGS.set(0);
 }
 
 #[cfg(test)]
@@ -104,7 +104,7 @@ pub(super) fn gemini_parse_counters() -> (u64, u64, u64) {
     (
         TEST_RECORD_READS.get(),
         TEST_RESULT_SELECTIVE_PASSES.get(),
-        TEST_RESULT_FULL_HYDRATIONS.get(),
+        TEST_RESULT_FULL_DECODINGS.get(),
     )
 }
 
@@ -190,7 +190,7 @@ impl GeminiBorrowedRecordParser {
                     reason: "a second Gemini session header appeared in one transcript".to_owned(),
                 });
             }
-            let session = hydrate_header(payload, &self.source.layout).map_err(|reason| {
+            let session = decode_header(payload, &self.source.layout).map_err(|reason| {
                 GeminiScanError::UncommittedRecord {
                     raw_ordinal,
                     byte_start,
@@ -226,7 +226,7 @@ impl GeminiBorrowedRecordParser {
         };
         let events = match class {
             GeminiRecordClass::Result => {
-                let hydrated = match hydrate_result_record(
+                let decoded = match decode_result_record(
                     payload,
                     GeminiNativePathProfile::CoreOnly,
                     &self.source,
@@ -236,29 +236,25 @@ impl GeminiBorrowedRecordParser {
                     byte_start,
                     byte_end_exclusive,
                 ) {
-                    Ok(hydrated) => hydrated,
+                    Ok(decoded) => decoded,
                     Err(_) => return Ok(Vec::new()),
                 };
-                if hydrated
+                if decoded
                     .events
                     .iter()
                     .any(|(_, bytes)| *bytes > MAX_GEMINI_NATIVE_PAGE_BYTES)
                 {
                     return Ok(Vec::new());
                 }
-                hydrated
-                    .events
-                    .into_iter()
-                    .map(|(event, _)| event)
-                    .collect()
+                decoded.events.into_iter().map(|(event, _)| event).collect()
             }
             GeminiRecordClass::Message
             | GeminiRecordClass::ToolCall
             | GeminiRecordClass::StateNotice
             | GeminiRecordClass::RewindNotice => {
-                let hydrated =
-                    match hydrate_retained_event(payload, class, raw_ordinal, source_record) {
-                        Ok(Some(hydrated)) => hydrated,
+                let decoded =
+                    match decode_retained_event(payload, class, raw_ordinal, source_record) {
+                        Ok(Some(decoded)) => decoded,
                         Ok(None) => {
                             if let Some(native_event_id) = native_event_id {
                                 self.page_native_event_ids
@@ -266,22 +262,22 @@ impl GeminiBorrowedRecordParser {
                             }
                             return Ok(Vec::new());
                         }
-                        Err(GeminiHydrationError::Invalid(reason)) => {
+                        Err(GeminiDecodingError::Invalid(reason)) => {
                             drop(reason);
                             return Ok(Vec::new());
                         }
-                        Err(GeminiHydrationError::TouchOverflow(error)) => {
+                        Err(GeminiDecodingError::TouchOverflow(error)) => {
                             drop(error.to_string());
                             return Ok(Vec::new());
                         }
                     };
-                let Ok(event_bytes) = retained_event_bytes(&hydrated) else {
+                let Ok(event_bytes) = retained_event_bytes(&decoded) else {
                     return Ok(Vec::new());
                 };
                 if event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
                     return Ok(Vec::new());
                 }
-                let mut event = hydrated.event;
+                let mut event = decoded.event;
                 if event.occurred_at.is_none() {
                     event.occurred_at = self.session.started_at;
                 }
@@ -360,15 +356,14 @@ pub(crate) fn read_gemini_session_header(
             if !payload.iter().all(u8::is_ascii_whitespace) {
                 if let Ok(probe) = serde_json::from_slice::<GeminiRecordProbe>(payload) {
                     if probe.classify() == GeminiRecordClass::Header {
-                        let session =
-                            hydrate_header(payload, &source.layout).map_err(|reason| {
-                                GeminiScanError::UncommittedRecord {
-                                    raw_ordinal,
-                                    byte_start,
-                                    byte_end_exclusive: offset,
-                                    reason,
-                                }
-                            })?;
+                        let session = decode_header(payload, &source.layout).map_err(|reason| {
+                            GeminiScanError::UncommittedRecord {
+                                raw_ordinal,
+                                byte_start,
+                                byte_end_exclusive: offset,
+                                reason,
+                            }
+                        })?;
                         if GeminiFileObservation::from_metadata(&reader.get_ref().metadata()?)?
                             != opening
                         {

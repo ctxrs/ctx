@@ -367,45 +367,6 @@ fn direct_jsonl_lexical_text(
     }
 }
 
-pub(crate) fn hydrated_direct_jsonl_lexical_text(
-    provider: CaptureProvider,
-    value: &Value,
-    sub_ordinal: u32,
-) -> Result<Option<String>> {
-    let event_type = direct_jsonl_event_type(provider, value);
-    if event_type != EventType::ToolOutput {
-        let entry_type = native_jsonl_entry_type(provider, value);
-        let text = direct_jsonl_event_text(provider, value, event_type, &entry_type);
-        return Ok(Some(direct_jsonl_lexical_text(event_type, &text, None)));
-    }
-    let subrecords = match provider {
-        CaptureProvider::FactoryAiDroid => super::enumerate_factory_droid_results(value),
-        CaptureProvider::Qoder => super::qoder_parser::enumerate_qoder_results(value),
-        CaptureProvider::QwenCode => super::qwen_code::enumerate_qwen_code_results(value),
-        _ => {
-            let Some(profile) = native_jsonl_result_content_profile(provider) else {
-                return Ok(None);
-            };
-            enumerate_native_jsonl_result_subrecords(profile, value)
-        }
-    }
-    .map_err(|error| {
-        CaptureError::InvalidPayload(format!(
-            "direct JSONL result record changed shape during hydration: {error:?}"
-        ))
-    })?;
-    Ok(subrecords
-        .iter()
-        .find(|result| {
-            result.subrecord_index == sub_ordinal
-                && matches!(
-                    result.outcome.outcome,
-                    OutputOutcome::Failure | OutputOutcome::Timeout
-                )
-        })
-        .map(|result| direct_jsonl_lexical_text(event_type, "", Some(result))))
-}
-
 fn direct_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value> {
     match provider {
         CaptureProvider::FactoryAiDroid => super::factory_droid_model(value),

@@ -5,26 +5,13 @@ struct KimiOutputClassification {
     outcome: OutputOutcome,
 }
 
-#[derive(Debug)]
-pub(super) struct DecodedKimiLocator {
-    pub(super) byte_offset: u64,
-    pub(super) byte_length: u64,
-    pub(super) physical_ordinal: u64,
-    pub(super) native_event_id: String,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn lexical_document(
+pub(super) fn core_record(
     compound: &KimiCompoundObservation,
     session_id: StableEntityId,
     ordinal: u64,
-    byte_offset: u64,
-    byte_length: u64,
-    record_bytes: &[u8],
     value: &Value,
     fallback_timestamp: DateTime<Utc>,
-    source_revision_digest: [u8; 32],
-) -> KimiSourceBackedResult<Option<LexicalDocument>> {
+) -> KimiSourceBackedResult<Option<CoreRecord>> {
     let record_type = value
         .get("type")
         .and_then(Value::as_str)
@@ -54,23 +41,6 @@ pub(super) fn lexical_document(
         native_item_key: &event_key,
         subrecord_selector: None,
     })?;
-    let coordinate = TypedKey::composite(vec![
-        TypedKey::U64(byte_offset),
-        TypedKey::U64(byte_length),
-        TypedKey::U64(ordinal),
-        TypedKey::utf8(&compound.native.session.provider_session_id)?,
-        TypedKey::utf8(native_event_id)?,
-    ])?;
-    let locator = SourceRecordLocator::new(
-        compound.source.clone(),
-        NativeRecordCoordinate::TreeRecord {
-            relative_file_key: TypedKey::bytes(compound.relative_file_key.clone())?,
-            record_coordinate: coordinate,
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest),
-        Sha256::digest(record_bytes).into(),
-    )?;
     let touched_files = kimi_touched_paths(
         value,
         event_type,
@@ -92,33 +62,52 @@ pub(super) fn lexical_document(
         .transpose()?
         .unwrap_or(session_id);
     let workspace = compound.native.session.cwd.clone();
-    Ok(Some(LexicalDocument {
+    let agent_type = if compound.native.session.is_primary {
+        AgentType::Primary
+    } else {
+        AgentType::Subagent
+    };
+    let event = value.get("event").unwrap_or(value);
+    let tool_name = event
+        .get("toolName")
+        .or_else(|| event.get("tool_name"))
+        .or_else(|| event.get("name"))
+        .cloned();
+    let call_id = event
+        .get("callId")
+        .or_else(|| event.get("call_id"))
+        .or_else(|| event.get("id"))
+        .cloned();
+    let structured_content =
+        (!touched_files.is_empty() || tool_name.is_some() || call_id.is_some()).then(|| {
+            serde_json::json!({
+                "tool_name": tool_name,
+                "call_id": call_id,
+                "file_touches": touched_files,
+            })
+        });
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id,
         root_session_id,
-        source: compound.source.clone(),
-        locator,
-        provider_session_id: Some(compound.native.session.provider_session_id.clone()),
-        branch: None,
-        source_path: Some(compound.native.canonical_path().display().to_string()),
-        agent_type: if compound.native.session.is_primary {
-            AgentType::Primary
-        } else {
-            AgentType::Subagent
-        }
-        .as_str()
-        .to_owned(),
-        is_primary: compound.native.session.is_primary,
-        event_sequence: ordinal,
-        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        event_type: event_type.as_str().to_owned(),
-        role: Some(role.as_str().to_owned()),
+        compound.source.clone(),
+        ordinal,
+        event_type.as_str(),
+        agent_type.as_str(),
+        compound.native.session.is_primary,
+        KIMI_SOURCE_PARSER_REVISION,
         body,
-        workspace,
-        cwd: compound.native.session.cwd.clone(),
-        touched_files,
-    }))
+    )?;
+    record.parent_session_id = parent_session_id;
+    record.provider_session_id = Some(compound.native.session.provider_session_id.clone());
+    record.native_event_id = Some(TypedKey::utf8(native_event_id)?);
+    record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
+    record.role = Some(role.as_str().to_owned());
+    record.workspace = workspace;
+    record.cwd = compound.native.session.cwd.clone();
+    record.content.structured_content = structured_content;
+    record.validate_contract()?;
+    Ok(Some(record))
 }
 
 pub(super) fn kimi_lexical_body(
@@ -225,75 +214,4 @@ fn kimi_value_timed_out(value: &Value) -> bool {
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
-}
-
-pub(super) fn decode_locator(
-    leaf: &KimiSourceLeaf,
-    locator: &SourceRecordLocator,
-) -> KimiSourceBackedResult<DecodedKimiLocator> {
-    locator.validate_contract()?;
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || !leaf.source.exact_descriptor_eq(locator.source())
-    {
-        return Err(KimiSourceBackedError::InvalidLocator);
-    }
-    let NativeRecordCoordinate::TreeRecord {
-        relative_file_key,
-        record_coordinate,
-    } = locator.coordinate()
-    else {
-        return Err(KimiSourceBackedError::InvalidLocator);
-    };
-    if relative_file_key != &TypedKey::Bytes(leaf.relative_file_key.clone()) {
-        return Err(KimiSourceBackedError::InvalidLocator);
-    }
-    let TypedKey::Composite(parts) = record_coordinate else {
-        return Err(KimiSourceBackedError::InvalidLocator);
-    };
-    let [TypedKey::U64(byte_offset), TypedKey::U64(byte_length), TypedKey::U64(physical_ordinal), TypedKey::Utf8(provider_session_id), TypedKey::Utf8(native_event_id)] =
-        parts.as_slice()
-    else {
-        return Err(KimiSourceBackedError::InvalidLocator);
-    };
-    if provider_session_id != &leaf.provider_session_id || *byte_length == 0 {
-        return Err(KimiSourceBackedError::InvalidLocator);
-    }
-    if *byte_length > MAX_KIMI_HYDRATED_RECORD_BYTES {
-        return Err(KimiSourceBackedError::LocatorRangeTooLarge);
-    }
-    Ok(DecodedKimiLocator {
-        byte_offset: *byte_offset,
-        byte_length: *byte_length,
-        physical_ordinal: *physical_ordinal,
-        native_event_id: native_event_id.clone(),
-    })
-}
-
-pub(super) fn hydration_failure(kind: HydrationFailureKind, detail: &str) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: detail.to_owned(),
-    }
-}
-
-pub(super) fn map_hydration_error(error: KimiSourceBackedError) -> HydrationFailure {
-    let kind = match error {
-        KimiSourceBackedError::InvalidLocator
-        | KimiSourceBackedError::LocatorRangeTooLarge
-        | KimiSourceBackedError::Projection(_)
-        | KimiSourceBackedError::Resolver(_) => HydrationFailureKind::InvalidLocator,
-        KimiSourceBackedError::StaleRecordEvidence => HydrationFailureKind::StaleRecordEvidence,
-        KimiSourceBackedError::SourceChanged | KimiSourceBackedError::InventoryChanged => {
-            HydrationFailureKind::StaleSourceEvidence
-        }
-        KimiSourceBackedError::Capture(_)
-        | KimiSourceBackedError::Io(_)
-        | KimiSourceBackedError::Index(_)
-        | KimiSourceBackedError::DuplicateLineage(_)
-        | KimiSourceBackedError::CountOverflow => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    hydration_failure(
-        kind,
-        "Kimi provider source could not satisfy exact hydration",
-    )
 }

@@ -1,7 +1,7 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(in super::super) fn hydrate_result_record(
+pub(in super::super) fn decode_result_record(
     payload: &[u8],
     profile: GeminiNativePathProfile,
     source: &GeminiTranscriptSource,
@@ -10,7 +10,7 @@ pub(in super::super) fn hydrate_result_record(
     source_record: GeminiSourceRecordEvidence,
     byte_start: u64,
     byte_end_exclusive: u64,
-) -> std::result::Result<HydratedGeminiResult, String> {
+) -> std::result::Result<DecodedGeminiResult, String> {
     #[cfg(test)]
     TEST_RESULT_SELECTIVE_PASSES.set(TEST_RESULT_SELECTIVE_PASSES.get().saturating_add(1));
     let capture_full_content = profile == GeminiNativePathProfile::CoreAndTransientOutputs;
@@ -18,7 +18,7 @@ pub(in super::super) fn hydrate_result_record(
     if capture_full_content {
         TEST_RESULT_FULL_HYDRATIONS.set(TEST_RESULT_FULL_HYDRATIONS.get().saturating_add(1));
     }
-    // This is the record's sole hydration pass. CoreOnly computes only the
+    // This is the record's sole decoding pass. CoreOnly computes only the
     // bounded transient material needed to recognize the exact released
     // positional hash; the same visitor captures full Pro content.
     let result = parse_result_record_selectively(payload, capture_full_content)?;
@@ -30,7 +30,7 @@ pub(in super::super) fn hydrate_result_record(
             "Gemini result record exceeds the {MAX_GEMINI_NATIVE_PAGE_RECORDS} output limit"
         ));
     }
-    let mut hydrated = HydratedGeminiResult {
+    let mut decoded = DecodedGeminiResult {
         events: Vec::new(),
         outputs: Vec::new(),
         output_reservations: Vec::new(),
@@ -46,7 +46,7 @@ pub(in super::super) fn hydrate_result_record(
                 probed.outcome.outcome,
                 OutputOutcome::Failure | OutputOutcome::Timeout
             );
-        hydrated.decoded_body_bytes = hydrated.decoded_body_bytes.saturating_add(
+        decoded.decoded_body_bytes = decoded.decoded_body_bytes.saturating_add(
             if profile == GeminiNativePathProfile::CoreAndTransientOutputs {
                 content.as_ref().map_or(0, |content| content.len() as u64)
             } else if retained_failure {
@@ -66,7 +66,7 @@ pub(in super::super) fn hydrate_result_record(
             continue;
         }
         if !probed.redacted && probed.has_output_content {
-            hydrated.output_reservations.push((
+            decoded.output_reservations.push((
                 sub_ordinal,
                 conservative_transient_output_reservation(
                     probed.content_bytes,
@@ -81,7 +81,7 @@ pub(in super::super) fn hydrate_result_record(
             ));
         }
         if retained_failure {
-            let event = hydrate_output_diagnostic(
+            let event = decode_output_diagnostic(
                 native_record_id.as_deref(),
                 occurred_at_unix_ms,
                 raw_ordinal,
@@ -91,18 +91,18 @@ pub(in super::super) fn hydrate_result_record(
                 event_identity.clone(),
             )?;
             let event_bytes = retained_event_bytes(&event)?;
-            hydrated.failure_diagnostics = hydrated.failure_diagnostics.saturating_add(1);
+            decoded.failure_diagnostics = decoded.failure_diagnostics.saturating_add(1);
             if probed.released_diagnostic_preview.is_some() {
-                hydrated.failure_previews = hydrated.failure_previews.saturating_add(1);
+                decoded.failure_previews = decoded.failure_previews.saturating_add(1);
             }
-            hydrated.events.push((event.event, event_bytes));
+            decoded.events.push((event.event, event_bytes));
         }
         if profile == GeminiNativePathProfile::CoreAndTransientOutputs
             && !probed.redacted
             && probed.has_output_content
         {
             push_transient_output(
-                &mut hydrated.outputs,
+                &mut decoded.outputs,
                 content.unwrap_or_default(),
                 probed.outcome,
                 probed.call_id,
@@ -118,10 +118,10 @@ pub(in super::super) fn hydrate_result_record(
             )?;
         }
     }
-    Ok(hydrated)
+    Ok(decoded)
 }
 
-fn hydrate_output_diagnostic(
+fn decode_output_diagnostic(
     native_record_id: Option<&str>,
     occurred_at_unix_ms: Option<i64>,
     raw_ordinal: u64,
@@ -129,7 +129,7 @@ fn hydrate_output_diagnostic(
     source_record: GeminiSourceRecordEvidence,
     output: &ProbedGeminiOutput,
     identity: GeminiEventIdentity,
-) -> std::result::Result<HydratedGeminiEvent, String> {
+) -> std::result::Result<DecodedGeminiEvent, String> {
     let outcome = match output.outcome.outcome {
         OutputOutcome::Failure => "failure",
         OutputOutcome::Timeout => "timeout",
@@ -173,7 +173,7 @@ fn hydrate_output_diagnostic(
     let mut released_hasher = Sha256::new();
     released_hasher.update(BODY_HASH_DOMAIN);
     released_hasher.update(&released_body_bytes);
-    Ok(HydratedGeminiEvent {
+    Ok(DecodedGeminiEvent {
         event: GeminiRetainedEvent {
             identity,
             released_identity: format!(
@@ -422,28 +422,28 @@ struct GeminiRewindNoticeDto {
 }
 
 #[derive(Debug)]
-pub(in super::super) enum GeminiHydrationError {
+pub(in super::super) enum GeminiDecodingError {
     Invalid(String),
     TouchOverflow(GeminiTouchOverflow),
 }
 
-pub(in super::super) struct HydratedGeminiEvent {
+pub(in super::super) struct DecodedGeminiEvent {
     pub(in super::super) event: GeminiRetainedEvent,
     pub(in super::super) serialized_body_bytes: usize,
 }
 
-impl From<String> for GeminiHydrationError {
+impl From<String> for GeminiDecodingError {
     fn from(error: String) -> Self {
         Self::Invalid(error)
     }
 }
 
-pub(in super::super) fn hydrate_retained_event(
+pub(in super::super) fn decode_retained_event(
     payload: &[u8],
     class: GeminiRecordClass,
     raw_ordinal: u64,
     source_record: GeminiSourceRecordEvidence,
-) -> std::result::Result<Option<HydratedGeminiEvent>, GeminiHydrationError> {
+) -> std::result::Result<Option<DecodedGeminiEvent>, GeminiDecodingError> {
     let (id, occurred_at, event_type, role, body, searchable_text, safe_file_touches) = match class
     {
         GeminiRecordClass::Message => {
@@ -474,8 +474,8 @@ pub(in super::super) fn hydrate_retained_event(
             let dto: GeminiToolCallRecordDto = serde_json::from_slice(payload)
                 .map_err(|error| format!("invalid Gemini tool call: {error}"))?;
             if dto.tool_calls.iter().any(|call| call.result.0) {
-                return Err(GeminiHydrationError::Invalid(
-                    "Gemini result-bearing tool call reached retained hydration".to_owned(),
+                return Err(GeminiDecodingError::Invalid(
+                    "Gemini result-bearing tool call reached retained decoding".to_owned(),
                 ));
             }
             let calls: Vec<_> = dto
@@ -492,7 +492,7 @@ pub(in super::super) fn hydrate_retained_event(
             }
             let searchable_text = tool_call_search_text(&calls);
             let safe_file_touches =
-                safe_file_touches(&calls).map_err(GeminiHydrationError::TouchOverflow)?;
+                safe_file_touches(&calls).map_err(GeminiDecodingError::TouchOverflow)?;
             (
                 required_record_id(dto.id)?,
                 dto.timestamp.as_deref().and_then(parse_timestamp),
@@ -553,7 +553,7 @@ pub(in super::super) fn hydrate_retained_event(
         .chars()
         .take(PROVIDER_MAX_PREVIEW_CHARS)
         .collect();
-    Ok(Some(HydratedGeminiEvent {
+    Ok(Some(DecodedGeminiEvent {
         event: GeminiRetainedEvent {
             identity: GeminiEventIdentity::NativeRecordId(id.clone()),
             released_identity: id,
@@ -577,7 +577,7 @@ pub(in super::super) fn hydrate_retained_event(
 }
 
 pub(in super::super) fn retained_event_bytes(
-    event: &HydratedGeminiEvent,
+    event: &DecodedGeminiEvent,
 ) -> std::result::Result<usize, String> {
     let mut total = EVENT_ENVELOPE_FIXED_BYTES
         .checked_add(event.serialized_body_bytes)

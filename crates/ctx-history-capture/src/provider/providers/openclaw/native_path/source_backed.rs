@@ -1,24 +1,18 @@
 //! Thin OpenClaw legacy-session adapter for the shared borrowed JSONL family.
-
+use chrono::{DateTime, Utc};
+use ctx_history_core::{
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
+    EventType, NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput,
+    SourceAnchor, SourceKey, StableEntityId, TypedKey,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
-    EventIdentityInput, EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    StableEntityId, TypedKey,
-};
-use ctx_history_index::LexicalDocument;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::{complete_content, discover_inventory, normalization, openclaw_output_metadata};
 use crate::{
@@ -27,13 +21,13 @@ use crate::{
         file_touches::visit_all_file_touch_drafts,
         normalization::provider_timestamp_value,
         source_backed::family::jsonl::{
-            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyProjector, JsonlRecordRef,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
     CaptureError, OutputObservationKind, OutputOutcome, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES,
-    MAX_PROVIDER_JSONL_LINE_BYTES, OPENCLAW_SOURCE_FORMAT,
+    OPENCLAW_SOURCE_FORMAT,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.legacy-session";
@@ -174,35 +168,9 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         )?;
         Ok(Box::new(OpenClawProjector {
             source: leaf.source().clone(),
-            source_path: leaf.source_path().display().to_string(),
             binding,
             session_id,
             session,
-            index_file: compound.index_file,
-            authority: Arc::clone(leaf.authority()),
-        }))
-    }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        let binding = decode_binding(leaf).map_err(unavailable)?;
-        let compound = admit_compound(
-            leaf.authority(),
-            leaf.source_path(),
-            &binding.index_relative_path,
-            source_file.as_ref(),
-        )
-        .map_err(stale)?;
-        if compound.revision_digest != binding.revision_digest {
-            return Err(stale("OpenClaw compound source revision changed"));
-        }
-        Ok(Box::new(OpenClawHydrator {
-            source: leaf.source().clone(),
-            binding,
-            source_file,
             index_file: compound.index_file,
             authority: Arc::clone(leaf.authority()),
         }))
@@ -211,7 +179,6 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
 
 struct OpenClawProjector {
     source: SourceKey,
-    source_path: String,
     binding: Binding,
     session_id: StableEntityId,
     session: SessionState,
@@ -223,7 +190,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let bytes = record.bytes();
         if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -281,48 +248,48 @@ impl JsonlFamilyProjector for OpenClawProjector {
         })
         .map_err(contract)?;
         let touched_files = touched_files(&value)?;
-        let locator = SourceRecordLocator::new(
+        let event_value = value.get("message").unwrap_or(&value);
+        let tool_name = event_value
+            .get("toolName")
+            .or_else(|| event_value.get("tool_name"))
+            .or_else(|| event_value.get("name"))
+            .cloned();
+        let call_id = event_value
+            .get("toolCallId")
+            .or_else(|| event_value.get("tool_call_id"))
+            .or_else(|| event_value.get("callId"))
+            .cloned();
+        let structured_content =
+            (!touched_files.is_empty() || tool_name.is_some() || call_id.is_some()).then(|| {
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "call_id": call_id,
+                    "file_touches": touched_files,
+                })
+            });
+        let mut record = CoreRecord::new_selected(
+            event_id,
+            self.session_id,
+            self.session.root_session_id,
             self.source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: evidence.byte_start(),
-                byte_length: evidence
-                    .byte_end_exclusive()
-                    .checked_sub(evidence.byte_start())
-                    .ok_or(CaptureError::SystemInvariant(
-                        "OpenClaw record range underflowed",
-                    ))?,
-                physical_ordinal: evidence.physical_ordinal(),
-                native_session_key: Some(
-                    TypedKey::utf8(self.binding.native_session_id.clone()).map_err(contract)?,
-                ),
-                native_event_key: Some(native_event_key),
-            },
-            LocatorRevisionPolicy::ExactSourceRevision,
-            Some(self.binding.revision_digest),
-            Sha256::digest(bytes).into(),
+            event.provider_event_index,
+            event.event_type.as_str(),
+            AgentType::Primary.as_str(),
+            true,
+            PARSER_REVISION,
+            body,
         )
         .map_err(contract)?;
-        emit(LexicalDocument {
-            event_id,
-            session_id: self.session_id,
-            parent_session_id: self.session.parent_session_id,
-            root_session_id: self.session.root_session_id,
-            source: self.source.clone(),
-            locator,
-            provider_session_id: Some(self.session.provider_session_id.clone()),
-            branch: self.session.branch.clone(),
-            source_path: Some(self.source_path.clone()),
-            agent_type: AgentType::Primary.as_str().to_owned(),
-            is_primary: true,
-            event_sequence: event.provider_event_index,
-            occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-            event_type: event.event_type.as_str().to_owned(),
-            role: event.role.map(|role| role.as_str().to_owned()),
-            body,
-            workspace: None,
-            cwd: self.session.cwd.clone(),
-            touched_files,
-        })
+        record.parent_session_id = self.session.parent_session_id;
+        record.provider_session_id = Some(self.session.provider_session_id.clone());
+        record.native_event_id = Some(native_event_key);
+        record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
+        record.role = event.role.map(|role| role.as_str().to_owned());
+        record.branch = self.session.branch.clone();
+        record.cwd = self.session.cwd.clone();
+        record.content.structured_content = structured_content;
+        record.validate_contract().map_err(contract)?;
+        emit(record)
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -330,79 +297,6 @@ impl JsonlFamilyProjector for OpenClawProjector {
             index.revalidate()?;
         }
         self.authority.revalidate()
-    }
-}
-
-struct OpenClawHydrator {
-    source: SourceKey,
-    binding: Binding,
-    source_file: Arc<OpenedProviderSourceFile>,
-    index_file: Option<OpenedProviderSourceFile>,
-    authority: Arc<ProviderSourceRoot>,
-}
-
-impl JsonlFamilyHydrator for OpenClawHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let (byte_offset, byte_length, ordinal, native_event_key) =
-            validate_locator(request.locator(), &self.source, &self.binding)?;
-        let length = usize::try_from(byte_length)
-            .map_err(|_| invalid("OpenClaw locator range exceeds platform limits"))?;
-        if length == 0 || length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) {
-            return Err(invalid("OpenClaw locator range is invalid"));
-        }
-        if byte_offset > 0
-            && self
-                .source_file
-                .read_exact_range(byte_offset - 1, 1, 1)
-                .map_err(stale)?
-                != b"\n"
-        {
-            return Err(stale("OpenClaw record boundary changed"));
-        }
-        let wire = self
-            .source_file
-            .read_exact_range(
-                byte_offset,
-                length,
-                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-            )
-            .map_err(stale)?;
-        let payload = strip_jsonl_terminator(&wire);
-        if Sha256::digest(payload).as_slice() != request.locator().record_digest() {
-            return Err(stale("OpenClaw record digest changed"));
-        }
-        let value: Value =
-            serde_json::from_slice(payload).map_err(|_| stale("OpenClaw record JSON changed"))?;
-        match (&native_event_key, value.get("id").and_then(Value::as_str)) {
-            (TypedKey::Utf8(expected), Some(observed)) if expected == observed => {}
-            (TypedKey::U64(expected), _) if *expected == ordinal => {}
-            _ => return Err(stale("OpenClaw record identity changed")),
-        }
-        let line_number = usize::try_from(ordinal)
-            .ok()
-            .and_then(|ordinal| ordinal.checked_add(1))
-            .ok_or_else(|| invalid("OpenClaw locator ordinal is invalid"))?;
-        let mut event =
-            normalization::event_fact(ordinal, line_number, &value, DateTime::<Utc>::UNIX_EPOCH);
-        if let Some(output) = openclaw_output_metadata(&value) {
-            if output.kind == OutputObservationKind::Command {
-                event.event_type = EventType::CommandOutput;
-            }
-        }
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: event.lexical_text.into_bytes(),
-        })
-    }
-
-    fn finish(&mut self) -> std::result::Result<(), HydrationFailure> {
-        if let Some(index) = &self.index_file {
-            index.revalidate().map_err(stale)?;
-        }
-        self.authority.revalidate().map_err(stale)
     }
 }
 
@@ -583,44 +477,6 @@ fn native_event_keys(
     }
 }
 
-fn validate_locator(
-    locator: &SourceRecordLocator,
-    source: &SourceKey,
-    binding: &Binding,
-) -> std::result::Result<(u64, u64, u64, TypedKey), HydrationFailure> {
-    locator.validate_contract().map_err(invalid)?;
-    source
-        .validate_exact_descriptor(locator.source())
-        .map_err(invalid)?;
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || locator.certified_source_revision_digest() != Some(&binding.revision_digest)
-    {
-        return Err(invalid("OpenClaw locator revision is invalid"));
-    }
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key,
-        native_event_key,
-    } = locator.coordinate()
-    else {
-        return Err(invalid("OpenClaw locator is not a JSONL range"));
-    };
-    if native_session_key.as_ref() != Some(&TypedKey::Utf8(binding.native_session_id.clone())) {
-        return Err(invalid("OpenClaw locator session key is invalid"));
-    }
-    let native_event_key = native_event_key
-        .clone()
-        .ok_or_else(|| invalid("OpenClaw locator event key is absent"))?;
-    Ok((
-        *byte_offset,
-        *byte_length,
-        *physical_ordinal,
-        native_event_key,
-    ))
-}
-
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
     let TypedKey::Bytes(bytes) = leaf.binding() else {
         return Err(CaptureError::InvalidPayload(
@@ -676,36 +532,6 @@ fn touched_files(value: &Value) -> Result<Vec<String>> {
     Ok(paths.into_iter().collect())
 }
 
-fn strip_jsonl_terminator(record: &[u8]) -> &[u8] {
-    let record = record.strip_suffix(b"\n").unwrap_or(record);
-    record.strip_suffix(b"\r").unwrap_or(record)
-}
-
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
-
-fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::InvalidLocator,
-        detail: error.to_string(),
-    }
-}
-
-fn stale(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::StaleRecordEvidence,
-        detail: error.to_string(),
-    }
-}
-
-fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::TemporarilyUnavailable,
-        detail: error.to_string(),
-    }
-}
-
-#[cfg(test)]
-#[path = "source_backed_tests.rs"]
-mod tests;

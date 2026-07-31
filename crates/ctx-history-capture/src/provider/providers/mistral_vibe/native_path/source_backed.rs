@@ -7,12 +7,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, EventHydrationRequest, EventIdentityInput,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput, SourceAnchor,
+    SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -21,8 +19,8 @@ use super::*;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
-        JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+        JsonlFamilyProjector, JsonlRecordRef,
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -194,27 +192,13 @@ impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         Ok(Box::new(MistralProjector {
             source: leaf.source().clone(),
-            source_path: leaf.source_path().display().to_string(),
             binding: decode_binding(leaf)?,
-        }))
-    }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        Ok(Box::new(MistralHydrator {
-            source: leaf.source().clone(),
-            binding: decode_binding(leaf).map_err(unavailable)?,
-            source_file,
         }))
     }
 }
 
 struct MistralProjector {
     source: SourceKey,
-    source_path: String,
     binding: Binding,
 }
 
@@ -222,82 +206,20 @@ impl JsonlFamilyProjector for MistralProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
-        if let Some(document) =
-            lexical_document(&self.source, &self.binding, &self.source_path, record)?
-        {
+        if let Some(document) = core_record(&self.source, &self.binding, record)? {
             emit(document)?;
         }
         Ok(())
     }
 }
 
-struct MistralHydrator {
-    source: SourceKey,
-    binding: Binding,
-    source_file: Arc<OpenedProviderSourceFile>,
-}
-
-impl JsonlFamilyHydrator for MistralHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        validate_locator(request, &self.source, &self.binding)?;
-        let NativeRecordCoordinate::Jsonl {
-            byte_offset,
-            byte_length,
-            ..
-        } = request.locator().coordinate()
-        else {
-            return Err(invalid("Mistral Vibe locator is not a JSONL range"));
-        };
-        let length = usize::try_from(*byte_length)
-            .map_err(|_| invalid("Mistral Vibe locator range is too large"))?;
-        if length == 0 || length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) {
-            return Err(invalid("Mistral Vibe locator range is invalid"));
-        }
-        if *byte_offset > 0
-            && self
-                .source_file
-                .read_exact_range(byte_offset - 1, 1, 1)
-                .map_err(stale)?
-                != b"\n"
-        {
-            return Err(stale("Mistral Vibe record boundary changed"));
-        }
-        let wire = self
-            .source_file
-            .read_exact_range(
-                *byte_offset,
-                length,
-                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-            )
-            .map_err(stale)?;
-        let payload = json_record_bytes(&wire);
-        if Sha256::digest(payload).as_slice() != request.locator().record_digest() {
-            return Err(stale("Mistral Vibe record digest changed"));
-        }
-        let value: Value = serde_json::from_slice(payload)
-            .map_err(|_| stale("Mistral Vibe record JSON changed"))?;
-        let role = valid_mistral_vibe_record_role(&value)
-            .map_err(|_| stale("Mistral Vibe record role changed"))?;
-        let event_type = mistral_vibe_event_type(role, &value);
-        let failed_output = matches!(event_type, EventType::ToolOutput | EventType::CommandOutput);
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: mistral_vibe_lexical_text(&value, role, failed_output).into_bytes(),
-        })
-    }
-}
-
-fn lexical_document(
+fn core_record(
     source: &SourceKey,
     binding: &Binding,
-    source_path: &str,
     record: JsonlRecordRef<'_>,
-) -> Result<Option<LexicalDocument>> {
+) -> Result<Option<CoreRecord>> {
     let bytes = record.bytes();
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
@@ -353,65 +275,55 @@ fn lexical_document(
         subrecord_selector: None,
     })
     .map_err(contract)?;
-    let locator = SourceRecordLocator::new(
+    let native_event_id = native_event_id
+        .map(TypedKey::utf8)
+        .transpose()
+        .map_err(contract)?
+        .unwrap_or(TypedKey::U64(ordinal));
+    let role = crate::provider::normalization::provider_role(Some(role));
+    let touched_files = collect_touched_paths(&value)?;
+    let tool_name = value
+        .get("name")
+        .or_else(|| value.get("tool_name"))
+        .cloned();
+    let structured_content = (!touched_files.is_empty() || tool_name.is_some()).then(|| {
+        serde_json::json!({
+            "tool_name": tool_name,
+            "file_touches": touched_files,
+        })
+    });
+    let agent_type = if binding.is_primary {
+        AgentType::Primary
+    } else {
+        AgentType::Subagent
+    };
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        binding.session_id,
+        binding.root_session_id,
         source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: evidence.byte_start(),
-            byte_length: evidence
-                .byte_end_exclusive()
-                .checked_sub(evidence.byte_start())
-                .ok_or(CaptureError::SystemInvariant(
-                    "Mistral Vibe range underflowed",
-                ))?,
-            physical_ordinal: ordinal,
-            native_session_key: Some(
-                TypedKey::utf8(&binding.provider_session_id).map_err(contract)?,
-            ),
-            native_event_key: Some(
-                native_event_id
-                    .map(TypedKey::utf8)
-                    .transpose()
-                    .map_err(contract)?
-                    .unwrap_or(TypedKey::U64(ordinal)),
-            ),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(binding.revision_digest),
-        Sha256::digest(bytes).into(),
+        ordinal,
+        event_type.as_str(),
+        agent_type.as_str(),
+        binding.is_primary,
+        PARSER_REVISION,
+        body,
     )
     .map_err(contract)?;
-    let role = crate::provider::normalization::provider_role(Some(role));
-    Ok(Some(LexicalDocument {
-        event_id,
-        session_id: binding.session_id,
-        parent_session_id: binding.parent_session_id,
-        root_session_id: binding.root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(binding.provider_session_id.clone()),
-        branch: binding.branch.clone(),
-        source_path: Some(source_path.to_owned()),
-        agent_type: if binding.is_primary {
-            AgentType::Primary
-        } else {
-            AgentType::Subagent
-        }
-        .as_str()
-        .to_owned(),
-        is_primary: binding.is_primary,
-        event_sequence: ordinal,
-        occurred_at_unix_ms: Some(
-            native_jsonl_timestamp(&value)
-                .map(|timestamp| timestamp.timestamp_millis())
-                .unwrap_or(binding.started_at_unix_ms),
-        ),
-        event_type: event_type.as_str().to_owned(),
-        role: Some(role.as_str().to_owned()),
-        body,
-        workspace: None,
-        cwd: binding.cwd.clone(),
-        touched_files: collect_touched_paths(&value)?,
-    }))
+    record.parent_session_id = binding.parent_session_id;
+    record.provider_session_id = Some(binding.provider_session_id.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(
+        native_jsonl_timestamp(&value)
+            .map(|timestamp| timestamp.timestamp_millis())
+            .unwrap_or(binding.started_at_unix_ms),
+    );
+    record.role = Some(role.as_str().to_owned());
+    record.branch = binding.branch.clone();
+    record.cwd = binding.cwd.clone();
+    record.content.structured_content = structured_content;
+    record.validate_contract().map_err(contract)?;
+    Ok(Some(record))
 }
 
 struct AdmittedMetadata {
@@ -561,34 +473,6 @@ fn root_session_identity(
     }
 }
 
-fn validate_locator(
-    request: &EventHydrationRequest,
-    source: &SourceKey,
-    binding: &Binding,
-) -> std::result::Result<(), HydrationFailure> {
-    request.validate_contract().map_err(invalid)?;
-    if !request.locator().source().exact_descriptor_eq(source)
-        || request.locator().revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || request.locator().certified_source_revision_digest() != Some(&binding.revision_digest)
-    {
-        return Err(invalid("Mistral Vibe locator binding changed"));
-    }
-    let NativeRecordCoordinate::Jsonl {
-        native_session_key,
-        native_event_key,
-        ..
-    } = request.locator().coordinate()
-    else {
-        return Err(invalid("Mistral Vibe locator is not a JSONL range"));
-    };
-    if native_session_key.as_ref() != Some(&TypedKey::Utf8(binding.provider_session_id.clone()))
-        || native_event_key.is_none()
-    {
-        return Err(invalid("Mistral Vibe native locator binding changed"));
-    }
-    Ok(())
-}
-
 fn mistral_vibe_lexical_text(value: &Value, role: &str, failed_output: bool) -> String {
     if failed_output {
         format!(
@@ -609,35 +493,6 @@ fn provider_native_event_id(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn json_record_bytes(bytes: &[u8]) -> &[u8] {
-    bytes
-        .strip_suffix(b"\n")
-        .unwrap_or(bytes)
-        .strip_suffix(b"\r")
-        .unwrap_or_else(|| bytes.strip_suffix(b"\n").unwrap_or(bytes))
-}
-
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
-}
-
-fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::TemporarilyUnavailable,
-        detail: error.to_string(),
-    }
-}
-
-fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::InvalidLocator,
-        detail: error.to_string(),
-    }
-}
-
-fn stale(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::StaleRecordEvidence,
-        detail: error.to_string(),
-    }
 }

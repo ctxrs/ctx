@@ -9,17 +9,15 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, EventHydrationRequest, EventIdentityInput,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput, SourceAnchor,
+    SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    record::{parse_native_record, parse_native_record_for_hydration},
+    record::parse_native_record,
     rows::{
         ClaudeEventKind, ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow,
         ClaudeSessionMetadata, CLAUDE_MAX_RECORD_ROWS,
@@ -31,12 +29,11 @@ use crate::{
     provider::{
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
-            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
-            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
-            JsonlRecordRef,
+            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
+            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation, JsonlRecordRef,
         },
     },
-    CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "claude.session-leaf";
@@ -160,26 +157,9 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             identities,
         }))
     }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        let binding = decode_binding(leaf).map_err(unavailable)?;
-        let identities = identities(&binding).map_err(unavailable)?;
-        Ok(Box::new(ClaudeHydrator {
-            source: leaf.source().clone(),
-            source_path: leaf.source_path().to_path_buf(),
-            binding,
-            identities,
-            source_file,
-        }))
-    }
 }
 
 struct Identities {
-    native_session_key: TypedKey,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
@@ -199,7 +179,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let evidence = record.evidence();
         let ordinal = evidence.physical_ordinal();
@@ -232,7 +212,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
             parsed.git_branch.as_deref(),
         );
         for row in parsed.rows {
-            emit(lexical_document(
+            emit(core_record(
                 &self.source,
                 &self.source_path,
                 &self.binding,
@@ -245,131 +225,14 @@ impl JsonlFamilyProjector for ClaudeProjector {
     }
 }
 
-struct ClaudeHydrator {
-    source: SourceKey,
-    source_path: PathBuf,
-    binding: Binding,
-    identities: Identities,
-    source_file: Arc<OpenedProviderSourceFile>,
-}
-
-impl JsonlFamilyHydrator for ClaudeHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let (byte_offset, byte_length, ordinal, expected_event_key) = validate_locator(
-            request.locator(),
-            &self.source,
-            &self.identities.native_session_key,
-        )?;
-        let length = usize::try_from(byte_length)
-            .map_err(|_| invalid("Claude locator range exceeds platform limits"))?;
-        if length == 0 || length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(1) {
-            return Err(invalid("Claude locator range is invalid"));
-        }
-        if byte_offset > 0
-            && self
-                .source_file
-                .read_exact_range(byte_offset - 1, 1, 1)
-                .map_err(stale)?
-                != b"\n"
-        {
-            return Err(stale("Claude record boundary changed"));
-        }
-        let wire = self
-            .source_file
-            .read_exact_range(
-                byte_offset,
-                length,
-                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(1),
-            )
-            .map_err(stale)?;
-        let bytes = strip_jsonl_terminator(&wire);
-        if Sha256::digest(bytes).as_slice() != request.locator().record_digest() {
-            return Err(stale("Claude record digest changed"));
-        }
-        let byte_end_exclusive = byte_offset
-            .checked_add(byte_length)
-            .ok_or_else(|| invalid("Claude locator range overflows"))?;
-        let line_number = ordinal
-            .checked_add(1)
-            .ok_or_else(|| invalid("Claude locator ordinal is invalid"))?;
-        let physical = ClaudePhysicalLocator {
-            path: self.source_path.clone(),
-            byte_start: byte_offset,
-            byte_end_exclusive,
-            line_number,
-            record_sha256: Sha256::digest(bytes).into(),
-        };
-        let parsed =
-            parse_native_record_for_hydration(bytes, ordinal, &physical).map_err(|_| {
-                unsupported("Claude authoritative record no longer matches the parser revision")
-            })?;
-        if parsed
-            .session_id
-            .as_deref()
-            .filter(|session| !session.trim().is_empty())
-            .is_some_and(|session| session != self.binding.key.root_session_id)
-            || parsed.rows.len() > CLAUDE_MAX_RECORD_ROWS
-        {
-            return Err(invalid(
-                "Claude authoritative record no longer belongs to the locator session",
-            ));
-        }
-        let source_displays = parsed.source_displays.ok_or_else(|| {
-            unsupported("Claude authoritative record has no source display projection")
-        })?;
-        if source_displays.len() != parsed.rows.len() {
-            return Err(unsupported(
-                "Claude authoritative record display projection is inconsistent",
-            ));
-        }
-        let mut selected = None;
-        for (row, source_display) in parsed.rows.into_iter().zip(source_displays) {
-            let observed_event_key = native_event_typed_key(&row).map_err(unsupported)?;
-            if observed_event_key == expected_event_key {
-                if selected.is_some() {
-                    return Err(unsupported(
-                        "Claude authoritative record repeats a native event key",
-                    ));
-                }
-                selected = Some((row, source_display));
-            }
-        }
-        let (selected, source_display) = selected
-            .ok_or_else(|| invalid("Claude locator event key is not present in the record"))?;
-        if selected.identity.source_record_ordinal != ordinal {
-            return Err(invalid("Claude locator event ordinal is invalid"));
-        }
-        let native_item_key = native_item_key(&selected).map_err(invalid)?;
-        let event_id = derive_event_id(EventIdentityInput {
-            source: &self.source,
-            session_id: self.identities.session_id,
-            logical_item_kind: LOGICAL_EVENT_KIND,
-            native_item_key: &native_item_key,
-            subrecord_selector: None,
-        })
-        .map_err(invalid)?;
-        if event_id != request.event_id() {
-            return Err(invalid("Claude locator event identity is invalid"));
-        }
-        let text = source_display.unwrap_or_else(|| lexical_body(&selected));
-        Ok(HydratedProviderRecord {
-            event_id,
-            provider_bytes: text.into_bytes(),
-        })
-    }
-}
-
-fn lexical_document(
+fn core_record(
     source: &SourceKey,
-    source_path: &str,
+    _source_path: &str,
     binding: &Binding,
     identities: &Identities,
     session: &ClaudeSessionMetadata,
     row: ClaudeRetainedRow,
-) -> Result<LexicalDocument> {
+) -> Result<CoreRecord> {
     let native_item_key = native_item_key(&row)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
@@ -379,27 +242,7 @@ fn lexical_document(
         subrecord_selector: None,
     })
     .map_err(contract)?;
-    let byte_length = row
-        .locator
-        .byte_end_exclusive
-        .checked_sub(row.locator.byte_start)
-        .ok_or(CaptureError::SystemInvariant(
-            "Claude record range underflowed",
-        ))?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: row.locator.byte_start,
-            byte_length,
-            physical_ordinal: row.identity.source_record_ordinal,
-            native_session_key: Some(identities.native_session_key.clone()),
-            native_event_key: Some(native_event_typed_key(&row)?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        row.locator.record_sha256,
-    )
-    .map_err(contract)?;
+    let native_event_id = native_event_typed_key(&row)?;
     let event_sequence = row
         .identity
         .source_record_ordinal
@@ -408,41 +251,42 @@ fn lexical_document(
         .ok_or(CaptureError::SystemInvariant(
             "Claude event sequence overflowed",
         ))?;
-    let touched_files = row
-        .tool_call
-        .as_ref()
-        .map(|call| {
-            call.file_touches
-                .iter()
-                .map(|touch| touch.path.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(LexicalDocument {
+    let structured_content = if row.tool_call.is_some() || row.sparse_output.is_some() {
+        Some(serde_json::json!({
+            "tool_call": row.tool_call,
+            "tool_output": row.sparse_output,
+        }))
+    } else {
+        None
+    };
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: identities.session_id,
-        parent_session_id: identities.parent_session_id,
-        root_session_id: identities.root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(binding.key.provider_session_id()),
-        branch: session.git_branch.clone(),
-        source_path: Some(source_path.to_owned()),
-        agent_type: identities.agent_type.to_owned(),
-        is_primary: identities.is_primary,
+        identities.session_id,
+        identities.root_session_id,
+        source.clone(),
         event_sequence,
-        occurred_at_unix_ms: row
-            .occurred_at
-            .as_deref()
-            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
-            .map(|value| value.timestamp_millis()),
-        event_type: event_kind(row.kind).to_owned(),
-        role: row.role.clone(),
-        body: lexical_body(&row),
-        workspace: binding.project_dir.to_str().map(str::to_owned),
-        cwd: session.cwd.clone(),
-        touched_files,
-    })
+        event_kind(row.kind),
+        identities.agent_type,
+        identities.is_primary,
+        PARSER_REVISION,
+        lexical_body(&row),
+    )
+    .map_err(contract)?;
+    record.parent_session_id = identities.parent_session_id;
+    record.provider_session_id = Some(binding.key.provider_session_id());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = row
+        .occurred_at
+        .as_deref()
+        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .map(|value| value.timestamp_millis());
+    record.role = row.role;
+    record.workspace = binding.project_dir.to_str().map(str::to_owned);
+    record.branch = session.git_branch.clone();
+    record.cwd = session.cwd.clone();
+    record.content.structured_content = structured_content;
+    record.validate_contract().map_err(contract)?;
+    Ok(record)
 }
 
 fn identities(binding: &Binding) -> Result<Identities> {
@@ -467,7 +311,6 @@ fn identities(binding: &Binding) -> Result<Identities> {
         SessionLayout::WorkflowSubagent => ("workflow_subagent", false),
     };
     Ok(Identities {
-        native_session_key,
         session_id,
         parent_session_id,
         root_session_id,
@@ -603,45 +446,6 @@ fn event_kind(kind: ClaudeEventKind) -> &'static str {
     }
 }
 
-fn validate_locator(
-    locator: &SourceRecordLocator,
-    source: &SourceKey,
-    native_session_key: &TypedKey,
-) -> std::result::Result<(u64, u64, u64, TypedKey), HydrationFailure> {
-    locator.validate_contract().map_err(invalid)?;
-    source
-        .validate_exact_descriptor(locator.source())
-        .map_err(invalid)?;
-    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(invalid("Claude locator revision is invalid"));
-    }
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key: observed_session,
-        native_event_key: observed_event,
-    } = locator.coordinate()
-    else {
-        return Err(invalid("Claude locator is not a JSONL range"));
-    };
-    if observed_session.as_ref() != Some(native_session_key) {
-        return Err(invalid("Claude locator session key is invalid"));
-    }
-    let native_event_key = observed_event
-        .as_ref()
-        .ok_or_else(|| invalid("Claude locator event key is missing"))?
-        .clone();
-    Ok((
-        *byte_offset,
-        *byte_length,
-        *physical_ordinal,
-        native_event_key,
-    ))
-}
-
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
     let TypedKey::Bytes(bytes) = leaf.binding() else {
         return Err(contract("Claude family binding is malformed"));
@@ -658,46 +462,9 @@ fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<
         })
 }
 
-fn strip_jsonl_terminator(record: &[u8]) -> &[u8] {
-    let record = record.strip_suffix(b"\n").unwrap_or(record);
-    record.strip_suffix(b"\r").unwrap_or(record)
-}
-
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
-
-fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::InvalidLocator,
-        detail: error.to_string(),
-    }
-}
-
-fn stale(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::StaleRecordEvidence,
-        detail: error.to_string(),
-    }
-}
-
-fn unsupported(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::UnsupportedParserRevision,
-        detail: error.to_string(),
-    }
-}
-
-fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::TemporarilyUnavailable,
-        detail: error.to_string(),
-    }
-}
-
-#[cfg(test)]
-#[path = "source_backed/tests.rs"]
-mod tests;
 
 pub(crate) mod registration {
     use super::claude_source_backed_adapter;

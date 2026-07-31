@@ -41,7 +41,3 @@ pub(super) use records::{
     enumerate_qwen_code_results, qwen_code_event_text, qwen_code_event_type, qwen_code_header_cwd,
     qwen_code_header_session_id, qwen_code_model, qwen_code_role,
 };
-
-#[cfg(test)]
-#[path = "qwen_code_tests.rs"]
-mod tests;
