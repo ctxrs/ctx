@@ -165,8 +165,7 @@ pub(crate) fn status_with_helper_resolver(
                 HANDSHAKE_TIMEOUT,
             ) {
                 Ok(HelperMessage::Status(result)) => {
-                    let valid = result.validate().is_ok();
-                    let (ready, materialized, state_error) =
+                    let (ready, materialized, error_code) =
                         status_outcome(&result, client.authorization_state);
                     ProStatus {
                         schema_version: 1,
@@ -177,11 +176,7 @@ pub(crate) fn status_with_helper_resolver(
                         helper_version,
                         protocol_version: PROTOCOL_VERSION,
                         capabilities,
-                        error_code: if valid {
-                            state_error.map(ToOwned::to_owned)
-                        } else {
-                            Some("protocol_mismatch".to_owned())
-                        },
+                        error_code: error_code.map(ToOwned::to_owned),
                         access_state: access.state,
                         refresh_after_unix: access.refresh_after_unix,
                         access_deadline_unix: access.access_deadline_unix,
@@ -246,6 +241,9 @@ pub(super) fn status_outcome(
     status: &StatusResult,
     authorization_state: Option<EntitlementAccessState>,
 ) -> (bool, bool, Option<&'static str>) {
+    if status.validate().is_err() {
+        return (false, false, Some("protocol_mismatch"));
+    }
     let materialized = status.currentness == CoreProjectionCurrentness::Current
         && matches!(
             status.coverage,

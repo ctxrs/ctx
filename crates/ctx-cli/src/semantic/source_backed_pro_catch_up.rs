@@ -205,13 +205,24 @@ pub(super) fn run_after_core_publication(
             verified_index: verified_index.as_deref(),
         },
         preflight_core_materialization,
-        sync_core_materialization,
+        |data_root, index| {
+            let outcome = sync_core_materialization(data_root, index)?;
+            Ok(ProCatchUpSyncOutcome {
+                receipt: outcome.receipt,
+                did_work: outcome.did_work,
+            })
+        },
     )
 }
 
 struct ProCatchUpAuthority<'a> {
     generation_id: Option<&'a str>,
     verified_index: Option<&'a VerifiedIndex>,
+}
+
+struct ProCatchUpSyncOutcome {
+    receipt: CoreMaterializationReceipt,
+    did_work: bool,
 }
 
 fn run_with<Preflight, Sync>(
@@ -223,19 +234,9 @@ fn run_with<Preflight, Sync>(
 ) -> Result<SourceBackedProCatchUpRun>
 where
     Preflight: FnOnce(&Path) -> Result<()>,
-    Sync: FnOnce(&Path, &VerifiedIndex) -> Result<CoreMaterializationReceipt>,
+    Sync: FnOnce(&Path, &VerifiedIndex) -> Result<ProCatchUpSyncOutcome>,
 {
     let prior = read_status(data_root);
-    if let Some(status) = prior
-        .as_ref()
-        .filter(|status| status.is_completed_for(core_generation_id))
-    {
-        return Ok(SourceBackedProCatchUpRun {
-            status: status.to_json()?,
-            did_work: false,
-        });
-    }
-
     let attempts = next_attempt(prior.as_ref(), core_generation_id);
     let attempt_started = Instant::now();
     let pending = SourceBackedProCatchUpStatus::pending(core_generation_id, attempts);
@@ -263,24 +264,24 @@ where
             index.generation_id(),
             "pinned VerifiedIndex",
         )?;
-        let receipt = sync(data_root, index).map_err(SourceBackedProCatchUpError::projection)?;
+        let outcome = sync(data_root, index).map_err(SourceBackedProCatchUpError::projection)?;
         require_generation(
             core_generation_id,
-            &receipt.core_generation_id,
+            &outcome.receipt.core_generation_id,
             "Pro Core materialization receipt",
         )?;
-        Ok(receipt)
+        Ok(outcome)
     })();
 
     match result {
-        Ok(receipt) => {
+        Ok(outcome) => {
             let completed = pending
-                .completed(receipt.core_generation_id)
+                .completed(outcome.receipt.core_generation_id)
                 .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
             persist_status(data_root, &completed)?;
             Ok(SourceBackedProCatchUpRun {
                 status: completed.to_json()?,
-                did_work: true,
+                did_work: outcome.did_work,
             })
         }
         Err(error) => {
@@ -374,8 +375,12 @@ pub(super) fn persist_status_json(data_root: &Path, status: &Value) -> Result<()
     write_daemon_job_status(&status_path(data_root), status)
 }
 
-pub(super) fn generation_needs_catch_up(data_root: &Path, core_generation_id: &str) -> bool {
-    !read_status(data_root).is_some_and(|status| status.is_completed_for(core_generation_id))
+pub(super) fn generation_needs_catch_up(_data_root: &Path, _core_generation_id: &str) -> bool {
+    // The durable job file is retry and diagnostic state, not Pro currentness
+    // authority. Re-enter the helper for every eligible daemon drain so its
+    // validated Status and terminal receipt can replay, rebuild after a
+    // materializer revision change, or recover state that disappeared.
+    true
 }
 
 pub(super) fn status_generation(data_root: &Path) -> Option<String> {
@@ -434,6 +439,8 @@ fn wait_for_completed_generation_with(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use ctx_history_index::{GenerationWriter, WriterOptions};
 
     use crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens;
@@ -451,7 +458,10 @@ mod tests {
         open_verified_index(&source_backed_index_root(data_root)).unwrap()
     }
 
-    fn receipt(index: &VerifiedIndex) -> CoreMaterializationReceipt {
+    fn receipt_with_revision(
+        index: &VerifiedIndex,
+        materializer_revision: &str,
+    ) -> CoreMaterializationReceipt {
         CoreMaterializationReceipt {
             core_generation_id: index.generation_id().to_owned(),
             core_record_contract_fingerprint: index
@@ -459,9 +469,20 @@ mod tests {
                 .core_record_contract_fingerprint
                 .clone(),
             source_snapshot_sha256: "a".repeat(64),
-            materializer_revision: "test-core-materializer-v1".to_owned(),
+            materializer_revision: materializer_revision.to_owned(),
             source_count: 0,
             event_count: 0,
+        }
+    }
+
+    fn sync_outcome(
+        index: &VerifiedIndex,
+        materializer_revision: &str,
+        did_work: bool,
+    ) -> ProCatchUpSyncOutcome {
+        ProCatchUpSyncOutcome {
+            receipt: receipt_with_revision(index, materializer_revision),
+            did_work,
         }
     }
 
@@ -489,7 +510,7 @@ mod tests {
                 |_| Ok(()),
                 |_, supplied| {
                     assert_eq!(supplied.generation_id(), generation);
-                    Ok(receipt(supplied))
+                    Ok(sync_outcome(supplied, "test-core-materializer-v1", true))
                 },
             )
             .unwrap()
@@ -498,19 +519,140 @@ mod tests {
         assert!(run.did_work);
         assert_eq!(run.status["status"], "completed");
         assert_eq!(run.status["receipt_core_generation_id"], generation);
+        assert!(generation_needs_catch_up(temp.path(), &generation));
+    }
 
-        let no_op = run_with(
+    #[test]
+    fn same_generation_rechecks_helper_after_materializer_revision_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        run_with(
             temp.path(),
             &generation,
             ProCatchUpAuthority {
                 generation_id: Some(&generation),
                 verified_index: Some(&index),
             },
-            |_| panic!("completed generation must not preflight again"),
-            |_, _| panic!("completed generation must not sync again"),
+            |_| Ok(()),
+            |_, supplied| Ok(sync_outcome(supplied, "test-core-materializer-v1", true)),
         )
         .unwrap();
-        assert!(!no_op.did_work);
+
+        let mut preflighted = false;
+        let mut synced = false;
+        let rerun = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| {
+                preflighted = true;
+                Ok(())
+            },
+            |_, supplied| {
+                synced = true;
+                Ok(sync_outcome(supplied, "test-core-materializer-v2", true))
+            },
+        )
+        .unwrap();
+
+        assert!(preflighted);
+        assert!(synced);
+        assert!(rerun.did_work);
+        assert_eq!(rerun.status["status"], "completed");
+        assert_eq!(rerun.status["attempts"], 2);
+    }
+
+    #[test]
+    fn same_generation_rechecks_helper_after_private_state_loss() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let helper_private_state_exists = Cell::new(false);
+        run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, supplied| {
+                assert!(!helper_private_state_exists.get());
+                helper_private_state_exists.set(true);
+                Ok(sync_outcome(supplied, "test-core-materializer-v1", true))
+            },
+        )
+        .unwrap();
+        assert!(helper_private_state_exists.replace(false));
+
+        let rerun = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, supplied| {
+                assert!(!helper_private_state_exists.get());
+                helper_private_state_exists.set(true);
+                Ok(sync_outcome(supplied, "test-core-materializer-v1", true))
+            },
+        )
+        .unwrap();
+
+        assert!(helper_private_state_exists.get());
+        assert!(rerun.did_work);
+        assert_eq!(rerun.status["status"], "completed");
+        assert_eq!(rerun.status["attempts"], 2);
+    }
+
+    #[test]
+    fn same_generation_current_helper_is_revalidated_without_reporting_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, supplied| Ok(sync_outcome(supplied, "test-core-materializer-v1", true)),
+        )
+        .unwrap();
+
+        let preflighted = Cell::new(false);
+        let synced = Cell::new(false);
+        let replay = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| {
+                preflighted.set(true);
+                Ok(())
+            },
+            |_, supplied| {
+                synced.set(true);
+                Ok(sync_outcome(supplied, "test-core-materializer-v1", false))
+            },
+        )
+        .unwrap();
+
+        assert!(preflighted.get());
+        assert!(synced.get());
+        assert!(!replay.did_work);
+        assert_eq!(replay.status["status"], "completed");
+        assert_eq!(replay.status["attempts"], 2);
     }
 
     #[test]
