@@ -591,6 +591,18 @@ def _reap_terminated_children(baseline_children: set[int]) -> None:
         _reap_pid(pid)
 
 
+def _settle_capture_scope(
+    session_id: int | None, baseline_children: set[int]
+) -> list[int]:
+    deadline = time.monotonic() + TERM_GRACE_SECONDS
+    while True:
+        _reap_terminated_children(baseline_children)
+        scoped_pids = _pids_in_capture_scope(session_id, baseline_children)
+        if not scoped_pids or time.monotonic() >= deadline:
+            return scoped_pids
+        time.sleep(0.01)
+
+
 def _terminate_pids(pids: list[int]) -> list[int]:
     for pid in pids:
         try:
@@ -850,8 +862,7 @@ def observe(
             profile=profile,
             identity=process_identity,
         )
-        _reap_terminated_children(baseline_children)
-        leaked_pids = _pids_in_capture_scope(
+        leaked_pids = _settle_capture_scope(
             process_identity.get("session_id"), baseline_children
         )
         if leaked_pids:

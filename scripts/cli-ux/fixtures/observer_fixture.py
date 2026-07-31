@@ -113,8 +113,8 @@ def exited_orphan() -> None:
     child = os.fork()
     if child == 0:
         os.setsid()
+        time.sleep(0.05)
         os._exit(0)
-    time.sleep(0.05)
     print(f"exited:{child}", flush=True)
 
 
