@@ -323,9 +323,14 @@ fn scripted_errors_are_terminal_and_still_publish_complete_isolation_receipts() 
     ));
     let output = harness.run(&["pro", "manage", "--no-open"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("service_unavailable"));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("ctx Pro account management is temporarily unavailable"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ctx pro manage --no-open"), "{stderr}");
+    assert!(!stderr.contains("service_unavailable"), "{stderr}");
+    assert!(!stderr.contains("scripted commercial outage"), "{stderr}");
     let receipt = harness.receipt();
     assert_eq!(receipt["command_outcome"], "error");
     assert_receipt(&receipt, "lifecycle.manage", &[], &[]);
@@ -340,9 +345,8 @@ fn scripted_errors_are_terminal_and_still_publish_complete_isolation_receipts() 
     ));
     let output = locked.run(&["referral", "status"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("key_store_locked"));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("key_store_locked"), "{stderr}");
     let receipt = locked.receipt();
     assert_eq!(receipt["command_outcome"], "error");
     assert_receipt(&receipt, "referral.status", &[], &[]);
