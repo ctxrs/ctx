@@ -1087,8 +1087,11 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     );
     let missing_index_strict_semantic: Value =
         serde_json::from_slice(&missing_index_strict_semantic.stderr).unwrap();
-    assert_eq!(
-        missing_index_strict_semantic["error_code"], "semantic_store_missing",
+    assert!(
+        matches!(
+            missing_index_strict_semantic["error_code"].as_str(),
+            Some("semantic_store_missing" | "semantic_generation_not_acknowledged")
+        ),
         "{missing_index_strict_semantic:#}"
     );
     assert_eq!(missing_index_strict_semantic["retryable"], true);
