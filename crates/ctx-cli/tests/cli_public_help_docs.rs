@@ -826,11 +826,13 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert!(upgrade_body.contains("Foreground commands and MCP"));
     assert!(upgrade_body.contains("never schedule an upgrade"));
 
-    let missing_topic = failure_stderr(ctx(&temp).args(["docs", "show", "cli"]));
-    assert!(missing_topic.contains("unknown ctx docs topic: cli"));
-    assert!(missing_topic.contains("nearest topics:"));
+    let missing_topic = failure_stderr(ctx(&temp).args(["--color=always", "docs", "show", "cli"]));
+    assert!(missing_topic.contains("Unknown ctx docs topic: cli"));
+    assert!(missing_topic.contains("Nearest topics"));
     assert!(missing_topic.contains("ctx docs list"));
     assert!(missing_topic.contains("ctx docs search cli"));
+    assert!(!missing_topic.contains("\\n"));
+    assert!(missing_topic.as_bytes().contains(&0x1b));
 
     let man = ctx(&temp)
         .args(["docs", "man", "--print", "ctx"])
