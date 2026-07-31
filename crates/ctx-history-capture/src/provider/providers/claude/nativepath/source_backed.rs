@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    record::parse_native_record,
+    record::{parse_native_record, parse_native_record_for_hydration},
     rows::{
         ClaudeEventKind, ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow,
         ClaudeSessionMetadata, CLAUDE_MAX_RECORD_ROWS,
@@ -302,9 +302,10 @@ impl JsonlFamilyHydrator for ClaudeHydrator {
             line_number,
             record_sha256: Sha256::digest(bytes).into(),
         };
-        let parsed = parse_native_record(bytes, ordinal, &physical).map_err(|_| {
-            unsupported("Claude authoritative record no longer matches the parser revision")
-        })?;
+        let parsed =
+            parse_native_record_for_hydration(bytes, ordinal, &physical).map_err(|_| {
+                unsupported("Claude authoritative record no longer matches the parser revision")
+            })?;
         if parsed
             .session_id
             .as_deref()
@@ -316,8 +317,16 @@ impl JsonlFamilyHydrator for ClaudeHydrator {
                 "Claude authoritative record no longer belongs to the locator session",
             ));
         }
+        let source_displays = parsed.source_displays.ok_or_else(|| {
+            unsupported("Claude authoritative record has no source display projection")
+        })?;
+        if source_displays.len() != parsed.rows.len() {
+            return Err(unsupported(
+                "Claude authoritative record display projection is inconsistent",
+            ));
+        }
         let mut selected = None;
-        for row in parsed.rows {
+        for (row, source_display) in parsed.rows.into_iter().zip(source_displays) {
             let observed_event_key = native_event_typed_key(&row).map_err(unsupported)?;
             if observed_event_key == expected_event_key {
                 if selected.is_some() {
@@ -325,10 +334,10 @@ impl JsonlFamilyHydrator for ClaudeHydrator {
                         "Claude authoritative record repeats a native event key",
                     ));
                 }
-                selected = Some(row);
+                selected = Some((row, source_display));
             }
         }
-        let selected = selected
+        let (selected, source_display) = selected
             .ok_or_else(|| invalid("Claude locator event key is not present in the record"))?;
         if selected.identity.source_record_ordinal != ordinal {
             return Err(invalid("Claude locator event ordinal is invalid"));
@@ -345,7 +354,7 @@ impl JsonlFamilyHydrator for ClaudeHydrator {
         if event_id != request.event_id() {
             return Err(invalid("Claude locator event identity is invalid"));
         }
-        let text = lexical_body(&selected);
+        let text = source_display.unwrap_or_else(|| lexical_body(&selected));
         Ok(HydratedProviderRecord {
             event_id,
             provider_bytes: text.into_bytes(),
