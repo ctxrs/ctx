@@ -393,6 +393,89 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
 }
 
 #[test]
+fn source_event_second_page_reopens_without_materializing_the_remaining_source() {
+    const EVENT_COUNT: u64 = 1_024;
+    const PAGE_LIMIT: usize = 17;
+
+    let temp = tempdir().unwrap();
+    let source = source("large-paged-source.jsonl");
+    let mut expected = Vec::with_capacity(EVENT_COUNT as usize);
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 1..=EVENT_COUNT {
+        let event = document(&source, sequence, "large source body");
+        expected.push(event.event_id);
+        writer.add_document(event).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, 1, EVENT_COUNT))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
+
+    let initial = VerifiedIndex::open(temp.path()).unwrap();
+    let first = initial
+        .core_source_event_page(&source, None, PAGE_LIMIT)
+        .unwrap();
+    let serialized_cursor = serde_json::to_vec(first.next_cursor.as_ref().unwrap()).unwrap();
+    drop(initial);
+
+    let reopened = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let cursor: SourceEventCursor = serde_json::from_slice(&serialized_cursor).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    let second = reopened
+        .core_source_event_page(&source, Some(&cursor), PAGE_LIMIT)
+        .unwrap();
+    let materializations = crate::query::stored_core_event_record_materializations();
+    let segment_bound = (PAGE_LIMIT + 1) * reopened.searcher.segment_readers().len();
+    assert!(
+        materializations <= segment_bound,
+        "stored Core materializations {materializations} exceeded page/lookahead × segment bound {segment_bound}"
+    );
+    assert!(
+        materializations < EVENT_COUNT as usize / 2,
+        "a second page materialized the large remaining source"
+    );
+    assert!(!second.terminal);
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        expected[PAGE_LIMIT..PAGE_LIMIT * 2]
+    );
+    assert_eq!(
+        second.next_cursor.as_ref().map(SourceEventCursor::after),
+        Some(expected[PAGE_LIMIT * 2 - 1])
+    );
+
+    crate::query::reset_stored_core_event_record_materializations();
+    let legacy = reopened
+        .source_event_page(&source, Some(&cursor), PAGE_LIMIT)
+        .unwrap();
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        materializations
+    );
+    assert_eq!(legacy.generation_id, second.generation_id);
+    assert!(legacy.source.exact_descriptor_eq(&second.source));
+    assert_eq!(legacy.terminal, second.terminal);
+    assert_eq!(
+        legacy.next_cursor.as_ref().map(SourceEventCursor::after),
+        second.next_cursor.as_ref().map(SourceEventCursor::after)
+    );
+    assert_eq!(
+        legacy.items,
+        second
+            .items
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn source_event_pages_bind_generation_descriptor_and_bounds() {
     const { assert!(MAX_SOURCE_EVENT_PAGE_ITEMS <= 4_096) };
     let temp = tempdir().unwrap();

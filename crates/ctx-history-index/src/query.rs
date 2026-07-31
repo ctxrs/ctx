@@ -3,6 +3,8 @@ mod verification;
 
 pub(super) use verification::{stored_verification_record, validate_verification_projection};
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BTreeSet, BinaryHeap},
@@ -33,6 +35,21 @@ use crate::analyzer::BODY_ANALYZER;
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
+
+#[cfg(test)]
+thread_local! {
+    static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_stored_core_event_record_materializations() {
+    STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn stored_core_event_record_materializations() -> usize {
+    STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.get()
+}
 
 /// Maximum number of semantic event records materialized in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
@@ -347,6 +364,12 @@ pub(super) fn stored_core_event_record(
     address: DocAddress,
     fields: Fields,
 ) -> Result<CoreEventRecord> {
+    #[cfg(test)]
+    STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.set(
+        STORED_CORE_EVENT_RECORD_MATERIALIZATIONS
+            .get()
+            .saturating_add(1),
+    );
     let document: TantivyDocument = searcher.doc(address)?;
     let core_record = CoreRecord::decode_stored(required_bytes(
         &document,
