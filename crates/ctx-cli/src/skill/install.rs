@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use crate::{
     analytics::{count_bucket, IntegrationResult, IntegrationTelemetry, TargetSelection},
     ui::{
-        diagnostic, fields, outcome, section, Action, Diagnostic, DiagnosticLevel, Document, Field,
-        Outcome, OutcomeState, RenderContext, Ui,
+        diagnostic, fields, hint, outcome, section, Action, Diagnostic, DiagnosticLevel, Document,
+        Field, Hint, Outcome, OutcomeState, RenderContext, Ui,
     },
 };
 
@@ -128,7 +128,8 @@ pub(super) fn run_status(
             })
         );
     } else {
-        let document = render_status_results(ui.stdout_context(), &results);
+        let recovery_command = status_install_command(&selection, args.project, &results);
+        let document = render_status_results(ui.stdout_context(), &results, &recovery_command);
         ui.write_stdout(&document)?;
     }
     Ok(())
@@ -483,7 +484,11 @@ fn force_install_command(target: &SkillTarget) -> String {
     )
 }
 
-fn render_status_results(context: &RenderContext, results: &[StatusResult]) -> Document {
+fn render_status_results(
+    context: &RenderContext,
+    results: &[StatusResult],
+    recovery_command: &str,
+) -> Document {
     let all_current = !results.is_empty()
         && results
             .iter()
@@ -527,7 +532,47 @@ fn render_status_results(context: &RenderContext, results: &[StatusResult]) -> D
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("Targets", fields(context, &target_fields)));
+    if !all_current {
+        document.push_blank();
+        document.append(hint(
+            context,
+            Hint {
+                text: "Install or refresh the bundled Agent Skill for the affected targets.",
+            },
+            Some(Action {
+                command: recovery_command,
+            }),
+        ));
+    }
     document
+}
+
+fn status_install_command(
+    selection: &SkillAgentSelection,
+    project: bool,
+    results: &[StatusResult],
+) -> String {
+    let mut tokens = ["ctx", "integrations", "install", "skills"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if selection.source == SkillSelectionSource::All {
+        tokens.push("--all-agents".to_owned());
+    } else {
+        for agent in &selection.agents {
+            tokens.extend(["--agent".to_owned(), agent.id().to_owned()]);
+        }
+    }
+    if project {
+        tokens.push("--project".to_owned());
+    }
+    if results
+        .iter()
+        .any(|result| result.status == SkillInstallStatus::Modified)
+    {
+        tokens.push("--force".to_owned());
+    }
+    tokens.join(" ")
 }
 
 #[cfg(test)]
@@ -581,11 +626,15 @@ mod render_tests {
                 "Agent skill installed",
             ),
             (
-                render_status_results(&render_context(80, ColorMode::Never), &[missing]),
+                render_status_results(
+                    &render_context(80, ColorMode::Never),
+                    &[missing],
+                    "ctx integrations install skills --agent universal",
+                ),
                 "Agent skill needs attention",
             ),
             (
-                render_status_results(&render_context(80, ColorMode::Never), &[current]),
+                render_status_results(&render_context(80, ColorMode::Never), &[current], "unused"),
                 "Agent skill is current",
             ),
         ] {
@@ -596,10 +645,44 @@ mod render_tests {
         }
 
         let color = render_context(80, ColorMode::Always);
-        let document = render_status_results(&color, &[status_target(&target).unwrap()]);
+        let document = render_status_results(&color, &[status_target(&target).unwrap()], "unused");
         let styled = document.render(&color);
         assert!(styled.as_bytes().contains(&0x1b), "{styled:?}");
         assert_eq!(strip_ansi(&styled), document.render_plain());
+    }
+
+    #[test]
+    fn missing_skill_status_offers_the_exact_selected_install_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let path_context = super::super::paths::PathContext::for_tests(
+            temp.path().join("home"),
+            temp.path().join("repo"),
+        );
+        let selection = SkillAgentSelection {
+            agents: vec![SkillAgentArg::Universal],
+            source: SkillSelectionSource::Explicit,
+        };
+        let target = resolve_targets_for_agents(&selection.agents, true, &path_context)
+            .unwrap()
+            .remove(0);
+        let result = status_target(&target).unwrap();
+        let command = status_install_command(&selection, true, std::slice::from_ref(&result));
+        assert_eq!(
+            command,
+            "ctx integrations install skills --agent universal --project"
+        );
+
+        for width in [32, 48, 80, 120] {
+            let context = render_context(width, ColorMode::Never);
+            let document = render_status_results(&context, std::slice::from_ref(&result), &command);
+            assert_eq!(semantic_command(&document), command);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains("Install or refresh the bundled Agent Skill"),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]
