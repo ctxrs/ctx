@@ -712,8 +712,11 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             vec![
                 "Usage: ctx daemon run",
                 "--idle-exit-seconds <IDLE_EXIT_SECONDS>",
+                "Exit after this many seconds without maintenance work",
                 "--loop-interval-seconds <LOOP_INTERVAL_SECONDS>",
+                "Wait this many seconds between maintenance passes",
                 "--max-chunks <MAX_CHUNKS>",
+                "Process at most this many semantic chunks per pass",
                 "--force",
                 "--format <FORMAT>",
             ],
@@ -756,11 +759,16 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
         assert!(!help.contains("--once"), "{args:?} help:\n{help}");
     }
 
-    ctx(&temp)
-        .args(["daemon", "run", "--once"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("unexpected argument '--once'"));
+    let stderr = failure_stderr(ctx(&temp).args(["daemon", "run", "--once"]));
+    assert!(
+        stderr.contains("The --once option has been retired"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ctx daemon run --idle-exit-seconds <SECONDS>"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--force"), "{stderr}");
 }
 
 #[test]
