@@ -251,14 +251,14 @@ fn render_sources_human(
     );
 
     if !sources.is_empty() || !plugin_sources.is_empty() {
-        let mut locations =
-            Table::new(["Source", "Status", "Location", "Format"]).keep_columns_intact([0, 1, 3]);
+        let mut locations = Table::new(["Source", "Status", "Location", "Format"])
+            .keep_columns_intact([0, 1, 2, 3]);
         for source in sources {
             locations.push_row([
                 source_provider_cli_name(source.provider).to_owned(),
                 source.status.as_str().to_owned(),
                 human_path(&source.path, home),
-                source.source_format.to_owned(),
+                human_source_format(&source.source_format),
             ]);
         }
         for source in plugin_sources {
@@ -270,7 +270,7 @@ fn render_sources_human(
                     || "no durable provider path".to_owned(),
                     |path| human_path(path, home),
                 ),
-                source.source_format.clone(),
+                human_source_format(&source.source_format),
             ]);
         }
         document.push_blank();
@@ -384,6 +384,24 @@ fn human_path(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
+fn human_source_format(format: &str) -> String {
+    if format == "ctx-history-jsonl-v1" {
+        "ctx history".to_owned()
+    } else if format.contains("sqlite") || format.contains("database") {
+        "Session database".to_owned()
+    } else if format.contains("transcript") || format.contains("trajectory") {
+        "Agent transcripts".to_owned()
+    } else if format.contains("history") && !format.contains("session") {
+        "Prompt history".to_owned()
+    } else if format.contains("event") {
+        "Session events".to_owned()
+    } else if format.contains("session") || format.contains("project") {
+        "Session history".to_owned()
+    } else {
+        format.replace(['_', '-'], " ")
+    }
+}
+
 fn render_discovery_issue(context: &RenderContext, issue: &DiscoveryIssue) -> Document {
     let provider = source_provider_cli_name(issue.provider);
     let (summary, detail) = match issue.kind {
@@ -442,7 +460,14 @@ mod ui_tests {
     fn assert_fits(document: &Document, context: &RenderContext) {
         let width = context.content_width().unwrap_or(1);
         for line in document.render_plain().lines() {
-            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+            let copyable_path = {
+                let atom = line.trim_start();
+                atom.starts_with("~/") || atom.starts_with('/')
+            };
+            assert!(
+                line.width() <= width || copyable_path,
+                "{line:?} exceeded {width} columns"
+            );
         }
     }
 
@@ -515,7 +540,7 @@ mod ui_tests {
                 "{width}: {rendered}"
             );
             assert!(rendered.contains("ctx sources --all"));
-            for atom in ["codex", "available", "codex_session_jsonl_tree"] {
+            for atom in ["codex", "available"] {
                 assert_eq!(
                     rendered
                         .split_whitespace()
@@ -525,6 +550,8 @@ mod ui_tests {
                     "{atom:?} did not remain intact at {width} columns: {rendered}"
                 );
             }
+            assert!(rendered.contains("Session history"), "{width}: {rendered}");
+            assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
             if width < 80 {
                 assert!(
                     rendered.contains("Source\n  codex\nStatus\n  available\n"),
@@ -579,18 +606,18 @@ mod ui_tests {
             let context = context(width, ColorMode::Never);
             let document = render_sources_human(&context, &sources, &[], &[], &[], 0, Some(&home));
             let rendered = document.render_plain();
-            for atom in [
-                "factory-ai-droid",
-                "available",
-                "factory_ai_droid_sessions_jsonl",
-                "windsurf",
-                "windsurf_cascade_hook_transcript_jsonl_tree",
-            ] {
+            for atom in ["factory-ai-droid", "available", "windsurf"] {
                 assert!(
                     rendered.split_whitespace().any(|token| token == atom),
                     "{atom:?} did not remain intact at {width} columns: {rendered}"
                 );
             }
+            assert!(rendered.contains("Session history"), "{width}: {rendered}");
+            assert!(
+                rendered.contains("Agent transcripts"),
+                "{width}: {rendered}"
+            );
+            assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
             if width == 80 {
                 assert!(
                     rendered.contains("Source\n  factory-ai-droid\nStatus\n  available\n"),
