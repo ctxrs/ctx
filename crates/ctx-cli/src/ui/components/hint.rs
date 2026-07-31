@@ -22,20 +22,44 @@ pub(crate) fn hint(
             document.push_blank();
         }
         document.push_line(Line::styled("Next", Token::Label));
-        for command in wrap_text(
-            action.command,
-            context
-                .content_width()
-                .map(|width| width.saturating_sub(2).max(1)),
-        ) {
-            document.push_line(
-                Line::new()
-                    .with(Span::text("  "))
-                    .with(Span::new(command, Token::Command)),
-            );
-        }
+        // A recovery command is a single copyable atom. Keep it byte-for-byte on
+        // one child line even when it exceeds the display width; wrapping a shell
+        // command can change its meaning when copied from a terminal.
+        document.push_line(
+            Line::new()
+                .with(Span::text("  "))
+                .with(Span::new(action.command, Token::Command)),
+        );
     }
     document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    #[test]
+    fn action_commands_are_never_wrapped_or_split() {
+        let context = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stderr, 24).color(ColorMode::Never),
+        );
+        let command = "ctx sql --max-rows 200 'SELECT * FROM ctx_events'";
+        let rendered = hint(
+            &context,
+            Hint {
+                text: "Rerun the query.",
+            },
+            Some(Action { command }),
+        )
+        .render_plain();
+
+        assert!(
+            rendered.contains(&format!("Next\n  {command}\n")),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches(command).count(), 1, "{rendered}");
+    }
 }
 
 fn labelled_text(context: &RenderContext, label: &str, text: &str) -> Document {
