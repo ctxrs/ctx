@@ -331,11 +331,17 @@ mod tests {
 
     #[test]
     fn explicit_cold_scan_certifies_and_hydrates_nested_itemtable_message() {
+        const TAIL: &str = "traepostsixteenkilobytesentinel";
+
         let temp = crate::test_support_paths::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace-explicit");
         fs::create_dir_all(&workspace).expect("workspace");
         let source = workspace.join("state.vscdb");
-        let full_assistant_body = format!("{}trae-tail", "bounded ".repeat(400));
+        let full_assistant_body = format!(
+            r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
+            "x".repeat(17_000)
+        );
+        assert!(full_assistant_body.find(TAIL).unwrap() > 16 * 1_024);
         write_value(
             &source,
             &chat_value("cold exact nested sentinel", &full_assistant_body),
@@ -358,7 +364,13 @@ mod tests {
         assert_eq!(documents.len(), 2);
         assert_eq!(documents[0].body, "cold exact nested sentinel");
         assert_eq!(documents[1].body, full_assistant_body);
-        assert!(documents[1].body.ends_with("trae-tail"));
+        let structured: Value = serde_json::from_str(&documents[1].body).unwrap();
+        assert_eq!(
+            structured
+                .pointer("/arguments/tail")
+                .and_then(Value::as_str),
+            Some(TAIL)
+        );
         assert_eq!(documents[0].parent_session_id, None);
         assert_eq!(documents[0].root_session_id, documents[0].session_id);
         assert_eq!(

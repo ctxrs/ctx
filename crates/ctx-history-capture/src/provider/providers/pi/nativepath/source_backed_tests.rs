@@ -185,6 +185,56 @@ fn shared_family_pi_noop_replacement_lineage_and_hydration_oracle() {
 }
 
 #[test]
+fn shared_family_pi_indexes_complete_structured_body_beyond_16k() {
+    const TAIL: &str = "pipostsixteenkilobytesentinel";
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let transcript = root.join("session.jsonl");
+    let structured_body = format!(
+        r#"{{"arguments":{{"padding":"{}","tail":"{TAIL}"}},"tool":"write_file"}}"#,
+        "x".repeat(17_000)
+    );
+    assert!(structured_body.find(TAIL).unwrap() > 16 * 1_024);
+    write_session(
+        &transcript,
+        "pi-complete-body",
+        None,
+        &[message("message-complete-body", &structured_body, 1)],
+    );
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+    let receipt =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let candidates = index.search_event_candidates(TAIL, 10).unwrap();
+    assert_eq!(candidates.len(), 1);
+    let source = receipt.sources[0].observation().source();
+    let event = index
+        .source_event_page(source, None, 10)
+        .unwrap()
+        .items
+        .remove(0);
+    assert_eq!(candidates[0].event.event_id, event.event_id);
+
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_event(&request)
+        .unwrap();
+    assert_eq!(hydrated.provider_bytes, structured_body.as_bytes());
+    let structured: Value = serde_json::from_slice(&hydrated.provider_bytes).unwrap();
+    assert_eq!(
+        structured
+            .pointer("/arguments/tail")
+            .and_then(Value::as_str),
+        Some(TAIL)
+    );
+}
+
+#[test]
 fn shared_family_pi_admits_a_later_header_and_counts_independent_rejections() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
