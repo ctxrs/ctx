@@ -2,9 +2,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::response::{error_response, success_response, tool_error_result};
-use crate::complete_content::serialized_json_line_bytes;
+use crate::presentation_limit::serialized_json_line_bytes;
 
-pub(super) fn is_complete_content_tool_call(message: &Value) -> bool {
+pub(super) fn is_show_tool_call(message: &Value) -> bool {
     message.get("method").and_then(Value::as_str) == Some("tools/call")
         && matches!(
             message.pointer("/params/name").and_then(Value::as_str),
@@ -52,7 +52,7 @@ pub(super) fn bound_blame_mcp_response(
     }
 }
 
-pub(super) fn bound_complete_content_mcp_response(
+pub(super) fn bound_show_mcp_response(
     response: Value,
     response_id: Value,
     output_limit_bytes: usize,
@@ -61,12 +61,13 @@ pub(super) fn bound_complete_content_mcp_response(
         return response;
     }
 
-    let result = match response_complete_content_event_id(&response) {
+    let result = match response_show_event_id(&response) {
         Some(event_id) => tool_error_result(anyhow::Error::new(
-            ctx_history_capture::complete_content::CompleteContentError::new(
-                ctx_history_capture::complete_content::CompleteContentErrorKind::ContentTooLarge,
+            crate::presentation_limit::PresentationOutputLimitError {
                 event_id,
-            ),
+                actual_bytes: serialized_json_line_bytes(&response).unwrap_or(usize::MAX),
+                maximum_bytes: output_limit_bytes,
+            },
         )),
         None => json!({
             "isError": true,
@@ -75,8 +76,8 @@ pub(super) fn bound_complete_content_mcp_response(
                 "text": "show response exceeds the serialized MCP output limit",
             }],
             "structuredContent": {
-                "error": "content_too_large",
-                "error_code": "content_too_large",
+                "error": "output_limit_exceeded",
+                "error_code": "output_limit_exceeded",
                 "retryable": false,
             },
         }),
@@ -89,12 +90,12 @@ pub(super) fn bound_complete_content_mcp_response(
             Value::Null,
             -32603,
             "Show response too large",
-            Some(json!({ "error": "content_too_large" })),
+            Some(json!({ "error": "output_limit_exceeded" })),
         )
     }
 }
 
-fn response_complete_content_event_id(response: &Value) -> Option<Uuid> {
+fn response_show_event_id(response: &Value) -> Option<Uuid> {
     response
         .pointer("/result/structuredContent/ctx_event_id")
         .and_then(Value::as_str)

@@ -1009,7 +1009,7 @@ mod native {
     }
 
     fn assert_search_result(packet: &Value, query: &str, generation: &str) {
-        assert_eq!(packet["retrieval"]["index"], "source_backed", "{packet:#}");
+        assert_eq!(packet["retrieval"]["index"], "core", "{packet:#}");
         assert_eq!(
             packet["retrieval"]["generation_id"], generation,
             "{packet:#}"

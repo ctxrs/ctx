@@ -165,7 +165,6 @@ fn malformed_and_tool_requests_get_typed_terminal_events() {
         .record_delivered(
             RequestDescriptor::ToolCall {
                 tool: McpToolV1::Search,
-                complete_content: false,
             },
             Some(&response),
             Duration::ZERO,
@@ -461,7 +460,6 @@ fn mixed_mcp_and_pro_queue_pressure_is_bounded_and_counted() {
     telemetry.record_delivered(
         RequestDescriptor::ToolCall {
             tool: McpToolV1::Status,
-            complete_content: false,
         },
         Some(&json!({"result": {"structuredContent": {}}})),
         Duration::ZERO,

@@ -172,7 +172,7 @@ fn spawn_copied_test_binary(command: &mut StdCommand) -> io::Result<Child> {
 fn assert_published_generation(search: &Value, expected_mode: &str) -> String {
     assert_eq!(search["freshness"]["mode"], expected_mode, "{search:#}");
     assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     search["retrieval"]["generation_id"]
         .as_str()
         .expect("search response should identify its source-backed generation")
@@ -262,7 +262,7 @@ fn assert_source_backed_search_show_oracle(
     assert_eq!(packet["payload_type"], "search_results", "{packet:#}");
     assert_eq!(packet["query"], query, "{packet:#}");
     assert_eq!(packet["filters"]["provider"], provider, "{packet:#}");
-    assert_eq!(packet["retrieval"]["index"], "source_backed", "{packet:#}");
+    assert_eq!(packet["retrieval"]["index"], "core", "{packet:#}");
     let generation = packet["retrieval"]["generation_id"]
         .as_str()
         .expect("source-backed search generation");
@@ -305,7 +305,8 @@ fn assert_source_backed_search_show_oracle(
         assert!(result["ctx_session_id"].is_string(), "{result:#}");
         assert!(result["provider_session_id"].is_string(), "{result:#}");
         assert!(result["source_format"].is_string(), "{result:#}");
-        assert!(result["source_path"].is_string(), "{result:#}");
+        assert!(result.get("source_path").is_none(), "{result:#}");
+        assert!(result.get("source_exists").is_none(), "{result:#}");
         assert!(result["session_importance"].is_number(), "{result:#}");
         assert!(result["more_matches_in_session"].is_number(), "{result:#}");
         assert!(
@@ -320,13 +321,10 @@ fn assert_source_backed_search_show_oracle(
                 .is_some_and(|snippet| snippet.contains(query)),
             "{result:#}"
         );
-        let source_exists = result["source_exists"]
-            .as_bool()
-            .expect("source-backed results report current source availability");
         assert_eq!(
             result.get("why_matched"),
             None,
-            "source-backed results use the indexed event type and hydrated snippet: {result:#}"
+            "Core results use the indexed event type and normalized snippet: {result:#}"
         );
 
         let commands = result["suggested_next_commands"]
@@ -377,12 +375,8 @@ fn assert_source_backed_search_show_oracle(
             "{result:#}"
         );
         assert_eq!(citation["provider"], provider, "{result:#}");
-        assert_eq!(citation["source_path"], result["source_path"], "{result:#}");
-        assert_eq!(
-            citation["source_exists"].as_bool(),
-            Some(source_exists),
-            "source-backed citations must preserve current source availability: {result:#}"
-        );
+        assert!(citation.get("source_path").is_none(), "{result:#}");
+        assert!(citation.get("source_exists").is_none(), "{result:#}");
 
         let shown_event = json_output(ctx(temp).args([
             "show", "event", event_id, "--window", "1", "--format", "json",
@@ -397,16 +391,9 @@ fn assert_source_backed_search_show_oracle(
             shown_event["event"]["provider"], provider,
             "{shown_event:#}"
         );
+        assert!(shown_event["event"].get("source_path").is_none());
         assert_eq!(
-            shown_event["event"]["source_path"], result["source_path"],
-            "{shown_event:#}"
-        );
-        assert_eq!(
-            shown_event["event"]["content"]["origin"], "provider_source",
-            "{shown_event:#}"
-        );
-        assert_eq!(
-            shown_event["event"]["content"]["source_verified"], true,
+            shown_event["event"]["content"]["policy_status"], "selected",
             "{shown_event:#}"
         );
         assert!(
@@ -432,8 +419,7 @@ fn assert_source_backed_search_show_oracle(
                 .as_array()
                 .is_some_and(|events| events.iter().any(|event| {
                     event["ctx_event_id"] == result["ctx_event_id"]
-                        && event["content"]["origin"] == "provider_source"
-                        && event["content"]["source_verified"] == true
+                        && event["content"]["policy_status"] == "selected"
                         && event["text"]
                             .as_str()
                             .is_some_and(|text| text.contains(query))

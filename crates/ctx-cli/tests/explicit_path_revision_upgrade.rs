@@ -206,7 +206,7 @@ fn assert_source_backed_codex_search(search: &Value, query: &str) {
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], "codex", "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1, "{search:#}");
     assert_eq!(results[0]["provider"], "codex", "{search:#}");
@@ -231,7 +231,7 @@ fn explicit_codex_source_revision_republishes_source_backed_generation() {
     let first_generation = assert_published_codex_source(&first, &source);
     assert_eq!(first["sources"][0]["catalog_changed"], true, "{first:#}");
     let before = search_codex(&temp, "explicit source revision before");
-    assert_eq!(before["retrieval"]["index"], "source_backed", "{before:#}");
+    assert_eq!(before["retrieval"]["index"], "core", "{before:#}");
     assert_eq!(
         before["retrieval"]["generation_id"], first_generation,
         "{before:#}"
@@ -259,7 +259,7 @@ fn explicit_codex_source_revision_republishes_source_backed_generation() {
     assert_ne!(revised_generation, first_generation);
 
     let after = search_codex(&temp, "explicit source revision after");
-    assert_eq!(after["retrieval"]["index"], "source_backed", "{after:#}");
+    assert_eq!(after["retrieval"]["index"], "core", "{after:#}");
     assert_eq!(
         after["retrieval"]["generation_id"], revised_generation,
         "{after:#}"
@@ -293,7 +293,7 @@ fn windows_explicit_codex_file_publishes_from_the_local_temp_directory() {
     let imported = explicit_import(&temp, &source);
     assert_published_codex_source(&imported, &source);
     let search = search_codex(&temp, "windows local explicit source oracle");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_source_backed_codex_search(&search, "windows local explicit source oracle");
     assert!(
         !temp.path().join("work.sqlite").exists(),

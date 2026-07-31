@@ -97,7 +97,6 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
         vec!["ctx", "sql", "select 1"],
         vec!["ctx", "doctor"],
         vec!["ctx", "show", "event", "deadbeef"],
-        vec!["ctx", "locate", "event", "deadbeef"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(

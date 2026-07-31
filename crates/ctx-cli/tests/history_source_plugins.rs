@@ -200,19 +200,12 @@ fn durable_plugin_path_indexes_in_place_and_hydrates_exact_content() {
     ]));
     let result = &search["results"].as_array().unwrap()[0];
     let event_id = result["ctx_event_id"].as_str().unwrap();
-    let shown = json_output(ctx(&temp).args([
-        "show",
-        "event",
-        event_id,
-        "--content",
-        "complete",
-        "--format=json",
-    ]));
+    let shown = json_output(ctx(&temp).args(["show", "event", event_id, "--format=json"]));
     assert_eq!(
         shown["event"]["text"],
         "provider-owned durable plugin oracle"
     );
-    assert_eq!(shown["event"]["content"]["origin"], "provider_source");
+    assert_eq!(shown["event"]["content"]["policy_status"], "selected");
 }
 
 #[test]

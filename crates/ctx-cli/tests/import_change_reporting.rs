@@ -382,7 +382,7 @@ fn codex_reimport_rebuilds_from_provider_source() {
         "off",
         "--format=json",
     ]));
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1, "{search:#}");
     assert_eq!(results[0]["provider"], "codex");

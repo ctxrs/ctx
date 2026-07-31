@@ -453,13 +453,10 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
 
         let result = &search["results"].as_array().unwrap()[0];
         let ctx_event_id = result["ctx_event_id"].as_str().unwrap();
-        let located =
-            json_output(ctx(&temp).args(["locate", "event", ctx_event_id, "--format=json"]));
-        assert_eq!(located["provider"], stored_provider);
-        assert_eq!(located["source"]["source_format"], source_format);
-        assert!(located["source"]["path"]
-            .as_str()
-            .is_some_and(|path| path.ends_with(".db") || path.ends_with(".sqlite3")));
+        let shown = json_output(ctx(&temp).args(["show", "event", ctx_event_id, "--format=json"]));
+        assert_eq!(shown["event"]["provider"], stored_provider);
+        assert_eq!(shown["event"]["source_format"], source_format);
+        assert!(shown["event"].get("source_path").is_none());
 
         let mut second_command = ctx(&temp);
         if stored_provider == "crush" {

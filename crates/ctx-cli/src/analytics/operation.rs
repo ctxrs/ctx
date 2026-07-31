@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::cli::{CommandRoot, LocateTarget, ShowTarget};
+use crate::cli::{CommandRoot, ShowTarget};
 
 use super::*;
 
@@ -190,18 +190,6 @@ impl ClientOperationDraft {
                         args.window.unwrap_or(args.before.max(args.after)) as u64,
                     )),
                     events_returned: None,
-                }),
-            },
-            CommandRoot::Locate(args) => match &args.target {
-                LocateTarget::Session(args) => ClientOperationV1::Locate(LocateTelemetry {
-                    target_kind: TargetKind::Session,
-                    output_format: RenderFormat::from_json_output_format(args.format),
-                    provider_lookup: args.provider.is_some() || args.provider_session.is_some(),
-                }),
-                LocateTarget::Event(args) => ClientOperationV1::Locate(LocateTelemetry {
-                    target_kind: TargetKind::Event,
-                    output_format: RenderFormat::from_json_output_format(args.format),
-                    provider_lookup: false,
                 }),
             },
             CommandRoot::Search(args) => ClientOperationV1::Search(SearchTelemetry {

@@ -77,13 +77,6 @@ fn render_session_header(document: &mut Document, context: &RenderContext, value
         value["mode"].as_str(),
         Token::Text,
     );
-    push_optional_field(
-        document,
-        context,
-        "Content",
-        value["content_policy"].as_str(),
-        Token::Text,
-    );
 }
 
 fn render_event_header(document: &mut Document, context: &RenderContext, value: &Value) {
@@ -101,13 +94,6 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         "Session",
         value["ctx_session_id"].as_str(),
         Token::Reference,
-    );
-    push_optional_field(
-        document,
-        context,
-        "Content",
-        value["content_policy"].as_str(),
-        Token::Text,
     );
     let selected = &value["event"];
     push_optional_field(

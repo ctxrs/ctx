@@ -12,27 +12,24 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    complete_content::{
-        enforce_complete_content_cli_output_limit, enforce_complete_content_output_limit,
-        ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-    },
     output::{compact_json, OutputFormat},
+    presentation_limit::{
+        enforce_presentation_cli_output_limit, enforce_presentation_output_limit,
+        CLI_PRESENTATION_MAX_OUTPUT_BYTES,
+    },
     transcript::{shell_quote_arg, write_output},
 };
 
-use super::{
-    search::{NormalizedSearchQuery, SearchCollection, SearchHit, SourceSearchRequest},
-    shared::source_path_exists,
-};
+use super::search::{NormalizedSearchQuery, SearchCollection, SearchHit, SourceSearchRequest};
 
 mod human;
-mod locate;
 mod search;
 mod show;
 
-pub(super) use locate::render_locate_document;
 pub(super) use search::render_search_document;
 pub(super) use show::render_show_document;
+
+const SEARCH_SNIPPET_MAX_CHARS: usize = 2_048;
 
 pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
     Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
@@ -49,7 +46,7 @@ struct SearchJsonInput<'a> {
     index: &'a VerifiedIndex,
     collection: &'a SearchCollection,
     filters: &'a EventSearchFilters,
-    snippets: &'a HashMap<Uuid, String>,
+    core_records: &'a HashMap<Uuid, ctx_history_index::CoreEventRecord>,
     metrics: SearchRenderMetrics<'a>,
 }
 
@@ -66,7 +63,7 @@ type SearchJsonCompatibilityFn = fn(
     &VerifiedIndex,
     &SearchCollection,
     &EventSearchFilters,
-    &HashMap<Uuid, String>,
+    &HashMap<Uuid, ctx_history_index::CoreEventRecord>,
     &str,
     usize,
     Duration,
@@ -78,7 +75,7 @@ pub(super) const SEARCH_JSON: SearchJsonCompatibilityFn =
      index,
      collection,
      filters,
-     snippets,
+     core_records,
      refresh_status,
      refresh_source_count,
      query_duration| {
@@ -88,7 +85,7 @@ pub(super) const SEARCH_JSON: SearchJsonCompatibilityFn =
             index,
             collection,
             filters,
-            snippets,
+            core_records,
             metrics: SearchRenderMetrics {
                 refresh_status,
                 refresh_source_count,
@@ -105,7 +102,7 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         index,
         collection,
         filters,
-        snippets,
+        core_records,
         metrics,
     } = input;
     let normalized_query = NormalizedSearchQuery::from_request(request);
@@ -117,18 +114,20 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         .iter()
         .enumerate()
         .map(|(offset, hit)| {
-            let snippet = snippets
+            let core_record = core_records
                 .get(&hit.event.event_id.as_uuid())
-                .filter(|snippet| !snippet.is_empty())
                 .ok_or_else(|| {
                     anyhow!(
-                        "generation-bound source hydration omitted search event {}",
+                        "pinned Core lookup omitted search event {}",
                         hit.event.event_id
                     )
                 })?;
+            let (snippet, snippet_truncated) = search_snippet(core_record)?;
             Ok(search_result_json(
                 hit,
-                snippet,
+                core_record,
+                &snippet,
+                snippet_truncated,
                 result_scope,
                 &normalized_query,
                 offset.saturating_add(1),
@@ -169,7 +168,7 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
             "semantic_fallback_code": collection.semantic_fallback.as_ref().map(|fallback| fallback.code),
             "semantic_fallback": collection.semantic_fallback.as_ref().map(|fallback| fallback.detail.as_str()),
             "semantic_diagnostics": collection.semantic_diagnostics,
-            "index": "source_backed",
+            "index": "core",
             "generation_id": index.generation_id(),
             "indexed_documents": index.document_count(),
             "phase_attribution": phase_attribution,
@@ -191,13 +190,15 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
 
 fn search_result_json(
     hit: &SearchHit,
+    core_record: &ctx_history_index::CoreEventRecord,
     snippet: &str,
+    snippet_truncated: bool,
     result_scope: &str,
     query: &NormalizedSearchQuery,
     rank: usize,
     command_prefix: &str,
 ) -> Value {
-    let event = &hit.event;
+    let event = &core_record.event;
     let event_id = event.event_id.as_uuid();
     let session_id = event.session_id.as_uuid();
     let item_id = if result_scope == "session" {
@@ -221,7 +222,6 @@ fn search_result_json(
             "{command_prefix} search {query_arguments} --session {session_id}"
         ));
     }
-    let source_exists = source_path_exists(event.source_path.as_deref());
     compact_json(json!({
         "item_id": item_id,
         "result_type": if result_scope == "session" { "session_result" } else { "event" },
@@ -232,6 +232,8 @@ fn search_result_json(
         "event_seq": event.event_sequence,
         "title": title,
         "snippet": snippet,
+        "snippet_truncated": snippet_truncated,
+        "snippet_max_chars": SEARCH_SNIPPET_MAX_CHARS,
         "rank": rank,
         "retrieval_score": hit.score,
         "result_scope": result_scope,
@@ -241,8 +243,6 @@ fn search_result_json(
         "provider": event.provider,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
-        "source_path": event.source_path,
-        "source_exists": source_exists,
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": event.root_session_id.as_uuid(),
         "branch": event.branch,
@@ -260,11 +260,30 @@ fn search_result_json(
             "provider": event.provider,
             "session_id": session_id,
             "event_seq": event.event_sequence,
-            "source_path": event.source_path,
-            "source_exists": source_exists,
         }],
         "visibility": "local",
     }))
+}
+
+fn search_snippet(record: &ctx_history_index::CoreEventRecord) -> Result<(String, bool)> {
+    let body = record
+        .core_record
+        .content
+        .normalized_body
+        .as_deref()
+        .filter(|body| !body.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "Core search event {} has no normalized body",
+                record.event_id
+            )
+        })?;
+    let mut chars = body.chars();
+    let snippet = chars
+        .by_ref()
+        .take(SEARCH_SNIPPET_MAX_CHARS)
+        .collect::<String>();
+    Ok((snippet, chars.next().is_some()))
 }
 
 fn follow_up_command_prefix(data_root: &Path) -> String {
@@ -287,11 +306,10 @@ pub(super) fn write_show_value(
         OutputFormat::Text => render_show_text(&value),
         OutputFormat::Markdown => render_show_markdown(&value),
     };
-    enforce_complete_content_cli_output_limit(
-        ContentPolicy::Complete,
+    enforce_presentation_cli_output_limit(
         &body,
         out.is_none(),
-        CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+        CLI_PRESENTATION_MAX_OUTPUT_BYTES,
         event_id,
     )?;
     let output_bytes = if out.is_some() {
@@ -312,7 +330,6 @@ fn render_show_jsonl(value: &Value) -> Result<String> {
                     "schema_version": 1,
                     "payload_type": "session_transcript_event",
                     "mode": value["mode"],
-                    "content_policy": value["content_policy"],
                     "ctx_session_id": value["ctx_session_id"],
                     "provider": value["provider"],
                     "provider_session_id": value["provider_session_id"],
@@ -336,12 +353,7 @@ pub(super) fn enforce_json_output_limit(
     event_id: Uuid,
 ) -> Result<()> {
     let serialized_bytes = serde_json::to_vec(value)?.len();
-    enforce_complete_content_output_limit(
-        ContentPolicy::Complete,
-        serialized_bytes,
-        output_limit_bytes,
-        event_id,
-    )?;
+    enforce_presentation_output_limit(serialized_bytes, output_limit_bytes, event_id)?;
     Ok(())
 }
 
@@ -358,17 +370,15 @@ fn render_show_text(value: &Value) -> String {
                 output.push_str(&format!("provider_session_id: {provider_session_id}\n"));
             }
             output.push_str(&format!(
-                "mode: {}\ncontent: {}\nformat: text\n\n",
-                value["mode"].as_str().unwrap_or("lite"),
-                value["content_policy"].as_str().unwrap_or("indexed")
+                "mode: {}\nformat: text\n\n",
+                value["mode"].as_str().unwrap_or("lite")
             ));
         }
         _ => {
             output.push_str(&format!(
-                "ctx_event_id: {}\nctx_session_id: {}\ncontent: {}\n\n",
+                "ctx_event_id: {}\nctx_session_id: {}\n\n",
                 value["ctx_event_id"].as_str().unwrap_or("unknown"),
-                value["ctx_session_id"].as_str().unwrap_or("unknown"),
-                value["content_policy"].as_str().unwrap_or("indexed")
+                value["ctx_session_id"].as_str().unwrap_or("unknown")
             ));
         }
     }
@@ -391,20 +401,18 @@ fn render_show_text(value: &Value) -> String {
 fn render_show_markdown(value: &Value) -> String {
     let mut output = match value["target"].as_str() {
         Some("session") => format!(
-            "# {} session {}\n\n- ctx_session_id: `{}`\n- content: `{}`\n",
+            "# {} session {}\n\n- ctx_session_id: `{}`\n",
             value["provider"].as_str().unwrap_or("unknown"),
             value["provider_session_id"]
                 .as_str()
                 .or_else(|| value["ctx_session_id"].as_str())
                 .unwrap_or("unknown"),
-            value["ctx_session_id"].as_str().unwrap_or("unknown"),
-            value["content_policy"].as_str().unwrap_or("indexed")
+            value["ctx_session_id"].as_str().unwrap_or("unknown")
         ),
         _ => format!(
-            "# Event {}\n\n- ctx_session_id: `{}`\n- content: `{}`\n",
+            "# Event {}\n\n- ctx_session_id: `{}`\n",
             value["ctx_event_id"].as_str().unwrap_or("unknown"),
-            value["ctx_session_id"].as_str().unwrap_or("unknown"),
-            value["content_policy"].as_str().unwrap_or("indexed")
+            value["ctx_session_id"].as_str().unwrap_or("unknown")
         ),
     };
     for event in value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]) {

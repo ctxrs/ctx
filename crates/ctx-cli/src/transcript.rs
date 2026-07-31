@@ -2,11 +2,6 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::ValueEnum;
-use serde_json::{json, Value};
-
-use ctx_history_core::CaptureProvider;
-
-use crate::output::compact_json;
 
 mod artifact;
 use artifact::atomic_write_output;
@@ -56,28 +51,6 @@ pub(crate) fn normalize_uuid_prefix(value: &str, kind: &str) -> Result<String> {
         ));
     }
     Ok(prefix.to_ascii_lowercase())
-}
-
-pub(crate) fn provider_resume_json(
-    provider: CaptureProvider,
-    provider_session_id: Option<&str>,
-) -> Value {
-    let (command, argv) = match (provider, provider_session_id) {
-        (CaptureProvider::Codex, Some(session_id)) => (
-            Some(format!("codex resume {}", shell_quote_arg(session_id))),
-            Some(vec![
-                "codex".to_owned(),
-                "resume".to_owned(),
-                session_id.to_owned(),
-            ]),
-        ),
-        _ => (None, None),
-    };
-    compact_json(json!({
-        "available": command.is_some(),
-        "command": command,
-        "argv": argv,
-    }))
 }
 
 pub(crate) fn shell_quote_arg(value: &str) -> String {
