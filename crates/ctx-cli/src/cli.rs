@@ -36,6 +36,7 @@ pub(crate) const MAX_EVENT_WINDOW: usize = 50;
     bin_name = "ctx",
     version,
     about = "Search local agent history",
+    max_term_width = 100,
     styles = crate::ui::CLAP_STYLES
 )]
 pub(crate) struct Cli {

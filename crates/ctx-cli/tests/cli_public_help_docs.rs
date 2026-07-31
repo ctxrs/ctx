@@ -160,9 +160,13 @@ fn show_help_exposes_explicit_content_fidelity() {
             .stdout
             .clone();
         let help = String::from_utf8(output).unwrap();
+        let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(help.contains("--content <CONTENT>"), "{help}");
         assert!(help.contains("indexed, complete"), "{help}");
-        assert!(help.contains("verified local provider sources"), "{help}");
+        assert!(
+            normalized.contains("verified local provider sources"),
+            "{help}"
+        );
     }
 }
 

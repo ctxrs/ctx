@@ -37,6 +37,7 @@ impl Primitive {
 enum OutputClass {
     MachineProtocol,
     JustifiedPlainHuman,
+    InteractivePrompt,
     Infrastructure,
     CapabilityProbe,
     Violation,
@@ -47,6 +48,7 @@ impl OutputClass {
         match self {
             Self::MachineProtocol => "machine_protocol",
             Self::JustifiedPlainHuman => "justified_plain_human",
+            Self::InteractivePrompt => "interactive_prompt",
             Self::Infrastructure => "infrastructure",
             Self::CapabilityProbe => "capability_probe",
             Self::Violation => "violation",

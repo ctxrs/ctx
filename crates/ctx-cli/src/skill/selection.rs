@@ -138,31 +138,8 @@ fn prompt_for_agents(context: &PathContext) -> Result<Vec<SkillAgentArg>> {
     let detected = detected_agents(context);
     let defaults = default_picker_agents(context);
     let mut stderr = crate::output::stderr_writer();
-    writeln!(
-        stderr,
-        "Select where to install {BUNDLED_SKILL_NAME}. Detected agents are preselected."
-    )?;
-    writeln!(
-        stderr,
-        "Press Enter for the marked defaults, or enter numbers like 1,2."
-    )?;
-    for (index, agent) in options.iter().enumerate() {
-        let marker = if defaults.contains(agent) { "*" } else { " " };
-        let detected_hint = if detected.contains(agent) {
-            " detected"
-        } else {
-            ""
-        };
-        let target = single_target(*agent, false, context)?;
-        writeln!(
-            stderr,
-            "  {}. [{}] {} -> {}{}",
-            index + 1,
-            marker,
-            agent.display_name(),
-            target.skill_dir.display(),
-            detected_hint
-        )?;
+    for line in picker_prompt_lines(context, options, &detected, &defaults)? {
+        writeln!(stderr, "{line}")?;
     }
     loop {
         write!(stderr, "Install target(s): ")?;
@@ -188,6 +165,36 @@ fn prompt_for_agents(context: &PathContext) -> Result<Vec<SkillAgentArg>> {
             }
         }
     }
+}
+
+fn picker_prompt_lines(
+    context: &PathContext,
+    options: &[SkillAgentArg],
+    detected: &[SkillAgentArg],
+    defaults: &[SkillAgentArg],
+) -> Result<Vec<String>> {
+    let mut lines = vec![
+        format!("Select where to install {BUNDLED_SKILL_NAME}. Detected agents are preselected."),
+        "Press Enter for the marked defaults, or enter numbers like 1,2.".to_owned(),
+    ];
+    for (index, agent) in options.iter().enumerate() {
+        let marker = if defaults.contains(agent) { "*" } else { " " };
+        let detected_hint = if detected.contains(agent) {
+            " detected"
+        } else {
+            ""
+        };
+        let target = single_target(*agent, false, context)?;
+        lines.push(format!(
+            "  {}. [{}] {} -> {}{}",
+            index + 1,
+            marker,
+            agent.display_name(),
+            target.skill_dir.display(),
+            detected_hint
+        ));
+    }
+    Ok(lines)
 }
 
 pub(super) fn parse_picker_selection(
@@ -220,4 +227,25 @@ pub(super) fn parse_picker_selection(
         return Err(anyhow!("choose at least one install target"));
     }
     Ok(selected)
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn interactive_picker_prompt_is_explicit_and_actionable() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = PathContext::for_tests(temp.path().join("home"), temp.path().join("repo"));
+        let options = picker_agents();
+        let defaults = vec![SkillAgentArg::Universal];
+        let lines = picker_prompt_lines(&context, options, &[], &defaults).unwrap();
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("Select where to install"));
+        assert!(rendered.contains("Press Enter for the marked defaults"));
+        assert!(rendered.contains("[*] Universal"));
+        assert!(rendered.contains(".agents/skills/ctx-agent-history-search"));
+        assert!(!rendered.contains('\u{1b}'));
+    }
 }

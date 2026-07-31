@@ -685,11 +685,14 @@ mod tests {
             .find_subcommand_mut("referral")
             .expect("referral subcommand");
         let help = referral.render_long_help().to_string();
+        let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(help.contains("Refer a developer. Earn $10/month toward your agent bill."));
         assert!(help.contains("Up to $120 per friend."));
-        assert!(help.contains("first 12 distinct qualifying paid monthly invoices"));
-        assert!(help.contains("first two commissions remain pending until invoice 2 settles"));
-        assert!(help.contains("invoices 3-12 each have their own 14-day hold and reconciliation"));
+        assert!(normalized.contains("first 12 distinct qualifying paid monthly invoices"));
+        assert!(normalized.contains("first two commissions remain pending until invoice 2 settles"));
+        assert!(
+            normalized.contains("invoices 3-12 each have their own 14-day hold and reconciliation")
+        );
         assert!(!help.contains("Get $20"));
         assert!(!help.contains("one-time"));
     }
