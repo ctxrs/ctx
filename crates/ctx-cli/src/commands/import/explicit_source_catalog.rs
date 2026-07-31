@@ -1,3 +1,4 @@
+mod codex_union;
 mod storage;
 
 use std::{
@@ -94,6 +95,7 @@ impl ExplicitSourceCatalogAuthority {
         validate_explicit_source_catalog_snapshot_roots(data_root, &snapshot)
     }
 
+    #[cfg(test)]
     pub(crate) fn remove_shadowed_automatic_routes(
         &self,
         data_root: &Path,
@@ -104,6 +106,7 @@ impl ExplicitSourceCatalogAuthority {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn register_routes(
         &self,
         data_root: &Path,
@@ -116,6 +119,7 @@ impl ExplicitSourceCatalogAuthority {
             base_generation,
             build,
             &snapshot,
+            false,
         )
     }
 
@@ -419,13 +423,20 @@ fn remove_automatic_routes_shadowed_by_snapshot(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn register_explicit_source_catalog_routes(
     data_root: &Path,
     base_generation: Option<&VerifiedIndex>,
     build: &mut SourceBackedAutomaticRegistryBuild,
 ) -> Result<ExplicitSourceCatalogAuthority> {
     let snapshot = load_catalog(data_root)?;
-    register_explicit_source_catalog_snapshot_routes(data_root, base_generation, build, &snapshot)?;
+    register_explicit_source_catalog_snapshot_routes(
+        data_root,
+        base_generation,
+        build,
+        &snapshot,
+        false,
+    )?;
     Ok(snapshot.authority)
 }
 
@@ -434,8 +445,12 @@ fn register_explicit_source_catalog_snapshot_routes(
     base_generation: Option<&VerifiedIndex>,
     build: &mut SourceBackedAutomaticRegistryBuild,
     snapshot: &ExplicitSourceCatalogSnapshot,
+    codex_session_roots_merged: bool,
 ) -> Result<()> {
     for entry in &snapshot.entries {
+        if codex_session_roots_merged && is_enabled_codex_session_tree(entry)? {
+            continue;
+        }
         let provider = entry.provider()?;
         let certified_format = entry.certified_source_format()?;
         if build.registry.routes().any(|route| {
@@ -502,6 +517,9 @@ fn register_explicit_source_catalog_snapshot_routes(
     };
 
     for entry in &snapshot.entries {
+        if codex_session_roots_merged && is_enabled_codex_session_tree(entry)? {
+            continue;
+        }
         if entry.enabled {
             let source = source_from_catalog_entry(entry, true)?;
             validate_explicit_source_root(data_root, &source)?;
@@ -530,6 +548,12 @@ fn register_explicit_source_catalog_snapshot_routes(
         }
     }
     Ok(())
+}
+
+fn is_enabled_codex_session_tree(entry: &CatalogEntry) -> Result<bool> {
+    Ok(entry.enabled
+        && entry.provider()? == CaptureProvider::Codex
+        && entry.source_format == "codex_session_jsonl_tree")
 }
 
 fn register_enabled_catalog_route(

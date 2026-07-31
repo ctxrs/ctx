@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 use crate::{
     commands::import::{
-        load_explicit_source_catalog_authority, register_explicit_source_catalog_routes,
-        validate_explicit_source_catalog_roots, ExplicitSourceCatalogAuthority,
+        load_explicit_source_catalog_authority, validate_explicit_source_catalog_roots,
+        ExplicitSourceCatalogAuthority,
     },
     compact_json,
     config::{AppConfig, DaemonMode},
