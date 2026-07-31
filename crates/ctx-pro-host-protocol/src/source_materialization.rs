@@ -42,6 +42,7 @@ const MAX_SOURCE_ENCODED_CONTENT_BYTES: usize = MAX_SOURCE_CONTENT_BYTES.div_cei
 include!("source_materialization/manifest.rs");
 include!("source_materialization/records.rs");
 include!("source_materialization/lifecycle.rs");
+include!("source_materialization/batch.rs");
 include!("source_materialization/helpers.rs");
 
 #[cfg(test)]
