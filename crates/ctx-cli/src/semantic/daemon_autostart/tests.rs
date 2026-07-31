@@ -5,22 +5,37 @@ use ctx_history_core::database_path;
 use std::sync::{Arc, Barrier};
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
+const DAEMON_ENV_PROBE_EXPECTED_CHANNEL: &str = "CTX_DAEMON_ENV_PROBE_EXPECTED_CHANNEL";
+const DAEMON_ENV_PRO_CHANNEL: &str = "CTX_PRO_CHANNEL";
 const DAEMON_ENV_PROBE_TEST: &str =
-    "semantic::daemon_autostart::tests::daemon_child_environment_is_narrow_and_release_sanitized";
+    "semantic::daemon_autostart::telemetry_tests::daemon_child_environment_preserves_supported_pro_channel_and_strips_authority";
 const DAEMON_ENV_HOSTILE: &str = "CTX_UNTRUSTED_DAEMON_AMBIENT_SECRET";
 const DAEMON_ENV_ALLOWED_SENTINEL: &str = "/ctx-daemon-allowed-home";
 
 #[test]
-fn daemon_child_environment_is_narrow_and_release_sanitized() -> Result<()> {
+fn daemon_child_environment_preserves_supported_pro_channel_and_strips_authority() -> Result<()> {
     match env::var(DAEMON_ENV_PROBE_STAGE).as_deref() {
         Ok("final") => {
+            let expected_channel = env::var(DAEMON_ENV_PROBE_EXPECTED_CHANNEL)?;
             assert_eq!(env::var("HOME").as_deref(), Ok(DAEMON_ENV_ALLOWED_SENTINEL));
+            if expected_channel == "default" {
+                assert!(env::var_os(DAEMON_ENV_PRO_CHANNEL).is_none());
+            } else {
+                assert_eq!(
+                    env::var(DAEMON_ENV_PRO_CHANNEL).as_deref(),
+                    Ok(expected_channel.as_str())
+                );
+            }
             assert!(env::var_os(DAEMON_ENV_HOSTILE).is_none());
             assert!(env::var_os("CTX_RELEASE_INHERITED_AUTHORITY").is_none());
             assert!(env::var_os("CTX_RELEASE_CONFIGURED_AUTHORITY").is_none());
+            assert!(env::var_os("CTX_PRO_STAGING_ACCESS_CLIENT_SECRET").is_none());
+            assert!(env::var_os("CTX_PRO_QUALIFICATION_HELPER_PATH").is_none());
+            assert!(env::var_os("CTX_PRO_API_URL").is_none());
             return Ok(());
         }
         Ok("inherited") => {
+            let expected_channel = env::var(DAEMON_ENV_PROBE_EXPECTED_CHANNEL)?;
             assert_eq!(env::var(DAEMON_ENV_HOSTILE).as_deref(), Ok("attacker"));
             assert_eq!(
                 env::var("CTX_RELEASE_INHERITED_AUTHORITY").as_deref(),
@@ -31,21 +46,44 @@ fn daemon_child_environment_is_narrow_and_release_sanitized() -> Result<()> {
             descendant
                 .args(["--exact", DAEMON_ENV_PROBE_TEST, "--nocapture"])
                 .env(DAEMON_ENV_PROBE_STAGE, "final")
+                .env(DAEMON_ENV_PROBE_EXPECTED_CHANNEL, &expected_channel)
                 .env("CTX_RELEASE_CONFIGURED_AUTHORITY", "attacker");
-            assert!(spawn_daemon_child(&mut descendant)?.wait()?.success());
+            if expected_channel == "invalid" {
+                let error = spawn_daemon_child(&mut descendant)
+                    .expect_err("unsupported Pro channel must fail before child launch");
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                assert!(error.to_string().contains("must be stable or staging"));
+            } else {
+                assert!(spawn_daemon_child(&mut descendant)?.wait()?.success());
+            }
             return Ok(());
         }
         _ => {}
     }
 
-    let mut inherited = Command::new(env::current_exe()?);
-    inherited
-        .args(["--exact", DAEMON_ENV_PROBE_TEST, "--nocapture"])
-        .env(DAEMON_ENV_PROBE_STAGE, "inherited")
-        .env(DAEMON_ENV_HOSTILE, "attacker")
-        .env("CTX_RELEASE_INHERITED_AUTHORITY", "attacker")
-        .env("HOME", DAEMON_ENV_ALLOWED_SENTINEL);
-    assert!(inherited.status()?.success());
+    for (expected_channel, channel) in [
+        ("default", None),
+        ("stable", Some("stable")),
+        ("staging", Some("staging")),
+        ("invalid", Some("preview")),
+    ] {
+        let mut inherited = Command::new(env::current_exe()?);
+        inherited
+            .args(["--exact", DAEMON_ENV_PROBE_TEST, "--nocapture"])
+            .env(DAEMON_ENV_PROBE_STAGE, "inherited")
+            .env(DAEMON_ENV_PROBE_EXPECTED_CHANNEL, expected_channel)
+            .env(DAEMON_ENV_HOSTILE, "attacker")
+            .env("CTX_RELEASE_INHERITED_AUTHORITY", "attacker")
+            .env("CTX_PRO_STAGING_ACCESS_CLIENT_SECRET", "attacker")
+            .env("CTX_PRO_QUALIFICATION_HELPER_PATH", "/attacker/helper")
+            .env("CTX_PRO_API_URL", "https://attacker.invalid")
+            .env("HOME", DAEMON_ENV_ALLOWED_SENTINEL)
+            .env_remove(DAEMON_ENV_PRO_CHANNEL);
+        if let Some(channel) = channel {
+            inherited.env(DAEMON_ENV_PRO_CHANNEL, channel);
+        }
+        assert!(inherited.status()?.success());
+    }
     Ok(())
 }
 
