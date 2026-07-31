@@ -9,7 +9,7 @@ use crate::{
 
 use super::super::{
     capture::CRUSH_SQLITE_VALUE_OVERHEAD_BYTES,
-    projection::{decode_message_child, decode_session, optional_text},
+    projection::{decode_message_child, decode_session, decode_session_at, optional_text},
     source::{
         message_projection, message_session_join, optional_session_column, retained_length_expr,
         session_projection,
@@ -234,10 +234,8 @@ pub(super) fn load_message_batch(
             .unwrap_or(usize::MAX)
             .saturating_add(CRUSH_NATIVE_PAGE_OVERHEAD_BYTES);
             let session = if child.parent_rowid.is_some() {
-                let mut session_values = Vec::with_capacity(10);
-                session_values.push(values[0].clone());
-                session_values.extend_from_slice(&values[13..22]);
-                let session = decode_session(&session_values)?;
+                let session = decode_session_at(&values, 13)?
+                    .ok_or(CaptureError::SourceChangedDuringCapture)?;
                 if session.id != child.message.session_id {
                     return Err(CaptureError::SourceChangedDuringCapture);
                 }

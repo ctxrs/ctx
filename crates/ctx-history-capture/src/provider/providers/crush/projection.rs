@@ -206,7 +206,7 @@ fn decode_message_at(values: &[NativeSqliteValue], offset: usize) -> Result<Crus
     })
 }
 
-fn decode_session_at(
+pub(super) fn decode_session_at(
     values: &[NativeSqliteValue],
     offset: usize,
 ) -> Result<Option<CrushSessionRow>> {
