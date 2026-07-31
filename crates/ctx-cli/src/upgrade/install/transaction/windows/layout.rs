@@ -441,15 +441,18 @@ pub(super) fn finish_committed(
         }
         let path = transaction.paths[index].clone();
         let result = if path.backup.try_exists()? {
-            if path.label == "ctx binary" {
-                let durable = backup_path(&transaction.install_path);
-                retry_io(|| move_replace_file(&path.backup, &durable))
-            } else {
-                retry_io(|| remove_path_if_present(&path.backup, path.kind))
-            }
+            retry_io(|| remove_path_if_present(&path.backup, path.kind))
         } else {
             Ok(())
-        };
+        }
+        .and_then(|()| {
+            if path.label == "ctx binary" {
+                let durable = backup_path(&transaction.install_path);
+                retry_io(|| remove_path_if_present(&durable, JournalPathKind::File))
+            } else {
+                Ok(())
+            }
+        });
         match result {
             Ok(()) => {
                 transaction.paths[index].state = JournalPathState::Cleaned;

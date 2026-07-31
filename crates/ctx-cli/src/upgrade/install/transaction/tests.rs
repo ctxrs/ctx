@@ -490,7 +490,7 @@ fn schema_two_interrupted_publication_recovers_by_rolling_back_current_format_in
 
 #[cfg(unix)]
 #[test]
-fn schema_two_interrupted_commit_keeps_published_install_and_finishes_cleanup() {
+fn schema_two_interrupted_commit_keeps_published_install_and_discards_old_binary() {
     let temp = tempdir().unwrap();
     let (mut transaction, target, marker) =
         interrupted_schema_two_binary_publication(temp.path(), JournalPhase::Committed);
@@ -500,10 +500,7 @@ fn schema_two_interrupted_commit_keeps_published_install_and_finishes_cleanup() 
     assert_eq!(outcome, RecoveryOutcome::Committed);
     assert_eq!(fs::read(&target).unwrap(), b"replacement");
     assert_eq!(fs::read(&marker).unwrap(), b"replacement-marker");
-    assert_eq!(
-        fs::read(temp.path().join("ctx.previous")).unwrap(),
-        b"current-format"
-    );
+    assert!(!temp.path().join("ctx.previous").exists());
     assert!(!journal::install_transaction_path(&target).exists());
 }
 
