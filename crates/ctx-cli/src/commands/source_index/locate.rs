@@ -17,8 +17,8 @@ use crate::{
 use super::{
     render::{pretty_json_stdout_bytes, render_locate_document, timestamp_json},
     shared::{
-        event_source_json, open_index, resolve_event, resolve_session, session_source_json,
-        source_path_exists, validate_ctx_id, validate_session_selector,
+        event_source_json, open_index, resolve_event, resolve_lookup_for_output, resolve_session,
+        session_source_json, source_path_exists, validate_ctx_id, validate_session_selector,
     },
 };
 
@@ -85,7 +85,12 @@ pub(crate) fn run_locate(
             (value, args.format.is_json())
         }
         LocateTarget::Event(args) => {
-            let event = resolve_event(&index, &args.id)?;
+            let event = resolve_lookup_for_output(
+                resolve_event(&index, &args.id),
+                !args.format.is_json(),
+                r#"ctx search "<query>" --events --verbose"#,
+                ui,
+            )?;
             let value = locate_event_value(&event);
             (value, args.format.is_json())
         }

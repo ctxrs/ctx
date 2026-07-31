@@ -49,6 +49,8 @@ mod tests {
         },
     };
 
+    mod recovery;
+
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";
 
