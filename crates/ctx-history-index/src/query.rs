@@ -17,33 +17,52 @@ use ctx_history_core::{
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{
-    collector::{Count, DocSetCollector, TopDocs},
+    collector::{Collector, Count, DocSetCollector, SegmentCollector, TopDocs},
     query::{
         AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, RegexQuery,
         TermQuery, TermSetQuery,
     },
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
-    DocAddress, DocSet, Score, TantivyDocument, Term, TERMINATED,
+    DocAddress, DocId, DocSet, Score, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
+    TERMINATED,
 };
 use uuid::Uuid;
 
 use super::{fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex};
-use crate::index_document::{core_content_bytes, SourceEventOrderKey};
+use crate::index_document::{
+    core_content_bytes, SourceEventOrderKey, StoredQueryMetadata, MAX_QUERY_METADATA_BYTES,
+};
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
 use crate::analyzer::BODY_ANALYZER;
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
+const SESSION_ID_HIGH_FIELD: &str = "session_id_high";
+const SESSION_ID_LOW_FIELD: &str = "session_id_low";
 const EVENT_SEQUENCE_FIELD: &str = "event_sequence";
 const OCCURRED_AT_UNIX_MS_FIELD: &str = "occurred_at_unix_ms";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
+const SOURCE_KEY_FIELD: &str = "source_key";
+const QUERY_METADATA_FIELD: &str = "query_metadata";
+const CORE_CONTENT_BYTES_FIELD: &str = "core_content_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 
 #[cfg(test)]
 thread_local! {
+    static STORED_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_stored_event_record_materializations() {
+    STORED_EVENT_RECORD_MATERIALIZATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn stored_event_record_materializations() -> usize {
+    STORED_EVENT_RECORD_MATERIALIZATIONS.get()
 }
 
 #[cfg(test)]
@@ -445,9 +464,88 @@ impl SessionEventCoordinate {
 pub(super) fn stored_event_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
-    fields: Fields,
+    _fields: Fields,
 ) -> Result<EventRecord> {
-    Ok(stored_core_event_record(searcher, address, fields)?.event)
+    #[cfg(test)]
+    STORED_EVENT_RECORD_MATERIALIZATIONS
+        .set(STORED_EVENT_RECORD_MATERIALIZATIONS.get().saturating_add(1));
+    let segment = searcher
+        .segment_readers()
+        .get(address.segment_ord as usize)
+        .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    let column = segment
+        .fast_fields()
+        .bytes(QUERY_METADATA_FIELD)?
+        .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    let mut term_ords = column.term_ords(address.doc_id);
+    let term_ord = term_ords
+        .next()
+        .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    if term_ords.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let mut encoded = Vec::new();
+    if !column.ord_to_bytes(term_ord, &mut encoded)? {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let event = query_metadata_event_record(&encoded)?;
+    if fast_uuid(
+        segment,
+        address.doc_id,
+        EVENT_ID_HIGH_FIELD,
+        EVENT_ID_LOW_FIELD,
+    )? != event.event_id.as_uuid()
+        || fast_uuid(
+            segment,
+            address.doc_id,
+            SESSION_ID_HIGH_FIELD,
+            SESSION_ID_LOW_FIELD,
+        )? != event.session_id.as_uuid()
+        || fast_string(segment, address.doc_id, EVENT_IDENTITY_DIGEST_FIELD)?
+            != hex(&event.event_id.digest())
+        || fast_string(segment, address.doc_id, SOURCE_KEY_FIELD)? != source_token(&event.source)
+    {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    Ok(event)
+}
+
+fn fast_uuid(
+    segment: &SegmentReader,
+    doc: DocId,
+    high_field: &'static str,
+    low_field: &'static str,
+) -> Result<Uuid> {
+    let high = segment
+        .fast_fields()
+        .u64(high_field)?
+        .first(doc)
+        .ok_or(IndexError::InvalidStoredDocumentField(high_field))?;
+    let low = segment
+        .fast_fields()
+        .u64(low_field)?
+        .first(doc)
+        .ok_or(IndexError::InvalidStoredDocumentField(low_field))?;
+    Ok(Uuid::from_u128((u128::from(high) << 64) | u128::from(low)))
+}
+
+fn fast_string(segment: &SegmentReader, doc: DocId, field_name: &'static str) -> Result<String> {
+    let column = segment
+        .fast_fields()
+        .str(field_name)?
+        .ok_or(IndexError::InvalidStoredDocumentField(field_name))?;
+    let mut term_ords = column.term_ords(doc);
+    let term_ord = term_ords
+        .next()
+        .ok_or(IndexError::InvalidStoredDocumentField(field_name))?;
+    if term_ords.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    let mut value = String::new();
+    if !column.ord_to_str(term_ord, &mut value)? {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    Ok(value)
 }
 
 pub(super) fn stored_core_event_record(
@@ -463,123 +561,120 @@ pub(super) fn stored_core_event_record_with_size(
     address: DocAddress,
     fields: Fields,
 ) -> Result<(CoreEventRecord, usize)> {
+    let event = stored_event_record(searcher, address, fields)?;
+    let document: TantivyDocument = searcher.doc(address)?;
+    stored_core_event_record_from_document(&document, fields, event)
+}
+
+fn note_stored_core_event_record_materialization() {
     #[cfg(test)]
     STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.set(
         STORED_CORE_EVENT_RECORD_MATERIALIZATIONS
             .get()
             .saturating_add(1),
     );
-    let document: TantivyDocument = searcher.doc(address)?;
-    let encoded_core_record = required_bytes(&document, fields.core_record, "core_record")?;
+}
+
+fn query_metadata_event_record(encoded: &[u8]) -> Result<EventRecord> {
+    if encoded.is_empty() || encoded.len() > MAX_QUERY_METADATA_BYTES {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let metadata: StoredQueryMetadata = serde_json::from_slice(encoded)?;
+    metadata.source.validate_contract()?;
+    metadata.event_id.validate_contract()?;
+    metadata.session_id.validate_contract()?;
+    metadata.root_session_id.validate_contract()?;
+    if let Some(parent_session_id) = metadata.parent_session_id {
+        parent_session_id.validate_contract()?;
+        if parent_session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+    }
+    if let Some(native_event_id) = metadata.native_event_id.as_ref() {
+        native_event_id.validate_contract()?;
+    }
+    let invalid_text = metadata.agent_type.is_empty()
+        || metadata.event_type.is_empty()
+        || metadata.agent_type.len() > super::MAX_DOCUMENT_METADATA_BYTES
+        || metadata.event_type.len() > super::MAX_DOCUMENT_METADATA_BYTES
+        || [
+            metadata.provider_session_id.as_deref(),
+            metadata.branch.as_deref(),
+            metadata.role.as_deref(),
+            metadata.workspace.as_deref(),
+            metadata.cwd.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.is_empty() || value.len() > super::MAX_DOCUMENT_METADATA_BYTES);
+    if metadata.event_id.entity_kind() != StableEntityKind::Event
+        || metadata.session_id.entity_kind() != StableEntityKind::Session
+        || metadata.root_session_id.entity_kind() != StableEntityKind::Session
+        || metadata.event_id.source_digest() != metadata.source.identity().digest()
+        || metadata.event_id.source_descriptor_digest() != metadata.source.exact_descriptor_digest()
+        || metadata.session_id.source_digest() != metadata.source.identity().digest()
+        || metadata.session_id.source_descriptor_digest()
+            != metadata.source.exact_descriptor_digest()
+        || invalid_text
+    {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let provider = metadata.source.provider().to_owned();
+    let source_format = metadata.source.source_format().to_owned();
+    Ok(EventRecord {
+        event_id: metadata.event_id,
+        session_id: metadata.session_id,
+        parent_session_id: metadata.parent_session_id,
+        root_session_id: metadata.root_session_id,
+        source: metadata.source,
+        provider,
+        source_format,
+        provider_session_id: metadata.provider_session_id,
+        native_event_id: metadata.native_event_id,
+        branch: metadata.branch,
+        source_path: None,
+        agent_type: metadata.agent_type,
+        is_primary: metadata.is_primary,
+        event_sequence: metadata.event_sequence,
+        occurred_at_unix_ms: metadata.occurred_at_unix_ms,
+        event_type: metadata.event_type,
+        role: metadata.role,
+        workspace: metadata.workspace,
+        cwd: metadata.cwd,
+        touched_files: Vec::new(),
+    })
+}
+
+fn stored_core_event_record_from_document(
+    document: &TantivyDocument,
+    fields: Fields,
+    event: EventRecord,
+) -> Result<(CoreEventRecord, usize)> {
+    note_stored_core_event_record_materialization();
+    let encoded_core_record = required_bytes(document, fields.core_record, "core_record")?;
     let stored_core_bytes = encoded_core_record.len();
     let core_record = CoreRecord::decode_stored(encoded_core_record)?;
-    let event_id = stored_identity(
-        &document,
-        fields.event_identity,
-        fields.event_id,
-        fields.event_identity_digest,
-        StableEntityKind::Event,
-        "event_identity",
-    )?;
-    let session_id = stored_identity(
-        &document,
-        fields.session_identity,
-        fields.session_id,
-        fields.session_identity_digest,
-        StableEntityKind::Session,
-        "session_identity",
-    )?;
-    let stored_source = required_string(&document, fields.source_key, "source_key")?;
-    if stored_source != source_token(&core_record.source)
-        || event_id != core_record.event_id
-        || session_id != core_record.session_id
+    if event.event_id != core_record.event_id
+        || event.session_id != core_record.session_id
+        || event.parent_session_id != core_record.parent_session_id
+        || event.root_session_id != core_record.root_session_id
+        || event.source != core_record.source
+        || event.native_event_id != core_record.native_event_id
+        || event.provider_session_id != core_record.provider_session_id
+        || event.branch != core_record.branch
+        || event.agent_type != core_record.agent_type
+        || event.is_primary != core_record.is_primary
+        || event.event_sequence != core_record.event_sequence
+        || event.occurred_at_unix_ms != core_record.occurred_at_unix_ms
+        || event.event_type != core_record.event_type
+        || event.role != core_record.role
+        || event.workspace != core_record.workspace
+        || event.cwd != core_record.cwd
     {
         return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }
 
-    let provider = required_string(&document, fields.provider, "provider")?;
-    let source_format = required_string(&document, fields.source_format, "source_format")?;
-    if provider != core_record.source.provider()
-        || source_format != core_record.source.source_format()
-    {
-        return Err(IndexError::InvalidStoredDocumentField("provider"));
-    }
-    let parent_session_id = optional_stored_identity(
-        &document,
-        fields.parent_session_identity,
-        fields.parent_session_id,
-        "parent_session_identity",
-    )?;
-    let root_session_id = stored_identity_without_digest(
-        &document,
-        fields.root_session_identity,
-        fields.root_session_id,
-        "root_session_identity",
-    )?;
-    let provider_session_id = optional_string(&document, fields.provider_session_id)?;
-    let branch = optional_string(&document, fields.branch)?;
-    let agent_type = required_string(&document, fields.agent_type, "agent_type")?;
-    let is_primary = required_bool(&document, fields.is_primary, "is_primary")?;
-    let event_sequence = required_u64(&document, fields.event_sequence, "event_sequence")?;
-    let occurred_at_unix_ms = optional_i64(&document, fields.occurred_at_unix_ms)?;
-    let event_type = required_string(&document, fields.event_type, "event_type")?;
-    let role = optional_string(&document, fields.role)?;
-    let workspace = optional_string(&document, fields.workspace)?;
-    let cwd = optional_string(&document, fields.cwd)?;
-    if parent_session_id != core_record.parent_session_id
-        || root_session_id != core_record.root_session_id
-        || provider_session_id != core_record.provider_session_id
-        || branch != core_record.branch
-        || agent_type != core_record.agent_type
-        || is_primary != core_record.is_primary
-        || event_sequence != core_record.event_sequence
-        || occurred_at_unix_ms != core_record.occurred_at_unix_ms
-        || event_type != core_record.event_type
-        || role != core_record.role
-        || workspace != core_record.workspace
-        || cwd != core_record.cwd
-    {
-        return Err(IndexError::InvalidStoredDocumentField("core_record"));
-    }
-    let touched_files = document
-        .get_all(fields.touched_file)
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|path| !path.is_empty())
-                .map(str::to_owned)
-                .ok_or(IndexError::InvalidStoredDocumentField("touched_file"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok((
-        CoreEventRecord {
-            event: EventRecord {
-                event_id,
-                session_id,
-                parent_session_id,
-                root_session_id,
-                source: core_record.source.clone(),
-                provider,
-                source_format,
-                provider_session_id,
-                native_event_id: core_record.native_event_id.clone(),
-                branch,
-                source_path: optional_string(&document, fields.source_path)?,
-                agent_type,
-                is_primary,
-                event_sequence,
-                occurred_at_unix_ms,
-                event_type,
-                role,
-                workspace,
-                cwd,
-                touched_files,
-            },
-            core_record,
-        },
-        stored_core_bytes,
-    ))
+    Ok((CoreEventRecord { event, core_record }, stored_core_bytes))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -881,103 +976,6 @@ fn escape_regex_literal(value: &str) -> String {
     escaped
 }
 
-fn stored_identity(
-    document: &TantivyDocument,
-    identity_field: tantivy::schema::Field,
-    uuid_field: tantivy::schema::Field,
-    digest_field: tantivy::schema::Field,
-    expected_kind: StableEntityKind,
-    field_name: &'static str,
-) -> Result<StableEntityId> {
-    let identity =
-        StableEntityId::decode_canonical(required_bytes(document, identity_field, field_name)?)?;
-    let uuid = required_string(document, uuid_field, field_name)?;
-    let digest = required_string(document, digest_field, field_name)?;
-    if identity.entity_kind() != expected_kind
-        || uuid != identity.as_uuid().to_string()
-        || digest != hex(&identity.digest())
-    {
-        return Err(IndexError::InvalidStoredDocumentField(field_name));
-    }
-    Ok(identity)
-}
-
-fn stored_identity_without_digest(
-    document: &TantivyDocument,
-    identity_field: tantivy::schema::Field,
-    uuid_field: tantivy::schema::Field,
-    field_name: &'static str,
-) -> Result<StableEntityId> {
-    decode_stored_session_identity(
-        required_bytes(document, identity_field, field_name)?,
-        required_string(document, uuid_field, field_name)?,
-        field_name,
-    )
-}
-
-fn optional_stored_identity(
-    document: &TantivyDocument,
-    identity_field: tantivy::schema::Field,
-    uuid_field: tantivy::schema::Field,
-    field_name: &'static str,
-) -> Result<Option<StableEntityId>> {
-    let identity = document
-        .get_first(identity_field)
-        .and_then(|value| value.as_bytes());
-    let uuid = document
-        .get_first(uuid_field)
-        .and_then(|value| value.as_str());
-    match (identity, uuid) {
-        (None, None) => Ok(None),
-        (Some(identity), Some(uuid)) => {
-            decode_stored_session_identity(identity, uuid.to_owned(), field_name).map(Some)
-        }
-        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
-    }
-}
-
-fn decode_stored_session_identity(
-    identity: &[u8],
-    uuid: String,
-    field_name: &'static str,
-) -> Result<StableEntityId> {
-    let identity = StableEntityId::decode_canonical(identity)?;
-    if identity.entity_kind() != StableEntityKind::Session || uuid != identity.as_uuid().to_string()
-    {
-        return Err(IndexError::InvalidStoredDocumentField(field_name));
-    }
-    Ok(identity)
-}
-
-fn required_string(
-    document: &TantivyDocument,
-    field: tantivy::schema::Field,
-    field_name: &'static str,
-) -> Result<String> {
-    document
-        .get_first(field)
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or(IndexError::InvalidStoredDocumentField(field_name))
-}
-
-fn optional_string(
-    document: &TantivyDocument,
-    field: tantivy::schema::Field,
-) -> Result<Option<String>> {
-    document
-        .get_first(field)
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .ok_or(IndexError::InvalidStoredDocumentField("optional_text"))
-        })
-        .transpose()
-}
-
 fn required_bytes<'a>(
     document: &'a TantivyDocument,
     field: tantivy::schema::Field,
@@ -987,40 +985,6 @@ fn required_bytes<'a>(
         .get_first(field)
         .and_then(|value| value.as_bytes())
         .ok_or(IndexError::InvalidStoredDocumentField(field_name))
-}
-
-fn required_u64(
-    document: &TantivyDocument,
-    field: tantivy::schema::Field,
-    field_name: &'static str,
-) -> Result<u64> {
-    document
-        .get_first(field)
-        .and_then(|value| value.as_u64())
-        .ok_or(IndexError::InvalidStoredDocumentField(field_name))
-}
-
-fn required_bool(
-    document: &TantivyDocument,
-    field: tantivy::schema::Field,
-    field_name: &'static str,
-) -> Result<bool> {
-    match required_u64(document, field, field_name)? {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
-    }
-}
-
-fn optional_i64(document: &TantivyDocument, field: tantivy::schema::Field) -> Result<Option<i64>> {
-    document
-        .get_first(field)
-        .map(|value| {
-            value.as_i64().ok_or(IndexError::InvalidStoredDocumentField(
-                "occurred_at_unix_ms",
-            ))
-        })
-        .transpose()
 }
 
 fn canonical_uuid_prefix(prefix: &str) -> Result<String> {

@@ -6,7 +6,8 @@ use tantivy::schema::{
 };
 
 use ctx_history_core::{
-    CoreContent, CoreRecord, SourceKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreContent, CoreRecord, SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
+    MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
 use crate::{Fields, IndexError, Result};
@@ -19,6 +20,62 @@ const SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_EVENT_
 const SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET + 4;
 const SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN: usize = 8;
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
+/// The complete body-free query envelope is bounded independently from Core.
+/// One MiB covers every contract-bounded identity and metadata field without
+/// imposing a new limit on otherwise valid Core records.
+pub(crate) const MAX_QUERY_METADATA_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredQueryMetadata {
+    pub(crate) event_id: StableEntityId,
+    pub(crate) session_id: StableEntityId,
+    pub(crate) parent_session_id: Option<StableEntityId>,
+    pub(crate) root_session_id: StableEntityId,
+    pub(crate) source: SourceKey,
+    pub(crate) provider_session_id: Option<String>,
+    pub(crate) native_event_id: Option<TypedKey>,
+    pub(crate) branch: Option<String>,
+    pub(crate) agent_type: String,
+    pub(crate) is_primary: bool,
+    pub(crate) event_sequence: u64,
+    pub(crate) occurred_at_unix_ms: Option<i64>,
+    pub(crate) event_type: String,
+    pub(crate) role: Option<String>,
+    pub(crate) workspace: Option<String>,
+    pub(crate) cwd: Option<String>,
+}
+
+impl StoredQueryMetadata {
+    fn encode(record: &CoreRecord) -> Result<Vec<u8>> {
+        let encoded = serde_json::to_vec(&Self {
+            event_id: record.event_id,
+            session_id: record.session_id,
+            parent_session_id: record.parent_session_id,
+            root_session_id: record.root_session_id,
+            source: record.source.clone(),
+            provider_session_id: record.provider_session_id.clone(),
+            native_event_id: record.native_event_id.clone(),
+            branch: record.branch.clone(),
+            agent_type: record.agent_type.clone(),
+            is_primary: record.is_primary,
+            event_sequence: record.event_sequence,
+            occurred_at_unix_ms: record.occurred_at_unix_ms,
+            event_type: record.event_type.clone(),
+            role: record.role.clone(),
+            workspace: record.workspace.clone(),
+            cwd: record.cwd.clone(),
+        })?;
+        if encoded.len() > MAX_QUERY_METADATA_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "query_metadata",
+                actual: encoded.len(),
+                maximum: MAX_QUERY_METADATA_BYTES,
+            });
+        }
+        Ok(encoded)
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct IndexSourceFields {
@@ -298,6 +355,7 @@ impl IndexDocument {
             core_record_bytes.len(),
             core_content_bytes,
         )?;
+        let query_metadata = StoredQueryMetadata::encode(&record)?;
         let event_identity = record.event_id.encode_canonical()?;
         let session_identity = record.session_id.encode_canonical()?;
         let parent_session_identity = record
@@ -326,6 +384,9 @@ impl IndexDocument {
             crate::hex(&record.session_id.digest()),
         );
         target.add_bytes(fields.session_identity, session_identity);
+        let session_uuid = record.session_id.as_uuid().as_u128();
+        target.add_u64(fields.session_id_high, (session_uuid >> 64) as u64);
+        target.add_u64(fields.session_id_low, session_uuid as u64);
         if let (Some(parent_session_id), Some(parent_session_identity)) =
             (record.parent_session_id, parent_session_identity)
         {
@@ -337,6 +398,17 @@ impl IndexDocument {
         target.add_shared_text(fields.source_key, source.token);
         target.add_shared_text(fields.provider, source.provider);
         target.add_shared_text(fields.source_format, source.source_format);
+        target.add_bytes(fields.query_metadata, query_metadata);
+        if record.source.provider() == "custom" {
+            if let Some(TypedKey::Composite(values)) = record.native_event_id.as_ref() {
+                if let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
+                    values.as_slice()
+                {
+                    target.add_text(fields.custom_provider_key, provider_key.clone());
+                    target.add_text(fields.custom_source_id, source_id.clone());
+                }
+            }
+        }
         if let Some(provider_session_id) = record.provider_session_id {
             target.add_text(fields.provider_session_id, provider_session_id);
         }
@@ -376,6 +448,11 @@ impl IndexDocument {
                 );
             }
         }
+        target.add_u64(
+            fields.core_content_bytes,
+            u64::try_from(core_content_bytes)
+                .map_err(|_| IndexError::WriterInvariant("Core content size does not fit u64"))?,
+        );
         target.add_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
         Ok(target)

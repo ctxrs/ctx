@@ -198,7 +198,7 @@ fn core_builder_preserves_semantic_tail_beyond_sixteen_kib() {
 }
 
 #[test]
-fn core_builder_reuses_one_bounded_session_for_multiple_lite_turns() {
+fn core_builder_pairs_multiple_lite_turns_with_bounded_forward_queries() {
     let fixture = CoreFixture::new();
     let index = fixture.index(vec![
         fixture.document(1, EventRole::User, "first question"),
@@ -225,15 +225,15 @@ fn core_builder_reuses_one_bounded_session_for_multiple_lite_turns() {
         second.text,
         "user:\nsecond question\n\nassistant:\nsecond answer"
     );
-    assert_eq!(builder.session_cache.sessions.len(), 1);
 }
 
 #[test]
-fn core_builder_fails_closed_when_lite_turn_session_exceeds_cache_bound() {
+fn core_builder_returns_user_only_when_forward_record_budget_is_exhausted() {
     let fixture = CoreFixture::new();
     let index = fixture.index(vec![
         fixture.document(1, EventRole::User, "bounded question"),
-        fixture.document(2, EventRole::Assistant, "bounded answer"),
+        fixture.document(2, EventRole::Assistant, "early bounded answer"),
+        fixture.document(3, EventRole::Assistant, "late bounded answer"),
     ]);
     let anchor = index
         .core_events_for_session(fixture.session_id.as_uuid())
@@ -243,23 +243,18 @@ fn core_builder_fails_closed_when_lite_turn_session_exceeds_cache_bound() {
         .unwrap();
     let mut builder = CoreSemanticDocumentBuilder {
         index: &index,
-        session_cache: LiteTurnSessionCache::new(1, 1, MAX_LITE_TURN_CACHED_CORE_BYTES),
+        maximum_pairing_records: 1,
+        pairing_budget: LITE_TURN_PAIRING_BUDGET,
     };
 
-    let error = builder
-        .build_document(&anchor)
-        .expect_err("an oversized session must not produce a partial lite turn");
+    let document = builder.build_document(&anchor).unwrap().unwrap();
 
-    assert!(error
-        .to_string()
-        .contains("cannot fit the bounded lite-turn session cache"));
-    assert!(builder.session_cache.sessions.is_empty());
-    assert_eq!(builder.session_cache.retained_events, 0);
-    assert_eq!(builder.session_cache.retained_stored_core_bytes, 0);
+    assert_eq!(document.text, "user:\nbounded question");
+    assert_eq!(document.occurred_at_ms, 1);
 }
 
 #[test]
-fn core_builder_many_sessions_stay_within_tiny_lru_bounds() {
+fn core_builder_pairs_many_sessions_without_retaining_a_session_cache() {
     let fixture = CoreFixture::new();
     let mut documents = Vec::new();
     for session in 0..12_u64 {
@@ -283,17 +278,63 @@ fn core_builder_many_sessions_stay_within_tiny_lru_bounds() {
     let mut builder = CoreSemanticDocumentBuilder::new(&index);
 
     for anchor in &anchors {
-        builder.build_document(anchor).unwrap().unwrap();
+        let session = (anchor.event_sequence - 1) / 2;
+        let document = builder.build_document(anchor).unwrap().unwrap();
+        assert_eq!(
+            document.text,
+            format!("user:\nquestion {session}\n\nassistant:\nanswer {session}")
+        );
     }
+}
 
-    assert_eq!(
-        builder.session_cache.sessions.len(),
-        MAX_LITE_TURN_CACHED_SESSIONS
-    );
-    assert_eq!(
-        builder.session_cache.lru.len(),
-        builder.session_cache.sessions.len()
-    );
-    assert!(builder.session_cache.retained_events <= MAX_LITE_TURN_CACHED_EVENTS);
-    assert!(builder.session_cache.retained_stored_core_bytes <= MAX_LITE_TURN_CACHED_CORE_BYTES);
+#[test]
+fn core_builder_returns_user_only_when_pairing_byte_budget_is_exhausted() {
+    let fixture = CoreFixture::new();
+    let index = fixture.index(vec![
+        fixture.document(1, EventRole::User, "byte bounded question"),
+        fixture.document(2, EventRole::Assistant, "first answer"),
+        fixture.document(3, EventRole::Assistant, "second answer"),
+    ]);
+    let anchor = index
+        .core_semantic_event_page(None, 1)
+        .unwrap()
+        .items
+        .remove(0);
+    let mut builder = CoreSemanticDocumentBuilder {
+        index: &index,
+        maximum_pairing_records: MAX_LITE_TURN_PAIRING_RECORDS,
+        pairing_budget: CoreEventPageBudget::new(
+            ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES,
+            1,
+        ),
+    };
+
+    let document = builder.build_document(&anchor).unwrap().unwrap();
+
+    assert_eq!(document.text, "user:\nbyte bounded question");
+    assert_eq!(document.occurred_at_ms, 1);
+}
+
+#[test]
+fn core_builder_large_session_over_4096_events_falls_back_user_only() {
+    const FOLLOWING_EVENTS: u64 = 4_097;
+
+    let fixture = CoreFixture::new();
+    let mut documents = Vec::with_capacity(FOLLOWING_EVENTS as usize + 1);
+    documents.push(fixture.document(1, EventRole::User, "large session question"));
+    for sequence in 2..=FOLLOWING_EVENTS + 1 {
+        documents.push(fixture.document(sequence, EventRole::Assistant, "bounded answer"));
+    }
+    let index = fixture.index(documents);
+    let anchor = index
+        .core_semantic_event_page(None, 1)
+        .unwrap()
+        .items
+        .remove(0);
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+
+    let document = builder.build_document(&anchor).unwrap().unwrap();
+
+    assert_eq!(document.text, "user:\nlarge session question");
+    assert_eq!(document.occurred_at_ms, 1);
 }

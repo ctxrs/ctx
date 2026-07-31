@@ -218,40 +218,21 @@ pub(super) fn search_context_observation(
         .iter()
         .map(|hit| hit.event.session_id.as_uuid())
         .collect::<BTreeSet<_>>();
-    let mut session_events = Vec::<CoreEventRecord>::new();
+    let mut matched_normalized_session_bytes = 0_usize;
     for session_id in session_ids {
-        let Ok(Some(events)) = index
-            .core_events_for_session_if_bounded(session_id, MAX_USAGE_CONTEXT_EVENTS_PER_SESSION)
-        else {
+        let Ok(Some(session_bytes)) = index.core_content_bytes_for_session_if_bounded(
+            session_id,
+            MAX_USAGE_CONTEXT_EVENTS_PER_SESSION,
+        ) else {
             return SearchContextObservation::unavailable();
         };
-        if events.is_empty() {
+        let Some(total) = matched_normalized_session_bytes.checked_add(session_bytes) else {
             return SearchContextObservation::unavailable();
-        }
-        session_events.extend(events);
+        };
+        matched_normalized_session_bytes = total;
     }
-    let Some(matched_normalized_session_bytes) =
-        session_events.iter().try_fold(0_usize, |total, event| {
-            total.checked_add(core_content_bytes(event)?)
-        })
-    else {
-        return SearchContextObservation::unavailable();
-    };
     SearchContextObservation::complete(delivered_context_bytes, matched_normalized_session_bytes)
         .unwrap_or_else(SearchContextObservation::unavailable)
-}
-
-fn core_content_bytes(event: &CoreEventRecord) -> Option<usize> {
-    let content = &event.core_record.content;
-    let body_bytes = content.normalized_body.as_ref().map_or(0, String::len);
-    let structured_bytes = content
-        .structured_content
-        .as_ref()
-        .map(serde_json::to_vec)
-        .transpose()
-        .ok()?
-        .map_or(0, |value| value.len());
-    body_bytes.checked_add(structured_bytes)
 }
 
 pub(super) fn refresh_for_search(
@@ -355,12 +336,17 @@ fn core_records_for_search_hits(
     index: &VerifiedIndex,
     hits: &[SearchHit],
 ) -> Result<HashMap<Uuid, CoreEventRecord>> {
-    let mut records = HashMap::with_capacity(hits.len());
-    for hit in hits {
-        let event_id = hit.event.event_id.as_uuid();
-        let record = index.core_event_by_id(event_id)?.ok_or_else(|| {
-            anyhow!("search event {event_id} is absent from the pinned Core generation")
+    let event_ids = hits
+        .iter()
+        .map(|hit| hit.event.event_id.as_uuid())
+        .collect::<Vec<_>>();
+    let decoded = index
+        .core_events_by_ids_if_bounded(&event_ids, event_ids.len(), usize::MAX)?
+        .ok_or_else(|| {
+            anyhow!("a selected search event is absent from the pinned Core generation")
         })?;
+    let mut records = HashMap::with_capacity(hits.len());
+    for (event_id, record) in event_ids.into_iter().zip(decoded) {
         if records.insert(event_id, record).is_some() {
             return Err(anyhow!("search result duplicated Core event {event_id}"));
         }

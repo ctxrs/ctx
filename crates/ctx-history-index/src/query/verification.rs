@@ -1,13 +1,10 @@
-use ctx_history_core::{CoreRecord, StableEntityId, StableEntityKind};
-use tantivy::{
-    schema::document::{
-        DeserializeError, DocumentDeserialize, DocumentDeserializer, ValueDeserialize,
-        ValueDeserializer, ValueVisitor,
-    },
-    DocAddress,
-};
+use ctx_history_core::StableEntityId;
+use tantivy::DocAddress;
 
-use crate::{hex, source_token, Fields, IndexError, Result, LEXICAL_SCHEMA_VERSION};
+use super::stored_event_record;
+use crate::{source_token, Fields, IndexError, Result, LEXICAL_SCHEMA_VERSION};
+
+const VERIFY_QUERY_METADATA: u32 = 17;
 
 pub(crate) struct VerificationRecord {
     pub(crate) event_id: StableEntityId,
@@ -17,186 +14,8 @@ pub(crate) struct VerificationRecord {
     pub(crate) source_owner: String,
 }
 
-// Verification uses a custom Tantivy document projection. The field ordinals
-// are part of the exact schema checked at the generation boundary; keeping the
-// projection here avoids retaining and then cloning every unrelated stored
-// metadata field for every document.
-const VERIFY_EVENT_ID: u32 = 0;
-const VERIFY_EVENT_IDENTITY_DIGEST: u32 = 1;
-const VERIFY_EVENT_IDENTITY: u32 = 2;
-const VERIFY_SESSION_ID: u32 = 5;
-const VERIFY_SESSION_IDENTITY_DIGEST: u32 = 6;
-const VERIFY_SESSION_IDENTITY: u32 = 7;
-const VERIFY_PARENT_SESSION_ID: u32 = 8;
-const VERIFY_PARENT_SESSION_IDENTITY: u32 = 9;
-const VERIFY_ROOT_SESSION_ID: u32 = 10;
-const VERIFY_ROOT_SESSION_IDENTITY: u32 = 11;
-const VERIFY_SOURCE_KEY: u32 = 12;
-const VERIFY_PROVIDER: u32 = 13;
-const VERIFY_SOURCE_FORMAT: u32 = 14;
-const VERIFY_CORE_RECORD: u32 = 30;
-
-enum VerificationStoredValue {
-    Text(String),
-    Bytes(Vec<u8>),
-    Ignored,
-}
-
-#[derive(Default)]
-struct VerificationStoredDocument {
-    event_id: Option<VerificationStoredValue>,
-    event_identity_digest: Option<VerificationStoredValue>,
-    event_identity: Option<VerificationStoredValue>,
-    session_id: Option<VerificationStoredValue>,
-    session_identity_digest: Option<VerificationStoredValue>,
-    session_identity: Option<VerificationStoredValue>,
-    parent_session_id: Option<VerificationStoredValue>,
-    parent_session_identity: Option<VerificationStoredValue>,
-    root_session_id: Option<VerificationStoredValue>,
-    root_session_identity: Option<VerificationStoredValue>,
-    source_key: Option<VerificationStoredValue>,
-    provider: Option<VerificationStoredValue>,
-    source_format: Option<VerificationStoredValue>,
-    core_record: Option<VerificationStoredValue>,
-}
-
-impl VerificationStoredDocument {
-    fn projected_slot(&mut self, field_id: u32) -> Option<&mut Option<VerificationStoredValue>> {
-        match field_id {
-            VERIFY_EVENT_ID => Some(&mut self.event_id),
-            VERIFY_EVENT_IDENTITY_DIGEST => Some(&mut self.event_identity_digest),
-            VERIFY_EVENT_IDENTITY => Some(&mut self.event_identity),
-            VERIFY_SESSION_ID => Some(&mut self.session_id),
-            VERIFY_SESSION_IDENTITY_DIGEST => Some(&mut self.session_identity_digest),
-            VERIFY_SESSION_IDENTITY => Some(&mut self.session_identity),
-            VERIFY_PARENT_SESSION_ID => Some(&mut self.parent_session_id),
-            VERIFY_PARENT_SESSION_IDENTITY => Some(&mut self.parent_session_identity),
-            VERIFY_ROOT_SESSION_ID => Some(&mut self.root_session_id),
-            VERIFY_ROOT_SESSION_IDENTITY => Some(&mut self.root_session_identity),
-            VERIFY_SOURCE_KEY => Some(&mut self.source_key),
-            VERIFY_PROVIDER => Some(&mut self.provider),
-            VERIFY_SOURCE_FORMAT => Some(&mut self.source_format),
-            VERIFY_CORE_RECORD => Some(&mut self.core_record),
-            _ => None,
-        }
-    }
-}
-
-impl DocumentDeserialize for VerificationStoredDocument {
-    fn deserialize<'de, D>(mut deserializer: D) -> std::result::Result<Self, DeserializeError>
-    where
-        D: DocumentDeserializer<'de>,
-    {
-        let mut document = Self::default();
-        while let Some((field, value)) = deserializer.next_field::<VerificationStoredValue>()? {
-            if let Some(slot) = document.projected_slot(field.field_id()) {
-                if slot.is_none() {
-                    *slot = Some(value);
-                }
-            }
-        }
-        Ok(document)
-    }
-}
-
-struct VerificationValueVisitor;
-
-impl ValueVisitor for VerificationValueVisitor {
-    type Value = VerificationStoredValue;
-
-    fn visit_null(&self) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_string(&self, value: String) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Text(value))
-    }
-
-    fn visit_u64(&self, _value: u64) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_i64(&self, _value: i64) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_f64(&self, _value: f64) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_bool(&self, _value: bool) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_datetime(
-        &self,
-        _value: tantivy::DateTime,
-    ) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_ip_address(
-        &self,
-        _value: std::net::Ipv6Addr,
-    ) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_facet(
-        &self,
-        _value: tantivy::schema::Facet,
-    ) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-
-    fn visit_bytes(&self, value: Vec<u8>) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Bytes(value))
-    }
-
-    fn visit_pre_tokenized_string(
-        &self,
-        _value: tantivy::tokenizer::PreTokenizedString,
-    ) -> std::result::Result<Self::Value, DeserializeError> {
-        Ok(VerificationStoredValue::Ignored)
-    }
-}
-
-impl ValueDeserialize for VerificationStoredValue {
-    fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Self, DeserializeError>
-    where
-        D: ValueDeserializer<'de>,
-    {
-        deserializer.deserialize_any(VerificationValueVisitor)
-    }
-}
-
 pub(crate) fn validate_verification_projection(fields: Fields) -> Result<()> {
-    let field_ids = [
-        (fields.event_id, VERIFY_EVENT_ID),
-        (fields.event_identity_digest, VERIFY_EVENT_IDENTITY_DIGEST),
-        (fields.event_identity, VERIFY_EVENT_IDENTITY),
-        (fields.session_id, VERIFY_SESSION_ID),
-        (
-            fields.session_identity_digest,
-            VERIFY_SESSION_IDENTITY_DIGEST,
-        ),
-        (fields.session_identity, VERIFY_SESSION_IDENTITY),
-        (fields.parent_session_id, VERIFY_PARENT_SESSION_ID),
-        (
-            fields.parent_session_identity,
-            VERIFY_PARENT_SESSION_IDENTITY,
-        ),
-        (fields.root_session_id, VERIFY_ROOT_SESSION_ID),
-        (fields.root_session_identity, VERIFY_ROOT_SESSION_IDENTITY),
-        (fields.source_key, VERIFY_SOURCE_KEY),
-        (fields.provider, VERIFY_PROVIDER),
-        (fields.source_format, VERIFY_SOURCE_FORMAT),
-        (fields.core_record, VERIFY_CORE_RECORD),
-    ];
-    if field_ids
-        .into_iter()
-        .any(|(field, expected)| field.field_id() != expected)
-    {
+    if fields.query_metadata.field_id() != VERIFY_QUERY_METADATA {
         return Err(IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION));
     }
     Ok(())
@@ -206,124 +25,13 @@ pub(crate) fn stored_verification_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
 ) -> Result<VerificationRecord> {
-    let document: VerificationStoredDocument = searcher.doc(address)?;
-    let event_id = projected_identity(
-        document.event_identity,
-        document.event_id,
-        document.event_identity_digest,
-        StableEntityKind::Event,
-        "event_identity",
-    )?;
-    let session_id = projected_identity(
-        document.session_identity,
-        document.session_id,
-        document.session_identity_digest,
-        StableEntityKind::Session,
-        "session_identity",
-    )?;
-    let parent_session_id = optional_projected_session_identity(
-        document.parent_session_identity,
-        document.parent_session_id,
-        "parent_session_identity",
-    )?;
-    let root_session_id = projected_session_identity(
-        document.root_session_identity,
-        document.root_session_id,
-        "root_session_identity",
-    )?;
-    let core_record =
-        CoreRecord::decode_stored(&projected_bytes(document.core_record, "core_record")?)?;
-    let stored_source = projected_text(document.source_key, "source_key")?;
-    let source_owner = source_token(&core_record.source);
-    if stored_source != source_owner
-        || event_id != core_record.event_id
-        || session_id != core_record.session_id
-        || parent_session_id != core_record.parent_session_id
-        || root_session_id != core_record.root_session_id
-    {
-        return Err(IndexError::InvalidStoredDocumentField("core_record"));
-    }
-
-    let provider = projected_text(document.provider, "provider")?;
-    let source_format = projected_text(document.source_format, "source_format")?;
-    if provider != core_record.source.provider()
-        || source_format != core_record.source.source_format()
-    {
-        return Err(IndexError::InvalidStoredDocumentField("provider"));
-    }
-
+    let fields = crate::fields_from_schema(searcher.schema())?;
+    let event = stored_event_record(searcher, address, fields)?;
     Ok(VerificationRecord {
-        event_id,
-        session_id,
-        parent_session_id,
-        root_session_id,
-        source_owner,
+        event_id: event.event_id,
+        session_id: event.session_id,
+        parent_session_id: event.parent_session_id,
+        root_session_id: event.root_session_id,
+        source_owner: source_token(&event.source),
     })
-}
-
-fn projected_identity(
-    identity: Option<VerificationStoredValue>,
-    uuid: Option<VerificationStoredValue>,
-    digest: Option<VerificationStoredValue>,
-    expected_kind: StableEntityKind,
-    field_name: &'static str,
-) -> Result<StableEntityId> {
-    let identity = StableEntityId::decode_canonical(&projected_bytes(identity, field_name)?)?;
-    let uuid = projected_text(uuid, field_name)?;
-    let digest = projected_text(digest, field_name)?;
-    if identity.entity_kind() != expected_kind
-        || uuid != identity.as_uuid().to_string()
-        || digest != hex(&identity.digest())
-    {
-        return Err(IndexError::InvalidStoredDocumentField(field_name));
-    }
-    Ok(identity)
-}
-
-fn projected_session_identity(
-    identity: Option<VerificationStoredValue>,
-    uuid: Option<VerificationStoredValue>,
-    field_name: &'static str,
-) -> Result<StableEntityId> {
-    let identity = StableEntityId::decode_canonical(&projected_bytes(identity, field_name)?)?;
-    let uuid = projected_text(uuid, field_name)?;
-    if identity.entity_kind() != StableEntityKind::Session || uuid != identity.as_uuid().to_string()
-    {
-        return Err(IndexError::InvalidStoredDocumentField(field_name));
-    }
-    Ok(identity)
-}
-
-fn optional_projected_session_identity(
-    identity: Option<VerificationStoredValue>,
-    uuid: Option<VerificationStoredValue>,
-    field_name: &'static str,
-) -> Result<Option<StableEntityId>> {
-    match (identity, uuid) {
-        (None, None) => Ok(None),
-        (Some(identity), Some(uuid)) => {
-            projected_session_identity(Some(identity), Some(uuid), field_name).map(Some)
-        }
-        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
-    }
-}
-
-fn projected_text(
-    value: Option<VerificationStoredValue>,
-    field_name: &'static str,
-) -> Result<String> {
-    match value {
-        Some(VerificationStoredValue::Text(value)) if !value.is_empty() => Ok(value),
-        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
-    }
-}
-
-fn projected_bytes(
-    value: Option<VerificationStoredValue>,
-    field_name: &'static str,
-) -> Result<Vec<u8>> {
-    match value {
-        Some(VerificationStoredValue::Bytes(value)) => Ok(value),
-        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
-    }
 }

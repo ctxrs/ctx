@@ -103,6 +103,210 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 }
 
 #[test]
+fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
+    const EVENT_COUNT: u64 = 64;
+    const AMBIGUITY_LIMIT: usize = 2;
+
+    let temp = tempdir().unwrap();
+    let source = source("metadata-hot-paths.jsonl");
+    let mut event_ids = Vec::new();
+    let mut session_ids = Vec::new();
+    let mut bodies_by_session = std::collections::BTreeMap::new();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 1..=EVENT_COUNT {
+        let body = format!("ambiguity needle {sequence}");
+        let mut event = document_for_session(
+            &source,
+            &format!("bounded-session-{sequence}"),
+            sequence,
+            &body,
+        );
+        event.provider_session_id = Some("shared-provider-session".to_owned());
+        event_ids.push(event.event_id.as_uuid());
+        session_ids.push(event.session_id.as_uuid());
+        bodies_by_session.insert(event.session_id.as_uuid(), body.len());
+        writer.add_core_record(event).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, 1, EVENT_COUNT))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    crate::query::reset_stored_event_record_materializations();
+    crate::query::reset_stored_core_event_record_materializations();
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    session_ids.sort();
+    session_ids.dedup();
+    crate::query::reset_stored_event_record_materializations();
+    let provider_sessions = index
+        .sessions_by_provider_session_id("shared-provider-session", Some("codex"))
+        .unwrap();
+    assert_eq!(provider_sessions.len(), AMBIGUITY_LIMIT);
+    assert_eq!(
+        provider_sessions
+            .iter()
+            .map(|session| session.session_id.as_uuid())
+            .collect::<Vec<_>>(),
+        session_ids[..AMBIGUITY_LIMIT]
+    );
+    assert_eq!(
+        crate::query::stored_event_record_materializations(),
+        AMBIGUITY_LIMIT,
+        "provider-session ambiguity lookup must decode only one metadata record per retained session"
+    );
+
+    let session_prefix = session_ids
+        .iter()
+        .fold(
+            std::collections::BTreeMap::<char, Vec<Uuid>>::new(),
+            |mut groups, id| {
+                groups
+                    .entry(id.to_string().chars().next().unwrap())
+                    .or_default()
+                    .push(*id);
+                groups
+            },
+        )
+        .into_iter()
+        .find(|(_, ids)| ids.len() > AMBIGUITY_LIMIT)
+        .unwrap();
+    crate::query::reset_stored_event_record_materializations();
+    let prefix_sessions = index
+        .sessions_by_id_prefix(&session_prefix.0.to_string())
+        .unwrap();
+    assert_eq!(
+        prefix_sessions
+            .iter()
+            .map(|session| session.session_id.as_uuid())
+            .collect::<Vec<_>>(),
+        session_prefix.1[..AMBIGUITY_LIMIT]
+    );
+    assert_eq!(
+        crate::query::stored_event_record_materializations(),
+        AMBIGUITY_LIMIT
+    );
+
+    event_ids.sort();
+    let event_prefix = event_ids
+        .iter()
+        .fold(
+            std::collections::BTreeMap::<char, Vec<Uuid>>::new(),
+            |mut groups, id| {
+                groups
+                    .entry(id.to_string().chars().next().unwrap())
+                    .or_default()
+                    .push(*id);
+                groups
+            },
+        )
+        .into_iter()
+        .find(|(_, ids)| ids.len() > AMBIGUITY_LIMIT)
+        .unwrap();
+    crate::query::reset_stored_event_record_materializations();
+    let prefix_events = index
+        .events_by_id_prefix(&event_prefix.0.to_string())
+        .unwrap();
+    assert_eq!(
+        prefix_events
+            .iter()
+            .map(|event| event.event_id.as_uuid())
+            .collect::<Vec<_>>(),
+        event_prefix.1[..AMBIGUITY_LIMIT]
+    );
+    assert_eq!(
+        crate::query::stored_event_record_materializations(),
+        AMBIGUITY_LIMIT
+    );
+
+    crate::query::reset_stored_event_record_materializations();
+    let candidates = index.search_event_candidates("ambiguity", 5).unwrap();
+    assert_eq!(candidates.len(), 5);
+    assert_eq!(crate::query::stored_event_record_materializations(), 5);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    crate::query::reset_stored_event_record_materializations();
+    let source_page = index.source_event_page(&source, None, 5).unwrap();
+    assert_eq!(source_page.items.len(), 5);
+    assert_eq!(crate::query::stored_event_record_materializations(), 5);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    crate::query::reset_stored_event_record_materializations();
+    let semantic_page = index.semantic_event_page(None, 5).unwrap();
+    assert_eq!(semantic_page.items.len(), 5);
+    assert_eq!(crate::query::stored_event_record_materializations(), 5);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    crate::query::reset_stored_event_record_materializations();
+    let session_id = session_ids[0];
+    assert_eq!(
+        index
+            .core_content_bytes_for_session_if_bounded(session_id, 1)
+            .unwrap(),
+        Some(bodies_by_session[&session_id])
+    );
+    assert_eq!(crate::query::stored_event_record_materializations(), 0);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+}
+
+#[test]
+fn metadata_lookup_does_not_read_or_validate_the_stored_core_body() {
+    use tantivy::schema::Document as _;
+
+    let temp = tempdir().unwrap();
+    let source = source("body-free-metadata.jsonl");
+    let event = document(&source, 1, "metadata survives an unreadable Core body");
+    let event_id = event.event_id;
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(event).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let original: TantivyDocument = searcher.doc(address).unwrap();
+    let mut malformed = TantivyDocument::default();
+    for (field, value) in original.iter_fields_and_values() {
+        if field != fields.core_record {
+            malformed.add_field_value(field, value);
+        }
+    }
+    malformed.add_bytes(fields.core_record, b"{");
+    drop(searcher);
+
+    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        vec![malformed],
+    );
+
+    crate::query::reset_stored_core_event_record_materializations();
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    let metadata = verified.event_by_id(event_id.as_uuid()).unwrap().unwrap();
+    assert_eq!(metadata.event_id, event_id);
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        0,
+        "generation verification and metadata lookup must not touch Core bodies"
+    );
+    assert!(verified.core_event_by_id(event_id.as_uuid()).is_err());
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+}
+
+#[test]
 fn bounded_core_event_batch_is_complete_and_requested_ordered() {
     let temp = tempdir().unwrap();
     let source = source("bounded-event-batch.jsonl");
@@ -312,6 +516,7 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         source_id: Some("fixture-source".to_owned()),
         ..EventSearchFilters::default()
     };
+    crate::query::reset_stored_core_event_record_materializations();
     let hits = index
         .search_event_candidates_with_filters("identity", &filters, 10)
         .unwrap();
@@ -326,6 +531,11 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         Some(&native_event_id)
     );
     assert!(filters.matches_source_identity(&hits[0].event));
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        0,
+        "custom source filtering must use bounded indexed identity metadata"
+    );
 
     let misses = index
         .search_event_candidates_with_filters(
@@ -727,7 +937,8 @@ fn source_event_second_page_reopens_without_materializing_the_remaining_source()
         .unwrap();
     assert_eq!(
         crate::query::stored_core_event_record_materializations(),
-        materializations
+        0,
+        "metadata-only source pages must not decode selected or lookahead Core bodies"
     );
     assert_eq!(legacy.generation_id, second.generation_id);
     assert!(legacy.source.exact_descriptor_eq(&second.source));
