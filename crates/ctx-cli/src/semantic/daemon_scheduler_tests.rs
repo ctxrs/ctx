@@ -437,7 +437,7 @@ fn install_jobs(
 }
 
 #[test]
-fn persistent_scheduler_drains_relational_then_pro_then_semantic_with_stable_core_pin() {
+fn core_only_once_then_persistent_scheduler_drains_relational_before_optional_sidecars() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
@@ -445,8 +445,10 @@ fn persistent_scheduler_drains_relational_then_pro_then_semantic_with_stable_cor
         },
     ));
     let mut runtime = DaemonRuntime::default();
+    let mut once_args = daemon_args();
+    once_args.once = true;
     let core = run_daemon_once_with_activity(
-        &daemon_args(),
+        &once_args,
         temp.path(),
         &mut runtime,
         None,
@@ -466,6 +468,31 @@ fn persistent_scheduler_drains_relational_then_pro_then_semantic_with_stable_cor
         runtime.sidecar_drain.generation.as_deref(),
         Some(generation.as_str())
     );
+    assert!(!coordinator.has_pending_request());
+    assert!(super::relational_generation_needs_catch_up(
+        temp.path(),
+        &generation
+    ));
+    assert!(super::pro_generation_needs_catch_up(
+        temp.path(),
+        &generation
+    ));
+    assert!(super::semantic_generation_needs_catch_up(
+        temp.path(),
+        &generation
+    ));
+    assert!(runtime
+        .sidecar_drain
+        .relational_attempted_generation
+        .is_none());
+    assert!(runtime.sidecar_drain.pro_attempted_generation.is_none());
+    assert!(runtime
+        .sidecar_drain
+        .semantic_attempted_generation
+        .is_none());
+    assert!(super::read_relational_status(temp.path()).is_none());
+    assert!(read_pro_status(temp.path()).is_none());
+    assert!(!daemon_semantic_job_path(temp.path()).exists());
     assert_eq!(pinned_generation(temp.path()), generation);
 
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
