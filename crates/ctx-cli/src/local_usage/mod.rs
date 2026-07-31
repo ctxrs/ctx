@@ -82,7 +82,6 @@ pub(crate) enum ResultObservationAction {
     Search,
     OpenSession,
     OpenEvent,
-    Locate,
     Sources,
     Sql,
     Blame,

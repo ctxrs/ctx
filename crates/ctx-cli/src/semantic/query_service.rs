@@ -1,19 +1,12 @@
 use std::{
-    collections::HashMap,
     path::Path,
     time::{Duration as StdDuration, Instant},
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::HydrationFailure;
-#[cfg(test)]
-use ctx_history_core::HydrationFailureKind;
-#[cfg(test)]
-use ctx_history_core::{CaptureProvider, EventRole, EventType};
-use ctx_history_index::{EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_history_index::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
 use serde_json::{json, Value};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::compact_json;
 
@@ -27,15 +20,6 @@ use super::{
     },
     vector_store_search::scan_exact_generation,
 };
-#[cfg(test)]
-use super::{
-    model_contract::SEMANTIC_DIMENSIONS,
-    vector_store::{
-        SemanticChunkDocument, SourceBackedSemanticDocumentBuilder, SourceBackedSemanticEmbedder,
-    },
-    SemanticEventDocument,
-};
-
 mod transport;
 #[cfg(test)]
 pub(in crate::semantic) use transport::*;
@@ -109,86 +93,7 @@ pub(crate) struct SourceBackedSemanticQueryPin {
     pinned: Option<PinnedFlatGeneration>,
 }
 
-// Temporary test-only bridge for the P3 presentation lane while its old
-// public hydration-error tests are removed. Production Core reads never
-// construct this error and never retry provider access.
-#[cfg(test)]
-#[derive(Debug, Error)]
-#[error("{code}/{failure_kind}")]
-struct RetiredSourceHydrationTestError {
-    code: String,
-    failure_kind: &'static str,
-}
-
 impl PinnedSourceBackedGeneration {
-    #[cfg(test)]
-    pub(crate) fn source_hydration_error_for_test(
-        code: &'static str,
-        failure_kind: &'static str,
-    ) -> anyhow::Error {
-        RetiredSourceHydrationTestError {
-            code: code.to_owned(),
-            failure_kind,
-        }
-        .into()
-    }
-
-    pub(crate) fn source_hydration_code(error: &anyhow::Error) -> Option<&str> {
-        #[cfg(test)]
-        if let Some(error) = error.downcast_ref::<RetiredSourceHydrationTestError>() {
-            return Some(&error.code);
-        }
-        #[cfg(not(test))]
-        let _ = error;
-        None
-    }
-
-    pub(crate) fn source_hydration_retryable(error: &anyhow::Error) -> bool {
-        #[cfg(test)]
-        if let Some(error) = error.downcast_ref::<RetiredSourceHydrationTestError>() {
-            return matches!(
-                error.failure_kind,
-                "temporarily_unavailable"
-                    | "confirmed_deleted"
-                    | "stale_source_evidence"
-                    | "stale_record_evidence"
-                    | "missing_record"
-            );
-        }
-        #[cfg(not(test))]
-        let _ = error;
-        false
-    }
-
-    pub(crate) fn source_hydration_failure(error: &anyhow::Error) -> Option<HydrationFailure> {
-        #[cfg(test)]
-        if let Some(error) = error.downcast_ref::<RetiredSourceHydrationTestError>() {
-            return HydrationFailureKind::parse(error.failure_kind).map(|kind| HydrationFailure {
-                kind,
-                detail: "source hydration exceeds the aggregate byte budget".to_owned(),
-            });
-        }
-        #[cfg(not(test))]
-        let _ = error;
-        None
-    }
-
-    pub(crate) fn hydrate_source_search_page(
-        index: &VerifiedIndex,
-        _data_root: &Path,
-        events: &[&EventRecord],
-    ) -> Result<HashMap<Uuid, String>> {
-        core_content_for_events(index, events, Some(2_048))
-    }
-
-    pub(crate) fn hydrate_source_complete_events(
-        index: &VerifiedIndex,
-        _data_root: &Path,
-        events: &[&EventRecord],
-    ) -> Result<HashMap<Uuid, String>> {
-        core_content_for_events(index, events, None)
-    }
-
     pub(crate) fn pin_semantic_query_for_source_generation(
         index: &VerifiedIndex,
         data_root: &Path,
@@ -283,174 +188,6 @@ impl PinnedSourceBackedGeneration {
             &embedding,
             Some(query_embed_ms),
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn semantic_candidates_for_source_generation_with_embedding(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        filters: &EventSearchFilters,
-        candidate_limit: usize,
-        embedding: &[f32],
-    ) -> Result<(Vec<EventSearchCandidate>, Value)> {
-        let pin = Self::pin_semantic_query_for_source_generation(index, data_root)?;
-        let Some(pinned) = pin.pinned.as_ref() else {
-            return Ok((Vec::new(), json!({"vector_backend": "flat_f32"})));
-        };
-        source_semantic_candidates_with_embedding(
-            index,
-            pinned,
-            filters,
-            candidate_limit,
-            embedding,
-            None,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_source_generation_flat_fixture(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        embedding: &[f32],
-        _retired_provider_texts: HashMap<Uuid, String>,
-    ) -> Result<()> {
-        if embedding.len() != SEMANTIC_DIMENSIONS {
-            return Err(anyhow!(
-                "source generation fixture embedding has {} dimensions, expected {SEMANTIC_DIMENSIONS}",
-                embedding.len()
-            ));
-        }
-        let mut vector_store =
-            SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root))?;
-        let mut builder = ExactCoreFixtureBuilder;
-        let mut embedder = ExactSourceFixtureEmbedder {
-            embedding: embedding.to_vec(),
-        };
-        for _ in 0..1_024 {
-            let outcome =
-                vector_store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
-            if outcome.ready {
-                let semantic_documents = index.semantic_eligible_event_count()?;
-                if !vector_store.source_backed_generation_ready_exact(
-                    index.generation_id(),
-                    semantic_documents,
-                )? {
-                    return Err(anyhow!(
-                        "source generation fixture did not publish an exact flat-F32 acknowledgement"
-                    ));
-                }
-                return Ok(());
-            }
-            if !outcome.work_remaining {
-                return Err(anyhow!(
-                    "source generation fixture stopped before publishing its flat-F32 acknowledgement"
-                ));
-            }
-        }
-        Err(anyhow!(
-            "source generation fixture exceeded its bounded projection page count"
-        ))
-    }
-}
-
-fn core_content_for_events(
-    index: &VerifiedIndex,
-    events: &[&EventRecord],
-    max_chars: Option<usize>,
-) -> Result<HashMap<Uuid, String>> {
-    let event_ids = events
-        .iter()
-        .map(|event| event.event_id.as_uuid())
-        .collect::<Vec<_>>();
-    let records = index
-        .core_events_by_ids_if_bounded(
-            &event_ids,
-            SEMANTIC_EXACT_TOP_K_MAX,
-            MAX_SEMANTIC_CORE_BATCH_BYTES,
-        )?
-        .ok_or_else(|| {
-            anyhow!(
-                "Core generation {} did not exactly resolve {} requested events within the {}-event/{}-byte display bounds",
-                index.generation_id(),
-                events.len(),
-                SEMANTIC_EXACT_TOP_K_MAX,
-                MAX_SEMANTIC_CORE_BATCH_BYTES,
-            )
-        })?;
-    let mut contents = HashMap::with_capacity(events.len());
-    for (event, record) in events.iter().zip(records) {
-        if record.event_id != event.event_id || record.session_id != event.session_id {
-            return Err(anyhow!(
-                "Core event {} does not match its pinned citation",
-                event.event_id
-            ));
-        }
-        let mut text = record.core_record.content.meaningful_text().to_owned();
-        if text.is_empty() {
-            return Err(anyhow!(
-                "Core event {} has no display content",
-                event.event_id
-            ));
-        }
-        if let Some(max_chars) = max_chars {
-            if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
-                text.truncate(byte_index);
-            }
-        }
-        contents.insert(event.event_id.as_uuid(), text);
-    }
-    Ok(contents)
-}
-
-#[cfg(test)]
-struct ExactCoreFixtureBuilder;
-
-#[cfg(test)]
-impl SourceBackedSemanticDocumentBuilder for ExactCoreFixtureBuilder {
-    fn build_document(
-        &mut self,
-        record: &ctx_history_index::CoreEventRecord,
-    ) -> Result<Option<SemanticEventDocument>> {
-        let text = record.core_record.content.meaningful_text().to_owned();
-        if text.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(SemanticEventDocument {
-            event_id: record.event_id.as_uuid(),
-            history_record_id: None,
-            session_id: Some(record.session_id.as_uuid()),
-            seq: record.event_sequence,
-            occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
-            anchor_occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
-            event_type: EventType::Message,
-            role: Some(EventRole::User),
-            rank_bucket: "core_generation_fixture".to_owned(),
-            provider: Some(CaptureProvider::Codex),
-            source_format: Some(record.source_format.clone()),
-            agent_type: None,
-            session_is_primary: Some(record.is_primary),
-            cwd: record.cwd.clone(),
-            raw_source_path: None,
-            record_title: None,
-            record_kind: Some(record.event_type.clone()),
-            record_workspace: record.workspace.clone(),
-            text,
-        }))
-    }
-}
-
-#[cfg(test)]
-struct ExactSourceFixtureEmbedder {
-    embedding: Vec<f32>,
-}
-
-#[cfg(test)]
-impl SourceBackedSemanticEmbedder for ExactSourceFixtureEmbedder {
-    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
-        Ok(chunks
-            .iter()
-            .map(|_| self.embedding.clone())
-            .collect::<Vec<_>>())
     }
 }
 
