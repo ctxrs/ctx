@@ -12,7 +12,6 @@ pub(crate) enum ClientOperationV1 {
     Sources(SourcesTelemetry),
     Import(ImportTelemetry),
     Show(ShowTelemetry),
-    Locate(LocateTelemetry),
     Search(SearchTelemetry),
     Sql(SqlTelemetry),
     Docs(DocsTelemetry),
@@ -30,7 +29,6 @@ impl ClientOperationV1 {
             Self::Sources(_) => "sources",
             Self::Import(_) => "import",
             Self::Show(_) => "show",
-            Self::Locate(_) => "locate",
             Self::Search(_) => "search",
             Self::Sql(_) => "sql",
             Self::Docs(_) => "docs",
@@ -332,13 +330,6 @@ impl ClientOperationDraft {
         match &mut self.operation {
             ClientOperationV1::Show(value) => value,
             _ => unreachable!("show telemetry requested for a different operation"),
-        }
-    }
-
-    pub(crate) fn locate_mut(&mut self) -> &mut LocateTelemetry {
-        match &mut self.operation {
-            ClientOperationV1::Locate(value) => value,
-            _ => unreachable!("locate telemetry requested for a different operation"),
         }
     }
 

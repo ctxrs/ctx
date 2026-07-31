@@ -375,14 +375,6 @@ pub(super) fn persist_status_json(data_root: &Path, status: &Value) -> Result<()
     write_daemon_job_status(&status_path(data_root), status)
 }
 
-pub(super) fn generation_needs_catch_up(_data_root: &Path, _core_generation_id: &str) -> bool {
-    // The durable job file is retry and diagnostic state, not Pro currentness
-    // authority. Re-enter the helper for every eligible daemon drain so its
-    // validated Status and terminal receipt can replay, rebuild after a
-    // materializer revision change, or recover state that disappeared.
-    true
-}
-
 pub(super) fn status_generation(data_root: &Path) -> Option<String> {
     read_status(data_root).map(|status| status.core_generation_id)
 }
@@ -519,7 +511,6 @@ mod tests {
         assert!(run.did_work);
         assert_eq!(run.status["status"], "completed");
         assert_eq!(run.status["receipt_core_generation_id"], generation);
-        assert!(generation_needs_catch_up(temp.path(), &generation));
     }
 
     #[test]

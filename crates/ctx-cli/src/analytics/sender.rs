@@ -436,11 +436,6 @@ fn insert_client_operation_properties(
             insert_optional_count(properties, "window_bucket", value.window);
             insert_optional_count(properties, "events_returned_bucket", value.events_returned);
         }
-        ClientOperationV1::Locate(value) => {
-            insert_str(properties, "target_kind", value.target_kind.as_str());
-            insert_str(properties, "output_format", value.output_format.as_str());
-            insert_bool(properties, "provider_lookup", value.provider_lookup);
-        }
         ClientOperationV1::Search(value) => insert_search_properties(properties, value),
         ClientOperationV1::Sql(value) => {
             insert_str(properties, "input", value.input.as_str());

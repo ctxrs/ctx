@@ -1,7 +1,7 @@
 use ctx_history_core::CaptureProvider;
 
 use crate::{
-    output::{JsonOutputFormat, OutputFormat, SqlFormat},
+    output::{OutputFormat, SqlFormat},
     progress::ProgressArg,
     transcript::TranscriptMode,
 };
@@ -372,13 +372,6 @@ impl RenderFormat {
         }
     }
 
-    pub(crate) fn from_json_output_format(value: JsonOutputFormat) -> Self {
-        match value {
-            JsonOutputFormat::Text => Self::Text,
-            JsonOutputFormat::Json => Self::Json,
-        }
-    }
-
     pub(crate) fn from_sql_format(value: SqlFormat) -> Self {
         match value {
             SqlFormat::Table => Self::Text,
@@ -433,13 +426,6 @@ pub(crate) struct ShowTelemetry {
     pub(crate) provider_lookup: bool,
     pub(crate) window: Option<CountBucket>,
     pub(crate) events_returned: Option<CountBucket>,
-}
-
-#[derive(Debug)]
-pub(crate) struct LocateTelemetry {
-    pub(crate) target_kind: TargetKind,
-    pub(crate) output_format: RenderFormat,
-    pub(crate) provider_lookup: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
