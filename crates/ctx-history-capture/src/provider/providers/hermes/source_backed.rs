@@ -789,23 +789,10 @@ fn projected_owned_bytes(record: &HermesSourceBackedRecord) -> Result<usize, ser
             .saturating_add(session.source_path.len())
             .saturating_add(session.agent_type.len())
             .saturating_add(session.workspace.as_deref().map(str::len).unwrap_or(0))
-            .saturating_add(session.cwd.as_deref().map(str::len).unwrap_or(0))
-            .saturating_add(serde_json::to_vec(&session.locator)?.len())),
-        HermesSourceBackedRecord::Event(event) => Ok(fixed
-            .saturating_add(event.body.len())
-            .saturating_add(
-                event
-                    .provider_session_id
-                    .as_deref()
-                    .map(str::len)
-                    .unwrap_or(0),
-            )
-            .saturating_add(event.branch.as_deref().map(str::len).unwrap_or(0))
-            .saturating_add(event.source_path.as_deref().map(str::len).unwrap_or(0))
-            .saturating_add(event.agent_type.len())
-            .saturating_add(event.workspace.as_deref().map(str::len).unwrap_or(0))
-            .saturating_add(event.cwd.as_deref().map(str::len).unwrap_or(0))
-            .saturating_add(serde_json::to_vec(&event.locator)?.len())),
+            .saturating_add(session.cwd.as_deref().map(str::len).unwrap_or(0))),
+        HermesSourceBackedRecord::Event(event) => {
+            Ok(fixed.saturating_add(serde_json::to_vec(event)?.len()))
+        }
         HermesSourceBackedRecord::Rejected(rejection) => {
             Ok(fixed.saturating_add(rejection.reason.len()))
         }
