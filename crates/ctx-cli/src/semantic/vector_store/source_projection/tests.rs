@@ -1,106 +1,85 @@
-use std::collections::HashMap;
+use std::{collections::HashSet, fs, time::Instant};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, EventIdentityInput, EventRole, EventType,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
+    EventRole, EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, SourceRecordLocator, TypedKey,
+};
+use ctx_history_index::{
+    CoreEventRecord, EventRecord, GenerationWriter, LexicalDocument, VerifiedIndex, WriterOptions,
 };
 use tempfile::TempDir;
 
 use super::*;
+use crate::semantic::vector_store_search::scan_exact_generation;
+
+const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
 
 fn active_counts(store: &SemanticVectorStore) -> Result<(usize, usize)> {
-    let pinned = store
-        .flat_pin_generation()?
-        .expect("fixture must publish a flat generation");
-    Ok((pinned.stats().active_events, pinned.stats().active_chunks))
+    Ok(store.flat_pin_generation()?.map_or((0, 0), |pinned| {
+        (pinned.stats().active_events, pinned.stats().active_chunks)
+    }))
 }
 
-struct FakeResolver {
-    texts: HashMap<Uuid, String>,
-    failures: HashMap<Uuid, HydrationFailureKind>,
+#[derive(Default)]
+struct CoreBuilder {
     calls: Vec<Uuid>,
+    fail_on: HashSet<Uuid>,
 }
 
-impl FakeResolver {
-    fn available(records: &[EventRecord]) -> Self {
-        Self {
-            texts: records
-                .iter()
-                .map(|record| {
-                    (
-                        record.event_id.as_uuid(),
-                        format!("exact provider text for {}", record.event_sequence),
-                    )
-                })
-                .collect(),
-            failures: HashMap::new(),
-            calls: Vec::new(),
-        }
-    }
-}
-
-impl SourceBackedSemanticResolver for FakeResolver {
-    fn resolve_document(
+impl SourceBackedSemanticDocumentBuilder for CoreBuilder {
+    fn build_document(
         &mut self,
-        event: &EventRecord,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<SemanticEventDocument, HydrationFailure> {
-        assert_eq!(request.event_id(), event.event_id);
-        assert_eq!(request.locator(), &event.locator);
-        self.calls.push(event.event_id.as_uuid());
-        if let Some(kind) = self.failures.get(&event.event_id.as_uuid()).copied() {
-            return Err(HydrationFailure {
-                kind,
-                detail: "fixture source unavailable".to_owned(),
-            });
+        record: &CoreEventRecord,
+    ) -> Result<Option<SemanticEventDocument>> {
+        self.calls.push(record.event_id.as_uuid());
+        if self.fail_on.contains(&record.event_id.as_uuid()) {
+            return Err(anyhow!("forced Core projection interruption"));
         }
-        let text = self
-            .texts
-            .get(&event.event_id.as_uuid())
-            .cloned()
-            .ok_or_else(|| HydrationFailure {
-                kind: HydrationFailureKind::MissingRecord,
-                detail: "fixture record missing".to_owned(),
-            })?;
-        Ok(SemanticEventDocument {
-            event_id: event.event_id.as_uuid(),
+        let text = record.core_record.content.meaningful_text().to_owned();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(SemanticEventDocument {
+            event_id: record.event_id.as_uuid(),
             history_record_id: None,
-            session_id: Some(event.session_id.as_uuid()),
-            seq: event.event_sequence,
-            occurred_at_ms: event.occurred_at_unix_ms.unwrap_or_default(),
-            anchor_occurred_at_ms: event.occurred_at_unix_ms.unwrap_or_default(),
+            session_id: Some(record.session_id.as_uuid()),
+            seq: record.event_sequence,
+            occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
+            anchor_occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
             event_type: EventType::Message,
             role: Some(EventRole::User),
-            rank_bucket: "source_backed_event".to_owned(),
+            rank_bucket: "core_event".to_owned(),
             provider: Some(CaptureProvider::Codex),
-            source_format: Some(event.source_format.clone()),
+            source_format: Some(record.source_format.clone()),
             agent_type: None,
-            session_is_primary: Some(true),
-            cwd: event.cwd.clone(),
+            session_is_primary: Some(record.is_primary),
+            cwd: record.cwd.clone(),
             raw_source_path: None,
             record_title: None,
             record_kind: Some("message".to_owned()),
-            record_workspace: event.workspace.clone(),
+            record_workspace: record.workspace.clone(),
             text,
-        })
+        }))
     }
 }
 
 #[derive(Default)]
-struct FakeEmbedder {
-    calls: usize,
+struct MarkerEmbedder {
+    chunks: usize,
+    maximum_batch: usize,
 }
 
-impl SourceBackedSemanticEmbedder for FakeEmbedder {
+impl SourceBackedSemanticEmbedder for MarkerEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
-        self.calls = self.calls.saturating_add(chunks.len());
+        self.chunks = self.chunks.saturating_add(chunks.len());
+        self.maximum_batch = self.maximum_batch.max(chunks.len());
         Ok(chunks
             .iter()
-            .enumerate()
-            .map(|(index, _)| {
+            .map(|chunk| {
                 let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
-                embedding[index % SEMANTIC_DIMENSIONS] = 1.0;
+                embedding[usize::from(!chunk.text.contains(TAIL_TOKEN))] = 1.0;
                 embedding
             })
             .collect())
@@ -109,6 +88,8 @@ impl SourceBackedSemanticEmbedder for FakeEmbedder {
 
 struct Fixture {
     _temp: TempDir,
+    data_root: std::path::PathBuf,
+    index_root: std::path::PathBuf,
     path: std::path::PathBuf,
     source: SourceKey,
     session_id: StableEntityId,
@@ -117,6 +98,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self> {
         let temp = tempfile::tempdir()?;
+        let data_root = temp.path().join("data");
         let source = SourceKey::derive(
             "codex",
             "codex_session_jsonl_tree",
@@ -132,80 +114,139 @@ impl Fixture {
             native_session_key: &session_key,
         })?;
         Ok(Self {
-            path: source_backed_semantic_vector_path(temp.path()),
+            index_root: data_root.join("search").join("lexical"),
+            path: source_backed_semantic_vector_path(&data_root),
+            data_root,
             _temp: temp,
             source,
             session_id,
         })
     }
 
-    fn event(&self, sequence: u64, record_digest: u8) -> Result<EventRecord> {
-        let native_item_key = NativeItemKey::native_id("message", TypedKey::U64(sequence))?;
+    fn document(&self, sequence: u64, body: impl Into<String>) -> Result<LexicalDocument> {
+        let item = NativeItemKey::native_id("message", TypedKey::U64(sequence))?;
         let event_id = derive_event_id(EventIdentityInput {
             source: &self.source,
             session_id: self.session_id,
             logical_item_kind: "message",
-            native_item_key: &native_item_key,
+            native_item_key: &item,
             subrecord_selector: None,
         })?;
-        let locator = SourceRecordLocator::new(
-            self.source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: sequence * 100,
-                byte_length: 50,
-                physical_ordinal: sequence,
-                native_session_key: Some(TypedKey::utf8("fixture-session")?),
-                native_event_key: Some(TypedKey::U64(sequence)),
-            },
-            LocatorRevisionPolicy::ExactSourceRevision,
-            Some([record_digest; 32]),
-            [record_digest; 32],
-        )?;
-        Ok(EventRecord {
+        Ok(LexicalDocument {
             event_id,
             session_id: self.session_id,
             parent_session_id: None,
             root_session_id: self.session_id,
-            locator,
-            provider: "codex".to_owned(),
-            source_format: "codex_session_jsonl_tree".to_owned(),
+            source: self.source.clone(),
+            locator: SourceRecordLocator::new(
+                self.source.clone(),
+                NativeRecordCoordinate::Jsonl {
+                    byte_offset: sequence * 100,
+                    byte_length: 50,
+                    physical_ordinal: sequence,
+                    native_session_key: Some(TypedKey::utf8("fixture-session")?),
+                    native_event_key: Some(TypedKey::U64(sequence)),
+                },
+                LocatorRevisionPolicy::ExactSourceRevision,
+                Some([9; 32]),
+                [sequence as u8; 32],
+            )?,
             provider_session_id: Some("fixture-session".to_owned()),
             branch: Some("main".to_owned()),
-            source_path: None,
+            source_path: Some(
+                self.data_root
+                    .join("provider-source-removed.jsonl")
+                    .display()
+                    .to_string(),
+            ),
             agent_type: "primary".to_owned(),
             is_primary: true,
             event_sequence: sequence,
             occurred_at_unix_ms: Some(sequence as i64),
             event_type: "message".to_owned(),
             role: Some("user".to_owned()),
+            body: body.into(),
             workspace: Some("/workspace".to_owned()),
             cwd: Some("/workspace".to_owned()),
             touched_files: Vec::new(),
         })
+    }
+
+    fn record(&self, sequence: u64, body: impl Into<String>) -> Result<CoreEventRecord> {
+        let document = self.document(sequence, body)?;
+        let core_record = document.to_core_record()?;
+        let event = EventRecord {
+            event_id: document.event_id,
+            session_id: document.session_id,
+            parent_session_id: document.parent_session_id,
+            root_session_id: document.root_session_id,
+            locator: document.locator,
+            provider: document.source.provider().to_owned(),
+            source_format: document.source.source_format().to_owned(),
+            provider_session_id: document.provider_session_id,
+            branch: document.branch,
+            source_path: document.source_path,
+            agent_type: document.agent_type,
+            is_primary: document.is_primary,
+            event_sequence: document.event_sequence,
+            occurred_at_unix_ms: document.occurred_at_unix_ms,
+            event_type: document.event_type,
+            role: document.role,
+            workspace: document.workspace,
+            cwd: document.cwd,
+            touched_files: document.touched_files,
+        };
+        Ok(CoreEventRecord { event, core_record })
+    }
+
+    fn publish(&self, documents: Vec<LexicalDocument>) -> Result<VerifiedIndex> {
+        let count = documents.len() as u64;
+        let mut writer = GenerationWriter::open(&self.index_root, WriterOptions::default())?;
+        writer.begin_source(self.source.clone())?;
+        for document in documents {
+            writer.add_document(document)?;
+        }
+        let observation = SourceObservation::new(self.source.clone(), "fixture-v1", vec![1])?;
+        writer.certify_source(CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            "fixture-parser-v1",
+            [1; 32],
+            ScannedSourceCounts {
+                complete_records: count,
+                retained_records: count,
+                indexed_documents: count,
+                certified_bytes: count * 50,
+                ..ScannedSourceCounts::default()
+            },
+        )?)?;
+        writer.commit(|_| true)?;
+        Ok(VerifiedIndex::open(&self.index_root)?)
     }
 }
 
 fn generation(id: u8, semantic_documents: u64) -> SourceBackedSemanticGeneration {
     SourceBackedSemanticGeneration {
         core_generation_id: format!("{id:064x}"),
+        semantic_policy_fingerprint: semantic_policy_fingerprint().unwrap(),
         semantic_documents,
     }
 }
 
-fn stable_identity_order(records: &mut [EventRecord]) {
+fn stable_identity_order(records: &mut [CoreEventRecord]) {
     records.sort_by_key(|record| record.event_id.encode_canonical().unwrap());
 }
 
 #[test]
-fn new_install_catch_up_resumes_from_its_own_stable_identity_frontier() -> Result<()> {
+fn catch_up_resumes_after_restart_from_core_identity_frontier() -> Result<()> {
     let fixture = Fixture::new()?;
-    let mut records = vec![fixture.event(1, 1)?, fixture.event(2, 2)?];
+    let mut records = vec![fixture.record(1, "first")?, fixture.record(2, "second")?];
     stable_identity_order(&mut records);
     let first = records[0].clone();
     let second = records[1].clone();
     let target = generation(1, 2);
-    let mut resolver = FakeResolver::available(&[first.clone(), second.clone()]);
-    let mut embedder = FakeEmbedder::default();
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
 
     {
         let mut store = SemanticVectorStore::open(&fixture.path)?;
@@ -217,67 +258,41 @@ fn new_install_catch_up_resumes_from_its_own_stable_identity_frontier() -> Resul
                 records: vec![first.clone()],
                 terminal: false,
             },
-            &mut resolver,
+            &mut builder,
             &mut embedder,
         )?;
-        assert_eq!(outcome.records_embedded, 1);
         assert!(outcome.work_remaining);
         assert!(!outcome.ready);
-        assert!(!store.source_backed_generation_ready(&target.core_generation_id)?);
     }
 
     let mut store = SemanticVectorStore::open(&fixture.path)?;
-    assert_eq!(
-        store.source_backed_frontier_generation()?.as_deref(),
-        Some(target.core_generation_id.as_str())
-    );
     let outcome = store.reconcile_source_backed_page(
         &target,
         SourceBackedSemanticPage {
             core_generation_id: target.core_generation_id.clone(),
             after: Some(first.event_id),
-            records: vec![second.clone()],
+            records: vec![second],
             terminal: true,
         },
-        &mut resolver,
+        &mut builder,
         &mut embedder,
     )?;
     assert!(outcome.ready);
-    assert!(!outcome.work_remaining);
-    assert!(store.source_backed_generation_ready(&target.core_generation_id)?);
     assert_eq!(active_counts(&store)?.0, 2);
-    assert_eq!(
-        store
-            .source_backed_hashes_for_generation(
-                &target.core_generation_id,
-                &[first.event_id.as_uuid(), second.event_id.as_uuid()],
-            )?
-            .len(),
-        2
-    );
-    let pinned = store
-        .pin_source_backed_generation(&target.core_generation_id, 2)?
-        .expect("exact flat generation");
-    assert_eq!(pinned.stats().active_events, 2);
-    store.delete_events(&[first.event_id.as_uuid()])?;
-    assert!(!store.source_backed_generation_ready_exact(&target.core_generation_id, 2)?);
-    assert!(store
-        .pin_source_backed_generation(&target.core_generation_id, 2)?
-        .is_none());
+    assert!(store.source_backed_generation_ready_exact(&target.core_generation_id, 2)?);
     Ok(())
 }
 
 #[test]
-fn metadata_eligible_control_record_is_filtered_only_after_exact_hydration() -> Result<()> {
+fn complete_core_control_record_is_filtered_without_embedding() -> Result<()> {
     let fixture = Fixture::new()?;
-    let event = fixture.event(1, 1)?;
-    let target = generation(9, 1);
-    let mut resolver = FakeResolver::available(std::slice::from_ref(&event));
-    resolver.texts.insert(
-        event.event_id.as_uuid(),
-        "<environment_context>exact provider control record</environment_context>".to_owned(),
-    );
-    let mut embedder = FakeEmbedder::default();
+    let record = fixture.record(
+        1,
+        "<environment_context>Core control record</environment_context>",
+    )?;
+    let target = generation(2, 1);
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
     let mut store = SemanticVectorStore::open(&fixture.path)?;
 
     let outcome = store.reconcile_source_backed_page(
@@ -285,97 +300,27 @@ fn metadata_eligible_control_record_is_filtered_only_after_exact_hydration() -> 
         SourceBackedSemanticPage {
             core_generation_id: target.core_generation_id.clone(),
             after: None,
-            records: vec![event.clone()],
+            records: vec![record],
             terminal: true,
         },
-        &mut resolver,
+        &mut builder,
         &mut embedder,
     )?;
 
-    assert_eq!(resolver.calls, vec![event.event_id.as_uuid()]);
     assert_eq!(outcome.records_filtered, 1);
-    assert_eq!(outcome.records_embedded, 0);
-    assert_eq!(embedder.calls, 0);
+    assert_eq!(embedder.chunks, 0);
     assert!(outcome.ready);
-    assert!(store.source_backed_generation_ready_exact(&target.core_generation_id, 1)?);
-    if let Some(pinned) = store.pin_source_backed_generation(&target.core_generation_id, 1)? {
-        assert_eq!(pinned.stats().active_events, 0);
-        assert_eq!(pinned.stats().active_chunks, 0);
-    }
+    assert_eq!(active_counts(&store)?, (0, 0));
     Ok(())
 }
 
 #[test]
-fn same_id_rewrite_reembeds_and_complete_generation_retires_deletions() -> Result<()> {
+fn generation_mismatch_rebuilds_and_failed_rebuild_keeps_flat_state_coherent() -> Result<()> {
     let fixture = Fixture::new()?;
-    let original = fixture.event(1, 1)?;
-    let deleted = fixture.event(2, 2)?;
-    let first_generation = generation(2, 2);
-    let mut resolver = FakeResolver::available(&[original.clone(), deleted.clone()]);
-    let mut embedder = FakeEmbedder::default();
-    let mut store = SemanticVectorStore::open(&fixture.path)?;
-    let mut initial_records = vec![original.clone(), deleted.clone()];
-    stable_identity_order(&mut initial_records);
-    assert!(
-        store
-            .reconcile_source_backed_page(
-                &first_generation,
-                SourceBackedSemanticPage {
-                    core_generation_id: first_generation.core_generation_id.clone(),
-                    after: None,
-                    records: initial_records,
-                    terminal: true,
-                },
-                &mut resolver,
-                &mut embedder,
-            )?
-            .ready
-    );
-    let original_hash = store
-        .existing_hashes_for_event_ids(&[original.event_id.as_uuid()])?
-        .remove(&original.event_id.as_uuid())
-        .expect("original hash");
-
-    let rewritten = fixture.event(1, 9)?;
-    let second_generation = generation(3, 1);
-    resolver.texts.insert(
-        rewritten.event_id.as_uuid(),
-        "rewritten exact provider text".to_owned(),
-    );
-    let outcome = store.reconcile_source_backed_page(
-        &second_generation,
-        SourceBackedSemanticPage {
-            core_generation_id: second_generation.core_generation_id.clone(),
-            after: None,
-            records: vec![rewritten.clone()],
-            terminal: true,
-        },
-        &mut resolver,
-        &mut embedder,
-    )?;
-    assert_eq!(outcome.invalidated_chunks, 1);
-    assert_eq!(outcome.deleted_chunks, 1);
-    assert!(outcome.ready);
-    let hashes = store.existing_hashes_for_event_ids(&[
-        rewritten.event_id.as_uuid(),
-        deleted.event_id.as_uuid(),
-    ])?;
-    assert_ne!(
-        hashes.get(&rewritten.event_id.as_uuid()),
-        Some(&original_hash)
-    );
-    assert!(!hashes.contains_key(&deleted.event_id.as_uuid()));
-    assert_eq!(active_counts(&store)?.0, 1);
-    Ok(())
-}
-
-#[test]
-fn unavailable_source_never_advances_or_exposes_the_new_core_generation() -> Result<()> {
-    let fixture = Fixture::new()?;
-    let event = fixture.event(1, 1)?;
-    let initial = generation(4, 1);
-    let mut resolver = FakeResolver::available(std::slice::from_ref(&event));
-    let mut embedder = FakeEmbedder::default();
+    let record = fixture.record(1, "stable Core body")?;
+    let initial = generation(3, 1);
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
     let mut store = SemanticVectorStore::open(&fixture.path)?;
     assert!(
         store
@@ -384,93 +329,136 @@ fn unavailable_source_never_advances_or_exposes_the_new_core_generation() -> Res
                 SourceBackedSemanticPage {
                     core_generation_id: initial.core_generation_id.clone(),
                     after: None,
-                    records: vec![event.clone()],
+                    records: vec![record.clone()],
                     terminal: true,
                 },
-                &mut resolver,
+                &mut builder,
                 &mut embedder,
             )?
             .ready
     );
+    let before = store.flat_pin_generation()?.unwrap();
+    let before_hash = before.generation_hash().to_owned();
+    drop(before);
 
-    let core_receipt = generation(5, 1);
-    resolver.failures.insert(
-        event.event_id.as_uuid(),
-        HydrationFailureKind::TemporarilyUnavailable,
-    );
-    let outcome = store.reconcile_source_backed_page(
-        &core_receipt,
-        SourceBackedSemanticPage {
-            core_generation_id: core_receipt.core_generation_id.clone(),
-            after: None,
-            records: vec![event.clone()],
-            terminal: true,
-        },
-        &mut resolver,
-        &mut embedder,
-    )?;
+    let target = generation(4, 1);
+    builder.fail_on.insert(record.event_id.as_uuid());
+    let error = store
+        .reconcile_source_backed_page(
+            &target,
+            SourceBackedSemanticPage {
+                core_generation_id: target.core_generation_id.clone(),
+                after: None,
+                records: vec![record],
+                terminal: true,
+            },
+            &mut builder,
+            &mut embedder,
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("forced Core projection interruption"));
+    assert!(!store.source_backed_generation_ready(&target.core_generation_id)?);
     assert_eq!(
-        outcome.unavailable,
-        Some(HydrationFailureKind::TemporarilyUnavailable)
+        store.flat_pin_generation()?.unwrap().generation_hash(),
+        before_hash
     );
-    assert!(outcome.work_remaining);
-    assert!(!outcome.ready);
-    assert_eq!(
-        core_receipt.core_generation_id,
-        format!("{:064x}", 5),
-        "semantic failure cannot mutate or roll back Core publication"
-    );
-    assert!(!store.source_backed_generation_ready(&core_receipt.core_generation_id)?);
-    assert!(store
-        .source_backed_hashes_for_generation(
-            &core_receipt.core_generation_id,
-            &[event.event_id.as_uuid()],
-        )?
-        .is_empty());
-    assert!(!store.source_backed_generation_ready(&initial.core_generation_id)?);
     assert_eq!(active_counts(&store)?.0, 1);
     Ok(())
 }
 
 #[test]
-fn rewritten_locator_is_invalidated_even_when_the_source_is_unavailable() -> Result<()> {
+fn tail_beyond_sixteen_kib_is_paged_embedded_searchable_and_never_stored_plaintext() -> Result<()> {
     let fixture = Fixture::new()?;
-    let original = fixture.event(1, 1)?;
-    let initial = generation(6, 1);
-    let mut resolver = FakeResolver::available(std::slice::from_ref(&original));
-    let mut embedder = FakeEmbedder::default();
-    let mut store = SemanticVectorStore::open(&fixture.path)?;
-    store.reconcile_source_backed_page(
-        &initial,
-        SourceBackedSemanticPage {
-            core_generation_id: initial.core_generation_id.clone(),
-            after: None,
-            records: vec![original.clone()],
-            terminal: true,
-        },
-        &mut resolver,
-        &mut embedder,
-    )?;
+    let body = format!("{} {TAIL_TOKEN}", "prefix ".repeat(2_500));
+    assert!(body.len() > 16 * 1024);
+    let index = fixture.publish(vec![fixture.document(1, body)?])?;
+    assert!(!fixture
+        .data_root
+        .join("provider-source-removed.jsonl")
+        .exists());
+    let page = index.core_semantic_event_page(None, 1)?;
+    assert!(page.items[0]
+        .core_record
+        .content
+        .meaningful_text()
+        .ends_with(TAIL_TOKEN));
 
-    let rewritten = fixture.event(1, 8)?;
-    resolver.failures.insert(
-        rewritten.event_id.as_uuid(),
-        HydrationFailureKind::TemporarilyUnavailable,
-    );
-    let target = generation(7, 1);
-    let outcome = store.reconcile_source_backed_page(
-        &target,
-        SourceBackedSemanticPage {
-            core_generation_id: target.core_generation_id.clone(),
-            after: None,
-            records: vec![rewritten.clone()],
-            terminal: true,
-        },
-        &mut resolver,
-        &mut embedder,
+    let mut store = SemanticVectorStore::open(&fixture.path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    let outcome = store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    assert!(outcome.ready);
+    assert!(embedder.chunks > 1);
+    let pin = store
+        .pin_source_backed_generation(index.generation_id(), 1)?
+        .unwrap();
+    let mut query = vec![0.0; SEMANTIC_DIMENSIONS];
+    query[0] = 1.0;
+    let search = scan_exact_generation(&pin, &query, 1, None, Instant::now())?;
+    assert_eq!(search.hits[0].event_id, page.items[0].event_id.as_uuid());
+
+    for directory in [fixture.path.clone(), fixture.path.join("flat_segments")] {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_file() {
+                let bytes = fs::read(path)?;
+                assert!(!bytes
+                    .windows(TAIL_TOKEN.len())
+                    .any(|window| window == TAIL_TOKEN.as_bytes()));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn no_op_and_policy_receipt_mismatch_are_automatic_and_bounded() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let documents = (0..65)
+        .map(|sequence| fixture.document(sequence + 1, format!("record {sequence}")))
+        .collect::<Result<Vec<_>>>()?;
+    let index = fixture.publish(documents)?;
+    let mut store = SemanticVectorStore::open(&fixture.path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+
+    let first = store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    assert_eq!(first.records_scanned, MAX_SEMANTIC_EVENT_PAGE_ITEMS);
+    assert!(first.work_remaining);
+    let second = store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    assert_eq!(second.records_scanned, 1);
+    assert!(second.ready);
+    assert!(embedder.maximum_batch <= 2);
+    let calls = builder.calls.len();
+    let no_op = store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    assert!(no_op.ready);
+    assert_eq!(no_op.records_scanned, 0);
+    assert_eq!(builder.calls.len(), calls);
+
+    let mut receipt: serde_json::Value = serde_json::from_str(&store.conn.query_row(
+        "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+        [SOURCE_ACKNOWLEDGEMENT_STATE],
+        |row| row.get::<_, String>(0),
+    )?)?;
+    receipt["semantic_policy_fingerprint"] = serde_json::Value::String("0".repeat(64));
+    store.conn.execute(
+        "UPDATE semantic_maintenance_state SET value = ?1 WHERE key = ?2",
+        params![
+            serde_json::to_string(&receipt)?,
+            SOURCE_ACKNOWLEDGEMENT_STATE
+        ],
     )?;
-    assert_eq!(outcome.invalidated_chunks, 1);
-    assert_eq!(active_counts(&store)?, (0, 0));
-    assert!(!store.source_backed_generation_ready(&target.core_generation_id)?);
+    assert!(!store.source_backed_generation_ready_exact(index.generation_id(), 65)?);
+    while !store
+        .reconcile_source_backed_index(&index, &mut builder, &mut embedder)?
+        .ready
+    {}
+    assert!(store.source_backed_generation_ready_exact(index.generation_id(), 65)?);
+    assert!(builder.calls.len() > calls);
     Ok(())
 }

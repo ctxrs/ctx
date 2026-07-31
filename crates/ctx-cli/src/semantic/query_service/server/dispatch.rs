@@ -14,7 +14,6 @@ use crate::semantic::{
 };
 
 use super::super::transport::DaemonIpcService;
-use super::hydration::handle_source_hydration_batch;
 
 pub(in crate::semantic) struct DaemonQueryDispatch<'a> {
     data_root: &'a Path,
@@ -85,12 +84,6 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if service == DaemonIpcService::SourceRefresh {
-        if op == "source_hydrate_batch" {
-            let response = handle_source_hydration_batch(data_root, source_refresh, &request);
-            serde_json::to_writer(&mut *stream, &response)?;
-            stream.write_all(b"\n")?;
-            return Ok(());
-        }
         if let Some(response) = source_refresh.handle_ipc_request(data_root, &request)? {
             writeln!(stream, "{}", serde_json::to_string(&response)?)?;
             return Ok(());

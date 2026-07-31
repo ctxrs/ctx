@@ -38,8 +38,15 @@ pub(super) fn semantic_chunks_for_document(
         .collect()
 }
 
-pub(super) fn semantic_document_hash(doc: &SemanticEventDocument, source_text: &str) -> String {
-    semantic_text_hash(&semantic_embedded_document_text(doc, source_text))
+pub(super) fn semantic_document_hash(
+    doc: &SemanticEventDocument,
+    source_text: &str,
+    semantic_policy_fingerprint: &str,
+) -> String {
+    semantic_text_hash(&format!(
+        "semantic_policy: {semantic_policy_fingerprint}\n\n{}",
+        semantic_embedded_document_text(doc, source_text)
+    ))
 }
 
 pub(super) fn semantic_embedded_document_text(doc: &SemanticEventDocument, body: &str) -> String {
