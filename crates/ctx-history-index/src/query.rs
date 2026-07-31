@@ -35,6 +35,8 @@ const ID_PREFIX_MATCH_LIMIT: usize = 2;
 use crate::analyzer::BODY_ANALYZER;
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
+const EVENT_SEQUENCE_FIELD: &str = "event_sequence";
+const OCCURRED_AT_UNIX_MS_FIELD: &str = "occurred_at_unix_ms";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 
@@ -69,6 +71,12 @@ pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
 
 /// Maximum number of complete records retained for one exact source page.
 pub const MAX_SOURCE_EVENT_PAGE_ITEMS: usize = 4_096;
+
+/// Maximum retained coordinate prefix, including one truncation lookahead.
+pub const MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS: usize = 4_097;
+
+/// Maximum retained centered event-window coordinates.
+pub const MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS: usize = 101;
 
 /// Default retained-byte ceiling for complete Core pages.
 ///
@@ -409,6 +417,29 @@ pub struct SessionEventCoordinate {
     pub event_id: Uuid,
     pub event_sequence: u64,
     pub occurred_at_unix_ms: Option<i64>,
+}
+
+type SessionEventCoordinateSortKey = (u64, Option<i64>, u64, u64);
+
+impl SessionEventCoordinate {
+    fn from_sort_key(sort_key: SessionEventCoordinateSortKey) -> Self {
+        let (event_sequence, occurred_at_unix_ms, event_id_high, event_id_low) = sort_key;
+        Self {
+            event_id: Uuid::from_u128((u128::from(event_id_high) << 64) | u128::from(event_id_low)),
+            event_sequence,
+            occurred_at_unix_ms,
+        }
+    }
+
+    fn sort_key(&self) -> SessionEventCoordinateSortKey {
+        let event_id = self.event_id.as_u128();
+        (
+            self.event_sequence,
+            self.occurred_at_unix_ms,
+            (event_id >> 64) as u64,
+            event_id as u64,
+        )
+    }
 }
 
 pub(super) fn stored_event_record(
@@ -1020,6 +1051,63 @@ fn validate_event_sort_fast_fields(searcher: &tantivy::Searcher) -> Result<()> {
     for segment in searcher.segment_readers() {
         segment.fast_fields().u64(EVENT_ID_HIGH_FIELD)?;
         segment.fast_fields().u64(EVENT_ID_LOW_FIELD)?;
+    }
+    Ok(())
+}
+
+fn validate_session_event_coordinate_fast_fields(searcher: &tantivy::Searcher) -> Result<()> {
+    for segment in searcher.segment_readers() {
+        segment.fast_fields().u64(EVENT_SEQUENCE_FIELD)?;
+        segment.fast_fields().i64(OCCURRED_AT_UNIX_MS_FIELD)?;
+        segment.fast_fields().u64(EVENT_ID_HIGH_FIELD)?;
+        segment.fast_fields().u64(EVENT_ID_LOW_FIELD)?;
+    }
+    Ok(())
+}
+
+fn session_event_coordinate_score(
+    segment_reader: &tantivy::SegmentReader,
+) -> impl Fn(tantivy::DocId, Score) -> SessionEventCoordinateSortKey {
+    let sequence = segment_reader
+        .fast_fields()
+        .u64(EVENT_SEQUENCE_FIELD)
+        .ok()
+        .map(|column| column.first_or_default_col(0));
+    let occurred_at = segment_reader
+        .fast_fields()
+        .i64(OCCURRED_AT_UNIX_MS_FIELD)
+        .ok();
+    let high = segment_reader
+        .fast_fields()
+        .u64(EVENT_ID_HIGH_FIELD)
+        .ok()
+        .map(|column| column.first_or_default_col(0));
+    let low = segment_reader
+        .fast_fields()
+        .u64(EVENT_ID_LOW_FIELD)
+        .ok()
+        .map(|column| column.first_or_default_col(0));
+    move |doc, _score| {
+        (
+            sequence.as_ref().map_or(0, |column| column.get_val(doc)),
+            occurred_at.as_ref().and_then(|column| column.first(doc)),
+            high.as_ref().map_or(0, |column| column.get_val(doc)),
+            low.as_ref().map_or(0, |column| column.get_val(doc)),
+        )
+    }
+}
+
+fn validate_session_event_coordinates(coordinates: &[SessionEventCoordinate]) -> Result<()> {
+    if let Some(pair) = coordinates
+        .windows(2)
+        .find(|pair| pair[0].sort_key() >= pair[1].sort_key())
+    {
+        if pair[0].event_id == pair[1].event_id {
+            return Err(IndexError::DuplicateEventIdentity(
+                pair[1].event_id.to_string(),
+            ));
+        }
+        return Err(IndexError::InvalidStoredDocumentField("event_sequence"));
     }
     Ok(())
 }

@@ -167,6 +167,10 @@ pub enum IndexError {
     #[error("source event page size must be between 1 and {maximum} items, requested {requested}")]
     InvalidSourceEventPageSize { requested: usize, maximum: usize },
     #[error(
+        "session event coordinate selection must be between 1 and {maximum} items, requested {requested}"
+    )]
+    InvalidSessionEventCoordinateLimit { requested: usize, maximum: usize },
+    #[error(
         "Core event page {field} byte limit must be between 1 and {maximum}, requested {requested}"
     )]
     InvalidCoreEventPageByteLimit {

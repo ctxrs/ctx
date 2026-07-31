@@ -509,9 +509,10 @@ impl VerifiedIndex {
     }
 
     /// Returns a complete requested-order Core batch under both encoded and
-    /// decoded-content byte ceilings. This composes with
-    /// [`Self::session_event_coordinates`] so presentation can select a small
-    /// session prefix/window before any bodies are retained.
+    /// decoded-content byte ceilings. This composes with the bounded
+    /// [`Self::session_event_coordinate_prefix`] and
+    /// [`Self::session_event_coordinate_window`] selectors so presentation
+    /// never retains all session coordinates before Core decode.
     pub fn core_events_by_ids_with_budget(
         &self,
         event_ids: &[Uuid],
@@ -716,10 +717,10 @@ impl VerifiedIndex {
         Ok(records)
     }
 
-    /// Returns one session's deterministic presentation coordinates without
-    /// retaining complete Core bodies. Callers can select a prefix or centered
-    /// window from this small metadata and pass those IDs to
-    /// [`Self::core_events_by_ids_with_budget`].
+    /// Returns every deterministic coordinate for one session without stored
+    /// Core bodies. Presentation callers must use the bounded prefix/window
+    /// selectors instead; this complete enumeration is for bounded maintenance
+    /// contexts that already constrain session cardinality.
     pub fn session_event_coordinates(
         &self,
         session_id: Uuid,
@@ -778,6 +779,139 @@ impl VerifiedIndex {
             ));
         }
         Ok(coordinates)
+    }
+
+    /// Returns the first `limit` deterministic coordinates for one session
+    /// without decoding stored Core records or retaining the complete session.
+    pub fn session_event_coordinate_prefix(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<SessionEventCoordinate>> {
+        if !(1..=MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS).contains(&limit) {
+            return Err(IndexError::InvalidSessionEventCoordinateLimit {
+                requested: limit,
+                maximum: MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS,
+            });
+        }
+        validate_session_event_coordinate_fast_fields(&self.searcher)?;
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.session_id, &session_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let collector = TopDocs::with_limit(limit).tweak_score(move |segment_reader| {
+            let score = session_event_coordinate_score(segment_reader);
+            move |doc, original_score| Reverse(score(doc, original_score))
+        });
+        type CoordinateHit = (Reverse<SessionEventCoordinateSortKey>, DocAddress);
+        let hits: Vec<CoordinateHit> = self.searcher.search(&query, &collector)?;
+        let coordinates = hits
+            .into_iter()
+            .map(|(Reverse(sort_key), _)| SessionEventCoordinate::from_sort_key(sort_key))
+            .collect::<Vec<_>>();
+        validate_session_event_coordinates(&coordinates)?;
+        Ok(coordinates)
+    }
+
+    /// Returns a deterministic body-free window centered on one exact event.
+    /// At most 101 coordinates are retained regardless of session cardinality.
+    pub fn session_event_coordinate_window(
+        &self,
+        session_id: Uuid,
+        selected_event_id: Uuid,
+        before: usize,
+        after: usize,
+    ) -> Result<Option<Vec<SessionEventCoordinate>>> {
+        let requested = before
+            .checked_add(after)
+            .and_then(|neighbors| neighbors.checked_add(1))
+            .unwrap_or(usize::MAX);
+        if !(1..=MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS).contains(&requested) {
+            return Err(IndexError::InvalidSessionEventCoordinateLimit {
+                requested,
+                maximum: MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+            });
+        }
+        validate_session_event_coordinate_fast_fields(&self.searcher)?;
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let session_term = || {
+            TermQuery::new(
+                Term::from_field_text(fields.session_id, &session_id.to_string()),
+                IndexRecordOption::Basic,
+            )
+        };
+        let selected_query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(session_term())),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.event_id, &selected_event_id.to_string()),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let selected_collector = TopDocs::with_limit(2).tweak_score(session_event_coordinate_score);
+        type SelectedCoordinateHit = (SessionEventCoordinateSortKey, DocAddress);
+        let selected_hits: Vec<SelectedCoordinateHit> =
+            self.searcher.search(&selected_query, &selected_collector)?;
+        let selected_sort_key = match selected_hits.as_slice() {
+            [] => return Ok(None),
+            [(sort_key, _)] => *sort_key,
+            _ => {
+                return Err(IndexError::DuplicateEventIdentity(
+                    selected_event_id.to_string(),
+                ));
+            }
+        };
+        let selected = SessionEventCoordinate::from_sort_key(selected_sort_key);
+        if selected.event_id != selected_event_id {
+            return Err(IndexError::InvalidStoredDocumentField("event_id"));
+        }
+
+        let mut preceding = if before == 0 {
+            Vec::new()
+        } else {
+            let collector = TopDocs::with_limit(before).tweak_score(move |segment_reader| {
+                let score = session_event_coordinate_score(segment_reader);
+                move |doc, original_score| {
+                    let sort_key = score(doc, original_score);
+                    (sort_key < selected_sort_key, sort_key)
+                }
+            });
+            type PrecedingHit = ((bool, SessionEventCoordinateSortKey), DocAddress);
+            let hits: Vec<PrecedingHit> = self.searcher.search(&session_term(), &collector)?;
+            let mut coordinates = hits
+                .into_iter()
+                .filter_map(|((is_preceding, sort_key), _)| {
+                    is_preceding.then(|| SessionEventCoordinate::from_sort_key(sort_key))
+                })
+                .collect::<Vec<_>>();
+            coordinates.reverse();
+            coordinates
+        };
+        let following = if after == 0 {
+            Vec::new()
+        } else {
+            let collector = TopDocs::with_limit(after).tweak_score(move |segment_reader| {
+                let score = session_event_coordinate_score(segment_reader);
+                move |doc, original_score| {
+                    let sort_key = score(doc, original_score);
+                    (sort_key > selected_sort_key, Reverse(sort_key))
+                }
+            });
+            type FollowingHit = ((bool, Reverse<SessionEventCoordinateSortKey>), DocAddress);
+            let hits: Vec<FollowingHit> = self.searcher.search(&session_term(), &collector)?;
+            hits.into_iter()
+                .filter_map(|((is_following, Reverse(sort_key)), _)| {
+                    is_following.then(|| SessionEventCoordinate::from_sort_key(sort_key))
+                })
+                .collect::<Vec<_>>()
+        };
+        preceding.push(selected);
+        preceding.extend(following);
+        validate_session_event_coordinates(&preceding)?;
+        Ok(Some(preceding))
     }
 
     /// Returns one session only when its event cardinality is within a caller

@@ -9,7 +9,10 @@ use ctx_history_core::{
     CaptureProvider, CoreContentPolicyStatus, EventType, MAX_CORE_CONTENT_BYTES,
     MAX_ENCODED_CORE_RECORD_BYTES,
 };
-use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, SessionRecord, VerifiedIndex};
+use ctx_history_index::{
+    CoreEventPageBudget, CoreEventRecord, SessionRecord, VerifiedIndex,
+    MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -33,9 +36,9 @@ use super::{
     },
 };
 
-const CLI_PRESENTATION_MAX_SESSION_EVENTS: usize = 4_096;
+const CLI_PRESENTATION_MAX_SESSION_EVENTS: usize = MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS - 1;
 const CORE_PRESENTATION_FETCH_MAX_EVENTS: usize = 200;
-const PRESENTATION_MAX_EVENT_WINDOW_EVENTS: usize = crate::MAX_EVENT_WINDOW * 2 + 1;
+const PRESENTATION_MAX_EVENT_WINDOW_EVENTS: usize = MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PresentationEventLimitError {
@@ -47,7 +50,7 @@ impl fmt::Display for PresentationEventLimitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "Core presentation selected {} events; the presentation limit is {} events",
+            "Core presentation selected at least {} events; the presentation limit is {} events",
             self.actual_events, self.maximum_events
         )
     }
@@ -311,21 +314,32 @@ pub(super) fn session_json(
     session: &SessionRecord,
     options: SessionJsonOptions,
 ) -> Result<Value> {
-    let coordinates = index.session_event_coordinates(session.session_id.as_uuid())?;
+    session_json_with_event_cap(index, session, options, CLI_PRESENTATION_MAX_SESSION_EVENTS)
+}
+
+pub(super) fn session_json_with_event_cap(
+    index: &VerifiedIndex,
+    session: &SessionRecord,
+    options: SessionJsonOptions,
+    absolute_maximum_events: usize,
+) -> Result<Value> {
+    let absolute_maximum_events = absolute_maximum_events.min(CLI_PRESENTATION_MAX_SESSION_EVENTS);
     let maximum_events = options
         .max_events
-        .unwrap_or(CLI_PRESENTATION_MAX_SESSION_EVENTS);
-    let truncated = options
-        .max_events
-        .is_some_and(|limit| coordinates.len() > limit);
+        .unwrap_or(absolute_maximum_events)
+        .min(absolute_maximum_events);
+    let coordinate_limit = maximum_events.saturating_add(1);
+    let mut coordinates =
+        index.session_event_coordinate_prefix(session.session_id.as_uuid(), coordinate_limit)?;
+    let truncated = coordinates.len() > maximum_events;
     if options.max_events.is_none() && coordinates.len() > maximum_events {
         return Err(anyhow::Error::new(PresentationEventLimitError {
             actual_events: coordinates.len(),
             maximum_events,
         }));
     }
-    let selected_coordinates = &coordinates[..coordinates.len().min(maximum_events)];
-    let selected_ids = selected_coordinates
+    coordinates.truncate(maximum_events);
+    let selected_ids = coordinates
         .iter()
         .map(|coordinate| coordinate.event_id)
         .collect::<Vec<_>>();
@@ -343,7 +357,7 @@ pub(super) fn session_json(
         options.format,
         rendered,
         truncated,
-        options.max_events,
+        options.max_events.map(|_| maximum_events),
     ))
 }
 
@@ -499,20 +513,18 @@ pub(super) fn event_window(
     window: Option<usize>,
     output_limit_bytes: usize,
 ) -> Result<Vec<CoreEventRecord>> {
-    let coordinates = index.session_event_coordinates(selected.session_id.as_uuid())?;
-    let position = coordinates
-        .iter()
-        .position(|coordinate| coordinate.event_id == selected.event_id.as_uuid())
-        .ok_or_else(|| anyhow!("selected event is absent from its pinned Core session"))?;
     let (before, after) = window
         .map(|window| (window, window))
         .unwrap_or((before, after));
-    let start = position.saturating_sub(before);
-    let end = position
-        .saturating_add(after)
-        .saturating_add(1)
-        .min(coordinates.len());
-    let selected_ids = coordinates[start..end]
+    let coordinates = index
+        .session_event_coordinate_window(
+            selected.session_id.as_uuid(),
+            selected.event_id.as_uuid(),
+            before,
+            after,
+        )?
+        .ok_or_else(|| anyhow!("selected event is absent from its pinned Core session"))?;
+    let selected_ids = coordinates
         .iter()
         .map(|coordinate| coordinate.event_id)
         .collect::<Vec<_>>();

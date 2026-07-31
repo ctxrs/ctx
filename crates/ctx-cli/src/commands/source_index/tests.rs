@@ -34,8 +34,9 @@ mod tests {
         show::{
             canonical_show_output_bytes, core_events_by_ids_with_presentation_limits,
             event_window, event_window_value, render_event_value, render_event_values,
-            session_json, session_transcript_value, take_core_presentation_fetch_ids,
-            validate_show_target, EncodedCorePresentationLimitError, SessionJsonOptions,
+            session_json, session_json_with_event_cap, session_transcript_value,
+            take_core_presentation_fetch_ids, validate_show_target,
+            EncodedCorePresentationLimitError, SessionJsonOptions,
         },
     };
 
@@ -1051,6 +1052,47 @@ mod tests {
             take_core_presentation_fetch_ids(),
             vec![first.event_id.as_uuid()],
             "the nonselected large window body must never be requested for Core decode"
+        );
+    }
+
+    #[test]
+    fn bounded_show_clamps_an_explicit_overlarge_max_to_the_absolute_cli_cap() {
+        assert_eq!(
+            ctx_history_index::MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS - 1,
+            4_096
+        );
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let first = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 73, 1),
+            "first bounded body",
+        );
+        let nonselected = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 73, 2),
+            "second nonselected body",
+        );
+        append_fixture_session(temp.path(), &[first.clone(), nonselected], 73);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&first.event);
+
+        take_core_presentation_fetch_ids();
+        let value = session_json_with_event_cap(
+            &index,
+            &session,
+            SessionJsonOptions {
+                mode: TranscriptMode::Log,
+                format: OutputFormat::Json,
+                max_events: Some(usize::MAX),
+                output_limit_bytes: 2 * 1024,
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(value["events"].as_array().unwrap().len(), 1);
+        assert_eq!(value["truncated"]["max_events"], 1);
+        assert_eq!(
+            take_core_presentation_fetch_ids(),
+            vec![first.event_id.as_uuid()]
         );
     }
 

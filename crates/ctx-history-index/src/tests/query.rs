@@ -216,6 +216,68 @@ fn bounded_core_event_batch_is_complete_and_requested_ordered() {
 }
 
 #[test]
+fn bounded_session_coordinate_queries_ignore_pathological_nonselected_cardinality() {
+    const EVENT_COUNT: u64 = 5_000;
+    const SELECTED_SEQUENCE: u64 = 2_500;
+
+    let temp = tempdir().unwrap();
+    let source = source("bounded-session-coordinates.jsonl");
+    let first = document(&source, 1, "first");
+    let session_id = first.session_id.as_uuid();
+    let mut selected_event_id = None;
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in (1..=EVENT_COUNT).rev() {
+        let event = document(&source, sequence, "small body");
+        if sequence == SELECTED_SEQUENCE {
+            selected_event_id = Some(event.event_id.as_uuid());
+        }
+        writer.add_document(event).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, 1, EVENT_COUNT))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    let prefix = index
+        .session_event_coordinate_prefix(session_id, 6)
+        .unwrap();
+    assert_eq!(
+        prefix
+            .iter()
+            .map(|coordinate| coordinate.event_sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    let selected_event_id = selected_event_id.unwrap();
+    let window = index
+        .session_event_coordinate_window(session_id, selected_event_id, 50, 50)
+        .unwrap()
+        .unwrap();
+    assert_eq!(window.len(), MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS);
+    assert_eq!(window.first().unwrap().event_sequence, 2_450);
+    assert_eq!(window[50].event_id, selected_event_id);
+    assert_eq!(window.last().unwrap().event_sequence, 2_550);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    assert!(matches!(
+        index.session_event_coordinate_prefix(
+            session_id,
+            MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS + 1,
+        ),
+        Err(IndexError::InvalidSessionEventCoordinateLimit { .. })
+    ));
+    assert!(matches!(
+        index.session_event_coordinate_window(session_id, selected_event_id, 51, 50),
+        Err(IndexError::InvalidSessionEventCoordinateLimit { .. })
+    ));
+}
+
+#[test]
 fn custom_source_filters_use_the_core_native_event_identity() {
     let temp = tempdir().unwrap();
     let source = SourceKey::derive(
