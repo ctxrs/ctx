@@ -90,7 +90,6 @@ pub(super) fn parse_projection_with_limits(
     let mut committed_source_hasher = source_hasher.clone();
     let mut prior_hasher = prior_prefix_bytes.map(|_| new_prefix_hasher());
     let mut prior_observed_bytes = 0_u64;
-    let mut line_hasher = Sha256::new();
     let mut line = Vec::new();
     let mut line_oversized = false;
     let mut byte_offset = 0_u64;
@@ -115,7 +114,6 @@ pub(super) fn parse_projection_with_limits(
                 .map_or(available.len(), |index| index.saturating_add(1));
             let chunk = &available[..take];
             source_hasher.update(chunk);
-            line_hasher.update(chunk);
             if let (Some(prior_prefix_bytes), Some(prior_hasher)) =
                 (prior_prefix_bytes, prior_hasher.as_mut())
             {
@@ -150,16 +148,9 @@ pub(super) fn parse_projection_with_limits(
             line_number = line_number
                 .checked_add(1)
                 .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
-            let byte_length = byte_offset
-                .checked_sub(line_start)
-                .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
             let evidence = CompleteLine {
                 line_number,
                 byte_offset: line_start,
-                byte_length,
-                physical_ordinal: u64::try_from(line_number.saturating_sub(1))
-                    .map_err(|_| CustomHistorySourceBackedError::CountMismatch)?,
-                record_digest: line_hasher.clone().finalize().into(),
             };
             catalog.budget.admit_record()?;
             if line_oversized {
@@ -178,7 +169,6 @@ pub(super) fn parse_projection_with_limits(
             committed_source_hasher = source_hasher.clone();
             line.clear();
             line_oversized = false;
-            line_hasher = Sha256::new();
             line_start = byte_offset;
         }
         event_writer.flush()?;
@@ -261,17 +251,14 @@ fn visit_record(
                 );
             }
             if catalog.summary.failed == failures_before {
-                let raw_source_path = source.raw_source_path.as_deref().and_then(bounded_metadata);
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     source.source_id.len(),
                     source.provider_key.len(),
-                    raw_source_path.as_ref().map_or(0, String::len),
                 ]))?;
                 catalog.sources.insert(
                     source.source_id.clone(),
                     CustomSourceCatalogEntry {
                         provider_key: source.provider_key,
-                        raw_source_path,
                     },
                 );
             }

@@ -17,17 +17,13 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, ContentSourceResolver, CtxHistoryJsonlEventRecord,
-    CtxHistoryJsonlRecord, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionEdgeType, SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
+    CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CtxHistoryJsonlEventRecord,
+    CtxHistoryJsonlRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionEdgeType, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
+    StableEntityId, TypedKey, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -47,16 +43,14 @@ use crate::{
 };
 
 mod parser;
-mod resolver;
-
 use parser::parse_projection;
-pub(crate) use resolver::CustomHistorySourceBackedResolver;
 
 const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
 const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
 const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v1-source-backed-v1";
 const CUSTOM_SOURCE_REVISION_KIND: &str = "custom-history-ordinary-file-observation-v1";
-const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str = "custom-history-jsonl-source-backed-v2";
+pub(super) const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str =
+    "custom-history-jsonl-source-backed-v2";
 const CUSTOM_SOURCE_FRONTIER_KIND: &str = "custom-history-jsonl-frontier-v2";
 const CUSTOM_INVENTORY_AUTHORITY_NAMESPACE: &str = "custom-history.explicit-registration";
 const CUSTOM_INVENTORY_REVISION_KIND: &str = "custom-history-explicit-inventory-v1";
@@ -72,7 +66,6 @@ pub(super) const CUSTOM_DOCUMENT_METADATA_MAX_BYTES: usize = 64 * 1024;
 pub(super) const CUSTOM_DOCUMENT_MAX_TOUCHED_FILES: usize = 256;
 pub(super) const CUSTOM_HISTORY_CATALOG_MAX_RECORDS: usize = 1_000_000;
 pub(super) const CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES: usize = 256 * 1024 * 1024;
-const CUSTOM_MAX_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.source-prefix.v2\0";
 const INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.explicit-inventory.v1\0";
@@ -94,9 +87,6 @@ pub(crate) struct CustomHistorySourceBackedWork {
     pub(crate) retained_events_before_prior_prefix: usize,
     pub(crate) catalog_records: usize,
     pub(crate) catalog_metadata_bytes: usize,
-    pub(crate) hydration_passes: usize,
-    pub(crate) hydration_source_opens: usize,
-    pub(crate) hydrated_records: usize,
 }
 
 #[cfg(test)]
@@ -117,9 +107,6 @@ thread_local! {
             retained_events_before_prior_prefix: 0,
             catalog_records: 0,
             catalog_metadata_bytes: 0,
-            hydration_passes: 0,
-            hydration_source_opens: 0,
-            hydrated_records: 0,
         }) };
 }
 
@@ -156,8 +143,6 @@ pub(crate) enum CustomHistorySourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
-    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -182,16 +167,6 @@ pub(crate) enum CustomHistorySourceBackedError {
     InvalidCheckpoint,
     #[error("Custom History source-backed counters overflowed or did not reconcile")]
     CountMismatch,
-    #[error("Custom History source-backed locator is malformed")]
-    InvalidLocator,
-    #[error("Custom History resolver received conflicting routes for one source")]
-    DuplicateResolverSource,
-    #[error("Custom History locator source is not registered with this resolver")]
-    LocatorSourceNotFound,
-    #[error("Custom History locator range exceeds the bounded JSONL record size")]
-    LocatorRangeTooLarge,
-    #[error("Custom History locator no longer decodes to the indexed provider event")]
-    LocatorRecordMismatch,
 }
 
 pub(crate) type CustomHistorySourceBackedResult<T> = Result<T, CustomHistorySourceBackedError>;
@@ -364,21 +339,13 @@ pub(crate) enum CustomHistorySourceBackedDisposition {
     Replacement,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct CustomHistorySourceBackedRoute {
-    source: SourceKey,
-    input: CustomHistorySourceBackedInput,
-    opened: Arc<OpenedProviderSourceFile>,
-}
-
 #[derive(Debug)]
 pub(crate) struct CustomHistorySourceBackedPage {
-    pub(crate) documents: Vec<LexicalDocument>,
+    pub(crate) records: Vec<CoreRecord>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CustomHistorySourceBackedReceipt {
-    pub(crate) route: CustomHistorySourceBackedRoute,
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CustomHistorySourceBackedDisposition,
     pub(crate) append: Option<CertifiedSourceAppend>,
@@ -399,6 +366,7 @@ pub(crate) enum CustomHistorySourceBackedOutcome {
 
 #[derive(Debug)]
 struct CustomHistorySourceBackedStage {
+    source: SourceKey,
     receipt: CustomHistorySourceBackedReceipt,
     projection: Option<ParsedProjection>,
     emit_from: u64,
@@ -414,13 +382,7 @@ impl CustomHistorySourceBackedStage {
         mut emit: impl FnMut(CustomHistorySourceBackedPage) -> CustomHistorySourceBackedResult<()>,
     ) -> CustomHistorySourceBackedResult<()> {
         if let Some(projection) = &mut self.projection {
-            emit_projection_pages(
-                &self.receipt.route.source,
-                &self.receipt.route.input,
-                projection,
-                self.emit_from,
-                &mut emit,
-            )?;
+            emit_projection_pages(&self.source, projection, self.emit_from, &mut emit)?;
         }
         Ok(())
     }
@@ -455,9 +417,6 @@ struct CustomHistoryCheckpoint {
 pub(super) struct CompleteLine {
     pub(super) line_number: usize,
     pub(super) byte_offset: u64,
-    pub(super) byte_length: u64,
-    pub(super) physical_ordinal: u64,
-    pub(super) record_digest: [u8; 32],
 }
 
 pub(super) type CustomSessionKey = (String, String);
@@ -466,7 +425,6 @@ pub(super) type CustomEventKey = (String, String, u64);
 #[derive(Debug)]
 pub(super) struct CustomSourceCatalogEntry {
     pub(super) provider_key: String,
-    pub(super) raw_source_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -663,16 +621,8 @@ fn stage_custom_history_source_backed_explicit(
             )?;
             return Ok(CustomHistorySourceBackedStagedOutcome::Present(Box::new(
                 CustomHistorySourceBackedStage {
+                    source,
                     receipt: CustomHistorySourceBackedReceipt {
-                        route: route(
-                            input,
-                            source,
-                            Arc::clone(
-                                opening_inventory
-                                    .opened()
-                                    .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
-                            ),
-                        ),
                         certificate: prior.clone(),
                         disposition: CustomHistorySourceBackedDisposition::Unchanged,
                         append: Some(append),
@@ -732,8 +682,8 @@ fn stage_custom_history_source_backed_explicit(
     let (disposition, emit_from, append) = classify_projection(prior, &projection, &certificate)?;
     Ok(CustomHistorySourceBackedStagedOutcome::Present(Box::new(
         CustomHistorySourceBackedStage {
+            source,
             receipt: CustomHistorySourceBackedReceipt {
-                route: route(input, source, opened),
                 certificate,
                 disposition,
                 append,
@@ -760,18 +710,6 @@ pub(crate) fn revalidate_custom_history_source_backed(
         return Ok(false);
     };
     Ok(source_observation(source, ordinary)? == *certificate.observation())
-}
-
-fn route(
-    input: &CustomHistorySourceBackedInput,
-    source: SourceKey,
-    opened: Arc<OpenedProviderSourceFile>,
-) -> CustomHistorySourceBackedRoute {
-    CustomHistorySourceBackedRoute {
-        source,
-        input: input.clone(),
-        opened,
-    }
 }
 
 fn open_explicit_source(

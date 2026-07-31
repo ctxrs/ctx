@@ -181,8 +181,8 @@ pub fn register_custom_history_source_backed_route(
                         }
                         staging_started = true;
                     }
-                    for document in page.documents {
-                        sink.add_core_record(document)
+                    for record in page.records {
+                        sink.add_core_record(record)
                             .map_err(capture_coordinator_error)?;
                     }
                     Ok(())
