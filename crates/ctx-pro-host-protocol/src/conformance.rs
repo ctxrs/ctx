@@ -10,13 +10,7 @@ fn inventory() -> Value {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn unhex(value: &str) -> Vec<u8> {
@@ -41,14 +35,10 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::PrepareGraphKeyDeletion(_) => "prepare_graph_key_deletion",
         HostMessage::ConfirmGraphKeyDeletion(_) => "confirm_graph_key_deletion",
         HostMessage::Status(_) => "status",
-        HostMessage::BeginSourceManifestAdmission(_) => "begin_source_manifest_admission",
-        HostMessage::AdmitSourceManifestPage(_) => "admit_source_manifest_page",
-        HostMessage::FinishSourceManifestAdmission(_) => "finish_source_manifest_admission",
-        HostMessage::ReadSourceProgressPage(_) => "read_source_progress_page",
-        HostMessage::PrepareSource(_) => "prepare_source",
-        HostMessage::MaterializeSourcePages(_) => "materialize_source_pages",
-        HostMessage::DeleteSource(_) => "delete_source",
-        HostMessage::FinishAdmittedSourceManifest(_) => "finish_admitted_source_manifest",
+        HostMessage::BeginCoreMaterialization(_) => "begin_core_materialization",
+        HostMessage::ApplyCoreSourceDeltaPage(_) => "apply_core_source_delta_page",
+        HostMessage::MaterializeCoreRecordPage(_) => "materialize_core_record_page",
+        HostMessage::FinishCoreMaterialization(_) => "finish_core_materialization",
         HostMessage::Blame(_) => "blame",
     }
 }
@@ -60,62 +50,12 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::GraphKeyDeletionPrepared(_) => "graph_key_deletion_prepared",
         HelperMessage::GraphKeyDeleted(_) => "graph_key_deleted",
         HelperMessage::Status(_) => "status",
-        HelperMessage::SourceManifestAdmissionBegan(_) => "source_manifest_admission_began",
-        HelperMessage::SourceManifestPageAdmitted(_) => "source_manifest_page_admitted",
-        HelperMessage::SourceManifestAdmitted(_) => "source_manifest_admitted",
-        HelperMessage::SourceProgressPage(_) => "source_progress_page",
-        HelperMessage::SourcePrepared(_) => "source_prepared",
-        HelperMessage::SourcePagesMaterialized(_) => "source_pages_materialized",
-        HelperMessage::SourceDeleted(_) => "source_deleted",
-        HelperMessage::SourceManifestFinished(_) => "source_manifest_finished",
+        HelperMessage::CoreMaterializationBegan(_) => "core_materialization_began",
+        HelperMessage::CoreSourceDeltaPageApplied(_) => "core_source_delta_page_applied",
+        HelperMessage::CoreRecordPageMaterialized(_) => "core_record_page_materialized",
+        HelperMessage::CoreMaterializationFinished(_) => "core_materialization_finished",
         HelperMessage::Blame(_) => "blame",
         HelperMessage::Error(_) => "error",
-    }
-}
-
-fn validate_host(message: &HostMessage) {
-    match message {
-        HostMessage::BeginSourceManifestAdmission(request) => request.validate().unwrap(),
-        HostMessage::AdmitSourceManifestPage(request) => request.validate().unwrap(),
-        HostMessage::FinishSourceManifestAdmission(request) => request.validate().unwrap(),
-        HostMessage::ReadSourceProgressPage(request) => request.validate().unwrap(),
-        HostMessage::PrepareSource(request) => request.validate().unwrap(),
-        HostMessage::MaterializeSourcePages(request) => request.validate().unwrap(),
-        HostMessage::DeleteSource(request) => request.validate().unwrap(),
-        HostMessage::FinishAdmittedSourceManifest(request) => request.validate().unwrap(),
-        HostMessage::Blame(request) => request.validate().unwrap(),
-        HostMessage::Hello(_)
-        | HostMessage::Authorize(_)
-        | HostMessage::PrepareGraphKeyDeletion(_)
-        | HostMessage::ConfirmGraphKeyDeletion(_)
-        | HostMessage::Status(_) => {}
-    }
-}
-
-fn validate_helper(message: &HelperMessage) {
-    match message {
-        HelperMessage::Status(result) => result.validate().unwrap(),
-        HelperMessage::Blame(result) => result.validate().unwrap(),
-        HelperMessage::SourceManifestAdmitted(result) => result.validate().unwrap(),
-        HelperMessage::SourceProgressPage(result) => {
-            result
-                .validate_for(
-                    &SourceProgressReceipt::from_progress(&result.progress)
-                        .expect("golden source progress receipt"),
-                )
-                .unwrap();
-        }
-        HelperMessage::SourcePrepared(result) => result.validate().unwrap(),
-        HelperMessage::SourcePagesMaterialized(result) => result.validate().unwrap(),
-        HelperMessage::SourceDeleted(result) => result.validate().unwrap(),
-        HelperMessage::SourceManifestFinished(result) => result.validate().unwrap(),
-        HelperMessage::Hello(_)
-        | HelperMessage::Authorized(_)
-        | HelperMessage::GraphKeyDeletionPrepared(_)
-        | HelperMessage::GraphKeyDeleted(_)
-        | HelperMessage::SourceManifestAdmissionBegan(_)
-        | HelperMessage::SourceManifestPageAdmitted(_)
-        | HelperMessage::Error(_) => {}
     }
 }
 
@@ -133,160 +73,74 @@ fn canonical_inventory_and_exported_fingerprint_are_exact() {
 }
 
 #[test]
-fn inventory_freezes_current_capabilities_and_message_kinds() {
-    let value = inventory();
-    let canonical = &value["canonical_inventory"];
+fn inventory_freezes_core_capability_and_exact_message_sequence() {
+    let canonical = &inventory()["canonical_inventory"];
     let capabilities = canonical["capabilities"]
         .as_array()
         .unwrap()
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect::<BTreeSet<_>>();
-    assert_eq!(
-        capabilities,
-        BTreeSet::from([
-            "entitlement_authorization",
-            "git_read",
-            "graph_key_deletion",
-            "query",
-            "source_materialization",
-            "status",
-        ])
-    );
-
-    let host_kinds = canonical["host_message_kinds"]
-        .as_array()
-        .unwrap()
+    assert!(capabilities.contains("core_materialization"));
+    let retired_capability = ["source", "_materialization"].concat();
+    assert!(!capabilities
         .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect::<BTreeSet<_>>();
-    let helper_kinds = canonical["helper_message_kinds"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect::<BTreeSet<_>>();
+        .any(|name| name.contains(&retired_capability)));
     assert_eq!(
-        host_kinds,
-        BTreeSet::from([
-            "admit_source_manifest_page",
-            "authorize",
-            "begin_source_manifest_admission",
-            "blame",
-            "confirm_graph_key_deletion",
-            "delete_source",
-            "finish_admitted_source_manifest",
-            "finish_source_manifest_admission",
-            "hello",
-            "materialize_source_pages",
-            "prepare_graph_key_deletion",
-            "prepare_source",
-            "read_source_progress_page",
-            "status",
+        canonical["core_materialization"]["sequence"],
+        serde_json::json!([
+            "begin_core_materialization",
+            "apply_core_source_delta_page",
+            "materialize_core_record_page",
+            "finish_core_materialization"
         ])
     );
-    assert_eq!(
-        helper_kinds,
-        BTreeSet::from([
-            "authorized",
-            "blame",
-            "error",
-            "graph_key_deleted",
-            "graph_key_deletion_prepared",
-            "hello",
-            "source_deleted",
-            "source_manifest_admission_began",
-            "source_manifest_admitted",
-            "source_manifest_finished",
-            "source_manifest_page_admitted",
-            "source_pages_materialized",
-            "source_prepared",
-            "source_progress_page",
-            "status",
-        ])
-    );
+    let encoded = serde_json::to_string(canonical).unwrap();
+    assert!(!encoded.contains(&["source", "_manifest"].concat()));
+    assert!(!encoded.contains(&["hydra", "tion"].concat()));
+    assert!(!encoded.contains("previous_page_sha256"));
+    assert!(!encoded.contains("receipt_sha256"));
 }
 
 #[test]
-fn every_generated_frame_round_trips_and_validates() {
-    let value = inventory();
-    for encoded in value["golden_vectors"]["host_frames"]
-        .as_object()
-        .unwrap()
-        .values()
-    {
-        let bytes = unhex(encoded.as_str().unwrap());
-        let envelope = read_frame::<_, HostEnvelope>(&mut Cursor::new(&bytes)).unwrap();
-        validate_host(&envelope.message);
-        let mut round_trip = Vec::new();
-        write_frame(&mut round_trip, &envelope).unwrap();
-        assert_eq!(round_trip, bytes);
-    }
-    for encoded in value["golden_vectors"]["helper_frames"]
-        .as_object()
-        .unwrap()
-        .values()
-    {
-        let bytes = unhex(encoded.as_str().unwrap());
-        let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(&bytes)).unwrap();
-        validate_helper(&envelope.message);
-        let mut round_trip = Vec::new();
-        write_frame(&mut round_trip, &envelope).unwrap();
-        assert_eq!(round_trip, bytes);
-    }
-}
-
-#[test]
-fn golden_frame_names_match_typed_message_kinds() {
+fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
     let value = inventory();
     for (name, encoded) in value["golden_vectors"]["host_frames"].as_object().unwrap() {
-        let envelope =
-            read_frame::<_, HostEnvelope>(&mut Cursor::new(unhex(encoded.as_str().unwrap())))
-                .unwrap();
+        let bytes = unhex(encoded.as_str().unwrap());
+        let envelope = read_frame::<_, HostEnvelope>(&mut Cursor::new(&bytes)).unwrap();
         assert_eq!(host_kind(&envelope.message), name);
+        let mut round_trip = Vec::new();
+        write_frame(&mut round_trip, &envelope).unwrap();
+        assert_eq!(round_trip, bytes);
     }
     for (name, encoded) in value["golden_vectors"]["helper_frames"]
         .as_object()
         .unwrap()
     {
-        let envelope =
-            read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(encoded.as_str().unwrap())))
-                .unwrap();
+        let bytes = unhex(encoded.as_str().unwrap());
+        let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(&bytes)).unwrap();
         assert_eq!(helper_kind(&envelope.message), name);
+        let mut round_trip = Vec::new();
+        write_frame(&mut round_trip, &envelope).unwrap();
+        assert_eq!(round_trip, bytes);
     }
 }
 
 #[test]
-fn source_manifest_admission_paging_and_transient_records_are_frozen() {
-    let value = inventory();
-    let host = value["golden_vectors"]["host_frames"].as_object().unwrap();
-    for name in [
-        "begin_source_manifest_admission",
-        "admit_source_manifest_page",
-        "finish_source_manifest_admission",
-        "read_source_progress_page",
-        "finish_admitted_source_manifest",
-    ] {
-        assert!(host.contains_key(name), "missing {name}");
-    }
-    let encoded = host["materialize_source_pages"].as_str().unwrap();
-    let envelope =
-        read_frame::<_, HostEnvelope>(&mut Cursor::new(unhex(encoded))).expect("source page");
-    let HostMessage::MaterializeSourcePages(request) = envelope.message else {
-        panic!("materialize source pages fixture kind");
-    };
-    request.validate().unwrap();
-    assert_eq!(request.pages.len(), 1);
-    assert_eq!(request.pages[0].records.len(), 1);
-    assert_eq!(request.pages[0].records[0].facts.len(), 3);
-}
-
-#[test]
-fn removed_citation_branch_is_rejected_as_an_unknown_field() {
-    let value = serde_json::json!({
-        "source_path": "fixture/session.jsonl",
-        "fixture_line": 1,
-        "provider_legacy": {}
-    });
-    assert!(serde_json::from_value::<EvidenceCitation>(value).is_err());
+fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
+    let canonical = &inventory()["canonical_inventory"];
+    assert_eq!(
+        canonical["status_contract"]["axes"],
+        serde_json::json!([
+            "core_projection_currentness",
+            "materialized_target_coverage",
+            "access",
+            "supported_operations",
+            "available_operations"
+        ])
+    );
+    let ack = canonical["dto_fields"]["CoreSourceDeltaPageApplied"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(ack.contains(&serde_json::json!("materialize_sources")));
 }

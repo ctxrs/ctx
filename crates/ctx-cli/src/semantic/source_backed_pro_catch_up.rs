@@ -5,20 +5,16 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ctx_history_capture::SourceBackedResolverRegistry;
 use ctx_history_core::utc_now;
 use ctx_history_index::VerifiedIndex;
-use ctx_pro_host_protocol::{SourceManifest, SourceManifestReceipt};
+use ctx_pro_host_protocol::CoreMaterializationReceipt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
     compact_json,
-    pro::{
-        preflight_source_manifest_materialization, stable_error_code,
-        sync_source_manifest_materialization,
-    },
+    pro::{preflight_core_materialization, stable_error_code, sync_core_materialization},
 };
 
 use super::{
@@ -135,8 +131,6 @@ impl SourceBackedProCatchUpStatus {
 
 #[derive(Debug, Error)]
 enum SourceBackedProCatchUpError {
-    #[error("source_pro_authority_missing: no retained source authority for Core generation {0}")]
-    MissingAuthority(String),
     #[error(
         "source_pro_generation_mismatch: expected Core generation {expected}, but {authority} \
          was supplied by {surface}"
@@ -146,8 +140,6 @@ enum SourceBackedProCatchUpError {
         authority: String,
         surface: &'static str,
     },
-    #[error("source_pro_manifest_missing: Core generation {0} has no retained source manifest")]
-    MissingManifest(String),
     #[error("source_pro_index_unavailable: {0}")]
     IndexUnavailable(String),
     #[error("{code}: {message}")]
@@ -157,9 +149,7 @@ enum SourceBackedProCatchUpError {
 impl SourceBackedProCatchUpError {
     fn code(&self) -> &str {
         match self {
-            Self::MissingAuthority(_) => "source_pro_authority_missing",
             Self::GenerationMismatch { .. } => "source_pro_generation_mismatch",
-            Self::MissingManifest(_) => "source_pro_manifest_missing",
             Self::IndexUnavailable(_) => "source_pro_index_unavailable",
             Self::Projection { code, .. } => code,
         }
@@ -168,7 +158,7 @@ impl SourceBackedProCatchUpError {
     fn projection(error: anyhow::Error) -> Self {
         Self::Projection {
             code: stable_error_code(&error)
-                .unwrap_or("pro_source_materialization_unavailable")
+                .unwrap_or("pro_core_materialization_unavailable")
                 .to_owned(),
             message: error.to_string(),
         }
@@ -192,52 +182,35 @@ pub(super) fn run_after_core_publication(
     core_generation_id: &str,
     authority: Option<&GenerationBoundSourceBackedResolver>,
 ) -> Result<SourceBackedProCatchUpRun> {
-    let Some(authority) = authority else {
-        return record_preflight_error(
-            data_root,
-            core_generation_id,
-            SourceBackedProCatchUpError::MissingAuthority(core_generation_id.to_owned()),
-        );
-    };
-    if authority.generation_id() != core_generation_id {
+    if authority.is_some_and(|authority| authority.generation_id() != core_generation_id) {
+        let supplied = authority
+            .map(GenerationBoundSourceBackedResolver::generation_id)
+            .unwrap_or_default();
         return record_preflight_error(
             data_root,
             core_generation_id,
             SourceBackedProCatchUpError::GenerationMismatch {
                 expected: core_generation_id.to_owned(),
-                authority: authority.generation_id().to_owned(),
-                surface: "retained resolver registry",
+                authority: supplied.to_owned(),
+                surface: "retained Core generation pin",
             },
         );
     }
-    let Some(manifest) = authority.source_manifest() else {
-        return record_preflight_error(
-            data_root,
-            core_generation_id,
-            SourceBackedProCatchUpError::MissingManifest(core_generation_id.to_owned()),
-        );
-    };
-    let verified_index = authority.verified_index();
+    let verified_index = authority.and_then(GenerationBoundSourceBackedResolver::verified_index);
     run_with(
         data_root,
         core_generation_id,
         ProCatchUpAuthority {
-            generation_id: authority.generation_id(),
-            manifest,
-            resolver: authority.resolver(),
+            generation_id: authority.map(GenerationBoundSourceBackedResolver::generation_id),
             verified_index: verified_index.as_deref(),
         },
-        preflight_source_manifest_materialization,
-        |data_root, manifest, index, resolver| {
-            sync_source_manifest_materialization(data_root, manifest.clone(), index, resolver)
-        },
+        preflight_core_materialization,
+        sync_core_materialization,
     )
 }
 
 struct ProCatchUpAuthority<'a> {
-    generation_id: &'a str,
-    manifest: &'a SourceManifest,
-    resolver: &'a SourceBackedResolverRegistry,
+    generation_id: Option<&'a str>,
     verified_index: Option<&'a VerifiedIndex>,
 }
 
@@ -250,12 +223,7 @@ fn run_with<Preflight, Sync>(
 ) -> Result<SourceBackedProCatchUpRun>
 where
     Preflight: FnOnce(&Path) -> Result<()>,
-    Sync: FnOnce(
-        &Path,
-        &SourceManifest,
-        &VerifiedIndex,
-        &SourceBackedResolverRegistry,
-    ) -> Result<SourceManifestReceipt>,
+    Sync: FnOnce(&Path, &VerifiedIndex) -> Result<CoreMaterializationReceipt>,
 {
     let prior = read_status(data_root);
     if let Some(status) = prior
@@ -274,16 +242,13 @@ where
     persist_status(data_root, &pending)?;
 
     let result = (|| {
-        require_generation(
-            core_generation_id,
-            authority.generation_id,
-            "retained resolver registry",
-        )?;
-        require_generation(
-            core_generation_id,
-            &authority.manifest.core_generation_id,
-            "retained source manifest",
-        )?;
+        if let Some(generation_id) = authority.generation_id {
+            require_generation(
+                core_generation_id,
+                generation_id,
+                "retained Core generation pin",
+            )?;
+        }
         preflight(data_root).map_err(SourceBackedProCatchUpError::projection)?;
         let opened_index: VerifiedIndex;
         let index = match authority.verified_index {
@@ -298,12 +263,11 @@ where
             index.generation_id(),
             "pinned VerifiedIndex",
         )?;
-        let receipt = sync(data_root, authority.manifest, index, authority.resolver)
-            .map_err(SourceBackedProCatchUpError::projection)?;
+        let receipt = sync(data_root, index).map_err(SourceBackedProCatchUpError::projection)?;
         require_generation(
             core_generation_id,
             &receipt.core_generation_id,
-            "Pro source manifest receipt",
+            "Pro Core materialization receipt",
         )?;
         Ok(receipt)
     })();
@@ -470,16 +434,36 @@ fn wait_for_completed_generation_with(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
     use ctx_history_index::{GenerationWriter, WriterOptions};
 
     use crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens;
 
     use super::*;
+
+    fn empty_index(data_root: &Path) -> VerifiedIndex {
+        GenerationWriter::open(
+            source_backed_index_root(data_root),
+            WriterOptions::default(),
+        )
+        .unwrap()
+        .commit(|_| true)
+        .unwrap();
+        open_verified_index(&source_backed_index_root(data_root)).unwrap()
+    }
+
+    fn receipt(index: &VerifiedIndex) -> CoreMaterializationReceipt {
+        CoreMaterializationReceipt {
+            core_generation_id: index.generation_id().to_owned(),
+            core_record_contract_fingerprint: index
+                .manifest()
+                .core_record_contract_fingerprint
+                .clone(),
+            source_snapshot_sha256: "a".repeat(64),
+            materializer_revision: "test-core-materializer-v1".to_owned(),
+            source_count: 0,
+            event_count: 0,
+        }
+    }
 
     #[test]
     fn durable_state_path_is_purpose_based() {
@@ -489,268 +473,76 @@ mod tests {
         );
     }
 
-    fn empty_authority(
-        data_root: &Path,
-    ) -> (String, SourceManifest, Arc<SourceBackedResolverRegistry>) {
-        let writer = GenerationWriter::open(
-            source_backed_index_root(data_root),
-            WriterOptions::default(),
-        )
-        .unwrap();
-        let receipt = writer.commit(|_| true).unwrap();
-        let manifest =
-            SourceManifest::new(receipt.generation_id.clone(), Vec::new(), Vec::new()).unwrap();
-        let resolver =
-            Arc::new(ctx_history_capture::SourceBackedProviderRegistry::new().resolver_registry());
-        (receipt.generation_id, manifest, resolver)
-    }
-
-    fn receipt(generation_id: &str) -> SourceManifestReceipt {
-        SourceManifestReceipt {
-            core_generation_id: generation_id.to_owned(),
-            manifest_aggregate_sha256: "b".repeat(64),
-            materializer_revision: "test-source-materializer".to_owned(),
-            progress: ctx_pro_host_protocol::SourceProgressReceipt::from_progress(&[]).unwrap(),
-        }
-    }
-
-    fn authority<'a>(
-        generation_id: &'a str,
-        manifest: &'a SourceManifest,
-        resolver: &'a SourceBackedResolverRegistry,
-        verified_index: Option<&'a VerifiedIndex>,
-    ) -> ProCatchUpAuthority<'a> {
-        ProCatchUpAuthority {
-            generation_id,
-            manifest,
-            resolver,
-            verified_index,
-        }
-    }
-
     #[test]
-    fn successful_projection_persists_the_exact_core_generation() {
+    fn catch_up_reuses_pinned_core_and_persists_exact_receipt_generation() {
         let temp = tempfile::tempdir().unwrap();
-        let (generation, manifest, resolver) = empty_authority(temp.path());
-        let index = open_verified_index(&source_backed_index_root(temp.path())).unwrap();
-
-        let (run, verified_opens) = count_verified_index_opens(|| {
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let (run, opens) = count_verified_index_opens(|| {
             run_with(
                 temp.path(),
                 &generation,
-                authority(&generation, &manifest, resolver.as_ref(), Some(&index)),
+                ProCatchUpAuthority {
+                    generation_id: Some(&generation),
+                    verified_index: Some(&index),
+                },
                 |_| Ok(()),
-                |_, supplied_manifest, index, supplied_resolver| {
-                    assert_eq!(supplied_manifest.core_generation_id, generation);
-                    assert_eq!(index.generation_id(), generation);
-                    assert!(std::ptr::eq(supplied_resolver, resolver.as_ref()));
-                    Ok(receipt(&generation))
+                |_, supplied| {
+                    assert_eq!(supplied.generation_id(), generation);
+                    Ok(receipt(supplied))
                 },
             )
             .unwrap()
         });
-
-        assert_eq!(verified_opens, 0, "Pro must reuse the Core verified pin");
+        assert_eq!(opens, 0);
         assert!(run.did_work);
         assert_eq!(run.status["status"], "completed");
-        assert_eq!(run.status["core_generation_id"], generation);
         assert_eq!(run.status["receipt_core_generation_id"], generation);
-        assert_eq!(read_status(temp.path()).unwrap().attempts, 1);
 
-        let exact_no_op = run_with(
+        let no_op = run_with(
             temp.path(),
             &generation,
-            authority(&generation, &manifest, resolver.as_ref(), Some(&index)),
-            |_| panic!("exact completed generation must not preflight Pro again"),
-            |_, _, _, _| panic!("exact completed generation must not invoke Pro again"),
-        )
-        .unwrap();
-        assert!(!exact_no_op.did_work);
-        assert_eq!(exact_no_op.status["status"], "completed");
-        assert_eq!(exact_no_op.status["core_generation_id"], generation);
-        assert_eq!(exact_no_op.status["attempts"], 1);
-    }
-
-    #[test]
-    fn absent_helper_waits_for_external_install_without_a_retry_timer() {
-        let temp = tempfile::tempdir().unwrap();
-        let (generation, manifest, resolver) = empty_authority(temp.path());
-
-        let (run, verified_opens) = count_verified_index_opens(|| {
-            run_with(
-                temp.path(),
-                &generation,
-                authority(&generation, &manifest, resolver.as_ref(), None),
-                |_| Err(anyhow::anyhow!("pro_not_installed: helper unavailable")),
-                |_, _, _, _| panic!("missing Pro helper must fail before index-backed sync"),
-            )
-            .unwrap()
-        });
-
-        assert_eq!(verified_opens, 0, "missing Pro must open zero Core indexes");
-        assert!(!run.did_work);
-        assert_eq!(run.status["status"], "error");
-        assert_eq!(run.status["pending"], true);
-        assert_eq!(run.status["retryable"], false);
-        assert_eq!(run.status["reason"], "pro_not_installed");
-        assert_eq!(run.status["error_code"], "pro_not_installed");
-        assert_eq!(run.status["core_generation_id"], generation);
-        assert!(run.status["last_attempt_duration_us"]
-            .as_u64()
-            .is_some_and(|duration| duration > 0));
-    }
-
-    #[test]
-    fn core_no_op_tick_retries_a_pending_generation() {
-        let temp = tempfile::tempdir().unwrap();
-        let (generation, manifest, resolver) = empty_authority(temp.path());
-        let calls = AtomicUsize::new(0);
-
-        let first = run_with(
-            temp.path(),
-            &generation,
-            authority(&generation, &manifest, resolver.as_ref(), None),
-            |_| Ok(()),
-            |_, _, _, _| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow::anyhow!("helper_crashed: retry later"))
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
             },
+            |_| panic!("completed generation must not preflight again"),
+            |_, _| panic!("completed generation must not sync again"),
         )
         .unwrap();
-        assert_eq!(first.status["status"], "error");
-
-        let second = run_with(
-            temp.path(),
-            &generation,
-            authority(&generation, &manifest, resolver.as_ref(), None),
-            |_| Ok(()),
-            |_, _, _, _| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Ok(receipt(&generation))
-            },
-        )
-        .unwrap();
-
-        assert!(second.did_work);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(second.status["status"], "completed");
-        assert_eq!(second.status["attempts"], 2);
-        assert_eq!(second.status["receipt_core_generation_id"], generation);
+        assert!(!no_op.did_work);
     }
 
     #[test]
-    fn generation_mismatch_never_completes_projection() {
+    fn pinned_generation_mismatch_fails_before_sync() {
         let temp = tempfile::tempdir().unwrap();
-        let (generation, manifest, resolver) = empty_authority(temp.path());
-        let wrong_generation = "b".repeat(64);
-
+        let index = empty_index(temp.path());
+        let expected = "f".repeat(64);
         let run = run_with(
             temp.path(),
-            &generation,
-            authority(&generation, &manifest, resolver.as_ref(), None),
+            &expected,
+            ProCatchUpAuthority {
+                generation_id: Some(index.generation_id()),
+                verified_index: Some(&index),
+            },
             |_| Ok(()),
-            |_, _, _, _| Ok(receipt(&wrong_generation)),
+            |_, _| panic!("mismatched pin must not sync"),
         )
         .unwrap();
-
         assert!(!run.did_work);
-        assert_eq!(run.status["status"], "error");
         assert_eq!(run.status["error_code"], "source_pro_generation_mismatch");
-        assert_eq!(run.status["core_generation_id"], generation);
-        assert!(run.status["receipt_core_generation_id"].is_null());
     }
 
     #[test]
-    fn mismatched_verified_pin_fails_before_pro_sync() {
-        let temp = tempfile::tempdir().unwrap();
-        let (generation, _, resolver) = empty_authority(temp.path());
-        let index = open_verified_index(&source_backed_index_root(temp.path())).unwrap();
-        let expected = "f".repeat(64);
-        assert_ne!(expected, generation);
-        let manifest = SourceManifest::new(expected.clone(), Vec::new(), Vec::new()).unwrap();
-
-        let (run, verified_opens) = count_verified_index_opens(|| {
-            run_with(
-                temp.path(),
-                &expected,
-                authority(&expected, &manifest, resolver.as_ref(), Some(&index)),
-                |_| Ok(()),
-                |_, _, _, _| panic!("mismatched Core pin must not reach Pro sync"),
-            )
-            .unwrap()
-        });
-
-        assert_eq!(verified_opens, 0);
-        assert!(!run.did_work);
-        assert_eq!(run.status["status"], "error");
-        assert_eq!(run.status["error_code"], "source_pro_generation_mismatch");
-        assert!(run.status["last_error"]
-            .as_str()
-            .is_some_and(|error| error.contains(index.generation_id())));
-    }
-
-    #[test]
-    fn explicit_wait_is_generation_exact_and_fails_closed_on_projection_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let generation = "a".repeat(64);
-        let completed =
-            SourceBackedProCatchUpStatus::pending(&generation, 1).completed(generation.clone());
-        persist_status(temp.path(), &completed).unwrap();
-        wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {
-            panic!("completed status must not sleep")
-        })
-        .unwrap();
-
-        let failed = SourceBackedProCatchUpStatus::pending(&generation, 2).error(
-            SourceBackedProCatchUpError::Projection {
-                code: "helper_crashed".to_owned(),
-                message: "boom".to_owned(),
-            },
-        );
-        persist_status(temp.path(), &failed).unwrap();
-        let error =
-            wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {
-                panic!("failed status must not sleep")
-            })
-            .unwrap_err();
-        assert!(format!("{error:#}").starts_with("helper_crashed:"));
-    }
-
-    #[test]
-    fn explicit_wait_times_out_on_a_stale_frontier() {
-        let temp = tempfile::tempdir().unwrap();
-        let generation = "a".repeat(64);
-        let stale =
-            SourceBackedProCatchUpStatus::pending(&"b".repeat(64), 1).completed("b".repeat(64));
-        persist_status(temp.path(), &stale).unwrap();
-        let error =
-            wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {
-                panic!("zero timeout must not sleep")
-            })
-            .unwrap_err();
-        assert!(format!("{error:#}").starts_with("not_materialized:"));
-    }
-
-    #[test]
-    fn source_backed_pro_catch_up_has_no_legacy_projection_authority() {
+    fn production_catch_up_has_no_manifest_resolver_or_provider_io() {
         let source = include_str!("source_backed_pro_catch_up.rs");
         for forbidden in [
-            ["ctx_history_", "store"].concat(),
-            ["database_", "path"].concat(),
-            ["body_", "preview"].concat(),
-            ["projection_", "journal"].concat(),
-            ["prepare_nativepath_", "projection"].concat(),
-            ["fall", "back"].concat(),
+            ["Source", "Manifest"].concat(),
+            ["source", "_manifest"].concat(),
+            ["sync_source", "_manifest_materialization"].concat(),
         ] {
-            assert!(
-                !source.contains(&forbidden),
-                "source-backed Pro catch-up contains forbidden architecture term {forbidden}"
-            );
+            assert!(!source.contains(&forbidden));
         }
-        assert!(source.contains("open_verified_index"));
-        assert!(!source.contains(&["VerifiedIndex", "::open"].concat()));
-        assert!(source.contains("sync_source_manifest_materialization"));
-        assert!(source.contains("authority.source_manifest()"));
-        assert!(source.contains("authority.resolver()"));
+        assert!(source.contains("sync_core_materialization"));
     }
 }

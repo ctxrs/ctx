@@ -23,7 +23,6 @@ use ctx_history_core::{
     utc_now, CertifiedSource, HydrationFailure, HydrationFailureKind, ScannedSourceCounts,
 };
 use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
-use ctx_pro_host_protocol::{SourceManifest, SourceRemoval};
 use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
@@ -211,9 +210,6 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
     /// Exact explicit-source catalog snapshot registered into this publication.
     pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
-    /// Exact metadata-only Pro handoff for this Core generation. Test
-    /// executors may omit it; the capture-owned production executor never does.
-    pub(crate) source_manifest: Option<SourceManifest>,
     /// Resolver built from the exact automatic registry used for this
     /// publication. Production refreshes always supply it; injected test
     /// executors may omit it when resolver behavior is irrelevant.
@@ -277,7 +273,7 @@ fn verify_source_backed_publication(
             verified.generation_id()
         );
     }
-    if publication.source_manifest.is_some() && publication.resolver.is_some() {
+    if publication.resolver.is_some() {
         let manifest = verified.manifest();
         let verified_current =
             SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;

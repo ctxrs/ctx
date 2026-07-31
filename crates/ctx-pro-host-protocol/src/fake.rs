@@ -7,8 +7,9 @@ use crate::lifecycle::{
     PrepareGraphKeyDeletionRequest, GRAPH_KEY_DELETION_CHALLENGE_BYTES,
 };
 use crate::message::{
-    Capability, GraphState, HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope,
-    HostMessage, MaterializationAuthority, StatusResult,
+    Capability, CoreProjectionCurrentness, HelloRequest, HelloResult, HelperEnvelope,
+    HelperMessage, HostEnvelope, HostMessage, MaterializedCoverage, ProAccessState,
+    ProAccessStatus, StatusResult,
 };
 use crate::query::{BlameRequest, BlameTarget, ResolvedBlameTarget};
 use crate::{
@@ -69,6 +70,7 @@ impl FakeHelper {
             capabilities: BTreeSet::from([
                 Capability::GraphKeyDeletion,
                 Capability::Status,
+                Capability::CoreMaterialization,
                 Capability::Query,
                 Capability::GitRead,
             ]),
@@ -119,9 +121,17 @@ impl FakeHelper {
             }
             HostMessage::Status(_) if self.selected(Capability::Status) => {
                 HelperMessage::Status(StatusResult {
-                    state: GraphState::NotMaterialized,
-                    authority: MaterializationAuthority::Source,
-                    source_receipt: None,
+                    currentness: CoreProjectionCurrentness::NotMaterialized,
+                    requested_core_generation_id: None,
+                    core_receipt: None,
+                    coverage: MaterializedCoverage::NotMaterialized,
+                    access: ProAccessStatus {
+                        entitlement: ProAccessState::Available,
+                        graph_key: ProAccessState::Available,
+                        local_repository: ProAccessState::Unavailable,
+                    },
+                    supported_operations: BTreeSet::new(),
+                    available_operations: BTreeSet::new(),
                 })
             }
             HostMessage::Blame(request) if self.selected(Capability::Query) => {

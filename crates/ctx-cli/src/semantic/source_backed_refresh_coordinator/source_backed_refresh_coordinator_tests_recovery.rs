@@ -20,7 +20,6 @@ fn empty_publication(
     SourceBackedRefreshPublication {
         generation_id,
         published_explicit_source_catalog: catalog,
-        source_manifest: None,
         resolver: None,
         scanned_routes: 0,
         unsupported_routes: 0,
@@ -299,13 +298,6 @@ fn changed_nonempty_catalog_recovers_only_generation_bound_a_and_queues_b() {
     assert_ne!(
         retained.published_explicit_source_catalog(),
         Some(&catalog_b)
-    );
-    assert_eq!(
-        retained
-            .source_manifest()
-            .expect("generation-bound source manifest")
-            .core_generation_id,
-        generation_id
     );
     assert!(coordinator.has_pending_request());
     let queued =

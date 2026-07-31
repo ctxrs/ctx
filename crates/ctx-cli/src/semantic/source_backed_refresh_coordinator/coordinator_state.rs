@@ -171,7 +171,6 @@ impl SourceBackedRefreshCoordinator {
                 published_explicit_source_catalog: Some(
                     recovered.published_explicit_source_catalog,
                 ),
-                source_manifest: Some(recovered.source_manifest),
                 resolver: recovered.resolver,
                 verified_index: Mutex::new(Some(recovered.verified_index)),
             }));
@@ -211,7 +210,6 @@ impl SourceBackedRefreshCoordinator {
         state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
             generation_id,
             published_explicit_source_catalog: None,
-            source_manifest: None,
             resolver,
             verified_index: Mutex::new(None),
         }));
@@ -777,20 +775,11 @@ impl SourceBackedRefreshCoordinator {
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
-                let manifest_generation_matches = publication
-                    .source_manifest
-                    .as_ref()
-                    .is_none_or(|manifest| manifest.core_generation_id == observed);
                 let catalog_matches_request = requested_catalog.as_ref().is_none_or(|requested| {
                     requested == &publication.published_explicit_source_catalog
                 });
-                let production_handoff_complete =
-                    publication.resolver.is_some() && publication.source_manifest.is_some();
-                let verified = if !manifest_generation_matches {
-                    Err(format!(
-                        "source-backed refresh published generation {observed} with a source manifest for another generation"
-                    ))
-                } else if !catalog_matches_request {
+                let production_handoff_complete = publication.resolver.is_some();
+                let verified = if !catalog_matches_request {
                     Err(format!(
                         "source-backed refresh published generation {observed} with an explicit source catalog authority different from the requested authority"
                     ))
@@ -798,7 +787,7 @@ impl SourceBackedRefreshCoordinator {
                     Ok((observed.clone(), publication))
                 } else {
                     Err(format!(
-                        "source-backed refresh published generation {observed} without its resolver registry or source manifest"
+                        "source-backed refresh published generation {observed} without its resolver registry"
                     ))
                 };
                 (verified, Some(observed))
@@ -861,7 +850,6 @@ impl SourceBackedRefreshCoordinator {
                     });
                     attempt.retained_publication = None;
                     attempt.timings = Some(publication.timings);
-                    let source_manifest = publication.source_manifest;
                     let published_explicit_source_catalog =
                         publication.published_explicit_source_catalog.clone();
                     attempt.published_explicit_source_catalog =
@@ -872,7 +860,6 @@ impl SourceBackedRefreshCoordinator {
                             published_explicit_source_catalog: Some(
                                 published_explicit_source_catalog,
                             ),
-                            source_manifest,
                             resolver,
                             verified_index: Mutex::new(None),
                         })

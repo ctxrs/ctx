@@ -112,7 +112,7 @@ fn materialize_once(
         Ok(mut client) => {
             telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
             helper_status(&mut client)?
-                .source_receipt
+                .core_receipt
                 .map(|receipt| receipt.core_generation_id)
         }
         Err(error) => {
@@ -151,12 +151,12 @@ fn materialize_once(
             return Err(error);
         }
     };
-    let status = helper_status(&mut client)?;
-    if status.authority != ctx_pro_host_protocol::MaterializationAuthority::Source {
-        bail!("not_materialized: Pro helper did not activate v0.26 source-manifest authority");
+    let status = helper_status_for(&mut client, Some(core_generation_id.clone()))?;
+    if status.currentness != ctx_pro_host_protocol::CoreProjectionCurrentness::Current {
+        bail!("not_materialized: Pro Core projection is not current");
     }
-    let receipt = status.source_receipt.ok_or_else(|| {
-        anyhow!("not_materialized: Pro helper has no completed source-manifest receipt")
+    let receipt = status.core_receipt.ok_or_else(|| {
+        anyhow!("not_materialized: Pro helper has no completed Core materialization receipt")
     })?;
     if receipt.core_generation_id != core_generation_id {
         bail!(
@@ -166,7 +166,7 @@ fn materialize_once(
         );
     }
 
-    let source_count = u64::try_from(receipt.progress.len()).unwrap_or(u64::MAX);
+    let source_count = u64::from(receipt.source_count);
     let no_op = prior_generation.as_deref() == Some(core_generation_id.as_str());
     telemetry.mode = Some(if no_op {
         ProMaterializationModeV1::NoOp
@@ -185,7 +185,7 @@ fn materialize_once(
 
     Ok(MaterializeReport {
         schema_version: 1,
-        payload_type: "pro_source_materialization",
+        payload_type: "pro_core_materialization",
         core_generation_id,
         source_count,
         batches: u64::from(!no_op),
@@ -203,13 +203,28 @@ pub(super) fn required_blame_capabilities(target: &BlameTarget) -> BTreeSet<Capa
 }
 
 pub(super) fn helper_status(client: &mut ProClient) -> Result<ctx_pro_host_protocol::StatusResult> {
-    helper_status_with(&mut |message, timeout| client.exchange(message, timeout))
+    helper_status_for(client, None)
+}
+
+fn helper_status_for(
+    client: &mut ProClient,
+    requested_core_generation_id: Option<String>,
+) -> Result<ctx_pro_host_protocol::StatusResult> {
+    helper_status_with(requested_core_generation_id, &mut |message, timeout| {
+        client.exchange(message, timeout)
+    })
 }
 
 pub(super) fn helper_status_with(
+    requested_core_generation_id: Option<String>,
     exchange: &mut impl FnMut(HostMessage, Duration) -> Result<HelperMessage>,
 ) -> Result<StatusResult> {
-    match exchange(HostMessage::Status(StatusRequest {}), HANDSHAKE_TIMEOUT)? {
+    match exchange(
+        HostMessage::Status(StatusRequest {
+            requested_core_generation_id,
+        }),
+        HANDSHAKE_TIMEOUT,
+    )? {
         HelperMessage::Status(status) => {
             status
                 .validate()

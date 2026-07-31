@@ -44,7 +44,6 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
             tempfile::tempdir().unwrap().path(),
         )
         .unwrap(),
-        source_manifest: None,
         resolver: None,
         scanned_routes: 1,
         unsupported_routes: 0,
@@ -91,7 +90,6 @@ fn recovered_resolver_is_available_before_a_successor_refresh() {
         .unwrap();
 
     assert_eq!(retained.generation_id(), "retained-generation");
-    assert!(retained.source_manifest().is_none());
 }
 
 fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatalogAuthority {
@@ -786,10 +784,6 @@ fn verified_publication_atomically_installs_generation_bound_resolver() {
             )?;
             let receipt = writer.commit(|_| true)?;
             let mut publication = test_publication(receipt.generation_id.clone());
-            publication.source_manifest = Some(
-                SourceManifest::new(receipt.generation_id, Vec::new(), Vec::new())
-                    .map_err(|error| anyhow!(error.message))?,
-            );
             publication.resolver = Some(Arc::clone(&executor_resolver));
             publication.certified_source_count = 0;
             publication.certified_source_bytes = 0;
@@ -809,13 +803,6 @@ fn verified_publication_atomically_installs_generation_bound_resolver() {
 
     assert_eq!(retained.generation_id(), generation_id);
     assert!(std::ptr::eq(retained.resolver(), resolver.as_ref()));
-    assert_eq!(
-        retained
-            .source_manifest()
-            .expect("retained source manifest")
-            .core_generation_id,
-        generation_id
-    );
     assert!(!coordinator.has_pending_request());
 
     let error = coordinator
@@ -849,10 +836,6 @@ fn one_post_commit_open_pins_probe_retirement_and_relational_catch_up() {
             )?
             .commit(|_| true)?;
             let mut publication = test_publication(receipt.generation_id.clone());
-            publication.source_manifest = Some(
-                SourceManifest::new(receipt.generation_id, Vec::new(), Vec::new())
-                    .map_err(|error| anyhow!(error.message))?,
-            );
             publication.resolver = Some(Arc::clone(&executor_resolver));
             publication.certified_source_count = 0;
             publication.certified_source_bytes = 0;

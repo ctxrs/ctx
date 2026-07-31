@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::Result;
 use ctx_pro_host_protocol::{
-    Capability, EntitlementAccessState, GraphState, HelperMessage, HostMessage, StatusRequest,
-    StatusResult, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    Capability, CoreProjectionCurrentness, EntitlementAccessState, HelperMessage, HostMessage,
+    MaterializedCoverage, StatusRequest, StatusResult, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 
@@ -158,10 +158,16 @@ pub(crate) fn status_with_helper_resolver(
                 .map(|capability| capability.wire_name().to_owned())
                 .collect();
             let access = client.public_access_status();
-            match client.exchange(HostMessage::Status(StatusRequest {}), HANDSHAKE_TIMEOUT) {
+            match client.exchange(
+                HostMessage::Status(StatusRequest {
+                    requested_core_generation_id: None,
+                }),
+                HANDSHAKE_TIMEOUT,
+            ) {
                 Ok(HelperMessage::Status(result)) => {
+                    let valid = result.validate().is_ok();
                     let (ready, materialized, state_error) =
-                        status_outcome(result.state, client.authorization_state);
+                        status_outcome(&result, client.authorization_state);
                     ProStatus {
                         schema_version: 1,
                         installed: true,
@@ -171,7 +177,11 @@ pub(crate) fn status_with_helper_resolver(
                         helper_version,
                         protocol_version: PROTOCOL_VERSION,
                         capabilities,
-                        error_code: state_error.map(ToOwned::to_owned),
+                        error_code: if valid {
+                            state_error.map(ToOwned::to_owned)
+                        } else {
+                            Some("protocol_mismatch".to_owned())
+                        },
                         access_state: access.state,
                         refresh_after_unix: access.refresh_after_unix,
                         access_deadline_unix: access.access_deadline_unix,
@@ -233,19 +243,25 @@ pub(crate) fn status_with_helper_resolver(
 }
 
 pub(super) fn status_outcome(
-    state: GraphState,
+    status: &StatusResult,
     authorization_state: Option<EntitlementAccessState>,
 ) -> (bool, bool, Option<&'static str>) {
-    let materialized = state == GraphState::Ready;
+    let materialized = status.currentness == CoreProjectionCurrentness::Current
+        && matches!(
+            status.coverage,
+            MaterializedCoverage::Complete
+                | MaterializedCoverage::Empty
+                | MaterializedCoverage::Abstained
+        );
     if authorization_state == Some(EntitlementAccessState::Locked) {
         return (false, materialized, Some("entitlement_expired"));
     }
-    let error = match state {
-        GraphState::NotMaterialized => Some("not_materialized"),
-        GraphState::NeedsRebuild => Some("needs_rebuild"),
-        GraphState::Partial => Some("partial"),
-        GraphState::NeedsResume => Some("needs_resume"),
-        GraphState::Ready => None,
+    let error = match status.currentness {
+        CoreProjectionCurrentness::NotMaterialized => Some("not_materialized"),
+        CoreProjectionCurrentness::NeedsRebuild => Some("needs_rebuild"),
+        CoreProjectionCurrentness::Partial => Some("partial"),
+        CoreProjectionCurrentness::Stale => Some("stale_source"),
+        CoreProjectionCurrentness::Current => None,
     };
-    (materialized, materialized, error)
+    (!status.available_operations.is_empty(), materialized, error)
 }

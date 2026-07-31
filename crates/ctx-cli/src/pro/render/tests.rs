@@ -1,5 +1,9 @@
 use std::io::Write as _;
 
+use ctx_history_core::{
+    derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+};
 use ctx_pro_host_protocol::{
     AgentAttribution, BlameContinuation, BlameMatch, BlameResult, CommitBlameMatch, CommitFactType,
     CommitPredicate, ContinuationReason, EvidenceCitation, FactConfidence, FactState,
@@ -9,7 +13,6 @@ use ctx_pro_host_protocol::{
     ResourceRef, WorktreeStatus,
 };
 use unicode_width::UnicodeWidthStr as _;
-use uuid::Uuid;
 
 use super::render_blame_document;
 use crate::ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Token};
@@ -39,22 +42,39 @@ fn repository() -> ResourceRef {
 }
 
 fn event_evidence(number: u32) -> NumberedEvidence {
+    let source = SourceKey::derive(
+        "fixture",
+        "fixture_jsonl",
+        "fixture-v1",
+        1,
+        SourceAnchor::CatalogLineage([number as u8; 32]),
+    )
+    .unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "thread",
+        native_session_key: &NativeSessionKey::native_id("session", TypedKey::U64(1)).unwrap(),
+    })
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &NativeItemKey::native_id("event", TypedKey::U64(u64::from(number)))
+            .unwrap(),
+        subrecord_selector: None,
+    })
+    .unwrap();
     NumberedEvidence {
         number,
         citation: EvidenceCitation {
-            observation_id: None,
-            observation_seq: None,
-            observation_kind: None,
-            session_id: None,
-            event_id: Some(Uuid::from_u128(u128::from(number))),
-            event_seq: Some(u64::from(number)),
-            source_locator: None,
-            source_path: None,
-            fixture_line: None,
-            source_record_ordinal: None,
-            source_record_subrecord_index: None,
+            core_generation_id: "a".repeat(64),
+            source,
+            session_id,
+            event_id,
+            event_sequence: u64::from(number),
             byte_range: None,
-            source_sha256: None,
+            evidence_sha256: None,
         },
     }
 }
@@ -535,7 +555,7 @@ fn labels_wider_than_the_configured_column_stack_or_align_by_actual_width() {
 }
 
 #[test]
-fn source_evidence_keeps_every_available_copyable_coordinate() {
+fn core_evidence_keeps_generation_event_source_and_sequence() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
     let result = BlameResult {
         target: ResolvedBlameTarget::Commit {
@@ -552,35 +572,14 @@ fn source_evidence_keeps_every_available_copyable_coordinate() {
             FactState::Asserted,
             1,
         )],
-        evidence: vec![NumberedEvidence {
-            number: 1,
-            citation: EvidenceCitation {
-                observation_id: None,
-                observation_seq: None,
-                observation_kind: None,
-                session_id: None,
-                event_id: None,
-                event_seq: None,
-                source_locator: None,
-                source_path: Some("fixtures/history.jsonl".to_owned()),
-                fixture_line: Some(7),
-                source_record_ordinal: Some(3),
-                source_record_subrecord_index: Some(2),
-                byte_range: Some(ctx_pro_host_protocol::ByteRange {
-                    start: 40,
-                    end_exclusive: 80,
-                }),
-                source_sha256: Some("a".repeat(64)),
-            },
-        }],
+        evidence: vec![event_evidence(1)],
         next: None,
     };
     result.validate().unwrap();
     let rendered = render_plain(&result, 120);
-    assert!(rendered.contains(
-        "fixtures/history.jsonl:7 record 3.2 bytes 40-80 sha256 \
-         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    ));
+    assert!(rendered.contains("ctx show event"));
+    assert!(rendered.contains("Core aaaaaaaaaaaa"));
+    assert!(rendered.contains("sequence 1"));
 }
 
 #[test]

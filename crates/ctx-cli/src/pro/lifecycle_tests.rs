@@ -17,42 +17,37 @@ use tempfile::TempDir;
 
 use super::*;
 
-const SOURCE_MANIFEST_AUTHORITY_SENTINEL: &[u8] =
-    b"v0.26 source-manifest authority; provider sources remain canonical";
+const CORE_GENERATION_SENTINEL: &[u8] = b"generation-bound Core snapshot authority";
 const SEMANTIC_INDEX_SENTINEL: &[u8] = b"v0.26 disposable semantic index";
 
 struct EpochStorageFixture {
-    source_manifest_authority: PathBuf,
+    core_generation: PathBuf,
     semantic_index: PathBuf,
 }
 
 impl EpochStorageFixture {
     fn write(data_root: &Path) -> Self {
-        let source_manifest_authority = data_root
+        let core_generation = data_root
             .join("search/lexical")
             .join("ctx-generations")
-            .join("source-manifest-authority.sentinel");
+            .join("core-generation.sentinel");
         let semantic_index = data_root
             .join("search/semantic")
             .join("fresh-epoch.sentinel");
-        fs::create_dir_all(source_manifest_authority.parent().unwrap()).unwrap();
+        fs::create_dir_all(core_generation.parent().unwrap()).unwrap();
         fs::create_dir_all(semantic_index.parent().unwrap()).unwrap();
-        fs::write(
-            &source_manifest_authority,
-            SOURCE_MANIFEST_AUTHORITY_SENTINEL,
-        )
-        .unwrap();
+        fs::write(&core_generation, CORE_GENERATION_SENTINEL).unwrap();
         fs::write(&semantic_index, SEMANTIC_INDEX_SENTINEL).unwrap();
         Self {
-            source_manifest_authority,
+            core_generation,
             semantic_index,
         }
     }
 
     fn assert_preserved(&self) {
         assert_eq!(
-            fs::read(&self.source_manifest_authority).unwrap(),
-            SOURCE_MANIFEST_AUTHORITY_SENTINEL
+            fs::read(&self.core_generation).unwrap(),
+            CORE_GENERATION_SENTINEL
         );
         assert_eq!(
             fs::read(&self.semantic_index).unwrap(),

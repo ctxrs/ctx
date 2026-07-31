@@ -11,7 +11,6 @@ pub(super) struct RetainedGenerationResolver {
 pub(crate) struct GenerationBoundSourceBackedResolver {
     pub(super) generation_id: String,
     pub(super) published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    pub(super) source_manifest: Option<SourceManifest>,
     pub(super) resolver: Arc<SourceBackedResolverRegistry>,
     pub(super) verified_index: Mutex<Option<Arc<VerifiedIndex>>>,
 }
@@ -30,7 +29,6 @@ impl fmt::Debug for GenerationBoundSourceBackedResolver {
                 "published_explicit_source_catalog",
                 &self.published_explicit_source_catalog,
             )
-            .field("source_manifest", &self.source_manifest)
             .field("verified_index_bound", &verified_index_bound)
             .finish_non_exhaustive()
     }
@@ -50,10 +48,6 @@ impl GenerationBoundSourceBackedResolver {
         &self,
     ) -> Option<&ExplicitSourceCatalogAuthority> {
         self.published_explicit_source_catalog.as_ref()
-    }
-
-    pub(crate) fn source_manifest(&self) -> Option<&SourceManifest> {
-        self.source_manifest.as_ref()
     }
 
     pub(crate) fn verified_index(&self) -> Option<Arc<VerifiedIndex>> {

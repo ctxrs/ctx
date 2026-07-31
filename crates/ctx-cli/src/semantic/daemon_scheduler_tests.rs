@@ -72,14 +72,6 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         generation_id: receipt.generation_id.clone(),
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        source_manifest: Some(
-            ctx_pro_host_protocol::SourceManifest::new(
-                receipt.generation_id,
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap(),
-        ),
         resolver: Some(std::sync::Arc::new(
             ctx_history_capture::SourceBackedProviderRegistry::new().resolver_registry(),
         )),
@@ -205,7 +197,6 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         generation_id: receipt.generation_id,
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        source_manifest: None,
         resolver: None,
         scanned_routes: 1,
         unsupported_routes: 0,

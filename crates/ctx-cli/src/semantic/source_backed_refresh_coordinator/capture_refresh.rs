@@ -70,7 +70,6 @@ pub(super) fn execute_capture_owned_refresh(
 pub(super) struct RecoveredCaptureOwnedPublication {
     pub(super) generation_id: String,
     pub(super) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
-    pub(super) source_manifest: SourceManifest,
     pub(super) resolver: Arc<SourceBackedResolverRegistry>,
     pub(super) verified_index: Arc<VerifiedIndex>,
 }
@@ -105,23 +104,9 @@ pub(super) fn recover_capture_owned_resolver(
     ) else {
         return Ok(None);
     };
-    let removals = retained_generation
-        .manifest()
-        .removals
-        .iter()
-        .map(|removal| SourceRemoval::new(removal.deletion().clone(), removal.inventory().clone()))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| anyhow!("recover certified Pro source removal: {}", error.message))?;
-    let source_manifest = SourceManifest::new(
-        generation_id.clone(),
-        retained_generation.manifest().sources.clone(),
-        removals,
-    )
-    .map_err(|error| anyhow!("recover Pro source manifest: {}", error.message))?;
     Ok(Some(RecoveredCaptureOwnedPublication {
         generation_id,
         published_explicit_source_catalog: published_explicit_source_catalog.clone(),
-        source_manifest,
         resolver,
         verified_index: retained_generation,
     }))
@@ -278,23 +263,9 @@ pub(super) fn refresh_all_provider_sources(
             "capture-owned source refresh receipt does not match its retained generation cardinalities"
         );
     }
-    let removals = receipt
-        .removals
-        .iter()
-        .cloned()
-        .map(|removal| SourceRemoval::new(removal.deletion, removal.inventory))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| anyhow!("build certified Pro source removal: {}", error.message))?;
-    let source_manifest = SourceManifest::new(
-        receipt.commit.generation_id.clone(),
-        receipt.sources.clone(),
-        removals,
-    )
-    .map_err(|error| anyhow!("build Pro source manifest: {}", error.message))?;
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         published_explicit_source_catalog,
-        source_manifest: Some(source_manifest),
         resolver: Some(resolver),
         scanned_routes: receipt.scanned_routes,
         unsupported_routes: receipt.unsupported_routes.len(),
@@ -349,12 +320,9 @@ fn refresh_without_executable_routes(
     .map_err(|error| anyhow!("report empty source-backed publication progress: {error}"))?;
 
     let resolver = Arc::new(registry.resolver_registry());
-    let source_manifest = SourceManifest::new(generation.clone(), Vec::new(), Vec::new())
-        .map_err(|error| anyhow!("build empty Pro source manifest: {}", error.message))?;
     Ok(SourceBackedRefreshPublication {
         generation_id: generation,
         published_explicit_source_catalog,
-        source_manifest: Some(source_manifest),
         resolver: Some(resolver),
         scanned_routes: 0,
         unsupported_routes: registry.unsupported_route_count(),
