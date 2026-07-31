@@ -24,6 +24,11 @@ use super::{
     },
     source::{classify_claude_path, claude_projects_root, ClaudeSessionKey, SessionLayout},
 };
+use crate::repository_attribution::{
+    apply_annotation, linked_outcome_evidence, AttributionInput, LinkedOutcomeInput,
+    RepositoryAttributor, UnscopedFileObservation,
+};
+use crate::OutputOutcome;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
@@ -42,8 +47,8 @@ const NATIVE_EVENT_KEY_NAMESPACE: &str = "claude.event";
 const EVENT_POSITION_KIND: &str = "claude.jsonl.event-position";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
-const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v5";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v1";
+const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v2";
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ClaudeJsonlAdapter;
@@ -155,6 +160,8 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             session: ClaudeSessionMetadata::new(binding.key.clone()),
             binding,
             identities,
+            attributor: RepositoryAttributor::default(),
+            pending_calls: HashMap::new(),
         }))
     }
 }
@@ -173,6 +180,15 @@ struct ClaudeProjector {
     binding: Binding,
     identities: Identities,
     session: ClaudeSessionMetadata,
+    attributor: RepositoryAttributor,
+    pending_calls: HashMap<String, PendingCall>,
+}
+
+#[derive(Clone)]
+struct PendingCall {
+    command: Option<String>,
+    declared_workdir: Option<String>,
+    event_sequence: u64,
 }
 
 impl JsonlFamilyProjector for ClaudeProjector {
@@ -212,14 +228,114 @@ impl JsonlFamilyProjector for ClaudeProjector {
             parsed.git_branch.as_deref(),
         );
         for row in parsed.rows {
-            emit(core_record(
+            let event_sequence = row_event_sequence(&row)?;
+            let structured_content = row_structured_content(&row);
+            let mut input = AttributionInput {
+                activity_at_unix_ms: row
+                    .occurred_at
+                    .as_deref()
+                    .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+                    .map(|value| value.timestamp_millis()),
+                session_cwd: parsed.cwd.clone().or_else(|| self.session.cwd.clone()),
+                structured_content,
+                ..AttributionInput::default()
+            };
+            if let Some(call) = &row.tool_call {
+                input.command = call.command.clone();
+                input.declared_tool_workdir = call.declared_workdir.clone();
+                input.file_observations = call
+                    .file_touches
+                    .iter()
+                    .map(|touch| UnscopedFileObservation {
+                        path: touch.path.clone(),
+                        prior_path: touch.previous_path.clone(),
+                        kind: touch.kind,
+                    })
+                    .collect();
+                if let Some(call_id) = call.call_id.as_deref().filter(|id| !id.is_empty()) {
+                    if self.pending_calls.len() < 4096 && !self.pending_calls.contains_key(call_id)
+                    {
+                        self.pending_calls.insert(
+                            call_id.to_owned(),
+                            PendingCall {
+                                command: call.command.clone(),
+                                declared_workdir: call.declared_workdir.clone(),
+                                event_sequence,
+                            },
+                        );
+                    }
+                }
+            }
+            let mut outcome_relevant = false;
+            if let Some(result) = &row.tool_result {
+                let context = result
+                    .call_id
+                    .as_deref()
+                    .and_then(|call_id| self.pending_calls.remove(call_id));
+                if let (Some(context), Some(result_call_id)) = (context, result.call_id.as_deref())
+                {
+                    input.command = context.command.clone();
+                    input.declared_tool_workdir = context.declared_workdir.clone();
+                    if let Some(command) = context.command.as_deref() {
+                        let output = result.tool_use_result.as_ref().unwrap_or(&result.content);
+                        let structured_oid = result
+                            .tool_use_result
+                            .as_ref()
+                            .and_then(|value| value.pointer("/gitOperation/commit/sha"))
+                            .and_then(serde_json::Value::as_str);
+                        let output_workdir = result
+                            .tool_use_result
+                            .as_ref()
+                            .and_then(|value| value.get("cwd").or_else(|| value.get("workdir")))
+                            .and_then(serde_json::Value::as_str);
+                        if let Some(linked) = linked_outcome_evidence(LinkedOutcomeInput {
+                            provider: "claude",
+                            command,
+                            session_cwd: input.session_cwd.as_deref(),
+                            declared_workdir: context.declared_workdir.as_deref(),
+                            origin_call_id: result_call_id,
+                            result_call_id,
+                            origin_event_sequence: context.event_sequence,
+                            continuation_call_id_sha256: &[],
+                            result_record_sha256: row.locator.record_sha256,
+                            observed_at_unix_ms: input.activity_at_unix_ms.unwrap_or(0),
+                            result_outcome: claude_output_outcome(result.outcome),
+                            result_output: output,
+                            structured_commit_oid: structured_oid,
+                            output_repository_path: output_workdir,
+                        }) {
+                            outcome_relevant = true;
+                            input.provider_native_repository_aliases =
+                                linked.provider_native_repository_aliases;
+                            input.outcome_operation_repository_path =
+                                linked.outcome_operation_repository_path;
+                            input.outcome_output_repository_path =
+                                linked.outcome_output_repository_path;
+                            input.outcome_observations = linked.outcomes;
+                            input.outcome_abstentions = linked.abstentions;
+                        }
+                    }
+                }
+                if !outcome_relevant
+                    && !matches!(
+                        result.outcome,
+                        ClaudeOutputOutcome::Failure | ClaudeOutputOutcome::Timeout
+                    )
+                {
+                    continue;
+                }
+            }
+            let mut core = core_record(
                 &self.source,
                 &self.source_path,
                 &self.binding,
                 &self.identities,
                 &self.session,
                 row,
-            )?)?;
+            )?;
+            apply_annotation(&mut core, self.attributor.attribute(input));
+            core.validate_contract().map_err(contract)?;
+            emit(core)?;
         }
         Ok(())
     }
@@ -243,22 +359,8 @@ fn core_record(
     })
     .map_err(contract)?;
     let native_event_id = native_event_typed_key(&row)?;
-    let event_sequence = row
-        .identity
-        .source_record_ordinal
-        .checked_mul(1_u64 << 16)
-        .and_then(|value| value.checked_add(row.identity.source_subrecord_index))
-        .ok_or(CaptureError::SystemInvariant(
-            "Claude event sequence overflowed",
-        ))?;
-    let structured_content = if row.tool_call.is_some() || row.sparse_output.is_some() {
-        Some(serde_json::json!({
-            "tool_call": row.tool_call,
-            "tool_output": row.sparse_output,
-        }))
-    } else {
-        None
-    };
+    let event_sequence = row_event_sequence(&row)?;
+    let structured_content = row_structured_content(&row);
     let mut record = CoreRecord::new_selected(
         event_id,
         identities.session_id,
@@ -287,6 +389,51 @@ fn core_record(
     record.content.structured_content = structured_content;
     record.validate_contract().map_err(contract)?;
     Ok(record)
+}
+
+fn row_event_sequence(row: &ClaudeRetainedRow) -> Result<u64> {
+    row.identity
+        .source_record_ordinal
+        .checked_mul(1_u64 << 16)
+        .and_then(|value| value.checked_add(row.identity.source_subrecord_index))
+        .ok_or(CaptureError::SystemInvariant(
+            "Claude event sequence overflowed",
+        ))
+}
+
+fn row_structured_content(row: &ClaudeRetainedRow) -> Option<serde_json::Value> {
+    row.tool_call
+        .as_ref()
+        .map(|call| {
+            serde_json::json!({
+                "type": "tool_use",
+                "id": call.call_id,
+                "name": call.tool_name,
+                "input": call.input,
+            })
+        })
+        .or_else(|| {
+            row.tool_result.as_ref().map(|result| {
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": result.call_id,
+                    "content": result.content,
+                    "toolUseResult": result.tool_use_result,
+                    "outcome": result.outcome,
+                    "exit_code": result.exit_code,
+                    "duration_ms": result.duration_ms,
+                })
+            })
+        })
+}
+
+fn claude_output_outcome(outcome: ClaudeOutputOutcome) -> OutputOutcome {
+    match outcome {
+        ClaudeOutputOutcome::Success => OutputOutcome::Success,
+        ClaudeOutputOutcome::Failure => OutputOutcome::Failure,
+        ClaudeOutputOutcome::Timeout => OutputOutcome::Timeout,
+        ClaudeOutputOutcome::Unknown => OutputOutcome::Unknown,
+    }
 }
 
 fn identities(binding: &Binding) -> Result<Identities> {
@@ -400,32 +547,28 @@ fn lexical_body(row: &ClaudeRetainedRow) -> String {
         .body
         .clone()
         .or_else(|| {
-            row.tool_call.as_ref().map(|call| {
-                let mut parts = vec!["tool call".to_owned()];
-                parts.extend(call.tool_name.clone());
-                parts.extend(call.call_id.clone());
-                parts.extend(call.file_touches.iter().map(|touch| touch.path.clone()));
-                parts.join(" ")
+            row.tool_call.as_ref().and_then(|call| {
+                serde_json::to_string(&serde_json::json!({
+                    "type": "tool_use",
+                    "id": call.call_id,
+                    "name": call.tool_name,
+                    "input": call.input,
+                }))
+                .ok()
             })
         })
         .or_else(|| {
-            row.sparse_output.as_ref().map(|output| {
-                format!(
-                    "tool output {}{}{}",
-                    match output.outcome {
-                        ClaudeOutputOutcome::Failure => "failure",
-                        ClaudeOutputOutcome::Timeout => "timeout",
-                    },
-                    output
-                        .call_id
-                        .as_deref()
-                        .map(|id| format!(" {id}"))
-                        .unwrap_or_default(),
-                    output
-                        .exit_code
-                        .map(|code| format!(" exit {code}"))
-                        .unwrap_or_default()
-                )
+            row.tool_result.as_ref().and_then(|output| {
+                serde_json::to_string(&serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": output.call_id,
+                    "content": output.content,
+                    "toolUseResult": output.tool_use_result,
+                    "outcome": output.outcome,
+                    "exit_code": output.exit_code,
+                    "duration_ms": output.duration_ms,
+                }))
+                .ok()
             })
         })
         .unwrap_or_else(|| event_kind(row.kind).to_owned());

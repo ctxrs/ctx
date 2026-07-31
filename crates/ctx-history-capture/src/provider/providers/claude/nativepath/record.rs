@@ -1,24 +1,26 @@
 use std::fmt;
 
+use ctx_history_core::RepositoryFileObservationKind;
 use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
     privacy::{preflight_record, RawRecordPreflight, RawResultClassification},
     rows::{
         ClaudeEventIdentity, ClaudeEventKind, ClaudeFileTouch, ClaudeNativeOrder,
-        ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow,
-        ClaudeSparseOutputDiagnostic, ToolCallRequest, CLAUDE_MAX_FILE_TOUCHES_PER_RECORD,
+        ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow, ClaudeToolResult,
+        ToolCallRequest, CLAUDE_MAX_FILE_TOUCHES_PER_RECORD,
     },
 };
 use crate::{OutputOutcome, OutputOutcomeMetadata};
 
 mod value_decoding;
 
-use value_decoding::sparse_output_rows;
+use value_decoding::complete_output_rows;
 
 const CLAUDE_BODY_HASH_DOMAIN: &[u8] = b"ctx-claude-nativepath-body-v1\0";
 
@@ -186,179 +188,7 @@ struct SafeBlock {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
-    input: SafeToolInput,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct SafeToolInput {
-    #[serde(default)]
-    path: Option<BoundedPath>,
-    #[serde(rename = "file_path", alias = "filePath", default)]
-    file_path: Option<BoundedPath>,
-    #[serde(rename = "old_path", alias = "oldPath", default)]
-    old_path: Option<BoundedPath>,
-    #[serde(rename = "new_path", alias = "newPath", default)]
-    new_path: Option<BoundedPath>,
-    #[serde(default)]
-    command: Option<BoundedPatch>,
-    #[serde(default)]
-    patch: Option<BoundedPatch>,
-}
-
-#[derive(Debug)]
-struct BoundedPath(Option<String>);
-
-impl BoundedPath {
-    fn as_deref(&self) -> Option<&str> {
-        self.0.as_deref()
-    }
-}
-
-impl<'de> Deserialize<'de> for BoundedPath {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(BoundedPathVisitor)
-    }
-}
-
-struct BoundedPathVisitor;
-
-impl<'de> Visitor<'de> for BoundedPathVisitor {
-    type Value = BoundedPath;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a bounded Claude tool path")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(BoundedPath(
-            (value.len() <= 4 * 1024).then(|| value.to_owned()),
-        ))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(BoundedPath((value.len() <= 4 * 1024).then_some(value)))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(BoundedPath(None))
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while sequence.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(BoundedPath(None))
-    }
-}
-
-#[derive(Debug)]
-struct BoundedPatch(Option<String>);
-
-impl<'de> Deserialize<'de> for BoundedPatch {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(BoundedPatchVisitor)
-    }
-}
-
-struct BoundedPatchVisitor;
-
-impl<'de> Visitor<'de> for BoundedPatchVisitor {
-    type Value = BoundedPatch;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a bounded Claude patch command")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(BoundedPatch(
-            (value.len() <= 64 * 1024).then(|| value.to_owned()),
-        ))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(BoundedPatch((value.len() <= 64 * 1024).then_some(value)))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(BoundedPatch(None))
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while sequence.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(BoundedPatch(None))
-    }
+    input: Value,
 }
 
 fn retain_safe_record(
@@ -439,7 +269,7 @@ fn retain_safe_record(
             body_text_retention: None,
             complete_body_ref: None,
             tool_call: Some(call),
-            sparse_output: None,
+            tool_result: None,
             locator: locator.clone(),
         });
         if let Some(displays) = &mut source_displays {
@@ -478,7 +308,7 @@ fn push_body_row(
         body_text_retention: None,
         complete_body_ref: None,
         tool_call: None,
-        sparse_output: None,
+        tool_result: None,
         locator: locator.clone(),
     });
 }
@@ -493,8 +323,15 @@ fn split_safe_content(content: SafeContent) -> (Option<String>, Vec<ToolCallRequ
         match block.kind.as_deref() {
             Some("tool_use") | Some("server_tool_use") => calls.push(ToolCallRequest {
                 call_id: block.id,
-                tool_name: block.name,
-                file_touches: safe_file_touches(&block.input),
+                tool_name: block.name.clone(),
+                command: bounded_input_string(&block.input, &["command"], 1024 * 1024),
+                declared_workdir: bounded_input_string(
+                    &block.input,
+                    &["workdir", "cwd"],
+                    16 * 1024,
+                ),
+                file_touches: safe_file_touches(&block.input, block.name.as_deref()),
+                input: block.input,
             }),
             Some("text") => {
                 if let Some(text) = block.text.filter(|value| !value.trim().is_empty()) {
@@ -512,41 +349,62 @@ fn split_safe_content(content: SafeContent) -> (Option<String>, Vec<ToolCallRequ
     (body, calls)
 }
 
-fn safe_file_touches(input: &SafeToolInput) -> Vec<ClaudeFileTouch> {
+fn bounded_input_string(input: &Value, fields: &[&str], limit: usize) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| input.get(*field).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty() && value.len() <= limit)
+        .map(str::to_owned)
+}
+
+fn safe_file_touches(input: &Value, tool_name: Option<&str>) -> Vec<ClaudeFileTouch> {
     let mut touches = Vec::new();
-    let old_path = input.old_path.as_ref().and_then(BoundedPath::as_deref);
-    if let Some(path) = input.new_path.as_ref().and_then(BoundedPath::as_deref) {
-        push_touch(&mut touches, path, old_path);
+    let old_path = bounded_input_string(input, &["old_path", "oldPath"], 16 * 1024);
+    if let Some(path) = bounded_input_string(input, &["new_path", "newPath"], 16 * 1024) {
+        push_touch(
+            &mut touches,
+            &path,
+            old_path.as_deref(),
+            RepositoryFileObservationKind::Renamed,
+        );
     }
-    for path in [&input.path, &input.file_path]
-        .into_iter()
-        .flatten()
-        .filter_map(BoundedPath::as_deref)
-    {
-        push_touch(&mut touches, path, None);
+    for path in ["path", "file_path", "filePath"] {
+        if let Some(path) = input.get(path).and_then(Value::as_str) {
+            let kind = match tool_name.unwrap_or_default().to_ascii_lowercase().as_str() {
+                "read" | "glob" | "grep" => RepositoryFileObservationKind::Read,
+                "edit" => RepositoryFileObservationKind::Modified,
+                "write" => RepositoryFileObservationKind::Unknown,
+                _ => RepositoryFileObservationKind::Unknown,
+            };
+            push_touch(&mut touches, path, None, kind);
+        }
     }
-    for patch in [&input.command, &input.patch]
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.0.as_deref())
-    {
-        extract_patch_touches(patch, &mut touches);
+    if let Some(patch) = bounded_input_string(input, &["patch"], 64 * 1024) {
+        extract_patch_touches(&patch, &mut touches);
     }
     touches
 }
 
-fn push_touch(touches: &mut Vec<ClaudeFileTouch>, path: &str, previous_path: Option<&str>) {
+fn push_touch(
+    touches: &mut Vec<ClaudeFileTouch>,
+    path: &str,
+    previous_path: Option<&str>,
+    kind: RepositoryFileObservationKind,
+) {
     if touches.len() >= CLAUDE_MAX_FILE_TOUCHES_PER_RECORD
         || path.trim().is_empty()
-        || touches
-            .iter()
-            .any(|touch| touch.path == path && touch.previous_path.as_deref() == previous_path)
+        || touches.iter().any(|touch| {
+            touch.path == path
+                && touch.previous_path.as_deref() == previous_path
+                && touch.kind == kind
+        })
     {
         return;
     }
     touches.push(ClaudeFileTouch {
         path: path.to_owned(),
         previous_path: previous_path.map(str::to_owned),
+        kind,
     });
 }
 
@@ -556,13 +414,33 @@ fn extract_patch_touches(patch: &str, touches: &mut Vec<ClaudeFileTouch>) {
         if let Some(path) = line.strip_prefix("*** Move from: ") {
             pending_old = Some(path.trim());
         } else if let Some(path) = line.strip_prefix("*** Move to: ") {
-            push_touch(touches, path.trim(), pending_old.take());
-        } else if let Some(path) = line
-            .strip_prefix("*** Update File: ")
-            .or_else(|| line.strip_prefix("*** Add File: "))
-            .or_else(|| line.strip_prefix("*** Delete File: "))
-        {
-            push_touch(touches, path.trim(), None);
+            push_touch(
+                touches,
+                path.trim(),
+                pending_old.take(),
+                RepositoryFileObservationKind::Renamed,
+            );
+        } else if let Some(path) = line.strip_prefix("*** Update File: ") {
+            push_touch(
+                touches,
+                path.trim(),
+                None,
+                RepositoryFileObservationKind::Modified,
+            );
+        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
+            push_touch(
+                touches,
+                path.trim(),
+                None,
+                RepositoryFileObservationKind::Created,
+            );
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            push_touch(
+                touches,
+                path.trim(),
+                None,
+                RepositoryFileObservationKind::Deleted,
+            );
         }
     }
 }
@@ -629,11 +507,9 @@ struct MetadataOnlyRecord {
     git_branch: Option<String>,
 }
 
-/// Performs exactly one semantic JSON deserialization for a complete record.
-///
-/// The allocation-free raw inspection only selects the safe semantic shape.
-/// Core-only result content is always visited as ignored JSON and therefore is
-/// never decoded, hashed, previewed, touched, or retained.
+/// The allocation-free raw inspection first selects and bounds the semantic
+/// shape. Result records are then retained completely for direct Core output
+/// and exact native call/result linkage.
 pub(super) fn parse_native_record(
     bytes: &[u8],
     raw_ordinal: u64,
@@ -663,13 +539,14 @@ fn parse_native_record_inner(
     if result.is_result() {
         let metadata: MetadataOnlyRecord = serde_json::from_slice(bytes)?;
         let outputs = output_descriptors(&preflight, bytes, &record_outcome);
-        let rows = sparse_output_rows(
+        let value: Value = serde_json::from_slice(bytes)?;
+        let rows = complete_output_rows(
             raw_ordinal,
             locator,
             metadata.uuid.clone(),
             metadata.timestamp.clone(),
-            0,
             &outputs,
+            &value,
         );
         let source_displays = include_source_displays.then(|| vec![None; rows.len()]);
         return Ok(ParsedClaudeRecord {
@@ -730,4 +607,65 @@ fn output_descriptors(
         });
     }
     outputs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/repository_attribution/claude-native.jsonl"
+    ));
+
+    fn locator() -> ClaudePhysicalLocator {
+        ClaudePhysicalLocator {
+            path: PathBuf::from("claude-native.jsonl"),
+            byte_start: 0,
+            byte_end_exclusive: 1,
+            line_number: 1,
+            record_sha256: [7; 32],
+        }
+    }
+
+    #[test]
+    fn native_tool_use_and_linked_result_are_retained_exactly() {
+        let lines = FIXTURE.lines().collect::<Vec<_>>();
+        let call = parse_native_record(lines[0].as_bytes(), 0, &locator()).unwrap();
+        let call = call
+            .rows
+            .iter()
+            .find_map(|row| row.tool_call.as_ref())
+            .unwrap();
+        assert_eq!(call.call_id.as_deref(), Some("toolu-1"));
+        assert_eq!(call.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(call.declared_workdir.as_deref(), Some("/tmp/repository"));
+        assert!(call
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("git -C /tmp/repository commit"));
+        assert_eq!(
+            call.input.get("workdir").and_then(Value::as_str),
+            Some("/tmp/repository")
+        );
+
+        let result = parse_native_record(lines[1].as_bytes(), 1, &locator()).unwrap();
+        let result = result
+            .rows
+            .iter()
+            .find_map(|row| row.tool_result.as_ref())
+            .unwrap();
+        assert_eq!(result.call_id.as_deref(), Some("toolu-1"));
+        assert_eq!(result.outcome, ClaudeOutputOutcome::Success);
+        assert_eq!(
+            result
+                .tool_use_result
+                .as_ref()
+                .and_then(|value| value.pointer("/gitOperation/commit/sha"))
+                .and_then(Value::as_str),
+            Some("abcdef1")
+        );
+    }
 }

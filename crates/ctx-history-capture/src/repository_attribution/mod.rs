@@ -1,4 +1,5 @@
 mod git;
+mod outcome;
 mod shell;
 
 use std::{
@@ -22,6 +23,7 @@ use sha2::{Digest, Sha256};
 use git::{
     negative_route_geometry_state, CandidateKind, CertifiedCandidate, GitCertifier, ProbeFailure,
 };
+pub(crate) use outcome::{linked_outcome_evidence, LinkedOutcomeInput};
 use shell::analyze;
 pub(crate) use shell::{
     bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
@@ -72,6 +74,19 @@ pub(crate) struct RepositoryAttributor {
     positive_cache: Vec<CachedPositiveCertificate>,
     negative_cache: Vec<CachedNegativeCertificate>,
     cache_clock: u64,
+}
+
+pub(crate) fn apply_annotation(
+    record: &mut ctx_history_core::CoreRecord,
+    annotation: CoreRecordAnnotation,
+) {
+    record.content.structured_content = annotation.structured_content;
+    record.metadata = annotation.metadata;
+    record.repository_candidate_evidence = annotation.repository_candidate_evidence;
+    record.repository_bindings = annotation.repository_bindings;
+    record.repository_abstentions = annotation.repository_abstentions;
+    record.repository_file_observations = annotation.repository_file_observations;
+    record.repository_vcs_observations = annotation.repository_vcs_observations;
 }
 
 #[derive(Debug, Clone)]
