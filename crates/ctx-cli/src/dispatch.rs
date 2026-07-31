@@ -6,7 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{
+    error::{ContextKind as ClapContextKind, ContextValue as ClapContextValue, ErrorKind},
+    Command, CommandFactory, Parser,
+};
 use ctx_history_core::default_data_root;
 
 use crate::{
@@ -39,7 +42,8 @@ use crate::{
     output::{JsonOutputFormat, OutputFormat, OutputMeasurement, SqlFormat},
     pro, semantic,
     ui::{
-        outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Outcome, OutcomeState, Ui,
+        diagnostic, outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Diagnostic,
+        DiagnosticLevel, Outcome, OutcomeState, Ui,
     },
     upgrade,
 };
@@ -47,6 +51,10 @@ use crate::{
 #[derive(Debug, thiserror::Error)]
 #[error("JSON error was already rendered")]
 struct RenderedJsonError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("CLI parser output was already rendered")]
+struct RenderedClapError(u8);
 
 #[derive(Debug, thiserror::Error)]
 #[error("CLI error was already rendered")]
@@ -92,6 +100,12 @@ pub(crate) fn run() -> ExitCode {
 
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is::<RenderedClapError>() => {
+            let exit_code = error
+                .downcast_ref::<RenderedClapError>()
+                .map_or(2, |rendered| rendered.0);
+            ExitCode::from(exit_code)
+        }
         Err(error) if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() => {
             ExitCode::FAILURE
         }
@@ -177,7 +191,7 @@ pub(crate) fn run_cli() -> Result<()> {
     }
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
-    let cli = Cli::parse();
+    let cli = parse_cli_from(env::args_os())?;
     let mut ui = Ui::stdio(cli.color);
     if let CommandRoot::Referral(args) = &cli.command {
         pro::human_result(
@@ -190,7 +204,20 @@ pub(crate) fn run_cli() -> Result<()> {
     let deprecated_controls = DeprecatedControls::detect();
     if command_deprecation_warning_eligible(&cli.command) {
         if let Some(warning) = deprecated_controls.warning() {
-            eprintln!("{warning}");
+            let detail = warning
+                .strip_prefix("warning: ")
+                .unwrap_or(warning.as_str());
+            let document = diagnostic(
+                ui.stderr_context(),
+                Diagnostic {
+                    level: DiagnosticLevel::Warning,
+                    summary: "Deprecated environment variables detected",
+                    detail: Some(detail),
+                    fields: &[],
+                    action: None,
+                },
+            );
+            ui.write_stderr(&document)?;
         }
     }
     let json_output = command_json_output(&cli.command);
@@ -474,6 +501,99 @@ pub(crate) fn run_cli() -> Result<()> {
     result
 }
 
+fn parse_cli_from<I, T>(arguments: I) -> Result<Cli>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let arguments = arguments.into_iter().map(Into::into).collect::<Vec<_>>();
+    match Cli::try_parse_from(arguments.iter().cloned()) {
+        Ok(cli) => Ok(cli),
+        Err(mut error) => {
+            attach_value_validation_usage(&mut error, &arguments);
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(2);
+            render_clap_output(&error, &arguments)?;
+            Err(RenderedClapError(exit_code).into())
+        }
+    }
+}
+
+fn render_clap_output(error: &clap::Error, arguments: &[std::ffi::OsString]) -> Result<()> {
+    let mode = if scan_machine_output_hint(arguments) {
+        ColorMode::Never
+    } else {
+        scan_color_mode(arguments.iter().cloned()).unwrap_or(ColorMode::Auto)
+    };
+    let mut ui = Ui::stdio(mode);
+    write_clap_output(error, &mut ui)?;
+    ui.flush().context("flush CLI parser output")
+}
+
+fn write_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
+    let rendered = error.render();
+    if error.use_stderr() {
+        if ui.stderr_context().color_enabled() {
+            write!(ui.stderr_writer(), "{}", rendered.ansi())?;
+        } else {
+            write!(ui.stderr_writer(), "{rendered}")?;
+        }
+    } else if ui.stdout_context().color_enabled() {
+        write!(ui.stdout_writer(), "{}", rendered.ansi())?;
+    } else {
+        write!(ui.stdout_writer(), "{rendered}")?;
+    }
+    Ok(())
+}
+
+fn attach_value_validation_usage(error: &mut clap::Error, arguments: &[std::ffi::OsString]) {
+    if error.kind() != ErrorKind::ValueValidation || error.get(ClapContextKind::Usage).is_some() {
+        return;
+    }
+    let mut command = Cli::command();
+    let leaf = leaf_command_for_arguments(&mut command, arguments);
+    let usage = leaf.render_usage();
+    error.insert(ClapContextKind::Usage, ClapContextValue::StyledStr(usage));
+    *error = std::mem::replace(error, clap::Error::new(ErrorKind::ValueValidation)).with_cmd(leaf);
+}
+
+fn leaf_command_for_arguments<'a>(
+    command: &'a mut Command,
+    arguments: &[std::ffi::OsString],
+) -> &'a mut Command {
+    let mut current = command;
+    let mut command_path = vec!["ctx".to_owned()];
+    let mut skip_global_value = false;
+    for argument in arguments.iter().skip(1) {
+        if skip_global_value {
+            skip_global_value = false;
+            continue;
+        }
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        if matches!(argument, "--data-root" | "--color") {
+            skip_global_value = true;
+            continue;
+        }
+        if argument.starts_with('-') {
+            continue;
+        }
+        let Some(index) = current
+            .get_subcommands()
+            .position(|subcommand| subcommand.get_name() == argument)
+        else {
+            continue;
+        };
+        current = current
+            .get_subcommands_mut()
+            .nth(index)
+            .expect("subcommand index came from the same command");
+        command_path.push(argument.to_owned());
+    }
+    current.set_bin_name(command_path.join(" "));
+    current
+}
+
 fn render_generic_command_error(
     error: &anyhow::Error,
     machine_output: bool,
@@ -660,6 +780,54 @@ mod tests {
     }
 
     #[test]
+    fn value_validation_errors_include_leaf_usage() {
+        for (arguments, expected_usage) in [
+            (
+                vec!["ctx", "sources", "--provider", "unknown"],
+                "Usage: ctx sources [OPTIONS]",
+            ),
+            (
+                vec!["ctx", "index", "watch", "--interval-seconds", "0"],
+                "Usage: ctx index watch [OPTIONS]",
+            ),
+            (
+                vec!["ctx", "sql", "--timeout", "0", "SELECT 1"],
+                "Usage: ctx sql [OPTIONS] [SQL]",
+            ),
+            (
+                vec!["ctx", "search", "needle", "--limit", "0"],
+                "Usage: ctx search [OPTIONS] [QUERY]",
+            ),
+        ] {
+            let mut error = Cli::try_parse_from(&arguments).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ValueValidation,
+                "unexpected parser kind for {arguments:?}: {error}"
+            );
+            let os_arguments = arguments
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            attach_value_validation_usage(&mut error, &os_arguments);
+            assert!(error.to_string().contains(expected_usage), "{error}");
+        }
+    }
+
+    #[test]
+    fn clap_help_respects_the_terminal_design_width_ceiling() {
+        let help = Cli::try_parse_from(["ctx", "sources", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("Usage: ctx sources [OPTIONS]"));
+        assert!(
+            help.lines()
+                .all(|line| line.trim_end().chars().count() <= 100),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn setup_handoff_is_owned_by_setup_and_machine_import_does_not_autostart() {
         for args in [
             &["setup"][..],
@@ -733,6 +901,31 @@ mod tests {
             stderr,
             RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
         )
+    }
+
+    #[test]
+    fn clap_value_errors_use_the_selected_stderr_stream_with_contextual_usage() {
+        let arguments = ["ctx", "sources", "--provider", "unknown"];
+        let mut error = Cli::try_parse_from(arguments).unwrap_err();
+        let os_arguments = arguments
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        attach_value_validation_usage(&mut error, &os_arguments);
+
+        let stderr = SharedBytes::default();
+        let stderr_copy = stderr.clone();
+        let mut ui = forced_color_test_ui(stderr);
+        write_clap_output(&error, &mut ui).unwrap();
+        ui.flush().unwrap();
+
+        let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+        assert!(rendered.contains('\u{1b}'));
+        let mut stripped = anstream::StripStream::new(Vec::new());
+        stripped.write_all(rendered.as_bytes()).unwrap();
+        let plain = String::from_utf8(stripped.into_inner()).unwrap();
+        assert!(plain.contains("unknown provider"));
+        assert!(plain.contains("Usage: ctx sources [OPTIONS]"));
     }
 
     #[test]

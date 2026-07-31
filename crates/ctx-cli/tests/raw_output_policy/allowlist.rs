@@ -27,7 +27,6 @@ const UNIT: TestOwner = TestOwner::behavioral(
     &[
         "src/commands/blame.rs",
         "src/dispatch.rs",
-        "src/dispatch/finalization.rs",
         "src/main.rs",
         "src/output.rs",
         "src/release_build_identity.rs",
@@ -73,9 +72,13 @@ const PUBLIC_HELP: TestOwner = TestOwner::behavioral(
     &["render_docs_list", "strip_ansi", "render_plain"],
 );
 const MCP: TestOwner = TestOwner::behavioral(
-    "src/integrations/mcp/operation/tests.rs::status_output_is_responsive_control_safe_and_style_equivalent",
+    "src/integrations/mcp/operation.rs::human_install_and_status_results_use_the_typed_ui",
     &["src/integrations/mcp/operation.rs"],
-    &["render_status_results", "render_status_diagnostics", "strip_ansi"],
+    &[
+        "render_install_results",
+        "render_status_results",
+        "strip_ansi",
+    ],
 );
 const MCP_SERVER: TestOwner = TestOwner::behavioral(
     "src/mcp/response_bound/tests.rs::final_mcp_serialization_is_bounded_after_json_expansion",
@@ -92,12 +95,12 @@ const PRO: TestOwner = TestOwner::behavioral(
     &["create_output", "status_output"],
 );
 const SKILL: TestOwner = TestOwner::behavioral(
-    "src/skill/install.rs::skill_output_is_responsive_control_safe_and_style_equivalent",
+    "src/skill/install.rs::human_install_and_status_results_use_the_typed_ui",
     &["src/skill/"],
     &[
         "render_status_results",
         "render_install_results",
-        "render_install_failures",
+        "strip_ansi",
     ],
 );
 const SLASH: TestOwner = TestOwner::behavioral(
@@ -119,14 +122,24 @@ const WINDOWS_READINESS: TestOwner = TestOwner::behavioral(
     &["ready_receipt", "validate_ready_receipt"],
 );
 const DISPATCH_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
-    "src/dispatch/finalization.rs::forced_color_never_decorates_generic_machine_mode_errors",
-    &["src/dispatch/finalization.rs"],
+    "src/dispatch.rs::forced_color_never_decorates_generic_machine_mode_errors",
+    &["src/dispatch.rs"],
     &["render_generic_command_error", "machine_stderr", "contains"],
 );
+const CLAP_OUTPUT: TestOwner = TestOwner::behavioral(
+    "src/dispatch.rs::clap_value_errors_use_the_selected_stderr_stream_with_contextual_usage",
+    &["src/dispatch.rs"],
+    &["write_clap_output", "contains", "rendered"],
+);
 const PROGRESS_DELIVERY: TestOwner = TestOwner::behavioral(
-    "src/progress.rs::progress_propagates_write_and_flush_failures_in_plain_and_json_modes",
+    "src/progress.rs::plain_and_json_progress_keep_explicit_stream_contracts",
     &["src/progress.rs"],
-    &["FailingWriter", "expect_err", "contains"],
+    &["ProgressRenderMode", "Plain", "Json", "progress_json"],
+);
+const SKILL_PROMPT: TestOwner = TestOwner::behavioral(
+    "src/skill/selection.rs::interactive_picker_prompt_is_explicit_and_actionable",
+    &["src/skill/selection.rs"],
+    &["picker_prompt_lines", "contains", "assert"],
 );
 
 const CARGO_DIRECTIVE: &str = "Cargo build-script protocol directive";
@@ -139,6 +152,8 @@ const RAW_INFRASTRUCTURE: &str = "central raw-output infrastructure seam";
 const UI_INFRASTRUCTURE: &str = "central Ui/Document rendering infrastructure seam";
 const PLAIN_FALLBACK: &str = "plain-human fallback used before or outside Ui setup";
 const SPECIALIZED_STREAM: &str = "specialized streaming renderer owns framing and writes";
+const INTERACTIVE_PICKER: &str =
+    "TTY-only interactive picker with explicit prompt framing and behavioral coverage";
 const MACHINE_BODY: &str = "command emits a preformatted protocol body verbatim";
 
 const BUILD: &str = "build.rs";
@@ -149,7 +164,6 @@ const SQL: &str = "src/commands/sql.rs";
 const STATS_COMMAND: &str = "src/commands/stats.rs";
 const STATUS_USAGE: &str = "src/commands/status/usage.rs";
 const DISPATCH: &str = "src/dispatch.rs";
-const DISPATCH_FINALIZATION: &str = "src/dispatch/finalization.rs";
 const DOCS: &str = "src/docs.rs";
 const MCP_OPERATION: &str = "src/integrations/mcp/operation.rs";
 const SLASH_COMMANDS: &str = "src/integrations/slash_commands.rs";
@@ -157,6 +171,7 @@ const MAIN: &str = "src/main.rs";
 const MCP_MODULE: &str = "src/mcp.rs";
 const OUTPUT: &str = "src/output.rs";
 const PRO_LIFECYCLE: &str = "src/pro/lifecycle_commands.rs";
+const PRO_SETUP_REPLAY: &str = "src/pro/lifecycle_commands/setup_replay.rs";
 const PRO_PENDING: &str = "src/pro/pending_materialization.rs";
 const PRO_REFERRAL: &str = "src/pro/referral.rs";
 const PRO_RENDER: &str = "src/pro/render.rs";
@@ -422,7 +437,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         STATUS
     ),
     allow!(
-        DISPATCH_FINALIZATION,
+        DISPATCH,
         "render_generic_command_error#1@28450a09db65187b",
         UiRawWriter,
         Infrastructure,
@@ -430,7 +445,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         DISPATCH_MACHINE_ERROR
     ),
     allow!(
-        DISPATCH_FINALIZATION,
+        DISPATCH,
         "render_generic_command_error#1@9deb49b5ff3a1d05",
         DirectWrite,
         MachineProtocol,
@@ -439,67 +454,123 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run#1@095f488efb9fbbd6",
+        "run#1@e980ea9ca2d818d3",
         PrintMacro,
         JustifiedPlainHuman,
-        PLAIN_FALLBACK,
+        "last-resort plain fallback after structured stderr rendering itself fails",
         UNIT
     ),
     allow!(
         DISPATCH,
-        "run_cli#1@1e006159573a8920",
-        ClapParse,
-        JustifiedPlainHuman,
-        "clap owns help/version/parse-error output before Ui setup",
-        PUBLIC_HELP
-    ),
-    allow!(
-        DISPATCH_FINALIZATION,
-        "finalize_cli#1@611edc2f163d9789",
+        "run_cli#1@611edc2f163d9789",
         StdoutConstructor,
         Infrastructure,
         "final process stream flush",
         UNIT
     ),
     allow!(
-        DISPATCH_FINALIZATION,
-        "finalize_cli#1@93f3ab5dd89cc205",
+        DISPATCH,
+        "run_cli#1@93f3ab5dd89cc205",
         StderrConstructor,
         Infrastructure,
         "final process stream flush",
         UNIT
     ),
     allow!(
-        DISPATCH_FINALIZATION,
-        "render_result_error#1@34cd62977695262a",
+        DISPATCH,
+        "run_cli#1@f717b63dfef0aa35",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         UNIT
     ),
     allow!(
-        DISPATCH_FINALIZATION,
-        "render_result_error#2@bec3fc86604eb591",
+        DISPATCH,
+        "run_cli#3@638b02f9a8248d06",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         UNIT
     ),
     allow!(
-        DISPATCH_FINALIZATION,
-        "render_result_error#3@bec3fc86604eb591",
+        DISPATCH,
+        "run_cli#2@638b02f9a8248d06",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         UNIT
     ),
     allow!(
-        DISPATCH_FINALIZATION,
-        "render_result_error#4@e980ea9ca2d818d3",
+        DISPATCH,
+        "run_cli#4@1f99826fdc74e99b",
         PrintMacro,
-        JustifiedPlainHuman,
-        PLAIN_FALLBACK,
+        MachineProtocol,
+        "generic machine-mode command error",
         UNIT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#1@a446ef88164d6fbc",
+        UiRawWriter,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#1@51c2e2ff74f6375a",
+        DirectWrite,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#2@1c5cb2fdc96ae200",
+        UiRawWriter,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#2@cb06e2483385337e",
+        DirectWrite,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#3@337d1d5a221bb1e9",
+        UiRawWriter,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#3@f25a8d0be1a22441",
+        DirectWrite,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#4@17a79ef591783ebd",
+        UiRawWriter,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
+    ),
+    allow!(
+        DISPATCH,
+        "write_clap_output#4@737a4b274061e165",
+        DirectWrite,
+        Infrastructure,
+        "Clap owns parser/help framing while Ui owns the selected stream adapter",
+        CLAP_OUTPUT
     ),
     allow!(
         DOCS,
@@ -543,7 +614,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         MCP_OPERATION,
-        "run_install#1@498281c376e92cd0",
+        "run_install#1@476a66834d6d3fcd",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -551,7 +622,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         MCP_OPERATION,
-        "run_status#1@a565df5212a21b73",
+        "run_status#1@7e646bbdf5ed1d14",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -758,8 +829,8 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         PRO
     ),
     allow!(
-        PRO_LIFECYCLE,
-        "run_setup#1@79342920bb593fd0",
+        PRO_SETUP_REPLAY,
+        "write_setup_result#1@79342920bb593fd0",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -784,6 +855,22 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     allow!(
         PRO_REFERRAL,
         "run#1@c31c16c84a609c6f",
+        StdoutConstructor,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PRO
+    ),
+    allow!(
+        PRO_REFERRAL,
+        "run#2@9332b03878d3276b",
+        StdoutConstructor,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PRO
+    ),
+    allow!(
+        PRO_REFERRAL,
+        "run#3@c31c16c84a609c6f",
         StdoutConstructor,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -823,26 +910,26 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PROGRESS,
-        "emit_status_at#1@5dca71adeac9a793",
-        UiRawWriter,
+        "emit_status#1@42f90c85ef8445c5",
+        PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
         PROGRESS_DELIVERY
     ),
     allow!(
         PROGRESS,
-        "emit_status_at#2@cf0efc65de930b13",
-        UiRawWriter,
+        "emit_status#2@49803700added34c",
+        PrintMacro,
         Infrastructure,
-        RAW_INFRASTRUCTURE,
+        SPECIALIZED_STREAM,
         PROGRESS_DELIVERY
     ),
     allow!(
         PROGRESS,
-        "emit_status_at#1@69a8d5465b9270d7",
-        DirectWrite,
-        MachineProtocol,
-        JSON_PROTOCOL,
+        "new#1@0b4277916e6ecd04",
+        StderrConstructor,
+        CapabilityProbe,
+        TERMINAL_PROBE,
         PROGRESS_DELIVERY
     ),
     allow!(
@@ -871,7 +958,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         SKILL_INSTALL,
-        "run_install#1@a1d0366871f3e9d3",
+        "run_install#1@eea45ab138d6f8e8",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -879,7 +966,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         SKILL_INSTALL,
-        "run_status#1@b5985f1cf11f7d76",
+        "run_status#1@80879dcf84b7283b",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -891,7 +978,39 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         StderrConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
-        SKILL
+        SKILL_PROMPT
+    ),
+    allow!(
+        SKILL_SELECTION,
+        "prompt_for_agents#1@4b2cc0708de7fe71",
+        OutputRawHelper,
+        InteractivePrompt,
+        INTERACTIVE_PICKER,
+        SKILL_PROMPT
+    ),
+    allow!(
+        SKILL_SELECTION,
+        "prompt_for_agents#1@596d62caccf3cad9",
+        DirectWrite,
+        InteractivePrompt,
+        INTERACTIVE_PICKER,
+        SKILL_PROMPT
+    ),
+    allow!(
+        SKILL_SELECTION,
+        "prompt_for_agents#2@c6a8085b6f4a378b",
+        DirectWrite,
+        InteractivePrompt,
+        INTERACTIVE_PICKER,
+        SKILL_PROMPT
+    ),
+    allow!(
+        SKILL_SELECTION,
+        "prompt_for_agents#3@2aff417542e17806",
+        DirectWrite,
+        InteractivePrompt,
+        INTERACTIVE_PICKER,
+        SKILL_PROMPT
     ),
     allow!(
         TRANSCRIPT,
