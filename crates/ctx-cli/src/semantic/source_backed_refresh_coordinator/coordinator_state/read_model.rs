@@ -112,6 +112,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) certified_source_count: Option<usize>,
     pub(super) certified_source_bytes: Option<u64>,
     pub(super) receipt: Option<SourceBackedRefreshReceipt>,
+    pub(super) retained_publication: Option<SourceBackedRefreshReceipt>,
     pub(super) timings: Option<SourceBackedRefreshTimings>,
     pub(super) publication_probe_us: u64,
     pub(super) retirement_us: u64,
@@ -155,6 +156,9 @@ impl SourceBackedRefreshAttempt {
                 .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
+            "retained_publication": self.retained_publication
+                .as_ref()
+                .map(SourceBackedRefreshReceipt::to_json),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -197,6 +201,9 @@ impl SourceBackedRefreshAttempt {
                 .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
+            "retained_publication": self.retained_publication
+                .as_ref()
+                .map(SourceBackedRefreshReceipt::to_json),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,

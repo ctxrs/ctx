@@ -147,7 +147,20 @@ impl SourceBackedRefreshCoordinator {
 
     pub(in crate::semantic) fn recover_published_resolver(&self, data_root: &Path) -> Result<()> {
         recovery::reconcile_persisted_refresh_job(data_root)?;
-        if let Some(recovered) = recover_capture_owned_resolver(data_root)? {
+        let retained_publication = recovery::persisted_verified_publication(data_root)?;
+        let current_catalog = load_explicit_source_catalog_authority(data_root).ok();
+        let recovered = retained_publication
+            .as_ref()
+            .map(|receipt| {
+                recover_capture_owned_resolver(
+                    data_root,
+                    &receipt.published_explicit_source_catalog,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let resolver_recovered = recovered.is_some();
+        if let Some(recovered) = recovered {
             retain_daemon_cycle_verified_index(
                 &source_backed_index_root(data_root),
                 &recovered.verified_index,
@@ -155,12 +168,36 @@ impl SourceBackedRefreshCoordinator {
             let mut state = self.lock_state();
             state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
                 generation_id: recovered.generation_id,
+                published_explicit_source_catalog: Some(
+                    recovered.published_explicit_source_catalog,
+                ),
                 source_manifest: Some(recovered.source_manifest),
                 resolver: recovered.resolver,
                 verified_index: Mutex::new(Some(recovered.verified_index)),
             }));
         }
-        self.recover_interrupted_request(data_root)?;
+        self.recover_interrupted_request(data_root, retained_publication.as_ref())?;
+        let has_retained_generation = retained_generation_hint(data_root)?.is_some();
+        let catalog_matches = retained_publication
+            .as_ref()
+            .zip(current_catalog.as_ref())
+            .is_some_and(|(receipt, current)| {
+                &receipt.published_explicit_source_catalog == current
+            });
+        if has_retained_generation
+            && (!resolver_recovered || !catalog_matches)
+            && !self.has_pending_request()
+        {
+            self.enqueue_recovery_refresh(
+                data_root,
+                current_catalog.or_else(|| {
+                    retained_publication
+                        .as_ref()
+                        .map(|receipt| receipt.published_explicit_source_catalog.clone())
+                }),
+                retained_publication.as_ref(),
+            )?;
+        }
         Ok(())
     }
 
@@ -173,13 +210,18 @@ impl SourceBackedRefreshCoordinator {
         let mut state = self.lock_state();
         state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
             generation_id,
+            published_explicit_source_catalog: None,
             source_manifest: None,
             resolver,
             verified_index: Mutex::new(None),
         }));
     }
 
-    fn recover_interrupted_request(&self, data_root: &Path) -> Result<()> {
+    fn recover_interrupted_request(
+        &self,
+        data_root: &Path,
+        retained_publication: Option<&SourceBackedRefreshReceipt>,
+    ) -> Result<()> {
         let path = daemon_source_backed_refresh_job_path(data_root);
         let Some(job) = read_daemon_job_status(&path) else {
             return Ok(());
@@ -226,10 +268,67 @@ impl SourceBackedRefreshCoordinator {
             .get("request_id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("recovered source refresh has no request ID"))?;
+        self.retain_publication_for_attempt(request_id, retained_publication)?;
         let queued_job = self
             .job_status(request_id)
             .ok_or_else(|| anyhow!("recovered source refresh has no job state"))?;
         write_daemon_job_status(&path, &queued_job)
+    }
+
+    fn enqueue_recovery_refresh(
+        &self,
+        data_root: &Path,
+        requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+        retained_publication: Option<&SourceBackedRefreshReceipt>,
+    ) -> Result<()> {
+        let observed_generation = self.observed_published_generation(data_root)?;
+        let metadata = if requested_catalog.is_some() {
+            source_catalog_refresh_runtime_metadata(data_root)
+        } else {
+            source_refresh_runtime_metadata(data_root)
+        };
+        let queued = self.enqueue_with_catalog_metadata(
+            observed_generation,
+            metadata,
+            requested_catalog,
+            false,
+        )?;
+        let request_id = queued
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("recovery source refresh has no request ID"))?;
+        self.retain_publication_for_attempt(request_id, retained_publication)?;
+        let queued_job = self
+            .job_status(request_id)
+            .ok_or_else(|| anyhow!("recovery source refresh has no job state"))?;
+        write_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(data_root),
+            &queued_job,
+        )
+    }
+
+    fn retain_publication_for_attempt(
+        &self,
+        request_id: &str,
+        retained_publication: Option<&SourceBackedRefreshReceipt>,
+    ) -> Result<()> {
+        let Some(retained_publication) = retained_publication else {
+            return Ok(());
+        };
+        let mut state = self.lock_state();
+        let attempt = find_attempt_mut(&mut state, request_id)
+            .ok_or_else(|| anyhow!("recovered source refresh has no attempt state"))?;
+        if attempt
+            .retained_publication
+            .as_ref()
+            .is_some_and(|existing| existing != retained_publication)
+        {
+            bail!("recovered source refresh changed its retained publication authority");
+        }
+        attempt
+            .retained_publication
+            .get_or_insert_with(|| retained_publication.clone());
+        Ok(())
     }
 
     /// Preserves the capture resolver's typed failure while arranging for
@@ -551,6 +650,7 @@ impl SourceBackedRefreshCoordinator {
             certified_source_count: None,
             certified_source_bytes: None,
             receipt: None,
+            retained_publication: None,
             timings: None,
             publication_probe_us: 0,
             retirement_us: 0,
@@ -754,13 +854,19 @@ impl SourceBackedRefreshCoordinator {
                             .clone(),
                         current: publication.current,
                     });
+                    attempt.retained_publication = None;
                     attempt.timings = Some(publication.timings);
                     let source_manifest = publication.source_manifest;
+                    let published_explicit_source_catalog =
+                        publication.published_explicit_source_catalog.clone();
                     attempt.published_explicit_source_catalog =
                         Some(publication.published_explicit_source_catalog);
                     installed_resolver = publication.resolver.map(|resolver| {
                         Arc::new(GenerationBoundSourceBackedResolver {
                             generation_id: observed.clone(),
+                            published_explicit_source_catalog: Some(
+                                published_explicit_source_catalog,
+                            ),
                             source_manifest,
                             resolver,
                             verified_index: Mutex::new(None),
