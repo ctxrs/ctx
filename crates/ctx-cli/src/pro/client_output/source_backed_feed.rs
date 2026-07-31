@@ -1,11 +1,16 @@
 #[path = "source_backed_feed/admission.rs"]
 mod admission;
+#[path = "source_backed_feed/reconciliation.rs"]
+mod reconciliation;
 #[path = "source_backed_feed/validation.rs"]
 mod validation;
 
 #[cfg(test)]
 pub(super) use admission::cursor_after_page;
 pub(super) use admission::sync_source_backed_pro_feed_paged;
+use reconciliation::match_stale_source_removals;
+#[cfg(test)]
+pub(super) use reconciliation::stale_removal_reconciliation_work_for_test;
 use validation::{
     source_identity_digest, validate_consumer_state, validate_prepared_source,
     validate_provider_page, validate_request, validate_response, validate_source_backed_receipt,
@@ -321,22 +326,14 @@ where
         .filter(|source_id| !current_source_ids.contains(*source_id))
         .copied()
         .collect::<Vec<_>>();
+    let stale_removals = match_stale_source_removals(&stale_source_ids, &manifest.removals)?;
     #[cfg(test)]
     let mut deleted_sources = 0_u64;
-    for source_id in stale_source_ids {
+    for (source_id, removal) in stale_removals {
         let prior = progress_by_source
             .get(&source_id)
             .cloned()
             .ok_or_else(|| anyhow!("invalid_response: missing stale source progress"))?;
-        let removal = manifest
-            .removals
-            .iter()
-            .find(|removal| removal.deletion.source().identity().digest() == source_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "source_changed: Pro source is absent from the manifest without a certified deletion"
-                )
-            })?;
         if !removal.deletion.source().exact_descriptor_eq(&prior.source) {
             bail!("source_changed: deletion witness does not describe Pro's source generation");
         }

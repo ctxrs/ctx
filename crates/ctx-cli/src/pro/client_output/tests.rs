@@ -999,7 +999,8 @@ fn source_backed_pro_deletion_requires_certified_complete_inventory() {
     .unwrap();
     let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
     let removal = SourceBackedProRemoval::new(deletion, inventory).unwrap();
-    let manifest = SourceBackedProManifest::new("d".repeat(64), Vec::new(), vec![removal]).unwrap();
+    let manifest =
+        SourceBackedProManifest::new("d".repeat(64), Vec::new(), vec![removal.clone()]).unwrap();
     let mut provider = FixtureProvider::default();
     let mut consumer = FixtureConsumer::new(vec![prior.clone()]);
     consumer.durable_event_ids.insert(
@@ -1016,6 +1017,34 @@ fn source_backed_pro_deletion_requires_certified_complete_inventory() {
     assert!(consumer.finish_called);
     assert!(report.receipt.progress.is_empty());
 
+    let mismatched_source = SourceKey::derive(
+        source.provider(),
+        "fixture_jsonl_descriptor_changed",
+        source.schema_variant(),
+        source.provider_identity_version(),
+        source.anchor().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        mismatched_source.identity().digest(),
+        source.identity().digest()
+    );
+    assert!(!mismatched_source.exact_descriptor_eq(&source));
+    let mut mismatched_prior = prior.clone();
+    mismatched_prior.source = mismatched_source;
+    let mismatched_manifest =
+        SourceBackedProManifest::new("d".repeat(64), Vec::new(), vec![removal]).unwrap();
+    let mut provider = FixtureProvider::default();
+    let mut consumer = FixtureConsumer::new(vec![mismatched_prior]);
+    let error = sync_source_backed_pro_feed(mismatched_manifest, &mut provider, &mut consumer)
+        .expect_err("digest match must not weaken exact descriptor matching");
+
+    assert!(error
+        .to_string()
+        .contains("deletion witness does not describe"));
+    assert!(consumer.deleted_epochs.is_empty());
+    assert!(!consumer.finish_called);
+
     let manifest_without_proof =
         SourceBackedProManifest::new("e".repeat(64), Vec::new(), Vec::new()).unwrap();
     let mut provider = FixtureProvider::default();
@@ -1025,6 +1054,67 @@ fn source_backed_pro_deletion_requires_certified_complete_inventory() {
 
     assert!(error.to_string().contains("without a certified deletion"));
     assert!(!consumer.finish_called);
+}
+
+#[test]
+fn stale_removal_reconciliation_is_linear_for_5863_sources() {
+    const SOURCE_COUNT: usize = 5_863;
+    let sources = (0..u32::try_from(SOURCE_COUNT).expect("source count fits u32"))
+        .map(synthetic_source_at)
+        .collect::<Vec<_>>();
+    let progress = sources
+        .iter()
+        .map(|source| SourceBackedProProgress {
+            source: source.observation().source().clone(),
+            source_epoch: 1,
+            certified_revision_sha256: certified_source_revision_sha256(source)
+                .expect("synthetic certified revision"),
+            frontier: source.frontier().cloned(),
+            materializer_revision: MATERIALIZER_REVISION.to_owned(),
+            terminal: true,
+        })
+        .collect::<Vec<_>>();
+    let inventory_observation = SourceInventoryObservation::new(
+        "fixture",
+        "fixture-removal-root",
+        TypedKey::utf8("fixture-removal-authority").unwrap(),
+        "fixture-inventory-v1",
+        vec![1],
+    )
+    .unwrap();
+    let inventory = CertifiedSourceInventory::certify(
+        inventory_observation.clone(),
+        inventory_observation,
+        "fixture-discovery-v1",
+        Vec::new(),
+    )
+    .unwrap();
+    let removals = sources
+        .into_iter()
+        .map(|source| {
+            let deletion = CertifiedSourceDeletion::from_inventory(
+                source.observation().source().clone(),
+                &inventory,
+            )
+            .unwrap();
+            SourceBackedProRemoval::new(deletion, inventory.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let manifest = SourceBackedProManifest::new("d".repeat(64), Vec::new(), removals).unwrap();
+    let mut provider = FixtureProvider::default();
+    let mut consumer = FixtureConsumer::new(progress);
+
+    let report = sync_source_backed_pro_feed(manifest, &mut provider, &mut consumer)
+        .expect("bounded stale-source reconciliation");
+    let work = stale_removal_reconciliation_work_for_test();
+
+    assert_eq!(report.deleted_sources, SOURCE_COUNT as u64);
+    assert_eq!(consumer.deleted_epochs.len(), SOURCE_COUNT);
+    assert!(provider.requests.is_empty());
+    assert_eq!(
+        work.digest_comparisons, SOURCE_COUNT as u64,
+        "sorted reconciliation must compare each matching removal only once"
+    );
 }
 
 #[test]
