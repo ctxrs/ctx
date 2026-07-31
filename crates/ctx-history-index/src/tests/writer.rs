@@ -749,9 +749,41 @@ fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
         fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
             .unwrap()
             .count(),
-        append_count + 1,
-        "each changed append should publish exactly one logical generation"
+        2,
+        "publication should retain only the visible generation and one grace generation"
     );
+}
+
+#[test]
+fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
+    let temp = tempdir().unwrap();
+    let source = source("manifest-retention.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_document(document(&source, 1, "visible generation"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let receipt = initial.commit(|_| true).unwrap();
+
+    let directory = temp.path().join(MANIFEST_DIRECTORY);
+    let stale_generation = "11".repeat(32);
+    let stale = directory.join(format!("{stale_generation}.json"));
+    let quarantine = directory.join(format!(".{stale_generation}.corrupt-test"));
+    let unrelated = directory.join("operator-note.txt");
+    fs::write(&stale, b"orphaned precommit manifest").unwrap();
+    fs::write(&quarantine, b"quarantined collision").unwrap();
+    fs::write(&unrelated, b"not managed by ctx manifest retention").unwrap();
+
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        writer.base_manifest().unwrap().generation_id().unwrap(),
+        receipt.generation_id
+    );
+    assert!(!stale.exists());
+    assert!(!quarantine.exists());
+    assert!(unrelated.exists());
+    assert!(manifest_path(temp.path(), &receipt.generation_id).exists());
 }
 
 #[test]
