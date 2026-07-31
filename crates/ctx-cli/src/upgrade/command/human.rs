@@ -137,13 +137,15 @@ fn render_upgrade_outcome_human(context: &RenderContext, upgrade: &UpgradeOutcom
     );
 
     if let Some(plan) = &upgrade.plan {
+        let current_version =
+            displayed_current_version(upgrade.applied, &plan.current_version, &plan.latest_version);
         document.push_blank();
         document.append(section(
             "Release",
             fields(
                 context,
                 &[
-                    Field::new("Current", &plan.current_version),
+                    Field::new("Current", current_version),
                     Field::new("Latest", &plan.latest_version),
                     Field::new("Channel", &plan.channel),
                 ],
@@ -166,6 +168,18 @@ fn render_upgrade_outcome_human(context: &RenderContext, upgrade: &UpgradeOutcom
         ));
     }
     document
+}
+
+fn displayed_current_version<'a>(
+    applied: bool,
+    current_version: &'a str,
+    latest_version: &'a str,
+) -> &'a str {
+    if applied {
+        latest_version
+    } else {
+        current_version
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +239,8 @@ mod tests {
         };
         let rendered = render_upgrade_outcome_human(&context(80), &upgrade).render_plain();
         assert_eq!(rendered, "✓ Upgraded ctx 1.0.0 to 1.1.0.\n");
+        assert_eq!(displayed_current_version(true, "1.0.0", "1.1.0"), "1.1.0");
+        assert_eq!(displayed_current_version(false, "1.0.0", "1.1.0"), "1.0.0");
     }
 
     #[test]
