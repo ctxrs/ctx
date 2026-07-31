@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{anyhow, bail, Result};
-use ctx_history_core::CertifiedSource;
+use ctx_history_core::{CertifiedSource, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index::{
     CoreEventPageBudget, GenerationManifest, SourceEventCursor, VerifiedIndex,
 };
@@ -19,9 +19,11 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
-// Keep retained Core payloads at the protocol's 16 MiB complete-content ceiling;
-// the larger wire bound remains reserved for JSON escaping and envelope overhead.
-const MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES: usize = MAX_CORE_RECORD_PAGE_CONTENT_BYTES;
+// Complete content remains capped at 16 MiB. JSON escaping can expand one
+// otherwise-valid Core record, so encoded paging admits Core's validated
+// singleton maximum while the protocol's larger wire bound covers the
+// envelope.
+const MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
 const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
     MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES,
     MAX_CORE_RECORD_PAGE_CONTENT_BYTES,

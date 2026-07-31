@@ -451,13 +451,13 @@ fn encoded_payload_boundary_splits_pages_below_sixteen_mib() {
         vec![1, 1]
     );
     assert!(consumer.record_pages.iter().all(|page| {
-        encoded_record_bytes(page) <= MAX_CORE_RECORD_PAGE_CONTENT_BYTES
+        encoded_record_bytes(page) <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES
             && page.content_bytes().unwrap() <= MAX_CORE_RECORD_PAGE_CONTENT_BYTES
     }));
 }
 
 #[test]
-fn overlarge_encoded_single_record_fails_before_record_exchange() {
+fn escaped_single_record_above_content_byte_count_still_transports() {
     let temp = tempdir().unwrap();
     let source = source("overlarge-encoded.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -466,10 +466,15 @@ fn overlarge_encoded_single_record_fails_before_record_exchange() {
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let mut consumer = Consumer::new();
 
-    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
-    assert!(error.to_string().contains("encoded-payload bound"));
-    assert_eq!(consumer.record_exchanges, 0);
-    assert!(consumer.record_pages.is_empty());
+    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
+    assert_eq!(report.materialized_records, 1);
+    assert_eq!(consumer.record_exchanges, 1);
+    assert_eq!(consumer.record_pages.len(), 1);
+    assert!(encoded_record_bytes(&consumer.record_pages[0]) > MAX_CORE_RECORD_PAGE_CONTENT_BYTES);
+    assert!(
+        encoded_record_bytes(&consumer.record_pages[0])
+            <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES
+    );
 }
 
 #[test]
