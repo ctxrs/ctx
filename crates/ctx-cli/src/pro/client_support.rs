@@ -121,7 +121,7 @@ pub(super) fn helper_executable(data_root: &Path) -> Result<VerifiedHelperExecut
     crate::pro::lifecycle::validated_installed_helper(data_root)
 }
 
-pub(super) fn git_executable() -> Result<PathBuf> {
+pub(crate) fn git_executable() -> Result<PathBuf> {
     let search_path = env::var_os("PATH")
         .ok_or_else(|| anyhow!("repository_unavailable: Git is not available on PATH"))?;
     let current_directory = env::current_dir().context("repository_unavailable: resolve cwd")?;
