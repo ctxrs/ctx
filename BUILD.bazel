@@ -321,6 +321,7 @@ py_test(
 py_test(
     name = "cli_ux_observer_tests",
     srcs = [
+        "scripts/cli-ux/_observe_processes.py",
         "scripts/cli-ux/observe.py",
         "scripts/cli-ux/observe_test.py",
     ],
