@@ -45,7 +45,6 @@ ctx doctor --format json
 ctx daemon status
 ctx daemon status --format json
 ctx daemon run
-ctx daemon run --once --format json
 ctx daemon disable
 ctx daemon enable
 ```
@@ -315,9 +314,11 @@ provider sources. Use `import` to repair, re-run, resume, or target a specific
 provider/path. It creates the data root if needed, reads provider transcript
 files, builds a private immutable Tantivy candidate containing indexed-only
 meaningful text plus locator/metadata fields, verifies it, and atomically
-publishes it under `search/lexical`. It then advances disposable consumers such
-as `relational.sqlite`; semantic catch-up is daemon-owned. It does not write
-`config.toml` for implicit defaults.
+publishes it under `search/lexical`. Before returning, it waits for the required
+daemon-owned `relational.sqlite` projection to reach that exact Core
+generation. Pro and semantic catch-up remain independently scheduled and do
+not extend the foreground import boundary. It does not write `config.toml` for
+implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v1` path; the
@@ -336,14 +337,14 @@ Import results report `change: changed|no_op` independently from import and
 skip counters. `change: changed` remains truthful even when a source projects
 to the same stable event identities.
 
-When `[daemon].enabled` is true, `import` may opportunistically start a short
-one-pass ctx-owned maintenance profile after the foreground import finishes.
-The daemon work includes bounded native provider-history refresh plus semantic
-indexing when semantic is enabled. It may acquire the local embedding model for
-semantic indexing. Explicit custom JSONL and history-source imports use the
-daemon-owned source-refresh endpoint for their foreground publication and may
-start it unless `import --no-daemon` is set. With `--no-daemon`, an
-already-running source-refresh endpoint is required.
+When `[daemon].enabled` is true, `import` may opportunistically start the
+ctx-owned persistent daemon and uses its source-refresh endpoint for foreground
+Core publication and required relational catch-up. Pro and semantic work
+continue independently; semantic indexing may acquire the local embedding
+model. Explicit custom JSONL and history-source imports use the same
+daemon-owned endpoint and may start it unless `import --no-daemon` is set. With
+`--no-daemon`, an already-running full daemon is required; import never falls
+back to a foreground writer.
 
 ## Local Pro
 

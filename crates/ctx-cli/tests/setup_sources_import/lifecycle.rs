@@ -913,7 +913,7 @@ fn human_setup_without_sources_starts_daemon_and_reports_observed_refresh_state(
 }
 
 #[test]
-fn daemon_once_rejections_complete_and_preserve_diagnostics() {
+fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let sessions = temp
@@ -938,34 +938,34 @@ fn daemon_once_rejections_complete_and_preserve_diagnostics() {
         .assert()
         .success();
 
-    let output = ctx_from_binary(&temp, &binary)
-        .args(["daemon", "run", "--once", "--force", "--format=json"])
-        .env("CTX_UPGRADE_AUTO", "off")
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    let daemon: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let import = json_output(
+        ctx_from_binary(&temp, &binary)
+            .args(["import", "--all", "--format=json", "--progress", "none"])
+            .env("CTX_UPGRADE_AUTO", "off"),
+    );
+    let source = &import["sources"][0];
+    let generation = source["published_generation"].as_str().unwrap();
 
-    assert_eq!(daemon["status"], "completed", "{daemon:#}");
+    assert_eq!(import["outcome"], "success", "{import:#}");
     assert_eq!(
-        daemon["jobs"]["source_backed_refresh"]["status"], "completed",
-        "{daemon:#}"
+        import["totals"]["current_rejected_records"], 1,
+        "{import:#}"
     );
     assert_eq!(
-        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]["current_rejected_records"],
-        1,
-        "{daemon:#}"
+        import["totals"]["current_sources_with_rejections"], 1,
+        "{import:#}"
     );
+    assert_eq!(source["status"], "published", "{import:#}");
+
+    let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+    assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
+    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
     assert_eq!(
-        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]
-            ["current_sources_with_rejections"],
-        1,
-        "{daemon:#}"
+        status["relational"]["active_core_generation_id"], generation,
+        "{status:#}"
     );
-    assert!(daemon["last_error"].is_null(), "{daemon:#}");
-    assert!(stderr.is_empty(), "{stderr}");
+    assert!(data_root(&temp).join("relational.sqlite").is_file());
 
     let index =
         json_output(ctx_from_binary(&temp, &binary).args(["index", "status", "--format=json"]));
@@ -982,15 +982,10 @@ fn daemon_once_rejections_complete_and_preserve_diagnostics() {
         .timeout(Duration::from_secs(3))
         .assert()
         .success();
-
-    let lock: Value =
-        serde_json::from_slice(&fs::read(data_root(&temp).join("daemon/daemon.lock")).unwrap())
-            .unwrap();
-    assert_eq!(lock["released"], true, "{lock:#}");
 }
 
 #[test]
-fn daemon_rejection_diagnostics_survive_a_noop_source_cycle() {
+fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let sessions = temp
@@ -1023,39 +1018,34 @@ fn daemon_rejection_diagnostics_survive_a_noop_source_cycle() {
         .assert()
         .success();
 
+    let _daemon = start_full_source_refresh_daemon(&temp);
     let mut generation = None;
     let mut refresh_request_id = None;
     for cycle in 0..2 {
-        let report = (0..4)
-            .find_map(|_| {
-                let report = json_output(
-                    ctx_from_binary(&temp, &binary)
-                        .args(["daemon", "run", "--once", "--force", "--format=json"])
-                        .env("CTX_UPGRADE_AUTO", "off"),
-                );
-                let request_id = report["jobs"]["source_backed_refresh"]["request_id"].as_str();
-                (request_id.is_some() && request_id != refresh_request_id.as_deref())
-                    .then_some(report)
-            })
-            .expect("bounded daemon cycles must execute a new source refresh");
-        let refresh = &report["jobs"]["source_backed_refresh"];
-        refresh_request_id = refresh["request_id"].as_str().map(str::to_owned);
-        let rejected = refresh["receipt"]["current"]["current_rejected_records"]
-            .as_u64()
-            .unwrap_or(0);
-        assert_eq!(rejected, 1, "{report:#}");
-        assert_eq!(
-            refresh["receipt"]["current"]["current_sources_with_rejections"], 1,
-            "{report:#}"
+        let report = json_output(
+            ctx_from_binary(&temp, &binary)
+                .args(["import", "--all", "--format=json", "--progress", "none"])
+                .env("CTX_UPGRADE_AUTO", "off"),
         );
+        let refresh = &report["sources"][0];
+        let request_id = refresh["daemon_request_id"].as_str();
+        assert_ne!(request_id, refresh_request_id.as_deref(), "{report:#}");
+        refresh_request_id = request_id.map(str::to_owned);
+        assert_eq!(refresh["current_rejected_records"], 1, "{report:#}");
+        assert_eq!(refresh["current_sources_with_rejections"], 1, "{report:#}");
         let published = refresh["published_generation"].as_str().unwrap();
         if cycle == 0 {
-            assert_eq!(refresh["generation_changed"], true, "{report:#}");
             generation = Some(published.to_owned());
         } else {
             assert_eq!(Some(published), generation.as_deref(), "{report:#}");
             assert_eq!(refresh["generation_changed"], false, "{report:#}");
         }
+        let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+        assert_eq!(status["relational"]["status"], "ready", "{status:#}");
+        assert_eq!(
+            status["relational"]["active_core_generation_id"], published,
+            "{status:#}"
+        );
     }
 
     let doctor = json_output(ctx_from_binary(&temp, &binary).args(["doctor", "--format=json"]));
@@ -1068,7 +1058,7 @@ fn daemon_rejection_diagnostics_survive_a_noop_source_cycle() {
 }
 
 #[test]
-fn daemon_once_refreshes_discovered_codex_prompt_history() {
+fn foreground_import_publishes_core_and_required_relational_projection() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let history = temp.path().join(".codex/history.jsonl");
@@ -1092,27 +1082,37 @@ fn daemon_once_refreshes_discovered_codex_prompt_history() {
         .assert()
         .success();
 
-    let daemon = json_output(
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let import = json_output(
         ctx_from_binary(&temp, &binary)
-            .args(["daemon", "run", "--once", "--force", "--format=json"])
+            .args([
+                "import",
+                "--provider",
+                "codex",
+                "--format=json",
+                "--progress",
+                "none",
+            ])
             .env("CTX_UPGRADE_AUTO", "off"),
     );
-    assert_eq!(daemon["status"], "completed", "{daemon:#}");
+    assert_eq!(import["outcome"], "success", "{import:#}");
+    assert_eq!(import["totals"]["current_source_count"], 1, "{import:#}");
     assert_eq!(
-        daemon["jobs"]["source_backed_refresh"]["status"], "completed",
-        "{daemon:#}"
+        import["totals"]["current_indexed_documents"], 1,
+        "{import:#}"
     );
+    let generation = import["sources"][0]["published_generation"]
+        .as_str()
+        .unwrap();
+
+    let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+    assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
+    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
     assert_eq!(
-        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]["current_source_count"], 1,
-        "{daemon:#}"
-    );
-    assert_eq!(
-        daemon["jobs"]["source_backed_refresh"]["receipt"]["current"]["current_indexed_documents"],
-        1,
-        "{daemon:#}"
+        status["relational"]["active_core_generation_id"], generation,
+        "{status:#}"
     );
 
-    let _daemon = start_full_source_refresh_daemon(&temp);
     let search = json_output(ctx_from_binary(&temp, &binary).args([
         "search",
         "prompt history daemon refresh oracle",

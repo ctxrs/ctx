@@ -14,7 +14,8 @@ use crate::{
     progress::ProgressReporter,
     provider_sources::{discovered_sources_for_provider_report, manual_path_guidance},
     semantic::{
-        autostart_daemon_and_wait, coordinate_source_backed_refresh, SourceBackedRefreshMode,
+        autostart_daemon_and_wait, coordinate_source_backed_refresh,
+        wait_for_source_backed_relational_generation, SourceBackedRefreshMode,
     },
     DaemonTriggerCommandArg, ImportArgs,
 };
@@ -72,6 +73,12 @@ pub(super) fn run_automatic_source_refresh_import(
         .receipt
         .clone()
         .context("daemon source refresh published without an authoritative terminal receipt")?;
+    wait_for_source_backed_relational_generation(
+        &context.data_root,
+        &receipt.published_generation,
+        context.args.no_daemon,
+    )
+    .context("converge required relational projection after provider source publication")?;
     let request_id = refresh.request_id.clone();
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
