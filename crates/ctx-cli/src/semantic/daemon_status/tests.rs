@@ -301,6 +301,35 @@ fn source_rejections_are_visible_without_internal_provenance() {
 }
 
 #[test]
+fn failed_source_refresh_is_bounded_actionable_and_never_leaks_backend_details() {
+    let backend_error = "all_provider_terminal_coverage_unavailable at /tmp/private/source";
+    let report = json!({
+        "enabled": true,
+        "status": "failed",
+        "running": false,
+        "last_error": format!("source-backed refresh failed: {backend_error}"),
+        "jobs": {
+            "source_backed_refresh": {
+                "status": "failed",
+                "last_error": backend_error,
+                "certified_source_count": 0
+            },
+            "semantic_index": {"status": "unknown"}
+        }
+    });
+    let rendered = render_status(&context(80), &report).render_plain();
+
+    assert!(rendered
+        .starts_with("✗ History refresh failed\nNo new history generation was published.\n"));
+    assert!(rendered.contains("Sources  0 certified sources\n"));
+    assert!(rendered.contains("Issue    One or more history sources could not be refreshed.\n"));
+    assert_eq!(rendered.matches("ctx import --all --no-daemon").count(), 1);
+    assert!(!rendered.contains("ctx daemon enable"));
+    assert!(!rendered.contains("all_provider_terminal_coverage_unavailable"));
+    assert!(!rendered.contains("/tmp/private/source"));
+}
+
+#[test]
 fn semantic_fallback_names_backend_and_reason_but_not_model_identity() {
     let mut report = running_report();
     report["jobs"]["semantic_index"] = json!({
@@ -486,7 +515,9 @@ fn controls_are_neutralized_and_ansi_stripped_output_matches_plain() {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect::<String>();
-        assert!(compact_plain.contains("\\x1b[31mowned\\x1b[0m\\nsecondline"));
+        assert!(compact_plain.contains("Oneormorehistorysourcescouldnotberefreshed."));
+        assert!(!plain.contains("owned"));
+        assert!(!plain.contains("second line"));
         assert!(!plain.contains('\u{1b}'));
         assert_eq!(strip_ansi(&styled), plain);
         assert!(styled.contains("\u{1b}[2mStatus\u{1b}[0m"));
