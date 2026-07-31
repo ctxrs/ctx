@@ -79,6 +79,7 @@ pub(super) fn codex_lexical_document(
         lexical_body,
         touched_paths,
         repository_tool,
+        repository_result,
         repository_files,
     } = row;
     let event_id = codex_event_identity(source, native_session_id, raw_ordinal)?;
@@ -98,7 +99,7 @@ pub(super) fn codex_lexical_document(
     if lexical_body.is_empty() {
         return Err(CodexSourceBackedErrorV0::MissingLexicalBody);
     }
-    let (declared_tool_workdir, command, structured_content) =
+    let (mut declared_tool_workdir, mut command, mut structured_content) =
         repository_tool.map_or((None, None, None), |evidence| {
             (
                 evidence.declared_workdir,
@@ -106,16 +107,36 @@ pub(super) fn codex_lexical_document(
                 Some(evidence.structured_content),
             )
         });
+    let mut provider_native_repository_aliases = Vec::new();
+    let mut outcome_observations = Vec::new();
+    let mut outcome_abstentions = Vec::new();
+    let mut outcome_operation_repository_path = None;
+    let mut outcome_output_repository_path = None;
+    if let Some(evidence) = repository_result {
+        declared_tool_workdir = evidence.declared_workdir;
+        command = Some(evidence.command);
+        structured_content = Some(evidence.structured_content);
+        provider_native_repository_aliases = evidence.provider_native_repository_aliases;
+        outcome_operation_repository_path = evidence.outcome_operation_repository_path;
+        outcome_output_repository_path = evidence.outcome_output_repository_path;
+        outcome_observations = evidence.outcomes;
+        outcome_abstentions = evidence.abstentions;
+    }
     let annotation = attributor.attribute(crate::repository_attribution::AttributionInput {
-        // Current Codex session/tool records expose cwd, workdir, command, and
-        // file activity, but no structured credential-free project identity.
-        provider_native_repository_aliases: Vec::new(),
+        activity_at_unix_ms: Some(occurred_at.timestamp_millis()),
+        // Codex result records contribute a credential-free forge identity
+        // only when an exact structured PR result carries one.
+        provider_native_repository_aliases,
         session_cwd: owner.cwd.clone(),
         declared_tool_workdir,
         command,
         structured_content,
         file_observations: repository_files,
         vcs_observations: Vec::new(),
+        outcome_operation_repository_path,
+        outcome_output_repository_path,
+        outcome_observations,
+        outcome_abstentions,
     });
     let document = LexicalDocument {
         event_id,

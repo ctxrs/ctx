@@ -1,7 +1,642 @@
 use super::*;
 
+fn initialize_repository(path: &Path) {
+    use std::process::Command;
+
+    fs::create_dir(path).unwrap();
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "ctx test"],
+        vec!["config", "user.email", "ctx@example.invalid"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/codex-fixture.git",
+        ],
+    ] {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(path)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(path.join("tracked.txt"), "tracked\n").unwrap();
+    for arguments in [vec!["add", "tracked.txt"], vec!["commit", "-qm", "fixture"]] {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(path)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    }
+}
+
+fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-28T12:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": serde_json::json!({
+                "cmd": command,
+                "workdir": workdir,
+                "yield_time_ms": 10000
+            }).to_string()
+        }
+    })
+    .to_string()
+}
+
+fn successful_result(call_id: &str, output: Value) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "status": "success",
+            "output": output
+        }
+    })
+    .to_string()
+}
+
+fn wait_call(call_id: &str, cell_id: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-28T12:00:03Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "wait",
+            "call_id": call_id,
+            "arguments": serde_json::json!({"cell_id": cell_id}).to_string()
+        }
+    })
+    .to_string()
+}
+
+fn running_result(call_id: &str, cell_id: &str) -> String {
+    successful_result(
+        call_id,
+        Value::String(format!("Script running with cell ID {cell_id}\n")),
+    )
+}
+
+fn outcome_for_sequence(
+    index: &VerifiedIndex,
+    session_id: StableEntityId,
+    sequence: u64,
+) -> ctx_history_core::CoreRecord {
+    let event = index
+        .events_for_session(session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_sequence == sequence)
+        .unwrap();
+    index
+        .core_record_by_id(event.event_id.as_uuid())
+        .unwrap()
+        .unwrap()
+}
+
 #[test]
-fn codex_production_path_persists_native_workdir_arguments_and_certified_binding() {
+fn codex_exact_commit_result_publishes_scoped_outcome_and_no_raw_output() {
+    use ctx_history_core::{RepositoryOutcomeKind, RepositoryVcsObservationKind};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let native_session_id = "019fa000-0000-7000-8000-000000000100";
+    let oid = "0123456789abcdef0123456789abcdef01234567";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(
+                "commit-call",
+                "git commit -m exact && git rev-parse --verify HEAD",
+                &repository,
+            ),
+            successful_result(
+                "commit-call",
+                Value::String(format!(
+                    "Process exited with code 0\nFinal output:\n[main abc1234] exact\n{oid}\n"
+                )),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let core = outcome_for_sequence(&verified, session_id, 2);
+    assert_eq!(core.repository_bindings.len(), 1);
+    let RepositoryVcsObservationKind::Outcome(outcome) = &core.repository_vcs_observations[0].kind
+    else {
+        panic!("expected repository outcome");
+    };
+    assert_eq!(outcome.kind, RepositoryOutcomeKind::Commit);
+    assert_eq!(outcome.produced_object_ids[0].hex, oid);
+    assert_eq!(outcome.linkage.origin_call_id, "commit-call");
+    assert_eq!(outcome.linkage.result_call_id, "commit-call");
+    assert_eq!(outcome.linkage.origin_event_sequence, 1);
+    let structured = core.content.structured_content.as_ref().unwrap();
+    assert_eq!(
+        structured["provider_native_tool_result"]["raw_output_retained"],
+        false
+    );
+    assert!(!serde_json::to_string(structured).unwrap().contains(oid));
+}
+
+#[test]
+fn codex_success_without_binding_and_failed_or_mismatched_results_fail_closed() {
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let missing = temp.path().join("not-a-repository");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir(&missing).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000101";
+    let oid = "1111111111111111111111111111111111111111";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call("unbound", "git commit -m exact", &missing),
+            successful_result("unbound", serde_json::json!({"commit_oid": oid})),
+            exec_call("failed", "git commit -m failed", &missing),
+            serde_json::json!({
+                "timestamp": "2026-07-28T12:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "failed",
+                    "output": "Process exited with code 1\ncommit failed"
+                }
+            })
+            .to_string(),
+            exec_call("prose", "git commit -m prose", &missing),
+            successful_result(
+                "prose",
+                Value::String(format!("commit completed near diagnostic token {oid}")),
+            ),
+            exec_call("mismatch-origin", "git commit -m mismatch", &missing),
+            successful_result(
+                "different-result-id",
+                serde_json::json!({"commit_oid": oid}),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let unbound = outcome_for_sequence(&verified, session_id, 2);
+    assert!(unbound.repository_vcs_observations.is_empty());
+    assert!(unbound.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound
+    }));
+    let failed = outcome_for_sequence(&verified, session_id, 4);
+    assert!(failed.repository_vcs_observations.is_empty());
+    assert!(failed.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::OutcomeResultInadmissible
+    }));
+    let prose = outcome_for_sequence(&verified, session_id, 6);
+    assert!(prose.repository_vcs_observations.is_empty());
+    assert!(prose.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::OutcomeResultInadmissible
+    }));
+    assert!(verified
+        .events_for_session(session_id.as_uuid())
+        .unwrap()
+        .iter()
+        .all(|event| event.event_sequence != 8));
+}
+
+#[test]
+fn codex_structured_pr_create_uses_exact_provider_identity() {
+    use ctx_history_core::{RepositoryOutcomeKind, RepositoryVcsObservationKind};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let control = temp.path().join("control");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir(&control).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000102";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call("pr-call", "gh pr create", &control),
+            successful_result(
+                "pr-call",
+                serde_json::json!({
+                    "number": 42,
+                    "url": "https://github.com/acme/codex-fixture/pull/42",
+                    "id": "PR_42"
+                }),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let core = outcome_for_sequence(&verified, session_id, 2);
+    assert_eq!(
+        core.repository_bindings[0].logical_repository_id,
+        "forge:github.com/acme/codex-fixture"
+    );
+    assert!(core.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
+    let RepositoryVcsObservationKind::Outcome(outcome) = &core.repository_vcs_observations[0].kind
+    else {
+        panic!("expected PR outcome");
+    };
+    assert_eq!(outcome.kind, RepositoryOutcomeKind::PullRequestCreated);
+    let pull_request = outcome.pull_request.as_ref().unwrap();
+    assert_eq!(pull_request.number, 42);
+    assert_eq!(pull_request.provider_id.as_deref(), Some("PR_42"));
+}
+
+#[test]
+fn codex_continuation_linkage_survives_checkpoint_resume() {
+    use ctx_history_core::RepositoryVcsObservationKind;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let native_session_id = "019fa000-0000-7000-8000-000000000103";
+    let oid = "2222222222222222222222222222222222222222";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(
+                "origin-call",
+                "git commit -m exact && git rev-parse HEAD",
+                &repository,
+            ),
+            successful_result(
+                "origin-call",
+                Value::String("Script running with cell ID cell-7\n".to_owned()),
+            ),
+        ],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+    let wait_call = serde_json::json!({
+        "timestamp": "2026-07-28T12:00:03Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "wait",
+            "call_id": "wait-call",
+            "arguments": serde_json::json!({"cell_id": "cell-7"}).to_string()
+        }
+    })
+    .to_string();
+    let terminal = successful_result(
+        "wait-call",
+        Value::String(format!(
+            "Script completed\nProcess exited with code 0\nFinal output:\n[main abc1234] exact\n{oid}\n"
+        )),
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap()
+        .write_all(format!("{wait_call}\n{terminal}\n").as_bytes())
+        .unwrap();
+    let append = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(append.counters.appended_sources, 1);
+
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let core = outcome_for_sequence(&verified, session_id, 4);
+    let RepositoryVcsObservationKind::Outcome(outcome) = &core.repository_vcs_observations[0].kind
+    else {
+        panic!("expected resumed outcome");
+    };
+    assert_eq!(outcome.produced_object_ids[0].hex, oid);
+    assert_eq!(outcome.linkage.origin_call_id, "origin-call");
+    assert_eq!(outcome.linkage.result_call_id, "wait-call");
+    assert_eq!(outcome.linkage.origin_event_sequence, 1);
+    assert_eq!(outcome.linkage.continuation_call_id_sha256.len(), 1);
+}
+
+#[test]
+fn codex_outcome_routes_are_operation_local_across_two_repositories() {
+    use ctx_history_core::{RepositoryAbstentionReason, RepositoryVcsObservationKind};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&first);
+    initialize_repository(&second);
+    let native_session_id = "019fa000-0000-7000-8000-000000000104";
+    let oid = "3333333333333333333333333333333333333333";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(
+                "route-mismatch",
+                &format!(
+                    "git -C {} commit -m exact && git rev-parse HEAD",
+                    first.display()
+                ),
+                &second,
+            ),
+            successful_result("route-mismatch", Value::String(oid.to_owned())),
+            exec_call(
+                "route-match",
+                &format!(
+                    "git -C {} commit -m exact && git -C {} rev-parse HEAD",
+                    first.display(),
+                    first.display()
+                ),
+                &second,
+            ),
+            successful_result("route-match", Value::String(oid.to_owned())),
+            exec_call(
+                "route-cd",
+                &format!(
+                    "cd {} && git commit -m exact && git rev-parse HEAD",
+                    first.display()
+                ),
+                &second,
+            ),
+            successful_result("route-cd", Value::String(oid.to_owned())),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let mismatch = outcome_for_sequence(&verified, session_id, 2);
+    assert!(mismatch.repository_vcs_observations.is_empty());
+    assert!(mismatch.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::ConflictingIdentity
+    }));
+
+    for sequence in [4, 6] {
+        let core = outcome_for_sequence(&verified, session_id, sequence);
+        let RepositoryVcsObservationKind::Outcome(_) = &core.repository_vcs_observations[0].kind
+        else {
+            panic!("expected repository outcome at {sequence}");
+        };
+        assert_eq!(
+            core.repository_bindings[0]
+                .local_root_authorization
+                .as_ref()
+                .unwrap()
+                .local_root,
+            first.to_string_lossy()
+        );
+    }
+}
+
+#[test]
+fn codex_provider_local_identity_conflict_never_publishes_a_binding_or_outcome() {
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let native_session_id = "019fa000-0000-7000-8000-000000000105";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call("pr-conflict", "gh pr create", &repository),
+            successful_result(
+                "pr-conflict",
+                Value::String("https://github.com/other/repository/pull/9".to_owned()),
+            ),
+        ],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let core = outcome_for_sequence(&verified, session_id, 2);
+    assert!(core.repository_bindings.is_empty());
+    assert!(core.repository_vcs_observations.is_empty());
+    assert!(core.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::ConflictingIdentity
+    }));
+}
+
+#[test]
+fn codex_duplicate_and_reordered_linkage_abstains_without_positive_outcomes() {
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let oid = "4444444444444444444444444444444444444444";
+
+    let duplicate_session = "019fa000-0000-7000-8000-000000000106";
+    let duplicate_call = exec_call(
+        "duplicate-call",
+        "git commit -m exact && git rev-parse HEAD",
+        &repository,
+    );
+    write_session(
+        &sessions,
+        duplicate_session,
+        &[
+            duplicate_call.clone(),
+            duplicate_call,
+            successful_result("duplicate-call", Value::String(oid.to_owned())),
+        ],
+    );
+
+    let reordered_session = "019fa000-0000-7000-8000-000000000107";
+    write_session(
+        &sessions,
+        reordered_session,
+        &[
+            exec_call(
+                "origin-call",
+                "git commit -m exact && git rev-parse HEAD",
+                &repository,
+            ),
+            running_result("origin-call", "cell-reorder"),
+            wait_call("wait-a", "cell-reorder"),
+            wait_call("wait-b", "cell-reorder"),
+            successful_result(
+                "wait-b",
+                Value::String(format!("Script completed\nFinal output:\n{oid}\n")),
+            ),
+            successful_result(
+                "wait-a",
+                Value::String(format!("Script completed\nFinal output:\n{oid}\n")),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    for (native_session_id, sequences) in [
+        (duplicate_session, vec![3]),
+        (reordered_session, vec![5, 6]),
+    ] {
+        let source = codex_source_key(native_session_id).unwrap();
+        let session_id = codex_session_identity(&source, native_session_id).unwrap();
+        for sequence in sequences {
+            let core = outcome_for_sequence(&verified, session_id, sequence);
+            assert!(core.repository_vcs_observations.is_empty());
+            assert!(core.repository_abstentions.iter().any(|abstention| {
+                abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+            }));
+        }
+    }
+}
+
+#[test]
+fn codex_pending_cache_evicts_by_raw_ordinal_without_rejoining_old_results() {
+    use ctx_history_core::RepositoryVcsObservationKind;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let native_session_id = "019fa000-0000-7000-8000-000000000108";
+    let command = "git commit -m exact && git rev-parse HEAD";
+    let mut records = vec![exec_call("z-oldest", command, &repository)];
+    for index in 0..23 {
+        records.push(exec_call(&format!("mid-{index:02}"), command, &repository));
+    }
+    records.push(exec_call("a-newest", command, &repository));
+    let oid = "5555555555555555555555555555555555555555";
+    records.push(successful_result("z-oldest", Value::String(oid.to_owned())));
+    records.push(successful_result("a-newest", Value::String(oid.to_owned())));
+    write_session(&sessions, native_session_id, &records);
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert!(verified
+        .events_for_session(session_id.as_uuid())
+        .unwrap()
+        .iter()
+        .all(|event| event.event_sequence != 26));
+    let newest = outcome_for_sequence(&verified, session_id, 27);
+    let RepositoryVcsObservationKind::Outcome(outcome) =
+        &newest.repository_vcs_observations[0].kind
+    else {
+        panic!("expected newest pending call to remain linked");
+    };
+    assert_eq!(outcome.linkage.origin_call_id, "a-newest");
+}
+
+#[test]
+fn codex_continuation_overflow_survives_checkpoint_and_typed_abstains() {
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let native_session_id = "019fa000-0000-7000-8000-000000000109";
+    let oid = "6666666666666666666666666666666666666666";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(
+                "overflow-origin",
+                "git commit -m exact && git rev-parse HEAD",
+                &repository,
+            ),
+            running_result("overflow-origin", "cell-overflow"),
+        ],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+    let mut intermediate = String::new();
+    for index in 0..25 {
+        intermediate.push_str(&wait_call(
+            &format!("overflow-wait-{index:02}"),
+            "cell-overflow",
+        ));
+        intermediate.push('\n');
+        intermediate.push_str(&running_result(
+            &format!("overflow-wait-{index:02}"),
+            "cell-overflow",
+        ));
+        intermediate.push('\n');
+    }
+    OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap()
+        .write_all(intermediate.as_bytes())
+        .unwrap();
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+    let final_wait = wait_call("overflow-final", "cell-overflow");
+    let terminal = successful_result(
+        "overflow-final",
+        Value::String(format!("Script completed\nFinal output:\n{oid}\n")),
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap()
+        .write_all(format!("{final_wait}\n{terminal}\n").as_bytes())
+        .unwrap();
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let core = outcome_for_sequence(&verified, session_id, 54);
+    assert!(core.repository_vcs_observations.is_empty());
+    assert!(core.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::LinkageCapacityExceeded
+    }));
+}
+
+#[test]
+fn codex_production_path_persists_redacted_native_summary_and_certified_binding() {
     use std::process::Command;
 
     let temp = tempfile::tempdir().unwrap();
@@ -43,8 +678,9 @@ fn codex_production_path_persists_native_workdir_arguments_and_certified_binding
     }
 
     let native_session_id = "019fa000-0000-7000-8000-000000000099";
+    let secret = "CTX_SECRET_TOKEN_7f3a9d";
     let arguments = serde_json::json!({
-        "cmd": "git status",
+        "cmd": format!("SECRET_TOKEN={secret} git status"),
         "workdir": repository,
         "yield_time_ms": 10000,
     });
@@ -108,11 +744,102 @@ fn codex_production_path_persists_native_workdir_arguments_and_certified_binding
         core.repository_bindings[0].logical_repository_id,
         "forge:github.com/acme/codex-fixture"
     );
+    let structured = core.content.structured_content.as_ref().unwrap();
     assert_eq!(
-        core.content.structured_content.as_ref().unwrap()["provider_native_tool"]["arguments"],
-        arguments.to_string()
+        structured["provider_native_tool"]["raw_arguments_retained"],
+        false
     );
+    assert_eq!(
+        structured["provider_native_tool"]["argument_schema"],
+        "codex_exec_command_args_v1"
+    );
+    let encoded = core.encode_stored().unwrap();
+    assert!(!encoded
+        .windows(secret.len())
+        .any(|window| window == secret.as_bytes()));
+    assert!(!encoded
+        .windows(arguments.to_string().len())
+        .any(|window| window == arguments.to_string().as_bytes()));
     assert!(core.repository_vcs_observations.is_empty());
+}
+
+#[test]
+fn multi_source_cold_cache_is_worker_bounded_and_generation_is_deterministic() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let first_index = temp.path().join("first-index");
+    let second_index = temp.path().join("second-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+
+    let native_session_ids = (0..32)
+        .map(|index| format!("019fa000-0000-7000-8000-{index:012}"))
+        .collect::<Vec<_>>();
+    for (index, native_session_id) in native_session_ids.iter().enumerate() {
+        write_session(
+            &sessions,
+            native_session_id,
+            &[exec_call(
+                &format!("status-{index}"),
+                "git status",
+                &repository,
+            )],
+        );
+    }
+
+    let first = ingest_codex_source_backed_v0(&sessions, &first_index).unwrap();
+    assert!(first.counters.scanner_workers >= 1);
+    assert_eq!(
+        first.counters.repository_full_git_certification_probes,
+        first.counters.scanner_workers
+    );
+    assert!(
+        first.counters.repository_full_git_certification_probes
+            < u64::try_from(native_session_ids.len()).unwrap()
+    );
+
+    let second = ingest_codex_source_backed_v0(&sessions, &second_index).unwrap();
+    assert_eq!(
+        second.counters.repository_full_git_certification_probes,
+        second.counters.scanner_workers
+    );
+    assert_eq!(first.commit.generation_id, second.commit.generation_id);
+
+    let first_verified = VerifiedIndex::open(&first_index).unwrap();
+    let second_verified = VerifiedIndex::open(&second_index).unwrap();
+    for native_session_id in native_session_ids {
+        let source = codex_source_key(&native_session_id).unwrap();
+        let session_id = codex_session_identity(&source, &native_session_id).unwrap();
+        let first_event = first_verified
+            .events_for_session(session_id.as_uuid())
+            .unwrap()
+            .remove(0);
+        let second_event = second_verified
+            .events_for_session(session_id.as_uuid())
+            .unwrap()
+            .remove(0);
+        let first_core = first_verified
+            .core_record_by_id(first_event.event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        let second_core = second_verified
+            .core_record_by_id(second_event.event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_core.encode_stored().unwrap(),
+            second_core.encode_stored().unwrap()
+        );
+        assert_eq!(
+            first_core.repository_bindings[0]
+                .local_root_authorization
+                .as_ref()
+                .unwrap()
+                .observed_at_unix_ms,
+            1_785_240_001_000
+        );
+    }
 }
 
 #[test]

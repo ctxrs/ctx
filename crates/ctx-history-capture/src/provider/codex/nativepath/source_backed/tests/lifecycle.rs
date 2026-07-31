@@ -171,12 +171,19 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
     assert_eq!(parallel.counters.emitted_pages, 32);
     assert_eq!(single.commit.indexed_documents, 1_040);
     assert_eq!(parallel.commit.indexed_documents, 1_040);
+    assert_eq!(single.counters.repository_full_git_certification_probes, 1);
+    assert_eq!(
+        parallel.counters.repository_full_git_certification_probes,
+        4
+    );
     let mut single_counters = single.counters;
     let mut parallel_counters = parallel.counters;
     single_counters.scanner_workers = 0;
     parallel_counters.scanner_workers = 0;
     single_counters.peak_active_scanners = 0;
     parallel_counters.peak_active_scanners = 0;
+    single_counters.repository_full_git_certification_probes = 0;
+    parallel_counters.repository_full_git_certification_probes = 0;
     assert_eq!(single_counters, parallel_counters);
 
     let single_verified = VerifiedIndex::open(&single_index).unwrap();
@@ -274,12 +281,26 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
     assert_eq!(parallel_mixed.counters.replayed_sources, 8);
     assert_eq!(parallel_mixed.counters.catalog_source_body_reads, 8);
     assert_eq!(parallel_mixed.counters.catalog_session_meta_parses, 8);
+    assert_eq!(
+        single_mixed
+            .counters
+            .repository_full_git_certification_probes,
+        1
+    );
+    assert_eq!(
+        parallel_mixed
+            .counters
+            .repository_full_git_certification_probes,
+        8
+    );
     let mut normalized_single_mixed = single_mixed.counters;
     let mut normalized_parallel_mixed = parallel_mixed.counters;
     normalized_single_mixed.scanner_workers = 0;
     normalized_parallel_mixed.scanner_workers = 0;
     normalized_single_mixed.peak_active_scanners = 0;
     normalized_parallel_mixed.peak_active_scanners = 0;
+    normalized_single_mixed.repository_full_git_certification_probes = 0;
+    normalized_parallel_mixed.repository_full_git_certification_probes = 0;
     assert_eq!(normalized_single_mixed, normalized_parallel_mixed);
     assert_eq!(
         single_mixed.commit.generation_id,

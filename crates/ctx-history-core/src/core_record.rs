@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,7 +12,14 @@ use crate::{SourceKey, StableEntityId, StableEntityKind, TypedKey};
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 1;
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 2;
+pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 1;
+pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN: &[u8] =
+    b"ctx.core.repository-local-root-fingerprint.v1\0";
+pub const CORE_MISSING_ACTIVITY_TIME_UNIX_MS: i64 = i64::MIN;
 
 /// Maximum complete policy-selected content admitted to one Core record.
 pub const MAX_CORE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
@@ -27,6 +37,7 @@ const MAX_REPOSITORY_EVIDENCE: usize = 64;
 const MAX_REPOSITORY_NAMESPACE_PARTS: usize = 32;
 const MAX_REPOSITORY_RELATIVE_PATH_BYTES: usize = 16 * 1024;
 const MAX_GIT_REF_BYTES: usize = 4 * 1024;
+const MAX_OUTCOME_LINKAGE_ITEMS: usize = 64;
 
 pub type CoreRecordResult<T> = Result<T, CoreRecordError>;
 
@@ -35,12 +46,47 @@ pub type CoreRecordResult<T> = Result<T, CoreRecordError>;
 /// Any logical shape or validation change must bump at least one bound
 /// revision below, which changes both this value and generation identity.
 pub fn core_record_contract_fingerprint() -> String {
+    core_record_contract_fingerprint_for(CoreContractRevisions::current())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoreContractRevisions {
+    record: u32,
+    normalization: u32,
+    content_policy: u32,
+    repository_contract: u32,
+    repository_observation: u32,
+    bounded_shell_subset: u32,
+    repository_outcome_capture: u32,
+    repository_locator_fingerprint: u32,
+}
+
+impl CoreContractRevisions {
+    const fn current() -> Self {
+        Self {
+            record: CORE_RECORD_VERSION,
+            normalization: CORE_NORMALIZATION_REVISION,
+            content_policy: CORE_CONTENT_POLICY_REVISION,
+            repository_contract: CORE_REPOSITORY_CONTRACT_REVISION,
+            repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
+            bounded_shell_subset: CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            repository_outcome_capture: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            repository_locator_fingerprint: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
+        }
+    }
+}
+
+fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> String {
     let mut digest = Sha256::new();
     digest.update(b"ctx.core-record-contract\0");
-    digest.update(CORE_RECORD_VERSION.to_be_bytes());
-    digest.update(CORE_NORMALIZATION_REVISION.to_be_bytes());
-    digest.update(CORE_CONTENT_POLICY_REVISION.to_be_bytes());
-    digest.update(CORE_REPOSITORY_CONTRACT_REVISION.to_be_bytes());
+    digest.update(revisions.record.to_be_bytes());
+    digest.update(revisions.normalization.to_be_bytes());
+    digest.update(revisions.content_policy.to_be_bytes());
+    digest.update(revisions.repository_contract.to_be_bytes());
+    digest.update(revisions.repository_observation.to_be_bytes());
+    digest.update(revisions.bounded_shell_subset.to_be_bytes());
+    digest.update(revisions.repository_outcome_capture.to_be_bytes());
+    digest.update(revisions.repository_locator_fingerprint.to_be_bytes());
     digest
         .finalize()
         .iter()
@@ -84,6 +130,10 @@ pub enum CoreRecordError {
     InvalidRepositoryAlias,
     #[error("Git object ID does not match its declared object format")]
     InvalidGitObjectId,
+    #[error("Core record repository revisions do not match the active contract")]
+    InvalidRepositoryRevisions,
+    #[error("repository outcome does not match its declared operation or linkage")]
+    InvalidRepositoryOutcome,
 }
 
 /// Complete normalized content retained under one explicit product policy.
@@ -397,13 +447,20 @@ impl CoreRecord {
                     observation.repository_binding_id.clone(),
                 ));
             };
-            let object_ids = observation
+            for object_id in observation
                 .object_id
                 .iter()
-                .chain(observation.parent_object_ids.iter());
-            for object_id in object_ids {
+                .chain(observation.parent_object_ids.iter())
+            {
                 if format.is_none_or(|format| object_id.format != format) {
                     return Err(CoreRecordError::InvalidGitObjectId);
+                }
+            }
+            if let RepositoryVcsObservationKind::Outcome(outcome) = &observation.kind {
+                for object_id in outcome.object_ids() {
+                    if format.is_none_or(|format| object_id.format != format) {
+                        return Err(CoreRecordError::InvalidGitObjectId);
+                    }
                 }
             }
         }
@@ -605,11 +662,22 @@ pub enum RepositoryAliasKind {
 #[serde(deny_unknown_fields)]
 pub struct RepositoryLocalRootAuthorization {
     pub local_root: String,
+    pub locator_fingerprint_revision: u32,
     pub locator_fingerprint: [u8; 32],
     pub observed_at_unix_ms: i64,
 }
 
 impl RepositoryLocalRootAuthorization {
+    /// Orders two local-root observations only when provider activity time is
+    /// present and strictly different. `None` is intentionally ambiguous:
+    /// callers must not break equal/missing-time ties by ingestion order.
+    pub fn provider_activity_order(&self, other: &Self) -> Option<Ordering> {
+        (self.observed_at_unix_ms != CORE_MISSING_ACTIVITY_TIME_UNIX_MS
+            && other.observed_at_unix_ms != CORE_MISSING_ACTIVITY_TIME_UNIX_MS
+            && self.observed_at_unix_ms != other.observed_at_unix_ms)
+            .then(|| self.observed_at_unix_ms.cmp(&other.observed_at_unix_ms))
+    }
+
     fn validate_contract(&self) -> CoreRecordResult<()> {
         validate_text(
             "repository_local_root",
@@ -625,6 +693,9 @@ impl RepositoryLocalRootAuthorization {
         let is_windows_unc = self.local_root.starts_with("\\\\");
         if !is_posix_absolute && !is_windows_drive_absolute && !is_windows_unc {
             return Err(CoreRecordError::InvalidIdentityRelationship);
+        }
+        if self.locator_fingerprint_revision != CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION {
+            return Err(CoreRecordError::InvalidRepositoryRevisions);
         }
         if self.locator_fingerprint == [0; 32] {
             return Err(CoreRecordError::EmptyField {
@@ -649,6 +720,7 @@ pub struct RepositoryEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryEvidenceKind {
     ProviderNativeProject,
+    ProviderNativeResult,
     DeclaredToolWorkdir,
     DerivedEffectiveCwd,
     CommandSpecificRepositoryPath,
@@ -663,17 +735,44 @@ pub enum RepositoryEvidenceKind {
 /// In particular, declared workdir, derived effective cwd, and a
 /// command-specific repository path must never be collapsed into one cwd.
 /// P0 defines only the storage contract and does not parse or resolve commands.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryCandidateEvidence {
+    pub repository_observation_revision: u32,
+    pub bounded_shell_subset_revision: u32,
+    pub outcome_capture_revision: u32,
     pub session_cwd: Option<String>,
     pub declared_tool_workdir: Option<String>,
     pub derived_effective_cwd: Option<String>,
     pub command_specific_repository_path: Option<String>,
+    pub outcome_operation_repository_path: Option<String>,
+    pub outcome_output_repository_path: Option<String>,
+}
+
+impl Default for RepositoryCandidateEvidence {
+    fn default() -> Self {
+        Self {
+            repository_observation_revision: CORE_REPOSITORY_OBSERVATION_REVISION,
+            bounded_shell_subset_revision: CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            session_cwd: None,
+            declared_tool_workdir: None,
+            derived_effective_cwd: None,
+            command_specific_repository_path: None,
+            outcome_operation_repository_path: None,
+            outcome_output_repository_path: None,
+        }
+    }
 }
 
 impl RepositoryCandidateEvidence {
     pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        if self.repository_observation_revision != CORE_REPOSITORY_OBSERVATION_REVISION
+            || self.bounded_shell_subset_revision != CORE_BOUNDED_SHELL_SUBSET_REVISION
+            || self.outcome_capture_revision != CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION
+        {
+            return Err(CoreRecordError::InvalidRepositoryRevisions);
+        }
         validate_optional_text(
             "repository_session_cwd",
             self.session_cwd.as_deref(),
@@ -692,6 +791,16 @@ impl RepositoryCandidateEvidence {
         validate_optional_text(
             "repository_command_specific_path",
             self.command_specific_repository_path.as_deref(),
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )?;
+        validate_optional_text(
+            "repository_outcome_operation_path",
+            self.outcome_operation_repository_path.as_deref(),
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )?;
+        validate_optional_text(
+            "repository_outcome_output_path",
+            self.outcome_output_repository_path.as_deref(),
             MAX_REPOSITORY_RELATIVE_PATH_BYTES,
         )
     }
@@ -745,12 +854,18 @@ pub enum RepositoryAbstentionReason {
     ProfileDependent,
     UnsupportedShell,
     CommandTooLarge,
+    CandidateLimitExceeded,
     CandidateMissingBeforeCertification,
     UnsafePath,
     UnscopedFileActivity,
     AmbiguousCandidates,
     AmbiguousRemote,
     GitProbeFailed,
+    ProviderOutputUnjoined,
+    LinkageCapacityExceeded,
+    OutcomeResultInadmissible,
+    HistoryRewriteUnlinked,
+    OutcomeRepositoryUnbound,
     ConcurrentDrift,
     PlatformUnsupported,
 }
@@ -834,11 +949,21 @@ impl RepositoryVcsObservation {
         if let Some(path) = &self.relative_path {
             validate_repository_relative_path(path)?;
         }
+        if let RepositoryVcsObservationKind::Outcome(outcome) = &self.kind {
+            if self.object_id.is_some()
+                || !self.parent_object_ids.is_empty()
+                || self.reference.is_some()
+                || self.relative_path.is_some()
+            {
+                return Err(CoreRecordError::InvalidRepositoryOutcome);
+            }
+            outcome.validate_contract()?;
+        }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryVcsObservationKind {
     Head,
@@ -847,9 +972,211 @@ pub enum RepositoryVcsObservationKind {
     Worktree,
     Change,
     Reference,
+    Outcome(Box<RepositoryOutcomeObservation>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One exact repository outcome observed prospectively at provider event time.
+///
+/// The observation is nested in a repository-scoped VCS observation so it can
+/// never exist without a certified `repository_binding_id`. It intentionally
+/// models commit and pull-request operations in one lifecycle-neutral shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryOutcomeObservation {
+    pub kind: RepositoryOutcomeKind,
+    pub produced_object_ids: Vec<GitObjectId>,
+    pub replacement_lineage: Vec<RepositoryObjectReplacement>,
+    pub pull_request: Option<RepositoryPullRequestIdentity>,
+    pub observed_at_unix_ms: i64,
+    pub linkage: RepositoryOutcomeLinkage,
+    pub outcome_capture_revision: u32,
+}
+
+impl RepositoryOutcomeObservation {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        if self.outcome_capture_revision != CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION {
+            return Err(CoreRecordError::InvalidRepositoryRevisions);
+        }
+        validate_count(
+            "repository_outcome_object_ids",
+            self.produced_object_ids.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        validate_count(
+            "repository_outcome_replacement_lineage",
+            self.replacement_lineage.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        let mut produced = HashSet::new();
+        for object_id in &self.produced_object_ids {
+            object_id.validate_contract()?;
+            if !produced.insert((object_id.format, object_id.hex.as_str())) {
+                return Err(CoreRecordError::InvalidRepositoryOutcome);
+            }
+        }
+        let mut replacements = HashSet::new();
+        let mut replaced_ids = HashSet::new();
+        let mut replacement_ids = HashSet::new();
+        for replacement in &self.replacement_lineage {
+            replacement.validate_contract()?;
+            if !produced.contains(&(
+                replacement.replacement.format,
+                replacement.replacement.hex.as_str(),
+            )) || !replaced_ids.insert(replacement.replaced.clone())
+                || !replacement_ids.insert(replacement.replacement.clone())
+                || !replacements.insert((
+                    replacement.replaced.clone(),
+                    replacement.replacement.clone(),
+                ))
+            {
+                return Err(CoreRecordError::InvalidRepositoryOutcome);
+            }
+        }
+        for start in &replaced_ids {
+            let mut visited = HashSet::new();
+            let mut current = start;
+            while let Some(next) = self
+                .replacement_lineage
+                .iter()
+                .find(|replacement| &replacement.replaced == current)
+                .map(|replacement| &replacement.replacement)
+            {
+                if !visited.insert(current) || next == start {
+                    return Err(CoreRecordError::InvalidRepositoryOutcome);
+                }
+                current = next;
+            }
+        }
+        if let Some(pull_request) = &self.pull_request {
+            pull_request.validate_contract()?;
+        }
+        match self.kind {
+            RepositoryOutcomeKind::Commit
+                if !self.produced_object_ids.is_empty() && self.pull_request.is_none() => {}
+            RepositoryOutcomeKind::PullRequestCreated
+                if self.produced_object_ids.is_empty()
+                    && self.replacement_lineage.is_empty()
+                    && self.pull_request.is_some() => {}
+            RepositoryOutcomeKind::PullRequestMerged
+                if self.produced_object_ids.len() == 1
+                    && self.replacement_lineage.is_empty()
+                    && self.pull_request.is_some() => {}
+            _ => return Err(CoreRecordError::InvalidRepositoryOutcome),
+        }
+        self.linkage.validate_contract()
+    }
+
+    pub fn object_ids(&self) -> impl Iterator<Item = &GitObjectId> {
+        self.produced_object_ids.iter().chain(
+            self.replacement_lineage
+                .iter()
+                .flat_map(|replacement| [&replacement.replaced, &replacement.replacement]),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryOutcomeKind {
+    Commit,
+    PullRequestCreated,
+    PullRequestMerged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryObjectReplacement {
+    pub replaced: GitObjectId,
+    pub replacement: GitObjectId,
+}
+
+impl RepositoryObjectReplacement {
+    fn validate_contract(&self) -> CoreRecordResult<()> {
+        self.replaced.validate_contract()?;
+        self.replacement.validate_contract()?;
+        if self.replaced == self.replacement || self.replaced.format != self.replacement.format {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryPullRequestIdentity {
+    pub forge_repository: RepositoryAlias,
+    pub number: u64,
+    pub provider_id: Option<String>,
+}
+
+impl RepositoryPullRequestIdentity {
+    fn validate_contract(&self) -> CoreRecordResult<()> {
+        self.forge_repository.validate_contract()?;
+        if self.forge_repository.kind != RepositoryAliasKind::Forge
+            || self.forge_repository.remote_name.is_some()
+            || self.number == 0
+        {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        validate_optional_text(
+            "repository_pull_request_provider_id",
+            self.provider_id.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )
+    }
+}
+
+/// Bounded native linkage proving which structured result belongs to which
+/// command. Output bodies are represented only by the exact record digest.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryOutcomeLinkage {
+    pub provider: String,
+    pub origin_call_id: String,
+    pub result_call_id: String,
+    pub origin_event_sequence: u64,
+    pub continuation_call_id_sha256: Vec<[u8; 32]>,
+    pub result_record_sha256: [u8; 32],
+}
+
+impl RepositoryOutcomeLinkage {
+    fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_text(
+            "repository_outcome_provider",
+            &self.provider,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_text(
+            "repository_outcome_origin_call_id",
+            &self.origin_call_id,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_text(
+            "repository_outcome_result_call_id",
+            &self.result_call_id,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_count(
+            "repository_outcome_continuation_ids",
+            self.continuation_call_id_sha256.len(),
+            MAX_OUTCOME_LINKAGE_ITEMS,
+        )?;
+        if self.result_record_sha256 == [0; 32]
+            || self.continuation_call_id_sha256.contains(&[0; 32])
+            || self
+                .continuation_call_id_sha256
+                .iter()
+                .collect::<HashSet<_>>()
+                .len()
+                != self.continuation_call_id_sha256.len()
+        {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitObjectId {
     pub format: GitObjectFormat,

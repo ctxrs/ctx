@@ -2,7 +2,7 @@ mod git;
 mod shell;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt::Write,
     path::{Path, PathBuf},
 };
@@ -11,16 +11,28 @@ use ctx_history_core::{
     CoreRecordAnnotation, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
     RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryEvidence,
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    RepositoryFileObservationKind, RepositoryOutcomeObservation, RepositoryVcsObservation,
+    RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
+    CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
+    CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use git::{CandidateKind, CertifiedCandidate, GitCertifier, ProbeFailure};
-use shell::{analyze, lexical_absolute};
+use git::{
+    negative_route_geometry_state, CandidateKind, CertifiedCandidate, GitCertifier, ProbeFailure,
+};
+use shell::analyze;
+pub(crate) use shell::{
+    bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
+    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
+};
 
 pub(crate) const ASSOCIATION_POLICY_REVISION: u32 = 1;
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
+const MAX_REPOSITORY_CANDIDATES: usize = 32;
+const MAX_POSITIVE_CERTIFICATION_CACHE_ENTRIES: usize = 32;
+const MAX_NEGATIVE_CERTIFICATION_CACHE_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnscopedFileObservation {
@@ -40,6 +52,7 @@ pub(crate) struct UnscopedVcsObservation {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AttributionInput {
+    pub(crate) activity_at_unix_ms: Option<i64>,
     pub(crate) provider_native_repository_aliases: Vec<RepositoryAlias>,
     pub(crate) session_cwd: Option<String>,
     pub(crate) declared_tool_workdir: Option<String>,
@@ -47,45 +60,171 @@ pub(crate) struct AttributionInput {
     pub(crate) structured_content: Option<Value>,
     pub(crate) file_observations: Vec<UnscopedFileObservation>,
     pub(crate) vcs_observations: Vec<UnscopedVcsObservation>,
+    pub(crate) outcome_operation_repository_path: Option<String>,
+    pub(crate) outcome_output_repository_path: Option<String>,
+    pub(crate) outcome_observations: Vec<RepositoryOutcomeObservation>,
+    pub(crate) outcome_abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct RepositoryAttributor {
     certifier: GitCertifier,
-    cache: HashMap<(PathBuf, CandidateKind), Result<CertifiedCandidate, ProbeFailure>>,
+    positive_cache: Vec<CachedPositiveCertificate>,
+    negative_cache: Vec<CachedNegativeCertificate>,
+    cache_clock: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPositiveCertificate {
+    certificate: CertifiedCandidate,
+    last_used: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedNegativeCertificate {
+    path: PathBuf,
+    kind: CandidateKind,
+    route_geometry_state: [u8; 32],
+    failure: ProbeFailure,
+    last_used: u64,
 }
 
 impl RepositoryAttributor {
     pub(crate) fn attribute(&mut self, input: AttributionInput) -> CoreRecordAnnotation {
         // Certificates authorize the route observed during this event only.
         // A later event must revalidate after a move, replacement, or removal.
-        self.cache.clear();
         attribute_with_attributor(input, self)
     }
 
-    fn certify(&mut self, candidate: &Candidate) -> Result<CertifiedCandidate, ProbeFailure> {
-        if let Some(cached) = self.cache.get(&(candidate.path.clone(), candidate.kind)) {
-            return cached.clone().map(|certificate| {
-                certificate_with_evidence(certificate, candidate.evidence_kind)
-            });
-        }
-        if let Some(certificate) = self
-            .cache
-            .values()
-            .filter_map(|result| result.as_ref().ok())
-            .find(|certificate| candidate.path.starts_with(&certificate.repository_root))
-        {
-            return Ok(certificate_with_evidence(
-                certificate.clone(),
+    fn certify(
+        &mut self,
+        candidate: &Candidate,
+        observed_at_unix_ms: i64,
+    ) -> Result<CertifiedCandidate, ProbeFailure> {
+        self.cache_clock = self.cache_clock.saturating_add(1);
+        let now = self.cache_clock;
+        let positive = self
+            .positive_cache
+            .iter()
+            .enumerate()
+            .filter(|(_, cached)| cached.certificate.lexical_root_contains(&candidate.path))
+            .max_by_key(|(_, cached)| cached.certificate.repository_root.components().count())
+            .map(|(index, _)| index);
+        if let Some(index) = positive {
+            let cached = self.positive_cache[index].certificate.clone();
+            match cached.try_reuse(
+                &candidate.path,
+                candidate.kind,
                 candidate.evidence_kind,
-            ));
+                observed_at_unix_ms,
+            ) {
+                Ok(Some(reused)) => {
+                    self.positive_cache[index].last_used = now;
+                    return Ok(reused);
+                }
+                Ok(None) => {
+                    self.positive_cache.remove(index);
+                }
+                Err(failure) => return Err(failure),
+            }
         }
-        let result =
-            self.certifier
-                .certify(&candidate.path, candidate.kind, candidate.evidence_kind);
-        self.cache
-            .insert((candidate.path.clone(), candidate.kind), result.clone());
+
+        if let Some(state) = negative_route_geometry_state(&candidate.path, candidate.kind) {
+            if let Some(index) = self.negative_cache.iter().position(|cached| {
+                cached.path == candidate.path
+                    && cached.kind == candidate.kind
+                    && cached.route_geometry_state == state
+            }) {
+                self.negative_cache[index].last_used = now;
+                return Err(self.negative_cache[index].failure.clone());
+            }
+            self.negative_cache
+                .retain(|cached| cached.path != candidate.path || cached.kind != candidate.kind);
+        }
+
+        let result = self.certifier.certify_at(
+            &candidate.path,
+            candidate.kind,
+            candidate.evidence_kind,
+            observed_at_unix_ms,
+        );
+        match &result {
+            Ok(certificate) => {
+                self.negative_cache.retain(|cached| {
+                    cached.path != candidate.path || cached.kind != candidate.kind
+                });
+                self.positive_cache.retain(|cached| {
+                    cached.certificate.repository_root != certificate.repository_root
+                });
+                self.positive_cache.push(CachedPositiveCertificate {
+                    certificate: certificate.clone(),
+                    last_used: now,
+                });
+                evict_oldest_positive(&mut self.positive_cache);
+            }
+            Err(failure) if cacheable_negative(failure) => {
+                if let Some(state) = negative_route_geometry_state(&candidate.path, candidate.kind)
+                {
+                    self.negative_cache.push(CachedNegativeCertificate {
+                        path: candidate.path.clone(),
+                        kind: candidate.kind,
+                        route_geometry_state: state,
+                        failure: failure.clone(),
+                        last_used: now,
+                    });
+                    evict_oldest_negative(&mut self.negative_cache);
+                }
+            }
+            Err(_) => {}
+        }
         result
+    }
+
+    pub(crate) fn full_certification_probe_count(&self) -> usize {
+        self.certifier.full_certification_probe_count()
+    }
+}
+
+fn cacheable_negative(failure: &ProbeFailure) -> bool {
+    matches!(
+        failure,
+        ProbeFailure::Missing
+            | ProbeFailure::Failed(
+                "git_command_failed" | "unexpected_git_geometry" | "unsupported_git_object_format"
+            )
+    )
+}
+
+fn evict_oldest_positive(cache: &mut Vec<CachedPositiveCertificate>) {
+    if cache.len() <= MAX_POSITIVE_CERTIFICATION_CACHE_ENTRIES {
+        return;
+    }
+    if let Some(index) = cache
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, cached)| {
+            (
+                cached.last_used,
+                cached.certificate.repository_root.as_os_str(),
+            )
+        })
+        .map(|(index, _)| index)
+    {
+        cache.remove(index);
+    }
+}
+
+fn evict_oldest_negative(cache: &mut Vec<CachedNegativeCertificate>) {
+    if cache.len() <= MAX_NEGATIVE_CERTIFICATION_CACHE_ENTRIES {
+        return;
+    }
+    if let Some(index) = cache
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, cached)| (cached.last_used, cached.path.as_os_str()))
+        .map(|(index, _)| index)
+    {
+        cache.remove(index);
     }
 }
 
@@ -124,17 +263,35 @@ fn attribute_with_attributor(
     input: AttributionInput,
     attributor: &mut RepositoryAttributor,
 ) -> CoreRecordAnnotation {
+    let activity_at_unix_ms = input
+        .activity_at_unix_ms
+        .unwrap_or(CORE_MISSING_ACTIVITY_TIME_UNIX_MS);
+    let outcome_observations = input.outcome_observations.clone();
+    let outcome_operation_repository_path = input.outcome_operation_repository_path.clone();
+    let outcome_output_repository_path = input.outcome_output_repository_path.clone();
     let mut annotation = CoreRecordAnnotation {
         structured_content: input.structured_content,
         metadata: BTreeMap::from([(
             "repository_association".to_owned(),
             json!({
                 "association_policy_revision": ASSOCIATION_POLICY_REVISION,
+                "repository_observation_revision": CORE_REPOSITORY_OBSERVATION_REVISION,
+                "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
+                "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+                "locator_fingerprint_revision": CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
                 "candidate_source": "bounded_structured_activity",
             }),
         )]),
         ..CoreRecordAnnotation::default()
     };
+    for (reason, detail) in input.outcome_abstentions.iter().copied() {
+        push_abstention(
+            &mut annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            reason,
+            detail,
+        );
+    }
     let provider_identity =
         resolve_provider_native_identity(input.provider_native_repository_aliases, &mut annotation);
 
@@ -152,6 +309,22 @@ fn attribute_with_attributor(
     annotation
         .repository_candidate_evidence
         .declared_tool_workdir = declared_workdir.as_deref().map(path_string);
+    let outcome_operation_path = bounded_absolute(
+        outcome_operation_repository_path.as_deref(),
+        RepositoryEvidenceKind::ProviderNativeResult,
+        &mut annotation.repository_abstentions,
+    );
+    let outcome_output_path = bounded_absolute(
+        outcome_output_repository_path.as_deref(),
+        RepositoryEvidenceKind::ProviderNativeResult,
+        &mut annotation.repository_abstentions,
+    );
+    annotation
+        .repository_candidate_evidence
+        .outcome_operation_repository_path = outcome_operation_path.as_deref().map(path_string);
+    annotation
+        .repository_candidate_evidence
+        .outcome_output_repository_path = outcome_output_path.as_deref().map(path_string);
 
     let base = declared_workdir.as_deref().or(session_cwd.as_deref());
     let command_analysis = analyze(input.command.as_deref(), base);
@@ -184,6 +357,47 @@ fn attribute_with_attributor(
         })
         .map(|candidate| path_string(&candidate.path));
 
+    if command_analysis
+        .abstentions
+        .iter()
+        .any(|abstention| abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded)
+    {
+        if !outcome_observations.is_empty() {
+            push_abstention(
+                &mut annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "repository_outcome_blocked_by_command_candidate_limit",
+            );
+        }
+        return annotation;
+    }
+
+    let requested_candidate_count = command_analysis
+        .repository_paths
+        .len()
+        .saturating_add(input.file_observations.len())
+        .saturating_add(input.vcs_observations.len())
+        .saturating_add(usize::from(input.declared_tool_workdir.is_some()))
+        .saturating_add(usize::from(outcome_operation_path.is_some()));
+    if requested_candidate_count > MAX_REPOSITORY_CANDIDATES {
+        push_abstention(
+            &mut annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "repository_candidate_product_limit_exceeded",
+        );
+        if !outcome_observations.is_empty() {
+            push_abstention(
+                &mut annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "repository_outcome_blocked_by_candidate_limit",
+            );
+        }
+        return annotation;
+    }
+
     let mut candidates = Vec::new();
     let more_specific_command = !command_analysis.repository_paths.is_empty();
     if more_specific_command {
@@ -202,6 +416,13 @@ fn attribute_with_attributor(
             path: workdir.clone(),
             kind: CandidateKind::Directory,
             evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+        });
+    }
+    if let Some(path) = &outcome_operation_path {
+        candidates.push(Candidate {
+            path: path.clone(),
+            kind: CandidateKind::Directory,
+            evidence_kind: RepositoryEvidenceKind::ProviderNativeResult,
         });
     }
 
@@ -295,7 +516,8 @@ fn attribute_with_attributor(
         || more_specific_command
         || command_analysis.blocks_session_fallback
         || !file_inputs.is_empty()
-        || !vcs_inputs.is_empty();
+        || !vcs_inputs.is_empty()
+        || outcome_operation_path.is_some();
     if candidates.is_empty() && !attempted_specific {
         if let Some(cwd) = &session_cwd {
             candidates.push(Candidate {
@@ -309,7 +531,7 @@ fn attribute_with_attributor(
 
     let mut certified = Vec::new();
     for candidate in candidates {
-        match attributor.certify(&candidate) {
+        match attributor.certify(&candidate, activity_at_unix_ms) {
             Ok(certificate) => merge_certificate(&mut certified, certificate),
             Err(failure) => push_probe_failure(
                 &mut annotation,
@@ -327,6 +549,13 @@ fn attribute_with_attributor(
     );
     scope_files(&mut annotation, &certified, file_inputs);
     scope_vcs(&mut annotation, &certified, vcs_inputs);
+    scope_outcomes(
+        &mut annotation,
+        &certified,
+        outcome_observations,
+        outcome_operation_path.as_deref(),
+        outcome_output_path.as_deref(),
+    );
     if annotation.repository_bindings.is_empty() && annotation.repository_abstentions.is_empty() {
         push_abstention(
             &mut annotation,
@@ -336,20 +565,6 @@ fn attribute_with_attributor(
         );
     }
     annotation
-}
-
-fn certificate_with_evidence(
-    mut certificate: CertifiedCandidate,
-    evidence_kind: RepositoryEvidenceKind,
-) -> CertifiedCandidate {
-    let evidence = RepositoryEvidence {
-        kind: evidence_kind,
-        confidence: RepositoryEvidenceConfidence::High,
-    };
-    if !certificate.binding.evidence.contains(&evidence) {
-        certificate.binding.evidence.push(evidence);
-    }
-    certificate
 }
 
 fn bounded_absolute(
@@ -543,6 +758,7 @@ fn reconcile_provider_identity(
             "provider_native_identity_does_not_match_local_certificate",
         );
         certified.clear();
+        return;
     }
     annotation.repository_bindings.push(*provider);
 }
@@ -680,6 +896,119 @@ fn scope_vcs(
                 relative_path,
             });
     }
+}
+
+fn scope_outcomes(
+    annotation: &mut CoreRecordAnnotation,
+    certified: &[CertifiedCandidate],
+    outcomes: Vec<RepositoryOutcomeObservation>,
+    operation_path: Option<&Path>,
+    output_path: Option<&Path>,
+) {
+    if outcomes.is_empty() {
+        return;
+    }
+    let Some(operation_path) = operation_path else {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+            "repository_outcome_has_no_operation_route",
+        );
+        return;
+    };
+    if output_path.is_some_and(|output_path| output_path != operation_path) {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::ConflictingIdentity,
+            "repository_outcome_operation_and_output_routes_conflict",
+        );
+        return;
+    }
+
+    let selected_binding_id = most_specific_certificate(certified, operation_path)
+        .map(|certificate| certificate.binding.binding_id.clone())
+        .or_else(|| match annotation.repository_bindings.as_slice() {
+            [binding] if binding.local_root_authorization.is_none() => {
+                Some(binding.binding_id.clone())
+            }
+            _ => None,
+        });
+    let Some(selected_binding_id) = selected_binding_id else {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+            "repository_outcome_route_has_no_single_certified_binding",
+        );
+        return;
+    };
+    let Some(binding_index) = annotation
+        .repository_bindings
+        .iter()
+        .position(|binding| binding.binding_id == selected_binding_id)
+    else {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+            "repository_outcome_certificate_is_not_in_event_bindings",
+        );
+        return;
+    };
+
+    let observed_formats = outcomes
+        .iter()
+        .flat_map(RepositoryOutcomeObservation::object_ids)
+        .map(|object_id| object_id.format)
+        .collect::<std::collections::HashSet<_>>();
+    if observed_formats.len() > 1 {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::Unsafe,
+            "repository_outcome_object_formats_conflict",
+        );
+        return;
+    }
+    let observed_format = observed_formats.iter().next().copied();
+    let binding = &mut annotation.repository_bindings[binding_index];
+    match (binding.git_object_format, observed_format) {
+        (Some(binding_format), Some(outcome_format)) if binding_format != outcome_format => {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::Unsafe,
+                "repository_outcome_object_format_mismatch",
+            );
+            return;
+        }
+        (None, Some(outcome_format)) => binding.git_object_format = Some(outcome_format),
+        _ => {}
+    }
+    let evidence = RepositoryEvidence {
+        kind: RepositoryEvidenceKind::ProviderNativeResult,
+        confidence: RepositoryEvidenceConfidence::Explicit,
+    };
+    if !binding.evidence.contains(&evidence) {
+        binding.evidence.push(evidence);
+    }
+    let binding_id = binding.binding_id.clone();
+    annotation
+        .repository_vcs_observations
+        .extend(
+            outcomes
+                .into_iter()
+                .map(|outcome| RepositoryVcsObservation {
+                    repository_binding_id: binding_id.clone(),
+                    kind: RepositoryVcsObservationKind::Outcome(Box::new(outcome)),
+                    object_id: None,
+                    parent_object_ids: Vec::new(),
+                    reference: None,
+                    relative_path: None,
+                }),
+        );
 }
 
 fn most_specific_certificate<'a>(

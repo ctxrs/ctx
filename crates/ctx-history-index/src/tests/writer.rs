@@ -47,6 +47,8 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
         git_object_format: None,
         local_root_authorization: Some(RepositoryLocalRootAuthorization {
             local_root: "/old/repo".to_owned(),
+            locator_fingerprint_revision:
+                ctx_history_core::CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
             locator_fingerprint: [9; 32],
             observed_at_unix_ms: 1,
         }),

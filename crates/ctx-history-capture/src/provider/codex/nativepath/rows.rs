@@ -15,7 +15,9 @@ use crate::provider::codex::events::{
     CodexNativeEvent, CodexToolCallContext,
 };
 use crate::{
-    provider::codex::repository::{repository_tool_evidence, CodexRepositoryToolEvidence},
+    provider::codex::repository::{
+        repository_tool_evidence, CodexRepositoryResultEvidence, CodexRepositoryToolEvidence,
+    },
     repository_attribution::UnscopedFileObservation,
     CaptureError, OutputOutcome, OutputOutcomeMetadata, Result as CaptureResult,
     CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
@@ -61,6 +63,7 @@ pub(crate) struct CodexSourceBackedRowV0 {
     pub(crate) lexical_body: String,
     pub(crate) touched_paths: Vec<String>,
     pub(crate) repository_tool: Option<CodexRepositoryToolEvidence>,
+    pub(crate) repository_result: Option<CodexRepositoryResultEvidence>,
     pub(crate) repository_files: Vec<UnscopedFileObservation>,
 }
 
@@ -79,6 +82,26 @@ impl CodexSourceBackedRowV0 {
             .as_ref()
             .and_then(|evidence| serde_json::to_vec(&evidence.structured_content).ok())
             .map_or(0, |encoded| encoded.len());
+        let repository_result_bytes = self.repository_result.as_ref().map_or(0, |evidence| {
+            evidence.command.capacity()
+                + evidence
+                    .declared_workdir
+                    .as_ref()
+                    .map_or(0, String::capacity)
+                + evidence
+                    .outcome_operation_repository_path
+                    .as_ref()
+                    .map_or(0, String::capacity)
+                + evidence
+                    .outcome_output_repository_path
+                    .as_ref()
+                    .map_or(0, String::capacity)
+                + serde_json::to_vec(&evidence.structured_content)
+                    .map_or(0, |encoded| encoded.len())
+                + serde_json::to_vec(&evidence.provider_native_repository_aliases)
+                    .map_or(0, |encoded| encoded.len())
+                + serde_json::to_vec(&evidence.outcomes).map_or(0, |encoded| encoded.len())
+        });
         let repository_file_bytes =
             self.repository_files
                 .iter()
@@ -95,6 +118,7 @@ impl CodexSourceBackedRowV0 {
             .checked_add(path_slots)?
             .checked_add(path_bytes)?
             .checked_add(repository_bytes)?
+            .checked_add(repository_result_bytes)?
             .checked_add(repository_file_bytes)?
             .checked_add(allocation_count.checked_mul(OWNED_ALLOCATION_OVERHEAD_BYTES)?)
     }
@@ -167,7 +191,7 @@ pub(super) fn build_source_backed_event_row(
     record_digest: [u8; 32],
 ) -> CaptureResult<std::result::Result<CodexSourceBackedBuiltRowV0, CodexRetainedNonMaterialized>> {
     let semantic = match source_backed_semantic_projection(kind, &retained.payload) {
-        SourceBackedSemanticProjection::Materialized(semantic) => semantic,
+        SourceBackedSemanticProjection::Materialized(semantic) => *semantic,
         SourceBackedSemanticProjection::ValidUnmaterializable => {
             return Ok(Err(CodexRetainedNonMaterialized::ValidUnmaterializable));
         }
@@ -176,6 +200,23 @@ pub(super) fn build_source_backed_event_row(
         }
     };
     let source_record = source_record_evidence(byte_offset, byte_end_exclusive, record_digest)?;
+    let repository_tool = repository_tool_evidence(&retained.payload);
+    let mut tool_context = semantic.tool_context;
+    if let (Some((call_id, context)), Some(evidence)) =
+        (tool_context.as_mut(), repository_tool.as_ref())
+    {
+        context.exact_command.clone_from(&evidence.command);
+        context
+            .declared_workdir
+            .clone_from(&evidence.declared_workdir);
+        context
+            .continuation_cell_id
+            .clone_from(&evidence.continuation_cell_id);
+        if evidence.command.is_some() {
+            context.origin_call_id = Some(call_id.clone());
+            context.origin_event_sequence = Some(raw_ordinal);
+        }
+    }
     Ok(Ok(CodexSourceBackedBuiltRowV0 {
         row: CodexSourceBackedRowV0 {
             raw_ordinal,
@@ -185,10 +226,11 @@ pub(super) fn build_source_backed_event_row(
             role: semantic.role,
             lexical_body: semantic.lexical_body,
             touched_paths: Vec::new(),
-            repository_tool: repository_tool_evidence(&retained.payload),
+            repository_tool,
+            repository_result: None,
             repository_files: Vec::new(),
         },
-        tool_context: semantic.tool_context,
+        tool_context,
     }))
 }
 
@@ -202,11 +244,13 @@ pub(super) fn build_source_backed_sparse_output_row(
     result_kind: CodexResultKind,
     context: Option<&CodexToolCallContext>,
     outcome: &OutputOutcomeMetadata,
+    repository_result: Option<CodexRepositoryResultEvidence>,
 ) -> CaptureResult<Option<CodexSourceBackedRowV0>> {
-    if !matches!(
+    let diagnostic = matches!(
         outcome.outcome,
         crate::OutputOutcome::Failure | crate::OutputOutcome::Timeout
-    ) {
+    );
+    if !diagnostic && repository_result.is_none() {
         return Ok(None);
     }
     let item_type = result_kind.item_type();
@@ -235,11 +279,15 @@ pub(super) fn build_source_backed_sparse_output_row(
         .and_then(|context| context.command_preview.as_deref())
         .map(|command| format!(" for `{command}`"))
         .unwrap_or_default();
-    let lexical_body = source_backed_lexical_body(
-        EventType::ToolOutput,
-        Some(EventRole::Tool),
-        &format!("{tool_name} output{command}: {status}{duration}{timeout}"),
-    );
+    let lexical_body = if diagnostic {
+        source_backed_lexical_body(
+            EventType::ToolOutput,
+            Some(EventRole::Tool),
+            &format!("{tool_name} output{command}: {status}{duration}{timeout}"),
+        )
+    } else {
+        "codex repository outcome result".to_owned()
+    };
     Ok(Some(CodexSourceBackedRowV0 {
         raw_ordinal,
         source_record: source_record_evidence(byte_offset, byte_end_exclusive, record_digest)?,
@@ -249,6 +297,7 @@ pub(super) fn build_source_backed_sparse_output_row(
         lexical_body,
         touched_paths: Vec::new(),
         repository_tool: None,
+        repository_result,
         repository_files: Vec::new(),
     }))
 }
@@ -295,7 +344,7 @@ struct SourceBackedSemantic {
 }
 
 enum SourceBackedSemanticProjection {
-    Materialized(SourceBackedSemantic),
+    Materialized(Box<SourceBackedSemantic>),
     ValidUnmaterializable,
     Malformed,
 }
@@ -305,8 +354,9 @@ enum SourceBackedSemanticProjection {
 ///
 /// `Eligible` means Core may publish a locator and exact hydration must decode
 /// display text from that same record. Known bookkeeping, encrypted/code-only,
-/// and non-diagnostic result records are intentionally non-display and never
-/// enter source-page enumeration. `ParserRevisionGap` is neither category: it
+/// and ordinary non-diagnostic result records are intentionally non-display.
+/// Exact repository-outcome result rows use a fixed bounded display body while
+/// their raw provider result remains only at the source locator. `ParserRevisionGap` is neither category: it
 /// must remain a typed hydration failure if an admitted record reaches a newer
 /// or malformed display shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,7 +373,7 @@ pub(super) fn source_backed_output_eligibility(
     if result_kind.is_eligible_output()
         && matches!(
             structural.outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
+            OutputOutcome::Success | OutputOutcome::Failure | OutputOutcome::Timeout
         )
         && structural.has_exact_display_field
     {
@@ -373,11 +423,17 @@ pub(super) fn source_backed_display_text(
             };
             match source_backed_output_eligibility(result_kind, structural) {
                 CodexSourceBackedDocumentEligibility::Eligible(()) => {
-                    match codex_result_content(payload) {
-                        Some(content) => {
-                            CodexSourceBackedDocumentEligibility::Eligible(content.into_owned())
+                    if structural.outcome.outcome == OutputOutcome::Success {
+                        CodexSourceBackedDocumentEligibility::Eligible(
+                            "codex repository outcome result".to_owned(),
+                        )
+                    } else {
+                        match codex_result_content(payload) {
+                            Some(content) => {
+                                CodexSourceBackedDocumentEligibility::Eligible(content.into_owned())
+                            }
+                            None => CodexSourceBackedDocumentEligibility::ParserRevisionGap,
                         }
-                        None => CodexSourceBackedDocumentEligibility::ParserRevisionGap,
                     }
                 }
                 CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
@@ -410,12 +466,12 @@ fn source_backed_message(payload: &Value) -> SourceBackedSemanticProjection {
     let Some(text) = payload.get("content").and_then(codex_content_text) else {
         return SourceBackedSemanticProjection::Malformed;
     };
-    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+    SourceBackedSemanticProjection::Materialized(Box::new(SourceBackedSemantic {
         event_type: EventType::Message,
         role: Some(role),
         lexical_body: source_backed_lexical_body(EventType::Message, Some(role), &text),
         tool_context: None,
-    })
+    }))
 }
 
 fn source_backed_reasoning(payload: &Value) -> SourceBackedSemanticProjection {
@@ -435,7 +491,7 @@ fn source_backed_reasoning(payload: &Value) -> SourceBackedSemanticProjection {
             SourceBackedSemanticProjection::Malformed
         };
     };
-    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+    SourceBackedSemanticProjection::Materialized(Box::new(SourceBackedSemantic {
         event_type: EventType::Summary,
         role: Some(EventRole::Assistant),
         lexical_body: source_backed_lexical_body(
@@ -444,7 +500,7 @@ fn source_backed_reasoning(payload: &Value) -> SourceBackedSemanticProjection {
             &summary,
         ),
         tool_context: None,
-    })
+    }))
 }
 
 fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
@@ -455,7 +511,7 @@ fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
             SourceBackedSemanticProjection::Malformed
         };
     };
-    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+    SourceBackedSemanticProjection::Materialized(Box::new(SourceBackedSemantic {
         event_type: EventType::Summary,
         role: Some(EventRole::System),
         lexical_body: source_backed_lexical_body(
@@ -464,14 +520,14 @@ fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
             &text,
         ),
         tool_context: None,
-    })
+    }))
 }
 
 fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
     let Some((text, tool_context)) = source_backed_tool_call_text(payload) else {
         return SourceBackedSemanticProjection::Malformed;
     };
-    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+    SourceBackedSemanticProjection::Materialized(Box::new(SourceBackedSemantic {
         event_type: EventType::ToolCall,
         role: Some(EventRole::Assistant),
         lexical_body: source_backed_lexical_body(
@@ -480,7 +536,7 @@ fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
             &text,
         ),
         tool_context,
-    })
+    }))
 }
 
 fn source_backed_tool_call_text(
@@ -498,23 +554,29 @@ fn source_backed_tool_call_text(
     let (arguments_preview, _, _) = arguments
         .map(codex_tool_arguments_preview)
         .unwrap_or_else(|| (String::new(), false, false));
-    let text = command_preview
-        .as_deref()
-        .map(|command| format!("{tool_name}: {command}"))
-        .unwrap_or_else(|| {
-            if arguments_preview.is_empty() {
-                format!("{tool_name} tool call")
-            } else {
-                format!("{tool_name}: {arguments_preview}")
-            }
-        });
+    let repository_redacted = repository_tool_evidence(payload).is_some();
+    let text = if repository_redacted {
+        format!("{tool_name} tool call")
+    } else {
+        command_preview
+            .as_deref()
+            .map(|command| format!("{tool_name}: {command}"))
+            .unwrap_or_else(|| {
+                if arguments_preview.is_empty() {
+                    format!("{tool_name} tool call")
+                } else {
+                    format!("{tool_name}: {arguments_preview}")
+                }
+            })
+    };
     let tool_context = call_id.map(|call_id| {
         (
             call_id.to_owned(),
             CodexToolCallContext {
                 tool_name: tool_name.clone(),
-                command_preview,
-                arguments_preview: Some(arguments_preview),
+                command_preview: (!repository_redacted).then_some(command_preview).flatten(),
+                arguments_preview: (!repository_redacted).then_some(arguments_preview),
+                ..CodexToolCallContext::default()
             },
         )
     });
@@ -570,6 +632,7 @@ pub(super) fn tool_context_from_row(row: &CodexEventRow) -> Option<(String, Code
             tool_name,
             command_preview,
             arguments_preview,
+            ..CodexToolCallContext::default()
         },
     ))
 }

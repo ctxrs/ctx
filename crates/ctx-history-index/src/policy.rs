@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 2;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 4;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 7;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
@@ -49,6 +49,10 @@ pub struct LexicalGenerationPolicy {
     pub core_normalization_revision: u32,
     pub core_content_policy_revision: u32,
     pub core_repository_contract_revision: u32,
+    pub core_repository_observation_revision: u32,
+    pub core_bounded_shell_subset_revision: u32,
+    pub core_repository_outcome_capture_revision: u32,
+    pub core_repository_locator_fingerprint_revision: u32,
     pub included_event_classes: [SourceEventClass; 11],
     pub body_selection: LexicalBodySelection,
     pub indexed_body_limit: LexicalIndexedBodyLimit,
@@ -140,6 +144,14 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
             core_normalization_revision: ctx_history_core::CORE_NORMALIZATION_REVISION,
             core_content_policy_revision: ctx_history_core::CORE_CONTENT_POLICY_REVISION,
             core_repository_contract_revision: ctx_history_core::CORE_REPOSITORY_CONTRACT_REVISION,
+            core_repository_observation_revision:
+                ctx_history_core::CORE_REPOSITORY_OBSERVATION_REVISION,
+            core_bounded_shell_subset_revision:
+                ctx_history_core::CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            core_repository_outcome_capture_revision:
+                ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            core_repository_locator_fingerprint_revision:
+                ctx_history_core::CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
             included_event_classes: [
                 SourceEventClass::Message,
                 SourceEventClass::ToolCall,
@@ -202,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "e1545c13d4c12733ae6815511c04784ef38fa15ae6423da1be34f09297ac210d"
+            "0781b66af18edd41e5e37a414db8358f86c66bbc30ddb3e16683759d23d8c3b3"
         );
     }
 

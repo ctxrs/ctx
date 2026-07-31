@@ -15,6 +15,15 @@ pub(crate) struct CodexToolCallContext {
     pub(crate) tool_name: String,
     pub(crate) command_preview: Option<String>,
     pub(crate) arguments_preview: Option<String>,
+    pub(crate) exact_command: Option<String>,
+    pub(crate) session_cwd: Option<String>,
+    pub(crate) declared_workdir: Option<String>,
+    pub(crate) continuation_cell_id: Option<String>,
+    pub(crate) origin_call_id: Option<String>,
+    pub(crate) origin_event_sequence: Option<u64>,
+    pub(crate) continuation_call_id_sha256: Vec<[u8; 32]>,
+    pub(crate) continuation_capacity_exceeded: bool,
+    pub(crate) correlation_ambiguous: bool,
 }
 
 #[cfg(test)]

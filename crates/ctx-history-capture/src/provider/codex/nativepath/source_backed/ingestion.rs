@@ -231,6 +231,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     for (source, source_key, native_session_id) in sources {
         let base = base_sources.get(&source_key).cloned();
         if base
@@ -296,8 +297,6 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         counters.peak_active_scanners = counters.peak_active_scanners.max(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
-        let mut repository_attributor =
-            crate::repository_attribution::RepositoryAttributor::default();
         let mut staged_for_source = 0_u64;
         loop {
             let scanner_started = Instant::now();
@@ -400,6 +399,12 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             ),
         );
     }
+    counters.repository_full_git_certification_probes = counters
+        .repository_full_git_certification_probes
+        .saturating_add(
+            u64::try_from(repository_attributor.full_certification_probe_count())
+                .unwrap_or(u64::MAX),
+        );
     Ok(())
 }
 

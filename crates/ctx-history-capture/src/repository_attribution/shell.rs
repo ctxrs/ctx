@@ -6,6 +6,7 @@ pub(super) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_TOKENS: usize = 16_384;
 const MAX_SEGMENTS: usize = 4_096;
 const MAX_PATH_BYTES: usize = 16 * 1024;
+const MAX_COMMAND_REPOSITORY_PATHS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ShellAbstention {
@@ -28,7 +29,325 @@ pub(super) struct CommandRepositoryPath {
     pub(super) evidence_kind: RepositoryEvidenceKind,
 }
 
-pub(super) fn lexical_absolute(value: &str, base: Option<&Path>) -> Option<PathBuf> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundedOutcomeOperation {
+    Commit {
+        rewrites_history: bool,
+        exact_oid_output: bool,
+    },
+    PullRequestCreate,
+    PullRequestMerge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedOutcomePlan {
+    pub(crate) operation: BoundedOutcomeOperation,
+    pub(crate) operation_repository_path: PathBuf,
+    pub(crate) output_repository_path: Option<PathBuf>,
+    pub(crate) expected_pr_repository_path: Option<Vec<String>>,
+    pub(crate) expected_pr_number: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BoundedOutcomePlanDisposition {
+    Unrecognized,
+    Planned(BoundedOutcomePlan),
+    Abstained {
+        reason: RepositoryAbstentionReason,
+        detail: &'static str,
+        plan: Option<Box<BoundedOutcomePlan>>,
+    },
+}
+
+/// Recognizes an ordered, route-preserving outcome plan. Wrappers and prefix
+/// assignments are never outcome authority because Codex does not supply a
+/// typed executable/argv attestation for them.
+#[cfg(test)]
+fn bounded_outcome_operation(command: &str) -> Option<BoundedOutcomeOperation> {
+    match bounded_outcome_plan(command, Path::new("/")) {
+        BoundedOutcomePlanDisposition::Planned(plan) => Some(plan.operation),
+        BoundedOutcomePlanDisposition::Unrecognized
+        | BoundedOutcomePlanDisposition::Abstained { .. } => None,
+    }
+}
+
+pub(crate) fn bounded_outcome_evidence_relevant(command: &str) -> bool {
+    !matches!(
+        bounded_outcome_plan(command, Path::new("/")),
+        BoundedOutcomePlanDisposition::Unrecognized
+    )
+}
+
+pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcomePlanDisposition {
+    if command.is_empty() || command.len() > MAX_COMMAND_BYTES {
+        return BoundedOutcomePlanDisposition::Unrecognized;
+    }
+    let Ok((command, terminal)) = strip_comments_and_bound_heredocs(command) else {
+        return outcome_abstained(
+            RepositoryAbstentionReason::UnsupportedShell,
+            "malformed_outcome_command",
+        );
+    };
+    if terminal.is_some() {
+        return outcome_abstained(
+            RepositoryAbstentionReason::UnsupportedShell,
+            "outcome_heredoc_is_unattested",
+        );
+    }
+    let Ok(tokenization) = tokenize(&command) else {
+        return outcome_abstained(
+            RepositoryAbstentionReason::UnsupportedShell,
+            "outcome_command_tokenization_failed",
+        );
+    };
+    if tokenization.terminal_abstention.is_some() {
+        return outcome_abstained(
+            RepositoryAbstentionReason::UnsupportedShell,
+            "dynamic_or_unsupported_outcome_shell",
+        );
+    }
+
+    let mut current = Some(base.to_path_buf());
+    let mut plan = None;
+    for segment in tokenization.segments {
+        if segment.first().is_some_and(|token| token == "cd") {
+            let destination = match segment.as_slice() {
+                [_, path] => lexical_absolute(path, current.as_deref()),
+                [_, option, path] if option == "--" => lexical_absolute(path, current.as_deref()),
+                _ => None,
+            };
+            let Some(destination) = destination else {
+                return outcome_abstained(
+                    RepositoryAbstentionReason::DynamicPath,
+                    "outcome_cd_is_not_a_bounded_literal",
+                );
+            };
+            current = Some(destination);
+            continue;
+        }
+        if segment
+            .first()
+            .is_none_or(|token| !matches!(token.as_str(), "git" | "gh"))
+        {
+            let (unwrapped, _) = unwrap_command_wrappers(&segment);
+            if unwrapped.is_some_and(|command| {
+                matches!(command.first().map(String::as_str), Some("git" | "gh"))
+            }) {
+                return outcome_abstained(
+                    RepositoryAbstentionReason::UnknownWrapper,
+                    "outcome_wrapper_or_assignment_is_unattested",
+                );
+            }
+            return BoundedOutcomePlanDisposition::Unrecognized;
+        }
+        match segment.first().map(String::as_str) {
+            Some("git") => {
+                let Some((subcommand, arguments, repository_path)) =
+                    bounded_git_invocation(&segment, current.as_deref())
+                else {
+                    return outcome_abstained(
+                        RepositoryAbstentionReason::DynamicPath,
+                        "outcome_git_route_is_not_bounded",
+                    );
+                };
+                match subcommand {
+                    "commit" | "rebase" => {
+                        if plan.is_some() {
+                            return outcome_abstained(
+                                RepositoryAbstentionReason::Ambiguous,
+                                "multiple_outcome_operations",
+                            );
+                        }
+                        plan = Some(BoundedOutcomePlan {
+                            operation: BoundedOutcomeOperation::Commit {
+                                rewrites_history: subcommand == "rebase"
+                                    || arguments.iter().any(|argument| {
+                                        argument == "--amend" || argument.starts_with("--amend=")
+                                    }),
+                                exact_oid_output: false,
+                            },
+                            operation_repository_path: repository_path,
+                            output_repository_path: None,
+                            expected_pr_repository_path: None,
+                            expected_pr_number: None,
+                        });
+                    }
+                    "rev-parse" if exact_head_oid_request(arguments) => {
+                        let Some(BoundedOutcomePlan {
+                            operation:
+                                BoundedOutcomeOperation::Commit {
+                                    exact_oid_output, ..
+                                },
+                            output_repository_path,
+                            ..
+                        }) = plan.as_mut()
+                        else {
+                            return outcome_abstained(
+                                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                                "outcome_oid_request_precedes_commit_operation",
+                            );
+                        };
+                        if output_repository_path.is_some() {
+                            return outcome_abstained(
+                                RepositoryAbstentionReason::Ambiguous,
+                                "multiple_exact_oid_output_segments",
+                            );
+                        }
+                        *exact_oid_output = true;
+                        *output_repository_path = Some(repository_path);
+                    }
+                    subcommand if known_git_builtin(subcommand) => {}
+                    _ => return BoundedOutcomePlanDisposition::Unrecognized,
+                }
+            }
+            Some("gh") => {
+                let Some((operation, expected_pr_repository_path, expected_pr_number)) =
+                    bounded_gh_operation(&segment)
+                else {
+                    return BoundedOutcomePlanDisposition::Unrecognized;
+                };
+                if plan.is_some() {
+                    return outcome_abstained(
+                        RepositoryAbstentionReason::Ambiguous,
+                        "multiple_outcome_operations",
+                    );
+                }
+                let Some(repository_path) = current.clone() else {
+                    return outcome_abstained(
+                        RepositoryAbstentionReason::UnsafePath,
+                        "gh_outcome_has_no_bounded_workdir",
+                    );
+                };
+                plan = Some(BoundedOutcomePlan {
+                    operation,
+                    operation_repository_path: repository_path,
+                    output_repository_path: None,
+                    expected_pr_repository_path,
+                    expected_pr_number,
+                });
+            }
+            _ => return BoundedOutcomePlanDisposition::Unrecognized,
+        }
+    }
+    let Some(plan) = plan else {
+        return BoundedOutcomePlanDisposition::Unrecognized;
+    };
+    if plan
+        .output_repository_path
+        .as_ref()
+        .is_some_and(|output| output != &plan.operation_repository_path)
+    {
+        return BoundedOutcomePlanDisposition::Abstained {
+            reason: RepositoryAbstentionReason::ConflictingIdentity,
+            detail: "operation_and_outcome_output_routes_conflict",
+            plan: Some(Box::new(plan)),
+        };
+    }
+    BoundedOutcomePlanDisposition::Planned(plan)
+}
+
+fn outcome_abstained(
+    reason: RepositoryAbstentionReason,
+    detail: &'static str,
+) -> BoundedOutcomePlanDisposition {
+    BoundedOutcomePlanDisposition::Abstained {
+        reason,
+        detail,
+        plan: None,
+    }
+}
+
+fn exact_head_oid_request(arguments: &[String]) -> bool {
+    matches!(arguments, [head] if head == "HEAD")
+        || matches!(arguments, [verify, head] if verify == "--verify" && head == "HEAD")
+        || matches!(arguments, [verify, head] if verify == "--verify" && head == "HEAD^{commit}")
+}
+
+fn bounded_git_invocation<'a>(
+    argv: &'a [String],
+    base: Option<&Path>,
+) -> Option<(&'a str, &'a [String], PathBuf)> {
+    let mut repository_path = base.map(Path::to_path_buf);
+    let mut index = 1;
+    while let Some(token) = argv.get(index) {
+        if token == "-C" {
+            repository_path = lexical_absolute(argv.get(index + 1)?, repository_path.as_deref());
+            index += 2;
+        } else if token == "--" {
+            index += 1;
+            break;
+        } else if matches!(
+            token.as_str(),
+            "--no-pager" | "--paginate" | "--literal-pathspecs"
+        ) {
+            index += 1;
+        } else if token.starts_with('-') {
+            return None;
+        } else {
+            break;
+        }
+    }
+    let subcommand = argv.get(index)?.as_str();
+    Some((
+        subcommand,
+        argv.get(index + 1..).unwrap_or_default(),
+        repository_path?,
+    ))
+}
+
+fn bounded_gh_operation(
+    argv: &[String],
+) -> Option<(BoundedOutcomeOperation, Option<Vec<String>>, Option<u64>)> {
+    let [gh, group, operation, arguments @ ..] = argv else {
+        return None;
+    };
+    if gh != "gh" || group != "pr" {
+        return None;
+    }
+    let operation = match operation.as_str() {
+        "create" => BoundedOutcomeOperation::PullRequestCreate,
+        "merge" => BoundedOutcomeOperation::PullRequestMerge,
+        _ => return None,
+    };
+    let mut expected_pr_number = None;
+    let mut expected_repository = None;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        let value = if matches!(argument.as_str(), "--repo" | "-R") {
+            index += 1;
+            Some(arguments.get(index)?.as_str())
+        } else {
+            argument.strip_prefix("--repo=")
+        };
+        if let Some(value) = value {
+            let parts = value.split('/').map(str::to_owned).collect::<Vec<_>>();
+            if parts.len() < 2
+                || parts.iter().any(|part| {
+                    part.is_empty()
+                        || matches!(part.as_str(), "." | "..")
+                        || part.bytes().any(|byte| {
+                            byte.is_ascii_control() || matches!(byte, b'@' | b':' | b'\\')
+                        })
+                })
+                || expected_repository.replace(parts).is_some()
+            {
+                return None;
+            }
+        } else if operation == BoundedOutcomeOperation::PullRequestMerge
+            && !argument.starts_with('-')
+        {
+            if let Ok(number) = argument.parse::<u64>() {
+                if number == 0 || expected_pr_number.replace(number).is_some() {
+                    return None;
+                }
+            }
+        }
+        index += 1;
+    }
+    Some((operation, expected_repository, expected_pr_number))
+}
+
+pub(crate) fn lexical_absolute(value: &str, base: Option<&Path>) -> Option<PathBuf> {
     if value.is_empty()
         || value == "-"
         || value.starts_with('~')
@@ -124,7 +443,7 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
 
         let (git, wrapper_error) = unwrap_wrappers(&segment);
         let Some(git) = git else {
-            preserve_derived_candidate(&analysis, &mut command_candidates);
+            preserve_derived_candidate(&mut analysis, &mut command_candidates);
             let (reason, detail) = opaque_segment_abstention(&segment, wrapper_error);
             push_analysis_abstention(&mut analysis, reason, detail);
             cut_off = true;
@@ -133,15 +452,29 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
         match parse_git(git, current.as_deref()) {
             Ok((path, has_git_c)) => {
                 if has_git_c {
-                    command_candidates.push(CommandRepositoryPath {
-                        path,
-                        evidence_kind: RepositoryEvidenceKind::CommandSpecificRepositoryPath,
-                    });
-                } else if analysis.derived_effective_cwd.is_some() {
-                    command_candidates.push(CommandRepositoryPath {
-                        path,
-                        evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
-                    });
+                    if !push_command_candidate(
+                        &mut analysis,
+                        &mut command_candidates,
+                        CommandRepositoryPath {
+                            path,
+                            evidence_kind: RepositoryEvidenceKind::CommandSpecificRepositoryPath,
+                        },
+                    ) {
+                        cut_off = true;
+                        break;
+                    }
+                } else if analysis.derived_effective_cwd.is_some()
+                    && !push_command_candidate(
+                        &mut analysis,
+                        &mut command_candidates,
+                        CommandRepositoryPath {
+                            path,
+                            evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
+                        },
+                    )
+                {
+                    cut_off = true;
+                    break;
                 }
             }
             Err((reason, detail)) => {
@@ -150,7 +483,7 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
                     RepositoryAbstentionReason::DynamicPath
                         | RepositoryAbstentionReason::ConflictingIdentity
                 );
-                preserve_derived_candidate(&analysis, &mut command_candidates);
+                preserve_derived_candidate(&mut analysis, &mut command_candidates);
                 push_analysis_abstention(&mut analysis, reason, detail);
                 cut_off = true;
                 break;
@@ -160,7 +493,7 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
     if !cut_off {
         if let Some((reason, detail)) = tokenization.terminal_abstention {
             analysis.blocks_session_fallback |= analysis.derived_effective_cwd.is_some();
-            preserve_derived_candidate(&analysis, &mut command_candidates);
+            preserve_derived_candidate(&mut analysis, &mut command_candidates);
             push_analysis_abstention(&mut analysis, reason, detail);
         }
     }
@@ -195,15 +528,40 @@ fn push_analysis_abstention(
 }
 
 fn preserve_derived_candidate(
-    analysis: &CommandAnalysis,
+    analysis: &mut CommandAnalysis,
     candidates: &mut Vec<CommandRepositoryPath>,
 ) {
-    if let Some(path) = &analysis.derived_effective_cwd {
-        candidates.push(CommandRepositoryPath {
-            path: path.clone(),
-            evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
-        });
+    if let Some(path) = analysis.derived_effective_cwd.clone() {
+        push_command_candidate(
+            analysis,
+            candidates,
+            CommandRepositoryPath {
+                path,
+                evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
+            },
+        );
     }
+}
+
+fn push_command_candidate(
+    analysis: &mut CommandAnalysis,
+    candidates: &mut Vec<CommandRepositoryPath>,
+    candidate: CommandRepositoryPath,
+) -> bool {
+    if candidates.contains(&candidate) {
+        return true;
+    }
+    if candidates.len() >= MAX_COMMAND_REPOSITORY_PATHS {
+        analysis.blocks_session_fallback = true;
+        push_analysis_abstention(
+            analysis,
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "command_repository_candidate_limit_exceeded",
+        );
+        return false;
+    }
+    candidates.push(candidate);
+    true
 }
 
 fn opaque_segment_abstention(
@@ -451,6 +809,17 @@ fn incomplete_segment_blocks_session_fallback(segment: &[String], token: &str) -
 }
 
 fn unwrap_wrappers(segment: &[String]) -> (Option<&[String]>, Option<&'static str>) {
+    let (remaining, error) = unwrap_command_wrappers(segment);
+    let Some(remaining) = remaining else {
+        return (None, error);
+    };
+    if remaining.first().map(String::as_str) != Some("git") {
+        return (None, Some("unknown_command_or_wrapper"));
+    }
+    (Some(remaining), None)
+}
+
+fn unwrap_command_wrappers(segment: &[String]) -> (Option<&[String]>, Option<&'static str>) {
     let mut cursor = 0;
     while segment
         .get(cursor)
@@ -526,8 +895,8 @@ fn unwrap_wrappers(segment: &[String]) -> (Option<&[String]>, Option<&'static st
         }
     }
     let remaining = segment.get(cursor..).unwrap_or_default();
-    if remaining.first().map(String::as_str) != Some("git") {
-        return (None, Some("unknown_command_or_wrapper"));
+    if remaining.is_empty() {
+        return (None, Some("missing_wrapped_command"));
     }
     (Some(remaining), None)
 }
@@ -682,4 +1051,23 @@ fn known_git_builtin(value: &str) -> bool {
             | "tag"
             | "worktree"
     )
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{bounded_outcome_operation, BoundedOutcomeOperation};
+
+    #[test]
+    fn outcome_recognition_is_bounded_and_alias_free() {
+        assert_eq!(
+            bounded_outcome_operation("git commit -m exact && git rev-parse --verify HEAD"),
+            Some(BoundedOutcomeOperation::Commit {
+                rewrites_history: false,
+                exact_oid_output: true,
+            })
+        );
+        assert!(bounded_outcome_operation("git ci -m alias").is_none());
+        assert!(bounded_outcome_operation("git commit -m exact && echo $HEAD").is_none());
+        assert!(bounded_outcome_operation("bash -lc 'git commit -m hidden'").is_none());
+    }
 }

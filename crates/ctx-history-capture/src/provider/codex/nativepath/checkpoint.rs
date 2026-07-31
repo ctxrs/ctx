@@ -6,11 +6,12 @@ use sha2::{Digest, Sha256};
 use super::rows::CodexSessionRow;
 use super::source::CodexFileObservation;
 
-const CODEX_NATIVE_CHECKPOINT_VERSION: u8 = 5;
+const CODEX_NATIVE_CHECKPOINT_VERSION: u8 = 7;
 const CODEX_PENDING_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/pending-call-id/v1\0";
 const MAX_CODEX_PENDING_TOOL_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
-pub(super) const MAX_CODEX_TOOL_CONTEXTS: usize = 24;
+pub(crate) const MAX_CODEX_TOOL_CONTEXTS: usize = 24;
 pub(super) const MAX_CODEX_TOOL_CALL_ID_BYTES: usize = 1024;
+pub(super) const MAX_CODEX_CONTINUATION_CELL_ID_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +20,11 @@ pub(super) struct CodexPendingToolAuthority {
     pub(super) record_start: u64,
     pub(super) record_end: u64,
     pub(super) raw_ordinal: u64,
+    continuation_cell_id: Option<String>,
+    continuation_conflicted: bool,
+    continuation_call_id_sha256: Vec<[u8; 32]>,
+    continuation_capacity_exceeded: bool,
+    correlation_ambiguous: bool,
 }
 
 impl CodexPendingToolAuthority {
@@ -31,6 +37,11 @@ impl CodexPendingToolAuthority {
             record_start,
             record_end,
             raw_ordinal,
+            continuation_cell_id: None,
+            continuation_conflicted: false,
+            continuation_call_id_sha256: Vec::new(),
+            continuation_capacity_exceeded: false,
+            correlation_ambiguous: false,
         }
     }
 
@@ -43,6 +54,74 @@ impl CodexPendingToolAuthority {
         )
         .call_id_sha256
             == self.call_id_sha256
+    }
+
+    pub(super) fn assign_continuation(&mut self, cell_id: &str) -> bool {
+        if cell_id.is_empty()
+            || cell_id.len() > MAX_CODEX_CONTINUATION_CELL_ID_BYTES
+            || !cell_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+            || self
+                .continuation_cell_id
+                .as_deref()
+                .is_some_and(|existing| existing != cell_id)
+        {
+            return false;
+        }
+        self.continuation_cell_id = Some(cell_id.to_owned());
+        self.continuation_conflicted = false;
+        true
+    }
+
+    pub(super) fn mark_continuation_conflict(&mut self, cell_id: &str) -> bool {
+        if !self.assign_continuation(cell_id) {
+            return false;
+        }
+        self.continuation_conflicted = true;
+        true
+    }
+
+    pub(super) fn clear_continuation(&mut self) {
+        self.continuation_cell_id = None;
+        self.continuation_conflicted = false;
+        self.continuation_call_id_sha256.clear();
+        self.continuation_capacity_exceeded = false;
+    }
+
+    pub(super) fn continuation_cell_id(&self) -> Option<&str> {
+        self.continuation_cell_id.as_deref()
+    }
+
+    pub(super) fn continuation_conflicted(&self) -> bool {
+        self.continuation_conflicted
+    }
+
+    pub(super) fn record_continuation_call(&mut self, digest: [u8; 32]) {
+        if digest == [0; 32] || self.continuation_call_id_sha256.contains(&digest) {
+            return;
+        }
+        if self.continuation_call_id_sha256.len() >= MAX_CODEX_TOOL_CONTEXTS {
+            self.continuation_capacity_exceeded = true;
+        } else {
+            self.continuation_call_id_sha256.push(digest);
+        }
+    }
+
+    pub(super) fn continuation_call_id_sha256(&self) -> &[[u8; 32]] {
+        &self.continuation_call_id_sha256
+    }
+
+    pub(super) fn continuation_capacity_exceeded(&self) -> bool {
+        self.continuation_capacity_exceeded
+    }
+
+    pub(super) fn mark_correlation_ambiguous(&mut self) {
+        self.correlation_ambiguous = true;
+    }
+
+    pub(super) fn correlation_ambiguous(&self) -> bool {
+        self.correlation_ambiguous
     }
 }
 
@@ -177,6 +256,7 @@ impl CodexNativeCheckpoint {
         let mut call_ids = BTreeSet::new();
         let mut record_spans = BTreeSet::new();
         let mut raw_ordinals = BTreeSet::new();
+        let mut continuation_cells = BTreeSet::new();
         if self.pending_tool_authorities.len() > MAX_CODEX_TOOL_CONTEXTS
             || self.pending_tool_authorities.iter().any(|authority| {
                 authority.record_start >= authority.record_end
@@ -187,6 +267,30 @@ impl CodexNativeCheckpoint {
                     || !call_ids.insert(authority.call_id_sha256)
                     || !record_spans.insert((authority.record_start, authority.record_end))
                     || !raw_ordinals.insert(authority.raw_ordinal)
+                    || authority
+                        .continuation_cell_id
+                        .as_ref()
+                        .is_some_and(|cell_id| {
+                            cell_id.is_empty()
+                                || cell_id.len() > MAX_CODEX_CONTINUATION_CELL_ID_BYTES
+                                || !cell_id.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric()
+                                        || matches!(byte, b'-' | b'_' | b'.' | b':')
+                                })
+                                || !continuation_cells.insert(cell_id.clone())
+                        })
+                    || authority.continuation_call_id_sha256.len() > MAX_CODEX_TOOL_CONTEXTS
+                    || (authority.continuation_capacity_exceeded
+                        && authority.continuation_call_id_sha256.len() != MAX_CODEX_TOOL_CONTEXTS)
+                    || (authority.continuation_conflicted
+                        && authority.continuation_cell_id.is_none())
+                    || authority.continuation_call_id_sha256.contains(&[0; 32])
+                    || authority
+                        .continuation_call_id_sha256
+                        .iter()
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        != authority.continuation_call_id_sha256.len()
             })
         {
             return Err(serde::de::Error::custom(
