@@ -158,6 +158,14 @@ pub enum IndexError {
     InvalidSemanticEventPageSize { requested: usize, maximum: usize },
     #[error("source event page size must be between 1 and {maximum} items, requested {requested}")]
     InvalidSourceEventPageSize { requested: usize, maximum: usize },
+    #[error(
+        "Core event page {field} byte limit must be between 1 and {maximum}, requested {requested}"
+    )]
+    InvalidCoreEventPageByteLimit {
+        field: &'static str,
+        requested: usize,
+        maximum: usize,
+    },
     #[error("source {0} is not retained by the pinned generation")]
     SourceEventSourceNotRetained(String),
     #[error("source {0} has a different descriptor in the pinned generation")]

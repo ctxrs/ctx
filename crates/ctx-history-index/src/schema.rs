@@ -87,6 +87,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("touched_file", STRING | STORED);
     builder.add_text_field("touched_file_filter", STRING);
     builder.add_bytes_field("core_record", STORED);
+    builder.add_bytes_field("source_event_order", INDEXED);
     builder.build()
 }
 

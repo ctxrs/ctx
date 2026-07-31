@@ -5,9 +5,20 @@ use tantivy::schema::{
     Document, Field, Value,
 };
 
+use ctx_history_core::{
+    CoreContent, CoreRecord, SourceKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+};
+
 use crate::{Fields, IndexError, LexicalDocument, Result};
 
-const BASE_FIELD_VALUES: usize = 32;
+const BASE_FIELD_VALUES: usize = 33;
+pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
+pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
+const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
+const SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET + 32;
+const SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET + 4;
+const SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN: usize = 8;
+const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 
 #[derive(Clone)]
 pub(super) struct IndexSourceFields {
@@ -32,6 +43,173 @@ impl IndexSourceFields {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceEventOrderKey([u8; SOURCE_EVENT_ORDER_KEY_LEN]);
+
+impl SourceEventOrderKey {
+    fn for_document(
+        source: &IndexSourceFields,
+        event_digest: [u8; 32],
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+    ) -> Result<Self> {
+        Self::from_parts(
+            source.identity_digest,
+            source.descriptor_digest,
+            event_digest,
+            encoded_core_bytes,
+            content_bytes,
+        )
+    }
+
+    fn from_parts(
+        source_digest: [u8; 32],
+        source_descriptor_digest: [u8; 32],
+        event_digest: [u8; 32],
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+    ) -> Result<Self> {
+        if encoded_core_bytes == 0 || encoded_core_bytes > MAX_ENCODED_CORE_RECORD_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "core_record",
+                actual: encoded_core_bytes,
+                maximum: MAX_ENCODED_CORE_RECORD_BYTES,
+            });
+        }
+        if content_bytes > MAX_CORE_CONTENT_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "core_content",
+                actual: content_bytes,
+                maximum: MAX_CORE_CONTENT_BYTES,
+            });
+        }
+        let encoded_core_bytes = u32::try_from(encoded_core_bytes).map_err(|_| {
+            IndexError::WriterInvariant("encoded Core size does not fit the source order key")
+        })?;
+        let content_bytes = u32::try_from(content_bytes).map_err(|_| {
+            IndexError::WriterInvariant("Core content size does not fit the source order key")
+        })?;
+
+        let mut key = [0_u8; SOURCE_EVENT_ORDER_KEY_LEN];
+        key[..32].copy_from_slice(&source_digest);
+        key[32..SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN].copy_from_slice(&source_descriptor_digest);
+        key[SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET]
+            .copy_from_slice(&event_digest);
+        key[SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET..SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET]
+            .copy_from_slice(&encoded_core_bytes.to_be_bytes());
+        key[SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET..]
+            .copy_from_slice(&content_bytes.to_be_bytes());
+        Ok(Self(key))
+    }
+
+    pub(crate) fn for_core_record(record: &CoreRecord, encoded_core_bytes: usize) -> Result<Self> {
+        Self::from_parts(
+            record.source.identity().digest(),
+            record.source.exact_descriptor_digest(),
+            record.event_id.digest(),
+            encoded_core_bytes,
+            core_content_bytes(&record.content)?,
+        )
+    }
+
+    pub(crate) fn decode_for_source(source: &SourceKey, encoded: &[u8]) -> Result<Self> {
+        let key: [u8; SOURCE_EVENT_ORDER_KEY_LEN] = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(SOURCE_EVENT_ORDER_FIELD))?;
+        if key[..SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN] != Self::source_prefix(source) {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SOURCE_EVENT_ORDER_FIELD,
+            ));
+        }
+        let key = Self(key);
+        if key.encoded_core_bytes() == 0
+            || key.encoded_core_bytes() > MAX_ENCODED_CORE_RECORD_BYTES
+            || key.content_bytes() > MAX_CORE_CONTENT_BYTES
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SOURCE_EVENT_ORDER_FIELD,
+            ));
+        }
+        Ok(key)
+    }
+
+    pub(crate) fn source_prefix(source: &SourceKey) -> [u8; SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN] {
+        let mut prefix = [0_u8; SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN];
+        prefix[..32].copy_from_slice(&source.identity().digest());
+        prefix[32..].copy_from_slice(&source.exact_descriptor_digest());
+        prefix
+    }
+
+    pub(crate) fn source_range_end(source: &SourceKey) -> Vec<u8> {
+        let mut bound = Vec::with_capacity(SOURCE_EVENT_ORDER_KEY_LEN + 1);
+        bound.extend_from_slice(&Self::source_prefix(source));
+        bound.extend(std::iter::repeat_n(
+            u8::MAX,
+            SOURCE_EVENT_ORDER_KEY_LEN - SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN + 1,
+        ));
+        bound
+    }
+
+    pub(crate) fn source_after_bound(source: &SourceKey, event_digest: [u8; 32]) -> Vec<u8> {
+        let mut bound = Vec::with_capacity(SOURCE_EVENT_ORDER_KEY_LEN + 1);
+        bound.extend_from_slice(&Self::source_prefix(source));
+        bound.extend_from_slice(&event_digest);
+        bound.extend(std::iter::repeat_n(
+            u8::MAX,
+            SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN + 1,
+        ));
+        bound
+    }
+
+    pub(crate) fn event_digest(self) -> [u8; 32] {
+        let mut digest = [0_u8; 32];
+        digest.copy_from_slice(
+            &self.0
+                [SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET],
+        );
+        digest
+    }
+
+    pub(crate) fn encoded_core_bytes(self) -> usize {
+        let mut encoded = [0_u8; 4];
+        encoded.copy_from_slice(
+            &self.0
+                [SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET..SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET],
+        );
+        u32::from_be_bytes(encoded) as usize
+    }
+
+    pub(crate) fn content_bytes(self) -> usize {
+        let mut encoded = [0_u8; 4];
+        encoded.copy_from_slice(&self.0[SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET..]);
+        u32::from_be_bytes(encoded) as usize
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; SOURCE_EVENT_ORDER_KEY_LEN] {
+        self.0
+    }
+}
+
+pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
+    let normalized_body_bytes = content.normalized_body.as_ref().map_or(0, String::len);
+    let structured_content_bytes = content
+        .structured_content
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()?
+        .map_or(0, |encoded| encoded.len());
+    let content_bytes = normalized_body_bytes
+        .checked_add(structured_content_bytes)
+        .ok_or(IndexError::CountOverflow)?;
+    if content_bytes > MAX_CORE_CONTENT_BYTES {
+        return Err(IndexError::DocumentFieldTooLarge {
+            field: "core_content",
+            actual: content_bytes,
+            maximum: MAX_CORE_CONTENT_BYTES,
+        });
+    }
+    Ok(content_bytes)
+}
 pub(super) struct EncodedDocumentIdentities {
     event: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
     session: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
@@ -135,9 +313,16 @@ impl IndexDocument {
         document: LexicalDocument,
         locator_bytes: Vec<u8>,
         core_record_bytes: Vec<u8>,
+        core_content_bytes: usize,
         identities: EncodedDocumentIdentities,
         source: IndexSourceFields,
-    ) -> Self {
+    ) -> Result<Self> {
+        let source_event_order = SourceEventOrderKey::for_document(
+            &source,
+            document.event_id.digest(),
+            core_record_bytes.len(),
+            core_content_bytes,
+        )?;
         let mut target = Self::with_capacity(BASE_FIELD_VALUES + document.touched_files.len() * 2);
         target.add_text(fields.event_id, document.event_id.to_string());
         target.add_text(

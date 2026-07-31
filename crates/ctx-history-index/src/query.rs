@@ -7,13 +7,13 @@ pub(super) use verification::{stored_verification_record, validate_verification_
 use std::cell::Cell;
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet},
     ops::Bound,
 };
 
 use ctx_history_core::{
     CoreRecord, NativeRecordCoordinate, SourceKey, SourceRecordLocator, StableEntityId,
-    StableEntityKind, TypedKey,
+    StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{
@@ -29,16 +29,19 @@ use tantivy::{
 use uuid::Uuid;
 
 use super::{fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex};
+use crate::index_document::{core_content_bytes, SourceEventOrderKey};
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
 use crate::analyzer::BODY_ANALYZER;
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
+const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 
 #[cfg(test)]
 thread_local! {
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -51,11 +54,47 @@ pub(crate) fn stored_core_event_record_materializations() -> usize {
     STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.get()
 }
 
-/// Maximum number of semantic event records materialized in one page.
+#[cfg(test)]
+pub(crate) fn reset_source_event_order_term_visits() {
+    SOURCE_EVENT_ORDER_TERM_VISITS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn source_event_order_term_visits() -> usize {
+    SOURCE_EVENT_ORDER_TERM_VISITS.get()
+}
+
+/// Maximum number of complete semantic event records retained in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
 
-/// Maximum number of records materialized for one exact provider source page.
+/// Maximum number of complete records retained for one exact source page.
 pub const MAX_SOURCE_EVENT_PAGE_ITEMS: usize = 4_096;
+
+/// Default retained-byte ceiling for complete Core pages.
+///
+/// One individually valid Core record always makes progress even when it is
+/// larger than a caller's chosen page budget. These defaults therefore also
+/// define the absolute maximum resident singleton page.
+pub const DEFAULT_CORE_EVENT_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget {
+    maximum_encoded_core_bytes: MAX_ENCODED_CORE_RECORD_BYTES,
+    maximum_content_bytes: MAX_CORE_CONTENT_BYTES,
+};
+
+/// Retained complete-Core byte ceilings for one source or semantic page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreEventPageBudget {
+    pub maximum_encoded_core_bytes: usize,
+    pub maximum_content_bytes: usize,
+}
+
+impl CoreEventPageBudget {
+    pub const fn new(maximum_encoded_core_bytes: usize, maximum_content_bytes: usize) -> Self {
+        Self {
+            maximum_encoded_core_bytes,
+            maximum_content_bytes,
+        }
+    }
+}
 
 /// Exclusive full-identity keyset cursor for one source in one generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,8 +142,18 @@ pub struct CoreSourceEventPage {
     pub generation_id: String,
     pub source: SourceKey,
     pub items: Vec<CoreEventRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
     pub next_cursor: Option<SourceEventCursor>,
     pub terminal: bool,
+}
+
+/// Complete requested-order Core records plus exact retained byte totals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEventBatch {
+    pub items: Vec<CoreEventRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
 }
 
 impl From<CoreSourceEventPage> for SourceEventPage {
@@ -199,6 +248,8 @@ pub struct CoreSemanticEventPage {
     pub eligibility: SemanticEligibility,
     pub eligible_total: u64,
     pub items: Vec<CoreEventRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
     pub next_cursor: Option<SemanticEventCursor>,
     pub terminal: bool,
 }
@@ -351,6 +402,16 @@ pub struct SessionRecord {
     pub first_occurred_at_unix_ms: Option<i64>,
 }
 
+/// Small body-free session coordinate used to select bounded Core batches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEventCoordinate {
+    pub event_id: Uuid,
+    pub event_sequence: u64,
+    pub occurred_at_unix_ms: Option<i64>,
+    pub event_type: String,
+    pub role: Option<String>,
+}
+
 pub(super) fn stored_event_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
@@ -497,40 +558,11 @@ pub(super) fn stored_core_event_record_with_size(
     ))
 }
 
-struct CoreEventIdentityCandidate {
-    identity: [u8; StableEntityId::CANONICAL_LEN],
-    digest_term: String,
-    record: CoreEventRecord,
-}
-
-impl CoreEventIdentityCandidate {
-    fn new(record: CoreEventRecord, digest_term: String) -> Result<Self> {
-        Ok(Self {
-            identity: record.event_id.encode_canonical()?,
-            digest_term,
-            record,
-        })
-    }
-}
-
-impl PartialEq for CoreEventIdentityCandidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.identity == other.identity
-    }
-}
-
-impl Eq for CoreEventIdentityCandidate {}
-
-impl PartialOrd for CoreEventIdentityCandidate {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for CoreEventIdentityCandidate {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.identity.cmp(&other.identity)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EventAddressCandidate {
+    identity_digest: [u8; 32],
+    address: DocAddress,
+    source_order: Option<SourceEventOrderKey>,
 }
 
 impl From<&EventRecord> for SessionRecord {

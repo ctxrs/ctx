@@ -49,10 +49,11 @@ pub(crate) use publication::{
     verify_searcher_structure, write_manifest,
 };
 pub use query::{
-    AgentScope, CoreEventRecord, CoreSemanticEventPage, CoreSourceEventPage, EventRecord,
-    EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, SemanticEligibility,
-    SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor, SourceEventPage,
-    MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
+    CoreSourceEventPage, EventRecord, EventSearchCandidate, EventSearchFilters,
+    ExcludedSessionTree, SemanticEligibility, SemanticEventCursor, SemanticEventPage,
+    SessionEventCoordinate, SessionRecord, SourceEventCursor, SourceEventPage,
+    DEFAULT_CORE_EVENT_PAGE_BUDGET, MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
 pub(crate) use schema::{
@@ -81,7 +82,9 @@ use tantivy::{
 use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
-use index_document::{EncodedDocumentIdentities, IndexDocument, IndexSourceFields, SourceToken};
+use index_document::{
+    core_content_bytes, EncodedDocumentIdentities, IndexDocument, IndexSourceFields, SourceToken,
+};
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 
 struct PendingSource {
@@ -641,6 +644,7 @@ impl GenerationWriter {
                 }
             }
         }
+        let core_content_bytes = core_content_bytes(&core_record.content)?;
         let core_record_bytes = core_record.encode_stored()?;
         let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
@@ -696,6 +700,7 @@ impl GenerationWriter {
             document,
             locator_bytes,
             core_record_bytes,
+            core_content_bytes,
             encoded_identities,
             index_fields,
         );
