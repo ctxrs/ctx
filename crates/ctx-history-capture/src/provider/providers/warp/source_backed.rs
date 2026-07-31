@@ -761,12 +761,18 @@ fn core_record(
             | ctx_history_core::EventType::ToolOutput
             | ctx_history_core::EventType::CommandOutput
     );
+    let result_outcome = event.result_outcome.map(|outcome| match outcome {
+        crate::OutputOutcome::Success => "success",
+        crate::OutputOutcome::Failure => "failure",
+        crate::OutputOutcome::Timeout => "timeout",
+        crate::OutputOutcome::Unknown => "unknown",
+    });
     let native_tool = is_tool.then(|| {
         serde_json::json!({
             "kind": event.kind,
             "request_id": event.request_id,
             "call_id": event.call_id,
-            "result_outcome": event.result_outcome,
+            "result_outcome": result_outcome,
         })
     });
     let agent_type = if is_primary {
