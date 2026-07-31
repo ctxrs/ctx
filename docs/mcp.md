@@ -30,13 +30,11 @@ fixed documented count. Core tools include:
   event ID.
 
 `show_session` and `show_event` accept `content: "indexed" | "complete"` and
-default to `indexed`. Both policies hydrate exact bodies from eligible,
-verified local provider records; `indexed` controls item selection and the
-generation-bound parser contract, not a stored body or preview. Both apply the
-MCP aggregate response limit and fail without a partial result if any selected
-record cannot be verified. MCP hosts may log or forward the returned
-transcript. Typed failures are returned in `structuredContent` with the same
-stable hydration error codes as the CLI JSON contract.
+default to `indexed`. Both policies read normalized content from the active
+verified Core generation; `indexed` controls item selection. Both apply the MCP
+aggregate response limit. MCP hosts may log or forward the returned transcript.
+Typed failures are returned in `structuredContent` with the same stable error
+codes as the CLI JSON contract.
 
 The `status` tool returns the CLI JSON status read model unchanged in
 `structuredContent`: the source-backed history report plus `upgrade`, `pro`,
@@ -120,7 +118,7 @@ hybrid contracts, including lexical fallback for unavailable hybrid semantic
 state, typed failure for semantic-only unavailability, and no vector work when
 the semantic weight is zero. The MCP process does not import provider history,
 initialize storage, or write provider data. MCP SQL remains an existing
-metadata-projection-only read and performs no body hydration.
+metadata-projection-only read and does not read transcript bodies.
 
 The `sources` tool returns the same bounded provider discovery `issues` as
 `ctx sources --format json`, including stable issue codes and truncation markers.

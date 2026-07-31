@@ -1,21 +1,15 @@
 # Search
 
-`ctx search` finds agent-history records while leaving provider sources
-authoritative for content. The v0.26 search epoch has three independent,
-rebuildable consumers:
+`ctx search` finds agent-history records imported into Core. The v0.26 search
+epoch has three independent, rebuildable consumers:
 
 - Tantivy lexical generations under `search/lexical`;
 - flat-F32 semantic generations under `search/semantic`;
 - the optional read-only SQL metadata projection in `relational.sqlite`.
 
-The lexical index contains the full policy-selected meaningful text as
-indexed-only terms. It stores identity, filter, ordering, citation, and exact
-typed-locator metadata, but it stores no message body or display preview.
-Search snippets are hydrated from the exact provider source through the
-resolver bound to the active lexical generation. A stale, changed, missing, or
-unsupported source produces a typed unavailable/stale result and schedules
-refresh where applicable; ctx never substitutes an old database row or an
-index-stored body.
+The lexical index contains the full policy-selected meaningful text and the
+metadata needed to match it to imported Core events. Search snippets come from
+those Core events; search does not reopen provider transcript files.
 
 Default results are session-diverse: ctx shows the strongest matching event
 from each session, then lets you drill into dense event-level results.
@@ -43,14 +37,14 @@ A result can include:
 
 - ctx-owned event and session IDs;
 - the provider-owned session ID when known;
-- title, hydrated snippet, one-based final rank, result scope, and match reasons;
+- title, Core-backed snippet, one-based final rank, result scope, and match reasons;
 - the backend-provided `retrieval_score`, which is diagnostic and can be
   non-monotonic after query-coverage and session-diversity shaping;
 - compatibility session importance and the additional-match count for session
   results; like `retrieval_score`, session importance is not an ordering contract;
 - provider, event sequence, timestamp, workspace, and working directory;
-- source path/cursor metadata and citations;
-- copyable `suggested_next_commands` for `show`, `locate`, and scoped search.
+- stable ctx citations;
+- copyable `suggested_next_commands` for `show` and scoped search.
 
 Search result IDs are ctx-owned. Commands accept complete IDs or unambiguous
 prefixes of at least eight hex characters. Provider-owned IDs are metadata;
@@ -106,14 +100,12 @@ or `--events` for dense event hits across sessions.
 ## Retrieval backends
 
 `--backend lexical` queries the active Tantivy generation using BM25-style
-lexical ranking. The meaningful body is indexed in full but is not stored in
-Tantivy. Result rendering hydrates exact provider bytes in a bounded,
-source-grouped batch.
+lexical ranking. Result rendering reads the corresponding imported Core
+events.
 
 `--backend semantic` queries the flat-F32 generation under
-`search/semantic`. Semantic projection enumerates eligible records from lexical
-metadata, hydrates exact provider content through the generation-bound
-resolver, filters control messages, then chunks and embeds it. The semantic
+`search/semantic`. Semantic projection enumerates eligible imported Core
+records, filters control messages, then chunks and embeds them. The semantic
 generation stores vectors, hashes, offsets, and generation binding rather than
 plaintext transcript chunks.
 
@@ -164,9 +156,8 @@ importer or wait for complete semantic or Pro coverage.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model
-download. Exact result hydration still reads the provider records identified
-by the generation-bound locators. It is read-only with respect to ctx indexes;
-it is not an offline-content cache mode.
+download. It renders results from the active Core generation and is read-only
+with respect to ctx indexes.
 
 Only sources with supported automatic import participate in automatic refresh.
 Explicit-only sources require `ctx import --provider ... --path ...`.
@@ -174,20 +165,16 @@ Winner-only provider precedence prevents combining a selected replacement with
 stale defaults.
 
 `ctx status`, `ctx index status`, and search JSON report lexical generation,
-resolver/catalog availability, semantic generation binding and coverage,
+source catalog availability, semantic generation binding and coverage,
 relational projection state, daemon work, and typed fallback reasons.
 
-## Source availability
+## Core-backed presentation
 
-Because provider files are the sole content authority, deleting, moving, or
-changing one can make an otherwise matching index record temporarily
-unrenderable. ctx does not emit an empty placeholder or use prior-epoch
-content. Use `ctx locate` to inspect provenance and run a source refresh or
-explicit import to publish a generation matching the current provider bytes.
-
-`ctx show session` hydrates ordered events by source and preserves transcript
-order. Any typed hydration failure fails the complete selected transcript
-rather than returning a mixture of exact and stale content.
+Search snippets and `ctx show` transcripts come from the active verified Core
+generation. Query-time commands do not reopen provider transcript files.
+Provider changes become visible after explicit import or daemon refresh
+publishes a new Core generation. `ctx show session` preserves the imported
+event order.
 
 ## History reports
 
@@ -211,12 +198,11 @@ the same result metadata and citations plus:
 `more_available` is true only when the bounded search pass finds one additional
 fully shaped result beyond the requested limit: a distinct session by default,
 or an event with `--events`. Search does not run a second count scan or expose a
-continuation cursor. Per-result cursors, when present, are provider-source
-provenance only and are omitted when unavailable. Text output ends with exactly
+continuation cursor. Text output ends with exactly
 `More results available.` only when that shaped sentinel exists.
 Candidate-pool truncation remains separate and does not by itself set
 `more_available`.
 
-Raw output can contain queries, absolute paths, hydrated snippets, provider
+Raw output can contain queries, absolute paths, complete snippets, provider
 metadata, and transcript-derived content. Treat it as private local data and
 review it before sharing.

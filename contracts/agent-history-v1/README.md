@@ -36,8 +36,6 @@ All operations return JSON objects with `contractVersion: "agent-history-v1"` an
 | `search()` | Search indexed agent history. |
 | `showEvent()` | Return one event or an event window. |
 | `showSession()` | Return a session transcript. |
-| `locateEvent()` | Return event provenance and source location. |
-| `locateSession()` | Return session provenance and source location. |
 
 ## Privacy
 
@@ -62,7 +60,7 @@ shared by all SDK tests.
 
 Important reusable records:
 
-- `ProviderSource`: provider, path, availability, importability, raw retention.
+- `ProviderSource`: provider, path, availability, and importability.
 - `Freshness`: pre-search refresh mode/status/totals.
 - `Status.semantic` and `Status.daemon`: extensible local diagnostic objects for
   semantic coverage and the ctx-owned daemon coordinator.
@@ -70,8 +68,10 @@ Important reusable records:
   weight, semantic coverage, optional fallback code/message, and optional
   diagnostics. The CLI adapter camel-cases raw CLI retrieval fields for this
   contract.
-- `Citation`: ctx event/session/file/source citation fields.
-- `SourceLocation`: path/cursor/source id/source format/existence.
+- `Citation`: stable ctx event/session citation fields.
+- Search and show results expose `providerSessionId` when Core retained the
+  provider-owned session identity. For Codex, this is the resume UUID used by
+  Codex tooling.
 - Structured error: `code`, `message`, `retryable`, optional `details`, and
   optional `cause`.
 
@@ -87,8 +87,6 @@ them into `agent-history-v1` wrappers:
 - `ctx search <query>|--term <term>|--file <path> --format json`
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
-- `ctx locate event ... --format json`
-- `ctx locate session ... --format json`
 
 This mapping is an adapter detail. SDK consumers should depend on
 `agent-history-v1`, not on CLI rendering or SQLite storage.

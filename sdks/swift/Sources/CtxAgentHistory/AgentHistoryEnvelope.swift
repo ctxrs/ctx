@@ -13,8 +13,6 @@ public enum AgentHistoryOperation: String, Codable, Sendable {
     case search
     case showEvent
     case showSession
-    case locateEvent
-    case locateSession
     case error
 }
 
@@ -93,7 +91,6 @@ public struct AgentHistoryEnvelope: Codable, Equatable, Sendable {
     public var search: AgentHistorySearchResult?
     public var event: AgentHistoryEventResult?
     public var session: AgentHistorySessionResult?
-    public var location: AgentHistoryLocationResult?
     public var error: AgentHistoryContractError?
 
     public init(
@@ -107,7 +104,6 @@ public struct AgentHistoryEnvelope: Codable, Equatable, Sendable {
         search: AgentHistorySearchResult? = nil,
         event: AgentHistoryEventResult? = nil,
         session: AgentHistorySessionResult? = nil,
-        location: AgentHistoryLocationResult? = nil,
         error: AgentHistoryContractError? = nil
     ) {
         self.contractVersion = contractVersion
@@ -120,7 +116,6 @@ public struct AgentHistoryEnvelope: Codable, Equatable, Sendable {
         self.search = search
         self.event = event
         self.session = session
-        self.location = location
         self.error = error
     }
 
@@ -135,7 +130,6 @@ public struct AgentHistoryEnvelope: Codable, Equatable, Sendable {
         case search
         case event
         case session
-        case location
         case error
     }
 }

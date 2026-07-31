@@ -126,8 +126,6 @@ export type AgentHistoryOperation =
   | "search"
   | "showEvent"
   | "showSession"
-  | "locateEvent"
-  | "locateSession"
   | "error";
 
 export type ClientAgentHistoryOperation = Exclude<AgentHistoryOperation, "error">;
@@ -229,9 +227,6 @@ export interface SearchHit {
   provider?: string | null;
   timestamp?: string | null;
   cwd?: string | null;
-  sourcePath?: string | null;
-  sourceExists?: boolean | null;
-  cursor?: string | null;
   whyMatched?: string[];
   citations?: Citation[];
   suggestedNextCommands?: string[];
@@ -269,54 +264,33 @@ export interface Citation {
   provider?: string | null;
   sessionId?: string | null;
   eventSeq?: number | null;
-  sourcePath?: string | null;
-  sourceExists?: boolean | null;
-  cursor?: string | null;
 }
 
 export interface AgentHistoryEvent {
   ctxEventId?: string | null;
   ctxSessionId?: string | null;
+  provider?: string | null;
+  providerSessionId?: string | null;
+  sourceFormat?: string | null;
   sequence?: number | null;
   eventType?: string | null;
   role?: string | null;
   occurredAt?: string | null;
-  source?: JsonValue;
-  cursor?: string | null;
   text?: string | null;
   preview?: string | null;
   citations?: Citation[];
 }
 
-export interface SourceLocation {
-  path?: string | null;
-  cursor?: string | null;
-  exists?: boolean | null;
-  sourceId?: string | null;
-  sourceFormat?: string | null;
-}
-
 export interface EventResult {
   event?: AgentHistoryEvent | null;
   events: AgentHistoryEvent[];
-  source?: SourceLocation | null;
 }
 
 export interface SessionResult {
   session?: JsonObject | null;
   events?: AgentHistoryEvent[];
-  source?: SourceLocation | null;
   mode?: string | null;
   format?: string | null;
-}
-
-export interface LocationResult {
-  ctxSessionId: string;
-  ctxEventId?: string | null;
-  provider: string;
-  providerSessionId?: string | null;
-  source: SourceLocation;
-  resume?: JsonObject;
 }
 
 export type AgentHistoryErrorCode =
@@ -375,11 +349,6 @@ export interface ShowSessionEnvelope extends AgentHistoryEnvelopeBase<"showSessi
   session: SessionResult;
 }
 
-export interface LocationEnvelope<TOperation extends "locateEvent" | "locateSession">
-  extends AgentHistoryEnvelopeBase<TOperation> {
-  location: LocationResult;
-}
-
 export interface AgentHistoryErrorEnvelope extends AgentHistoryEnvelopeBase<"error"> {
   error: AgentHistoryErrorRecord;
 }
@@ -393,8 +362,6 @@ export interface AgentHistoryEnvelopeByOperation {
   search: SearchEnvelope;
   showEvent: ShowEventEnvelope;
   showSession: ShowSessionEnvelope;
-  locateEvent: LocationEnvelope<"locateEvent">;
-  locateSession: LocationEnvelope<"locateSession">;
   error: AgentHistoryErrorEnvelope;
 }
 
@@ -457,9 +424,6 @@ export declare class LocalAgentHistoryClient {
   showEvent(id: string, options?: ShowEventOptions): Promise<ShowEventEnvelope>;
   showSession(id: string, options?: Omit<ShowSessionOptions, "id">): Promise<ShowSessionEnvelope>;
   showSession(options: ShowSessionOptions): Promise<ShowSessionEnvelope>;
-  locateEvent(id: string): Promise<LocationEnvelope<"locateEvent">>;
-  locateSession(id: string): Promise<LocationEnvelope<"locateSession">>;
-  locateSession(options: SessionLookup): Promise<LocationEnvelope<"locateSession">>;
   version(): Promise<VersionInfo>;
 }
 
@@ -476,8 +440,6 @@ export declare class HostedAgentHistoryClient {
   search(): Promise<never>;
   showEvent(): Promise<never>;
   showSession(): Promise<never>;
-  locateEvent(): Promise<never>;
-  locateSession(): Promise<never>;
   version(): Promise<VersionInfo>;
 }
 

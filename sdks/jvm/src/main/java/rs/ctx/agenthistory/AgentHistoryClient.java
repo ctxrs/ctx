@@ -166,31 +166,6 @@ public class AgentHistoryClient {
         return showSession(id, AgentHistoryOptions.showSession());
     }
 
-    public LocateEventResponse locateEvent(String id) {
-        if (id == null || id.isEmpty()) {
-            throw new CtxAgentHistoryException.Validation("event id is required");
-        }
-        return new LocateEventResponse(executeEnvelope("locateEvent", list("locate", "event", id, "--format", "json")));
-    }
-
-    public LocateSessionResponse locateSession(String id) {
-        return locateSession(AgentHistoryOptions.locateSession().id(id));
-    }
-
-    public LocateSessionResponse locateSession(AgentHistoryOptions.LocateSession options) {
-        AgentHistoryOptions.LocateSession safe = options == null ? AgentHistoryOptions.locateSession() : options;
-        List<String> args = mutable("locate", "session");
-        if (safe.id() != null && !safe.id().isEmpty()) {
-            args.add(safe.id());
-        } else {
-            add(args, "--provider", safe.provider());
-            add(args, "--provider-session", safe.providerSessionId());
-        }
-        args.add("--format");
-        args.add("json");
-        return new LocateSessionResponse(executeEnvelope("locateSession", args));
-    }
-
     public VersionInfo version() {
         return new VersionInfo(transport.name(), transport.ctxVersion());
     }

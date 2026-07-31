@@ -24,7 +24,7 @@ internal static class Program
             ("builds search flags", BuildsSearchFlags),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
             ("rejects search without intent", RejectsSearchWithoutIntent),
-            ("wraps show and locate commands", WrapsShowAndLocate),
+            ("wraps show commands", WrapsShow),
             ("reports versioning metadata", ReportsVersioning),
             ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
             ("raises structured hosted placeholder errors", HostedPlaceholderError),
@@ -251,25 +251,20 @@ internal static class Program
         Equal(0, transport.Calls.Count);
     }
 
-    private static async Task WrapsShowAndLocate()
+    private static async Task WrapsShow()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"events":[],"source":{"path":"/tmp/source.jsonl"},"ctx_session_id":"session-1","provider":"codex"}""");
+        var transport = new RecordingTransport("""{"schema_version":1,"events":[],"ctx_session_id":"session-1","provider":"codex"}""");
         var client = new AgentHistoryClient(transport);
 
         await client.ShowEventAsync("event-1", new ShowEventOptions { Window = 2 });
         await client.ShowSessionAsync("session-1", new ShowSessionOptions { Mode = "full" });
         await client.ShowSessionAsync(new ShowSessionOptions { Provider = "codex", ProviderSessionId = "provider-session", Mode = "lite" });
-        await client.LocateEventAsync("event-1");
-        await client.LocateSessionAsync(new SessionLookupOptions { Provider = "codex", ProviderSessionId = "provider-session" });
 
         Equal("show event event-1 --format=json --window 2", Join(transport.Calls[0]));
         Equal("show session session-1 --mode full --format=json", Join(transport.Calls[1]));
         Equal("show session --provider codex --provider-session provider-session --mode lite --format=json", Join(transport.Calls[2]));
-        Equal("locate event event-1 --format=json", Join(transport.Calls[3]));
-        Equal("locate session --provider codex --provider-session provider-session --format=json", Join(transport.Calls[4]));
 
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.ShowEventAsync(""));
-        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.LocateSessionAsync(new SessionLookupOptions { Provider = "codex" }));
     }
 
     private static async Task ReportsVersioning()
@@ -366,12 +361,6 @@ internal static class Program
                     break;
                 case "showSession":
                     _ = (await ClientFor(node["session"]).ShowSessionAsync("session-1")).Session.Events;
-                    break;
-                case "locateEvent":
-                    _ = (await ClientFor(node["location"]).LocateEventAsync("event-1")).Location.Source;
-                    break;
-                case "locateSession":
-                    _ = (await ClientFor(node["location"]).LocateSessionAsync("session-1")).Location.Source;
                     break;
                 case "error":
                     True(node.ContainsKey("error"), $"{path} missing error payload");

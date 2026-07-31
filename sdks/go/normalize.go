@@ -23,7 +23,6 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 		"operation":       operation,
 		"backend":         map[string]any{"kind": "local"},
 	}
-	rawObject, _ := raw.(map[string]any)
 	camel := camelize(raw)
 
 	switch operation {
@@ -40,20 +39,16 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 		envelope["search"] = camel
 	case "showEvent":
 		envelope["event"] = map[string]any{
-			"event":  normalizeEventRecord(get(camel, "event")),
-			"events": normalizeEventRecords(get(camel, "events")),
-			"source": sourceLocationFromShow(rawObject),
+			"event":  get(camel, "event"),
+			"events": get(camel, "events"),
 		}
 	case "showSession":
 		envelope["session"] = map[string]any{
 			"session": get(camel, "session"),
-			"events":  normalizeEventRecords(get(camel, "events")),
-			"source":  get(camel, "source"),
+			"events":  get(camel, "events"),
 			"mode":    get(camel, "mode"),
 			"format":  get(camel, "format"),
 		}
-	case "locateEvent", "locateSession":
-		envelope["location"] = locationFromLocate(camel)
 	}
 
 	return json.Marshal(envelope)
@@ -87,10 +82,6 @@ func agentHistoryOperationName(name string) string {
 		return "showEvent"
 	case "show_session":
 		return "showSession"
-	case "locate_event":
-		return "locateEvent"
-	case "locate_session":
-		return "locateSession"
 	case "setup":
 		return "init"
 	default:
@@ -142,74 +133,4 @@ func get(value any, key string) any {
 		return nil
 	}
 	return object[key]
-}
-
-func normalizeEventRecord(value any) any {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return value
-	}
-	source := object["source"]
-	switch typed := source.(type) {
-	case nil:
-	case string:
-	default:
-		if label := sourceName(typed); label != "" {
-			object["source"] = label
-		} else {
-			delete(object, "source")
-		}
-	}
-	return object
-}
-
-func normalizeEventRecords(value any) any {
-	events, ok := value.([]any)
-	if !ok {
-		return value
-	}
-	for i, event := range events {
-		events[i] = normalizeEventRecord(event)
-	}
-	return events
-}
-
-func sourceName(value any) string {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return ""
-	}
-	for _, key := range []string{"provider", "source", "kind"} {
-		if name, ok := object[key].(string); ok {
-			return name
-		}
-	}
-	return ""
-}
-
-func locationFromLocate(camel any) map[string]any {
-	object, _ := camel.(map[string]any)
-	return map[string]any{
-		"ctxSessionId":      object["ctxSessionId"],
-		"ctxEventId":        object["ctxEventId"],
-		"provider":          object["provider"],
-		"providerSessionId": object["providerSessionId"],
-		"source":            object["source"],
-		"resume":            object["resume"],
-	}
-}
-
-func sourceLocationFromShow(raw map[string]any) any {
-	if raw == nil {
-		return nil
-	}
-	source := raw["source"]
-	if source != nil {
-		return camelize(source)
-	}
-	event, _ := raw["event"].(map[string]any)
-	if event == nil {
-		return nil
-	}
-	return camelize(event["source"])
 }

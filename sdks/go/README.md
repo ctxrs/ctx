@@ -39,8 +39,6 @@ The public client mirrors agent-history-v1 operations:
 - `Search(ctx, SearchOptions)`
 - `ShowEvent(ctx, ShowEventOptions)`
 - `ShowSession(ctx, ShowSessionOptions)`
-- `LocateEvent(ctx, LocateEventOptions)`
-- `LocateSession(ctx, LocateSessionOptions)`
 
 Version constants:
 

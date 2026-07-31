@@ -48,8 +48,6 @@ The public client mirrors the `agent-history-v1` operations:
 - `search()` with a query, term, or file option
 - `showEvent()`
 - `showSession()`
-- `locateEvent()`
-- `locateSession()`
 - `version()` / `versioning()`
 
 Swift reserves `init` for initializers, so the agent-history-v1 `init` operation is
@@ -101,8 +99,7 @@ contract fixture directory is available.
 
 The package includes a fake-by-default toy executable that exercises
 `status`, `initialize`, `importHistory`, `sync`, `search`, `showEvent`,
-`showSession`, `locateEvent`, and `locateSession` without reading private local
-history:
+and `showSession` without reading private local history:
 
 ```bash
 swift run LocalAgentHistorySmoke

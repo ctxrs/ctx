@@ -215,10 +215,9 @@ manifest may point at the same kind of durable provider-owned file; ctx
 validates the declared source identity, registers the path in place, and waits
 for an authoritative daemon-owned publication receipt.
 
-That provider file remains exact-body authority for complete-content
-hydration. Plugin imports do not invoke exporters, copy command output, write
-the old Store database, synthesize a `NativePath` body, or create a local
-content pack. Command-only plugin manifests are typed unsupported in 1.0.
+Import copies policy-selected normalized content into Core. Plugin imports do
+not copy command output, write the old Store database, or synthesize a
+`NativePath` body. Command-only plugin manifests are typed unsupported in 1.0.
 
 If an import is interrupted, run the same command again. The shared custom
 JSONL route performs another idempotent scan of the provider-owned source.

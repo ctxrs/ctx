@@ -24,10 +24,9 @@ metadata. `ctx show session --out` writes only the explicit output path
 requested by the user.
 
 Both the default `--content indexed` and explicit `--content complete` show
-policies read the recorded provider source needed for selected events and
-verify it through the generation-bound typed resolver. `indexed` controls
-selection/versioning, not body authority. Neither policy scans for replacement
-transcripts, uses a stored body/preview, or uses a network fallback.
+policies read policy-selected normalized content from the active Core
+generation. `indexed` controls selection/versioning. Neither policy scans for
+replacement transcripts or uses a network fallback.
 
 Source repositories and provider homes remain outside ctx ownership. Provider
 files are read as import sources, not modified.
@@ -57,31 +56,26 @@ and orphan credentials or graph keys.
 
 ## Risks
 
-- searchable terms and source-hydrated prompts or output may contain secrets;
+- searchable terms and imported prompts or output may contain secrets;
 - local paths and repository names may reveal private work;
 - copied JSON output may leave the machine;
-- stale citations may point to moved or deleted raw files;
 - unsupported provider formats may be parsed incorrectly if adapters are too
   permissive;
 - compatibility JSON fields may expose more local store detail than an agent
   needs.
-- source-hydrated transcript output may contain secrets, and MCP hosts may
+- transcript output may contain secrets, and MCP hosts may
   retain or forward it;
-- a provider source can move, be replaced, or change after import.
+- provider sources can move, be replaced, or change before a later import.
 
 ## Mitigations
 
 - keep imports explicit and repeatable;
 - reject unknown provider formats;
-- keep provider sources as the sole body authority; index full meaningful text
-  only into unstored lexical fields and retain metadata/typed locators in the
-  relational projection;
-- preserve citations and source availability flags;
+- persist policy-selected normalized content in Core and keep the relational
+  projection metadata-only;
+- preserve stable ctx citations and provider session identity;
 - keep setup local and side-effect-limited;
-- document that SQLite and stable SQL views are metadata/locator-only and
+- document that SQLite and stable SQL views are metadata-only and
   cannot return event payloads;
 - treat JSON output as private until reviewed.
-- require exact native-record verification for every show policy, bounded
-  body/output sizes, and all-or-nothing results;
-- keep typed hydration errors path- and body-free and direct diagnosis through
-  `ctx locate event`.
+- require bounded Core body/output sizes and all-or-nothing show results.

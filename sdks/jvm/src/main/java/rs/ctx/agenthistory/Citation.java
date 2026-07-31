@@ -82,30 +82,6 @@ public final class Citation {
         return getEventSeq();
     }
 
-    public String getSourcePath() {
-        return AgentHistoryValue.string(fields.get("sourcePath"));
-    }
-
-    public String sourcePath() {
-        return getSourcePath();
-    }
-
-    public Boolean getSourceExists() {
-        return AgentHistoryValue.bool(fields.get("sourceExists"));
-    }
-
-    public Boolean sourceExists() {
-        return getSourceExists();
-    }
-
-    public String getCursor() {
-        return AgentHistoryValue.string(fields.get("cursor"));
-    }
-
-    public String cursor() {
-        return getCursor();
-    }
-
     public Map<String, Object> asMap() {
         return fields;
     }

@@ -7,10 +7,10 @@ narrow: a manifest identifies a durable provider-owned
 daemon-owned source-backed generation path.
 
 ctx does not load plugin code in-process and does not provide a second history
-store for plugins. The declared provider file remains the exact-body authority;
-the source-backed index is a derived search structure. Command-only exporters
-are discoverable but unsupported in 1.0 because command stdout is not a durable
-provider source.
+store for plugins. Import copies policy-selected normalized history into Core;
+the declared provider file remains the input to later refreshes. Command-only
+exporters are discoverable but unsupported in 1.0 because command stdout is not
+a durable provider source.
 
 ## Install And Discover
 
@@ -105,8 +105,8 @@ An accepted import has one authority path:
 Cold imports, appends, rewrites, replacements, and no-ops all use the shared
 custom JSONL source-family path. There is no fallback to the old Store database,
 synthetic `NativePath` body, command-output snapshot, or local content pack.
-`ctx show ... --content complete` rehydrates exact event content from the
-provider-owned file and fails closed if that source no longer verifies.
+`ctx show ... --content complete` reads normalized imported event content from
+Core and does not depend on the provider-owned file remaining available.
 
 After import, `--history-source` uses the canonical
 `provider_key/source_id` route identity:

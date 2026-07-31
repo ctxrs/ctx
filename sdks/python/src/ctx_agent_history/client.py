@@ -11,8 +11,6 @@ from .types import (
     ImportResponse,
     InitResponse,
     JsonObject,
-    LocateEventResponse,
-    LocateSessionResponse,
     SearchBackendMode,
     SearchResponse,
     ShowEventResponse,
@@ -189,18 +187,6 @@ class AgentHistoryClient:
 
     def showSession(self, session_id: str, *, mode: Optional[str] = None) -> ShowSessionResponse:
         return self.show_session(session_id, mode=mode)
-
-    def locate_event(self, event_id: str) -> LocateEventResponse:
-        return self._transport.locate_event(event_id)
-
-    def locateEvent(self, event_id: str) -> LocateEventResponse:
-        return self.locate_event(event_id)
-
-    def locate_session(self, session_id: str) -> LocateSessionResponse:
-        return self._transport.locate_session(session_id)
-
-    def locateSession(self, session_id: str) -> LocateSessionResponse:
-        return self.locate_session(session_id)
 
     def version(self) -> VersionInfo:
         return VersionInfo(

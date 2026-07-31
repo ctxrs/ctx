@@ -23,11 +23,6 @@
         "text": "local agent history search result"
       }
     ],
-    "source": {
-      "path": "/tmp/ctx-sdk-fixture/session.jsonl",
-      "exists": true,
-      "sourceFormat": "codex_session_jsonl"
-    },
     "mode": "lite",
     "format": "json"
   }

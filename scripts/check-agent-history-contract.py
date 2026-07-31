@@ -21,8 +21,6 @@ VALID_OPERATIONS = {
     "search",
     "showEvent",
     "showSession",
-    "locateEvent",
-    "locateSession",
     "error",
 }
 
@@ -48,8 +46,6 @@ PAYLOAD_BY_OPERATION = {
     "search": "search",
     "showEvent": "event",
     "showSession": "session",
-    "locateEvent": "location",
-    "locateSession": "location",
     "error": "error",
 }
 
@@ -197,12 +193,6 @@ def validate_fixture(path: Path, schema: dict) -> None:
 
     if operation == "showSession":
         require(isinstance(data.get("session"), dict), f"{path}: missing session envelope")
-
-    if operation in {"locateEvent", "locateSession"}:
-        location = data.get("location")
-        require(isinstance(location, dict), f"{path}: missing location")
-        require(isinstance(location.get("source"), dict), f"{path}: missing source location")
-
 
 def main() -> int:
     schema = json.loads((CONTRACT / "schema.json").read_text())

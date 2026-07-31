@@ -157,12 +157,6 @@ filegroup(
 )
 
 filegroup(
-    name = "complete_content_provider_capabilities",
-    srcs = ["docs/complete-content-provider-capabilities.json"],
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
     name = "release_contracts",
     srcs = [
         "contracts/public-control-surface-v1.json",

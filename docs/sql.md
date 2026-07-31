@@ -6,7 +6,7 @@ counts, audits, joins, file/session metadata lookups, or scripts that need
 structured output.
 
 `ctx sql` does not refresh provider history, import files, initialize storage,
-hydrate bodies, or rebuild projections. Run `ctx setup` or `ctx import` to
+return Core event bodies, or rebuild projections. Run `ctx setup` or `ctx import` to
 request daemon-owned maintenance first if the local metadata projection needs
 to be created or rebuilt.
 
@@ -22,10 +22,9 @@ ctx sql - --format raw < query.sql
 ```
 
 Use normal `ctx search` for transcript text search. The relational projection
-contains only metadata and typed locators; it does not store or expose event
-bodies, previews, command/result payloads, or transcript text, and `ctx sql`
-does not hydrate provider source files. Use `ctx show` or `ctx locate` when you
-need source-backed event content or its provider location.
+contains only metadata; it does not store or expose event
+bodies, previews, command/result payloads, or transcript text. Use `ctx show`
+when you need complete Core-backed event content.
 
 ## Stable Views
 
@@ -50,7 +49,6 @@ are implementation details and can change between versions.
 | `fidelity` | Import fidelity. |
 | `started_at_ms`, `ended_at_ms` | Unix epoch milliseconds. |
 | `cwd` | Captured working directory, when known. |
-| `source_path` | Raw provider source path, when known. |
 
 `ctx_events`:
 
@@ -65,7 +63,7 @@ are implementation details and can change between versions.
 | `role` | Event role such as `user`, `assistant`, or `tool`, when known. |
 | `occurred_at_ms` | Unix epoch milliseconds. |
 | `fidelity` | Import fidelity. |
-| `cwd`, `source_path` | Captured source context, when known. |
+| `cwd` | Captured working directory, when known. |
 
 `ctx_files_touched`:
 

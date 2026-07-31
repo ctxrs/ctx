@@ -10,7 +10,6 @@ from .types import (
     EventResult,
     ImportResult,
     JsonObject,
-    LocationResult,
     ProviderSource,
     SearchResult,
     SessionResult,
@@ -132,16 +131,12 @@ def _result_window_pagination(result_window: Mapping[str, Any]) -> JsonObject:
 def normalize_event(raw: Mapping[str, Any]) -> EventResult:
     event = _camelize_public(raw.get("event"))
     events = [_camelize_public(item) for item in raw.get("events", [])]
-    source = raw.get("source")
-    if source is None and isinstance(event, dict):
-        source = event.get("source")
     return cast(
         EventResult,
         _drop_none(
             {
                 "event": event,
                 "events": events,
-                "source": _camelize_public(source),
             }
         ),
     )
@@ -158,16 +153,11 @@ def normalize_session(raw: Mapping[str, Any]) -> SessionResult:
             {
                 "session": session,
                 "events": [_camelize_public(item) for item in raw.get("events", [])],
-                "source": _camelize_public(raw.get("source")),
                 "mode": raw.get("mode"),
                 "format": raw.get("format"),
             }
         ),
     )
-
-
-def normalize_location(raw: Mapping[str, Any]) -> LocationResult:
-    return cast(LocationResult, _camelize_public(raw))
 
 
 def _camelize_public(value: Any) -> Any:

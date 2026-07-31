@@ -15,8 +15,6 @@ const (
 	OperationSearch        OperationName = "search"
 	OperationShowEvent     OperationName = "showEvent"
 	OperationShowSession   OperationName = "showSession"
-	OperationLocateEvent   OperationName = "locateEvent"
-	OperationLocateSession OperationName = "locateSession"
 	OperationError         OperationName = "error"
 )
 
@@ -265,9 +263,6 @@ type SearchHit struct {
 	Provider              string      `json:"provider,omitempty"`
 	Timestamp             string      `json:"timestamp,omitempty"`
 	CWD                   string      `json:"cwd,omitempty"`
-	SourcePath            string      `json:"sourcePath,omitempty"`
-	SourceExists          *bool       `json:"sourceExists,omitempty"`
-	Cursor                string      `json:"cursor,omitempty"`
 	WhyMatched            []string    `json:"whyMatched,omitempty"`
 	Citations             []Citation  `json:"citations,omitempty"`
 	SuggestedNextCommands []string    `json:"suggestedNextCommands,omitempty"`
@@ -285,9 +280,6 @@ type Citation struct {
 	Provider     string `json:"provider,omitempty"`
 	SessionID    string `json:"sessionId,omitempty"`
 	EventSeq     int    `json:"eventSeq,omitempty"`
-	SourcePath   string `json:"sourcePath,omitempty"`
-	SourceExists *bool  `json:"sourceExists,omitempty"`
-	Cursor       string `json:"cursor,omitempty"`
 }
 
 // ShowEventResponse is returned by Client.ShowEvent.
@@ -298,9 +290,8 @@ type ShowEventResponse struct {
 
 // EventResult contains one selected event and its surrounding window.
 type EventResult struct {
-	Event  *Event          `json:"event,omitempty"`
-	Events []Event         `json:"events"`
-	Source *SourceLocation `json:"source,omitempty"`
+	Event  *Event  `json:"event,omitempty"`
+	Events []Event `json:"events"`
 }
 
 // ShowSessionResponse is returned by Client.ShowSession.
@@ -311,11 +302,10 @@ type ShowSessionResponse struct {
 
 // SessionResult contains a session transcript.
 type SessionResult struct {
-	Session *SessionRecord  `json:"session,omitempty"`
-	Events  []Event         `json:"events,omitempty"`
-	Source  *SourceLocation `json:"source,omitempty"`
-	Mode    string          `json:"mode,omitempty"`
-	Format  string          `json:"format,omitempty"`
+	Session *SessionRecord `json:"session,omitempty"`
+	Events  []Event        `json:"events,omitempty"`
+	Mode    string         `json:"mode,omitempty"`
+	Format  string         `json:"format,omitempty"`
 }
 
 // SessionRecord identifies a agent history session.
@@ -327,60 +317,23 @@ type SessionRecord struct {
 	StartedAt         string `json:"startedAt,omitempty"`
 	UpdatedAt         string `json:"updatedAt,omitempty"`
 	CWD               string `json:"cwd,omitempty"`
-	SourcePath        string `json:"sourcePath,omitempty"`
 	Visibility        string `json:"visibility,omitempty"`
 }
 
 // Event is the agent-history-v1 event shape.
 type Event struct {
-	CtxEventID   string     `json:"ctxEventId,omitempty"`
-	CtxSessionID string     `json:"ctxSessionId,omitempty"`
-	Sequence     int        `json:"sequence,omitempty"`
-	EventType    string     `json:"eventType,omitempty"`
-	Role         string     `json:"role,omitempty"`
-	OccurredAt   string     `json:"occurredAt,omitempty"`
-	Source       string     `json:"source,omitempty"`
-	Cursor       string     `json:"cursor,omitempty"`
-	Text         string     `json:"text,omitempty"`
-	Preview      string     `json:"preview,omitempty"`
-	Citations    []Citation `json:"citations,omitempty"`
-}
-
-// LocateEventResponse is returned by Client.LocateEvent.
-type LocateEventResponse struct {
-	Envelope
-	Location LocationResult `json:"location"`
-}
-
-// LocateSessionResponse is returned by Client.LocateSession.
-type LocateSessionResponse struct {
-	Envelope
-	Location LocationResult `json:"location"`
-}
-
-// LocationResult contains event or session source provenance.
-type LocationResult struct {
-	CtxSessionID      string          `json:"ctxSessionId"`
-	CtxEventID        string          `json:"ctxEventId,omitempty"`
-	Provider          string          `json:"provider"`
-	ProviderSessionID string          `json:"providerSessionId,omitempty"`
-	Source            *SourceLocation `json:"source"`
-	Resume            *ResumeLocation `json:"resume,omitempty"`
-}
-
-// ResumeLocation contains enough source information for a caller to resume.
-type ResumeLocation struct {
-	Cursor string `json:"cursor,omitempty"`
-	Path   string `json:"path,omitempty"`
-}
-
-// SourceLocation identifies source provenance for show/locate results.
-type SourceLocation struct {
-	Path         string `json:"path,omitempty"`
-	Cursor       string `json:"cursor,omitempty"`
-	Exists       *bool  `json:"exists,omitempty"`
-	SourceID     string `json:"sourceId,omitempty"`
-	SourceFormat string `json:"sourceFormat,omitempty"`
+	CtxEventID       string     `json:"ctxEventId,omitempty"`
+	CtxSessionID     string     `json:"ctxSessionId,omitempty"`
+	Provider         string     `json:"provider,omitempty"`
+	ProviderSessionID string    `json:"providerSessionId,omitempty"`
+	SourceFormat     string     `json:"sourceFormat,omitempty"`
+	Sequence         int        `json:"sequence,omitempty"`
+	EventType        string     `json:"eventType,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	OccurredAt       string     `json:"occurredAt,omitempty"`
+	Text             string     `json:"text,omitempty"`
+	Preview          string     `json:"preview,omitempty"`
+	Citations        []Citation `json:"citations,omitempty"`
 }
 
 // ErrorResponse is the agent-history-v1 structured error envelope.

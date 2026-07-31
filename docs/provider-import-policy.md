@@ -103,13 +103,11 @@ one-line diff previews as generic searchable text. Users can search actual line
 changes in Git or in the original provider transcript when they need patch
 content.
 
-Tool output is source-backed and metadata-only in durable ctx storage. Neither
-successful nor failed result body text is stored or indexed. A parser may emit
-a provider-independent `ContentRef` containing the SHA-256 and exact byte length
-of the full normalized output, plus compact typed outcome/evidence. Eligible
-Codex JSONL results can be re-read from the immutable source record and verified
-for a transient Pro request; this does not make them complete-message CLI
-content.
+Tool output is metadata-only in durable ctx storage. Neither successful nor
+failed result body text is stored or indexed. A parser may emit a
+provider-independent `ContentRef` containing the SHA-256 and exact byte length
+of the full normalized output, plus compact typed outcome/evidence. Query-time
+surfaces do not reconstruct excluded result bodies from provider files.
 
 ## Native Retention Metadata
 
@@ -247,7 +245,7 @@ contract for that source family:
   leaf invalidates its old evidence.
 
 Tests are layered by responsibility: each provider owns parsing, identity, and
-exact hydration fixtures; the shared source-family suite owns active append,
+normalized-content fixtures; the shared source-family suite owns active append,
 partial-tail, rewrite, truncation, replacement, logical-snapshot, and
 inventory-race behavior. Platform suites separately prove retained-handle,
 symlink/reparse, read-only SQLite, watcher, and daemon behavior. This avoids a
