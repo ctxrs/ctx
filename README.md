@@ -1,4 +1,4 @@
-<img src="docs/assets/ctx-readme-banner.png" alt="You have months of coding agent history on your machine. Search it with ctx." width="100%">
+<img src="docs/assets/ctx-readme-banner.png" alt="You have months of coding agent history on your machine. Put it to work with ctx." width="100%">
 
 ctx is an open-source CLI for fast local search across your past coding agent sessions.
 
