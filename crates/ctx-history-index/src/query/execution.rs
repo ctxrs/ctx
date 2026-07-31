@@ -755,39 +755,12 @@ impl VerifiedIndex {
                 .fast_fields()
                 .i64("occurred_at_unix_ms")?
                 .first(address.doc_id);
-            let document: TantivyDocument = self.searcher.doc(address)?;
-            let event_id = stored_identity(
-                &document,
-                fields.event_identity,
-                fields.event_id,
-                fields.event_identity_digest,
-                StableEntityKind::Event,
-                "event_identity",
-            )?;
-            let stored_session_id = stored_identity(
-                &document,
-                fields.session_identity,
-                fields.session_id,
-                fields.session_identity_digest,
-                StableEntityKind::Session,
-                "session_identity",
-            )?;
             let compact_event_id =
                 Uuid::from_u128((u128::from(event_id_high) << 64) | u128::from(event_id_low));
-            if event_id.as_uuid() != compact_event_id
-                || stored_session_id.as_uuid() != session_id
-                || required_u64(&document, fields.event_sequence, "event_sequence")?
-                    != event_sequence
-                || optional_i64(&document, fields.occurred_at_unix_ms)? != occurred_at_unix_ms
-            {
-                return Err(IndexError::InvalidStoredDocumentField("session_id"));
-            }
             coordinates.push(SessionEventCoordinate {
                 event_id: compact_event_id,
                 event_sequence,
                 occurred_at_unix_ms,
-                event_type: required_string(&document, fields.event_type, "event_type")?,
-                role: optional_string(&document, fields.role)?,
             });
         }
         coordinates.sort_by(|left, right| {

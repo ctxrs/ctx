@@ -9,7 +9,7 @@ use ctx_history_core::{
     CoreContent, CoreRecord, SourceKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
-use crate::{Fields, IndexError, LexicalDocument, Result};
+use crate::{Fields, IndexError, Result};
 
 const BASE_FIELD_VALUES: usize = 33;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
@@ -38,10 +38,6 @@ impl IndexSourceFields {
             provider: Arc::from(document_source.provider()),
             source_format: Arc::from(document_source.source_format()),
         }
-    }
-
-    pub(super) fn descriptor_digest(&self) -> [u8; 32] {
-        self.descriptor_digest
     }
 }
 
@@ -212,27 +208,6 @@ pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
     }
     Ok(content_bytes)
 }
-pub(super) struct EncodedDocumentIdentities {
-    event: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
-    session: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
-    parent: Option<[u8; ctx_history_core::StableEntityId::CANONICAL_LEN]>,
-    root: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
-}
-
-impl EncodedDocumentIdentities {
-    pub(super) fn new(document: &LexicalDocument) -> Result<Self> {
-        Ok(Self {
-            event: document.event_id.encode_canonical()?,
-            session: document.session_id.encode_canonical()?,
-            parent: document
-                .parent_session_id
-                .map(ctx_history_core::StableEntityId::encode_canonical)
-                .transpose()?,
-            root: document.root_session_id.encode_canonical()?,
-        })
-    }
-}
-
 pub(super) struct SourceToken([u8; 64]);
 
 impl SourceToken {
@@ -310,81 +285,96 @@ impl IndexDocument {
         self.fields.push((field, IndexValue::I64(value)));
     }
 
-    pub(super) fn from_lexical(
+    pub(super) fn from_core(
         fields: Fields,
-        document: LexicalDocument,
-        locator_bytes: Vec<u8>,
+        record: CoreRecord,
         core_record_bytes: Vec<u8>,
         core_content_bytes: usize,
-        identities: EncodedDocumentIdentities,
         source: IndexSourceFields,
     ) -> Result<Self> {
         let source_event_order = SourceEventOrderKey::for_document(
             &source,
-            document.event_id.digest(),
+            record.event_id.digest(),
             core_record_bytes.len(),
             core_content_bytes,
         )?;
-        let mut target = Self::with_capacity(BASE_FIELD_VALUES + document.touched_files.len() * 2);
-        target.add_text(fields.event_id, document.event_id.to_string());
+        let event_identity = record.event_id.encode_canonical()?;
+        let session_identity = record.session_id.encode_canonical()?;
+        let parent_session_identity = record
+            .parent_session_id
+            .map(ctx_history_core::StableEntityId::encode_canonical)
+            .transpose()?;
+        let root_session_identity = record.root_session_id.encode_canonical()?;
+        let repository_path_values = record
+            .repository_file_observations
+            .iter()
+            .map(|observation| 1 + usize::from(observation.prior_relative_path.is_some()))
+            .sum::<usize>();
+        let mut target = Self::with_capacity(BASE_FIELD_VALUES + repository_path_values);
+        target.add_text(fields.event_id, record.event_id.to_string());
         target.add_text(
             fields.event_identity_digest,
-            crate::hex(&document.event_id.digest()),
+            crate::hex(&record.event_id.digest()),
         );
-        target.add_bytes(fields.event_identity, identities.event);
-        let event_uuid = document.event_id.as_uuid().as_u128();
+        target.add_bytes(fields.event_identity, event_identity);
+        let event_uuid = record.event_id.as_uuid().as_u128();
         target.add_u64(fields.event_id_high, (event_uuid >> 64) as u64);
         target.add_u64(fields.event_id_low, event_uuid as u64);
-        target.add_text(fields.session_id, document.session_id.to_string());
+        target.add_text(fields.session_id, record.session_id.to_string());
         target.add_text(
             fields.session_identity_digest,
-            crate::hex(&document.session_id.digest()),
+            crate::hex(&record.session_id.digest()),
         );
-        target.add_bytes(fields.session_identity, identities.session);
-        if let (Some(parent_session_id), Some(parent_identity)) =
-            (document.parent_session_id, identities.parent)
+        target.add_bytes(fields.session_identity, session_identity);
+        if let (Some(parent_session_id), Some(parent_session_identity)) =
+            (record.parent_session_id, parent_session_identity)
         {
             target.add_text(fields.parent_session_id, parent_session_id.to_string());
-            target.add_bytes(fields.parent_session_identity, parent_identity);
+            target.add_bytes(fields.parent_session_identity, parent_session_identity);
         }
-        target.add_text(fields.root_session_id, document.root_session_id.to_string());
-        target.add_bytes(fields.root_session_identity, identities.root);
+        target.add_text(fields.root_session_id, record.root_session_id.to_string());
+        target.add_bytes(fields.root_session_identity, root_session_identity);
         target.add_shared_text(fields.source_key, source.token);
-        target.add_bytes(fields.native_locator, locator_bytes);
         target.add_shared_text(fields.provider, source.provider);
         target.add_shared_text(fields.source_format, source.source_format);
-        if let Some(provider_session_id) = document.provider_session_id {
+        if let Some(provider_session_id) = record.provider_session_id {
             target.add_text(fields.provider_session_id, provider_session_id);
         }
-        if let Some(branch) = document.branch {
+        if let Some(branch) = record.branch {
             target.add_text(fields.branch, branch);
         }
-        if let Some(source_path) = document.source_path {
-            target.add_text(fields.workspace_filter, source_path.to_lowercase());
-            target.add_text(fields.source_path, source_path);
-        }
-        target.add_text(fields.agent_type, document.agent_type);
-        target.add_u64(fields.is_primary, u64::from(document.is_primary));
-        target.add_u64(fields.event_sequence, document.event_sequence);
-        if let Some(occurred_at_unix_ms) = document.occurred_at_unix_ms {
+        target.add_text(fields.agent_type, record.agent_type);
+        target.add_u64(fields.is_primary, u64::from(record.is_primary));
+        target.add_u64(fields.event_sequence, record.event_sequence);
+        if let Some(occurred_at_unix_ms) = record.occurred_at_unix_ms {
             target.add_i64(fields.occurred_at_unix_ms, occurred_at_unix_ms);
         }
-        target.add_text(fields.event_type, document.event_type);
-        if let Some(role) = document.role {
+        target.add_text(fields.event_type, record.event_type);
+        if let Some(role) = record.role {
             target.add_text(fields.role, role);
         }
-        target.add_text(fields.body_search, document.body);
-        if let Some(workspace) = document.workspace {
+        if let Some(body) = record.content.normalized_body {
+            target.add_text(fields.body_search, body);
+        }
+        if let Some(workspace) = record.workspace {
             target.add_text(fields.workspace_filter, workspace.to_lowercase());
             target.add_text(fields.workspace, workspace);
         }
-        if let Some(cwd) = document.cwd {
+        if let Some(cwd) = record.cwd {
             target.add_text(fields.workspace_filter, cwd.to_lowercase());
             target.add_text(fields.cwd, cwd);
         }
-        for touched_file in document.touched_files {
-            target.add_text(fields.touched_file_filter, touched_file.to_lowercase());
-            target.add_text(fields.touched_file, touched_file);
+        for observation in record.repository_file_observations {
+            target.add_text(
+                fields.touched_file_filter,
+                observation.relative_path.to_lowercase(),
+            );
+            if let Some(prior_relative_path) = observation.prior_relative_path {
+                target.add_text(
+                    fields.touched_file_filter,
+                    prior_relative_path.to_lowercase(),
+                );
+            }
         }
         target.add_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
@@ -423,7 +413,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{fields_from_schema, lexical_schema, GenerationWriter, IndexError, WriterOptions};
+    use crate::{
+        fields_from_schema, lexical_schema, GenerationWriter, IndexError, LexicalDocument,
+        WriterOptions,
+    };
 
     fn source(source_format: &str) -> SourceKey {
         SourceKey::derive(
@@ -509,11 +502,11 @@ mod tests {
         let mut actual = IndexDocument::with_capacity(7);
         actual.add_text(fields.body_search, body);
         actual.add_shared_text(fields.source_key, Arc::clone(&source));
-        actual.add_bytes(fields.native_locator, bytes);
+        actual.add_bytes(fields.core_record, bytes);
         actual.add_u64(fields.event_sequence, 42);
         actual.add_i64(fields.occurred_at_unix_ms, -9);
-        actual.add_text(fields.touched_file, "first.rs".to_owned());
-        actual.add_text(fields.touched_file, "second.rs".to_owned());
+        actual.add_text(fields.touched_file_filter, "first.rs".to_owned());
+        actual.add_text(fields.touched_file_filter, "second.rs".to_owned());
 
         assert!(actual.fields.iter().any(|(field, value)| {
             *field == fields.body_search
@@ -524,18 +517,18 @@ mod tests {
                 && matches!(value, IndexValue::SharedText(value) if value.as_ptr() == source_pointer)
         }));
         assert!(actual.fields.iter().any(|(field, value)| {
-            *field == fields.native_locator
+            *field == fields.core_record
                 && matches!(value, IndexValue::Bytes(value) if value.as_ptr() == bytes_pointer)
         }));
 
         let mut expected = TantivyDocument::default();
         expected.add_text(fields.body_search, "move-backed body".repeat(512));
         expected.add_text(fields.source_key, source.as_ref());
-        expected.add_bytes(fields.native_locator, &[7_u8; 113]);
+        expected.add_bytes(fields.core_record, &[7_u8; 113]);
         expected.add_u64(fields.event_sequence, 42);
         expected.add_i64(fields.occurred_at_unix_ms, -9);
-        expected.add_text(fields.touched_file, "first.rs");
-        expected.add_text(fields.touched_file, "second.rs");
+        expected.add_text(fields.touched_file_filter, "first.rs");
+        expected.add_text(fields.touched_file_filter, "second.rs");
 
         assert_eq!(
             serde_json::to_value(actual.to_named_doc(&schema)).unwrap(),
@@ -611,7 +604,7 @@ mod tests {
         mismatched_identity.locator = lexical_document(&descriptor_alias).locator;
         assert!(matches!(
             writer.add_document(mismatched_identity),
-            Err(IndexError::IdentitySourceMismatch(_))
+            Err(IndexError::CoreRecord(_))
         ));
         assert!(matches!(
             writer.add_document(lexical_document(&descriptor_alias)),

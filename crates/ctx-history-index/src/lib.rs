@@ -24,7 +24,7 @@ pub use contracts::{
     RevalidationTarget, WriterOptions, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
     LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
-pub use ctx_history_core::CoreRecordAnnotation;
+pub use ctx_history_core::{CoreRecord, CoreRecordAnnotation};
 pub(crate) use identity::{
     hex, prior_core_record, register_compact_identity, register_event_identity,
     register_session_identity, sha256_hex, source_sort_key, source_token,
@@ -68,7 +68,7 @@ use std::{
 
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
-    SourceKey, StableEntityKind,
+    SourceKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
 };
 #[cfg(test)]
 use ctx_history_core::{SourceRecordLocator, StableEntityId, IDENTITY_VERSION};
@@ -82,9 +82,7 @@ use tantivy::{
 use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
-use index_document::{
-    core_content_bytes, EncodedDocumentIdentities, IndexDocument, IndexSourceFields, SourceToken,
-};
+use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 
 struct PendingSource {
@@ -571,107 +569,75 @@ impl GenerationWriter {
         document: LexicalDocument,
         annotation: CoreRecordAnnotation,
     ) -> Result<()> {
-        let locator_bytes = document.validate()?;
-        let encoded_identities = EncodedDocumentIdentities::new(&document)?;
-        if document.event_id.entity_kind() != StableEntityKind::Event {
-            return Err(IndexError::InvalidEventIdentityKind(
-                document.event_id.to_string(),
-            ));
-        }
-        if document.session_id.entity_kind() != StableEntityKind::Session {
-            return Err(IndexError::InvalidSessionIdentityKind(
-                document.session_id.to_string(),
-            ));
-        }
-        for related_session_id in document
-            .parent_session_id
-            .into_iter()
-            .chain(std::iter::once(document.root_session_id))
+        let record = document.to_core_record_with_annotation(annotation)?;
+        self.add_core_record(record)
+    }
+
+    /// Adds one complete generation-owned Core record.
+    ///
+    /// This is the canonical write API. No provider read locator is accepted,
+    /// synthesized, or persisted by this path.
+    pub fn add_core_record(&mut self, mut record: CoreRecord) -> Result<()> {
+        if record.normalization_revision != CORE_NORMALIZATION_REVISION
+            || record.content.policy_revision != CORE_CONTENT_POLICY_REVISION
         {
-            if related_session_id.entity_kind() != StableEntityKind::Session {
-                return Err(IndexError::InvalidSessionIdentityKind(
-                    related_session_id.to_string(),
-                ));
-            }
+            return Err(IndexError::CoreRecordPolicyRevisionMismatch {
+                normalization: record.normalization_revision,
+                expected_normalization: CORE_NORMALIZATION_REVISION,
+                content: record.content.policy_revision,
+                expected_content: CORE_CONTENT_POLICY_REVISION,
+            });
         }
-        let source_digest = document.source.identity().digest();
-        if document.event_id.source_digest() != source_digest
-            || document.session_id.source_digest() != source_digest
-        {
-            return Err(IndexError::IdentitySourceMismatch(
-                document.source.identity().to_string(),
-            ));
-        }
+        let source_digest = record.source.identity().digest();
         let token = SourceToken::new(&source_digest);
         let token = token.as_str()?;
         let pending_source = match self.pending.get(token) {
-            Some(pending) if pending.source.exact_descriptor_eq(&document.source) => pending,
-            _ => {
-                let source_descriptor_digest = document.source.exact_descriptor_digest();
-                if document.event_id.source_descriptor_digest() != source_descriptor_digest
-                    || document.session_id.source_descriptor_digest() != source_descriptor_digest
-                {
-                    return Err(IndexError::IdentitySourceMismatch(
-                        document.source.identity().to_string(),
-                    ));
-                }
-                return Err(IndexError::DocumentSourceNotActive);
-            }
+            Some(pending) if pending.source.exact_descriptor_eq(&record.source) => pending,
+            _ => return Err(IndexError::DocumentSourceNotActive),
         };
-        let source_descriptor_digest = pending_source.index_fields.descriptor_digest();
-        if document.event_id.source_descriptor_digest() != source_descriptor_digest
-            || document.session_id.source_descriptor_digest() != source_descriptor_digest
-        {
-            return Err(IndexError::IdentitySourceMismatch(
-                document.source.identity().to_string(),
-            ));
-        }
         let is_append = matches!(&pending_source.mode, PendingSourceMode::Append { .. });
         if matches!(&pending_source.mode, PendingSourceMode::Retain { .. }) {
             return Err(IndexError::DocumentSourceNotActive);
         }
-        let mut core_record = document.to_core_record_with_annotation(annotation)?;
-        if core_record.needs_prior_repository_certificate() {
+        let mut core_record_bytes = record.encode_stored()?;
+        if record.needs_prior_repository_certificate() {
             if let Some(base_searcher) = &self.base_searcher {
-                if let Some(prior) = prior_core_record(
-                    base_searcher,
-                    self.fields,
-                    document.event_id,
-                    &document.source,
-                )? {
-                    core_record.reuse_prior_repository_certificate(&prior);
-                    core_record.validate_contract()?;
+                if let Some(prior) =
+                    prior_core_record(base_searcher, self.fields, record.event_id, &record.source)?
+                {
+                    if record.reuse_prior_repository_certificate(&prior) {
+                        core_record_bytes = record.encode_stored()?;
+                    }
                 }
             }
         }
-        let core_content_bytes = core_content_bytes(&core_record.content)?;
-        let core_record_bytes = core_record.encode_stored()?;
+        let core_content_bytes = core_content_bytes(&record.content)?;
         let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
             validate_event_identity_against_base(
                 base_searcher,
                 self.fields,
-                document.event_id,
+                record.event_id,
                 token,
                 !is_append,
             )?;
             if self
                 .checked_base_sessions
-                .insert(document.session_id.as_uuid())
+                .insert(record.session_id.as_uuid())
             {
                 validate_session_identity_against_base(
                     base_searcher,
                     self.fields,
-                    document.session_id,
+                    record.session_id,
                     token,
                 )?;
             }
-            for related_session_id in document
+            for related_session_id in record
                 .parent_session_id
                 .into_iter()
-                .chain(std::iter::once(document.root_session_id))
+                .chain(std::iter::once(record.root_session_id))
             {
-                if related_session_id != document.session_id
+                if related_session_id != record.session_id
                     && self
                         .checked_base_sessions
                         .insert(related_session_id.as_uuid())
@@ -686,22 +652,17 @@ impl GenerationWriter {
         } else if is_append {
             return Err(IndexError::AppendBaseMismatch);
         }
-        register_session_identity(&mut self.staged_session_identities, document.session_id)?;
-        if let Some(parent_session_id) = document.parent_session_id {
+        register_session_identity(&mut self.staged_session_identities, record.session_id)?;
+        if let Some(parent_session_id) = record.parent_session_id {
             register_session_identity(&mut self.staged_session_identities, parent_session_id)?;
         }
-        register_session_identity(
-            &mut self.staged_session_identities,
-            document.root_session_id,
-        )?;
-        register_event_identity(&mut self.staged_event_identities, document.event_id)?;
-        let target = IndexDocument::from_lexical(
+        register_session_identity(&mut self.staged_session_identities, record.root_session_id)?;
+        register_event_identity(&mut self.staged_event_identities, record.event_id)?;
+        let target = IndexDocument::from_core(
             self.fields,
-            document,
-            locator_bytes,
+            record,
             core_record_bytes,
             core_content_bytes,
-            encoded_identities,
             index_fields,
         )?;
         self.writer_mut()?.add_document(target)?;

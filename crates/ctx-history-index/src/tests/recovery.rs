@@ -669,7 +669,7 @@ fn document_identity_kinds_are_checked() {
     let mut invalid = document(&source, 1, "body");
     invalid.event_id = invalid.session_id;
     let error = writer.add_document(invalid).unwrap_err();
-    assert!(matches!(error, IndexError::InvalidEventIdentityKind(_)));
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
@@ -683,7 +683,7 @@ fn document_identities_must_belong_to_the_document_source() {
     invalid.locator = document(&second, 2, "other").locator;
     invalid.source = second;
     let error = writer.add_document(invalid).unwrap_err();
-    assert!(matches!(error, IndexError::IdentitySourceMismatch(_)));
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]

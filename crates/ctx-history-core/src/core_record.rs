@@ -160,6 +160,62 @@ pub struct CoreRecordAnnotation {
 }
 
 impl CoreRecord {
+    /// Constructs the common policy-selected Core shape while keeping the
+    /// provider parser revision explicit.
+    ///
+    /// Provider adapters can set the public optional/native/repository fields
+    /// they actually observed after construction. The generation writer
+    /// validates the completed record again before indexing it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_selected(
+        event_id: StableEntityId,
+        session_id: StableEntityId,
+        root_session_id: StableEntityId,
+        source: SourceKey,
+        event_sequence: u64,
+        event_type: impl Into<String>,
+        agent_type: impl Into<String>,
+        is_primary: bool,
+        parser_revision: impl Into<String>,
+        normalized_body: impl Into<String>,
+    ) -> CoreRecordResult<Self> {
+        let record = Self {
+            record_version: CORE_RECORD_VERSION,
+            event_id,
+            session_id,
+            parent_session_id: None,
+            root_session_id,
+            source,
+            provider_session_id: None,
+            native_event_id: None,
+            event_sequence,
+            occurred_at_unix_ms: None,
+            event_type: event_type.into(),
+            role: None,
+            agent_type: agent_type.into(),
+            is_primary,
+            workspace: None,
+            branch: None,
+            cwd: None,
+            parser_revision: parser_revision.into(),
+            normalization_revision: CORE_NORMALIZATION_REVISION,
+            content: CoreContent {
+                policy_revision: CORE_CONTENT_POLICY_REVISION,
+                policy_status: CoreContentPolicyStatus::Selected,
+                normalized_body: Some(normalized_body.into()),
+                structured_content: None,
+            },
+            metadata: BTreeMap::new(),
+            repository_candidate_evidence: RepositoryCandidateEvidence::default(),
+            repository_bindings: Vec::new(),
+            repository_abstentions: Vec::new(),
+            repository_file_observations: Vec::new(),
+            repository_vcs_observations: Vec::new(),
+        };
+        record.validate_contract()?;
+        Ok(record)
+    }
+
     pub fn validate_contract(&self) -> CoreRecordResult<()> {
         if self.record_version != CORE_RECORD_VERSION {
             return Err(CoreRecordError::UnsupportedVersion(self.record_version));
