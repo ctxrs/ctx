@@ -80,13 +80,14 @@ pub(crate) fn open_root_handle_sqlite_source_snapshot(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
-    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, || {}, || {})
+    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, || {}, || {}, || {})
 }
 
 fn open_root_handle_sqlite_source_snapshot_inner(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
     after_parent_certification: impl FnOnce(),
+    after_database_copy: impl FnOnce(),
     before_source_revalidation: impl FnOnce(),
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
     let family = SqliteSourceFamily::open(authority, database_name, after_parent_certification)?;
@@ -97,6 +98,7 @@ fn open_root_handle_sqlite_source_snapshot_inner(
         &authority.snapshot_context,
         &family,
         &native_evidence,
+        after_database_copy,
     )?;
     verify_connection_read_only(&acquired.connection)?;
     configure_and_pin_snapshot(&acquired.connection)?;
@@ -137,6 +139,7 @@ fn acquire_sqlite_connection(
     snapshot_context: &Arc<SqliteSourceSnapshotContext>,
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
+    after_database_copy: impl FnOnce(),
 ) -> SqliteSourceAccessResult<AcquiredSqliteConnection> {
     if family.wal.is_none() && family.shared_memory.is_none() {
         #[cfg(target_os = "linux")]
@@ -152,9 +155,9 @@ fn acquire_sqlite_connection(
         }
     }
 
-    enforce_snapshot_copy_bounds(family, evidence)?;
-    let (snapshot_directory, snapshot_path, copied_bytes) =
-        copy_sqlite_family_to_ctx(data_root, family, evidence)?;
+    let copied_bytes = enforce_snapshot_copy_bounds(family, evidence)?;
+    let (snapshot_directory, snapshot_path) =
+        copy_sqlite_family_to_ctx(data_root, family, evidence, after_database_copy)?;
     snapshot_context.record_source_bytes_copied(copied_bytes)?;
     let connection = Connection::open_with_flags(
         &snapshot_path,
@@ -204,16 +207,22 @@ fn open_immutable_main(database: &SqliteFamilyMember) -> SqliteSourceAccessResul
 fn enforce_snapshot_copy_bounds(
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
-) -> SqliteSourceAccessResult<()> {
-    let mut total = bounded_snapshot_component(&family.database.path, evidence.database.length)?;
-    if let (Some(wal), Some(state)) = (family.wal.as_ref(), evidence.wal.as_ref()) {
-        total = total
-            .checked_add(bounded_snapshot_component(&wal.path, state.length)?)
-            .ok_or_else(|| SqliteSourceAccessError::SnapshotTooLarge {
-                path: family.database.path.clone(),
-                length: u64::MAX,
-                maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+) -> SqliteSourceAccessResult<u64> {
+    // The family total is authoritative: main and WAL may consume any share,
+    // but every observed byte from both members must fit and be copied.
+    let mut total = evidence.database.length;
+    match (family.wal.as_ref(), evidence.wal.as_ref()) {
+        (Some(_wal), Some(state)) => {
+            total = total.checked_add(state.length).ok_or_else(|| {
+                SqliteSourceAccessError::SnapshotTooLarge {
+                    path: family.database.path.clone(),
+                    length: u64::MAX,
+                    maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+                }
             })?;
+        }
+        (None, None) => {}
+        _ => return Err(SqliteSourceAccessError::SourceChanged),
     }
     if total > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
         return Err(SqliteSourceAccessError::SnapshotTooLarge {
@@ -222,26 +231,15 @@ fn enforce_snapshot_copy_bounds(
             maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
         });
     }
-    Ok(())
-}
-
-fn bounded_snapshot_component(path: &Path, length: u64) -> SqliteSourceAccessResult<u64> {
-    if length > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
-        Err(SqliteSourceAccessError::SnapshotTooLarge {
-            path: path.to_path_buf(),
-            length,
-            maximum: SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
-        })
-    } else {
-        Ok(length)
-    }
+    Ok(total)
 }
 
 fn copy_sqlite_family_to_ctx(
     data_root: &Path,
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
-) -> SqliteSourceAccessResult<(TempDir, PathBuf, u64)> {
+    after_database_copy: impl FnOnce(),
+) -> SqliteSourceAccessResult<(TempDir, PathBuf)> {
     let staging_root = data_root.join("tmp").join("provider-sqlite");
     create_private_directory_all(&staging_root).map_err(|source| SqliteSourceAccessError::Io {
         operation: "creating the private provider SQLite staging root",
@@ -258,21 +256,20 @@ fn copy_sqlite_family_to_ctx(
         })?;
     let snapshot_path = directory.path().join("source.sqlite");
     copy_sqlite_member(&family.database, &snapshot_path, evidence.database.length)?;
-    let mut copied_bytes = evidence.database.length;
-    if let (Some(wal), Some(state)) = (family.wal.as_ref(), evidence.wal.as_ref()) {
-        copy_sqlite_member(
+    after_database_copy();
+    match (family.wal.as_ref(), evidence.wal.as_ref()) {
+        (Some(wal), Some(state)) => copy_sqlite_member(
             wal,
             &directory.path().join("source.sqlite-wal"),
             state.length,
-        )?;
-        copied_bytes = copied_bytes
-            .checked_add(state.length)
-            .ok_or(SqliteSourceAccessError::SourceChanged)?;
+        )?,
+        (None, None) => {}
+        _ => return Err(SqliteSourceAccessError::SourceChanged),
     }
     // SHM is lock coordination, not provider content. Copying it would retain
     // volatile reader marks. Stock SQLite rebuilds it only in this ctx-owned
     // directory from the certified DB/WAL pair.
-    Ok((directory, snapshot_path, copied_bytes))
+    Ok((directory, snapshot_path))
 }
 
 fn copy_sqlite_member(
@@ -361,7 +358,23 @@ pub(super) fn open_root_handle_sqlite_source_snapshot_for_test(
         authority,
         database_name,
         || {},
+        || {},
         before_sqlite_open,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn open_root_handle_sqlite_source_snapshot_after_database_copy_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    after_database_copy: impl FnOnce(),
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    open_root_handle_sqlite_source_snapshot_inner(
+        authority,
+        database_name,
+        || {},
+        after_database_copy,
+        || {},
     )
 }
 
@@ -376,5 +389,18 @@ pub(super) fn open_root_handle_sqlite_source_snapshot_after_parent_certification
         database_name,
         after_parent_certification,
         || {},
+        || {},
     )
+}
+
+#[cfg(test)]
+pub(super) fn certify_root_handle_sqlite_source_snapshot_copy_budget_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+) -> SqliteSourceAccessResult<u64> {
+    let family = SqliteSourceFamily::open(authority, database_name, || {})?;
+    let evidence = family.capture_evidence()?;
+    let copied_bytes = enforce_snapshot_copy_bounds(&family, &evidence)?;
+    family.revalidate(&evidence)?;
+    Ok(copied_bytes)
 }
