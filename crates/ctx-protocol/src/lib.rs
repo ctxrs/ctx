@@ -65,8 +65,6 @@ pub enum AgentHistoryOperation {
     Search,
     ShowEvent,
     ShowSession,
-    LocateEvent,
-    LocateSession,
     Error,
 }
 
@@ -449,22 +447,6 @@ pub struct SessionResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocationResult {
-    pub ctx_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx_event_id: Option<String>,
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_session_id: Option<String>,
-    pub source: SourceLocation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume: Option<JsonObject>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: JsonObject,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentHistoryEnvelope {
     pub contract_version: String,
     pub schema_version: u16,
@@ -484,8 +466,6 @@ pub struct AgentHistoryEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<LocationResult>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AgentHistoryErrorBody>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
@@ -504,7 +484,6 @@ impl AgentHistoryEnvelope {
             search: None,
             event: None,
             session: None,
-            location: None,
             error: None,
             extra: JsonObject::new(),
         }
@@ -621,9 +600,6 @@ mod tests {
                 }
                 AgentHistoryOperation::ShowSession => {
                     assert!(envelope.session.is_some(), "{:?}", entry.path());
-                }
-                AgentHistoryOperation::LocateEvent | AgentHistoryOperation::LocateSession => {
-                    assert!(envelope.location.is_some(), "{:?}", entry.path());
                 }
                 AgentHistoryOperation::Error => {
                     assert!(envelope.error.is_some(), "{:?}", entry.path())
