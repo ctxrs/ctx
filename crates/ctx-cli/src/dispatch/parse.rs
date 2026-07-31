@@ -115,11 +115,15 @@ fn human_clap_document(
                 .next()
                 .unwrap_or(invalid_arg.as_str());
             let invalid_value = clap_context_text(error, ClapContextKind::InvalidValue)?;
+            let (detail, action) = human_value_validation_recovery(
+                invalid_arg,
+                error.source().map(ToString::to_string),
+            );
             (
                 format!("invalid value '{invalid_value}' for '{invalid_arg}'"),
-                error.source().map(ToString::to_string),
+                detail,
                 clap_usage(error),
-                None,
+                action,
             )
         }
         _ => return None,
@@ -138,6 +142,27 @@ fn human_clap_document(
             action: action.map(|command| Action { command }),
         },
     ))
+}
+
+fn human_value_validation_recovery(
+    invalid_arg: &str,
+    detail: Option<String>,
+) -> (Option<String>, Option<&'static str>) {
+    const PROVIDER_RECOVERY: &str =
+        "; run `ctx sources --all` to inspect every supported provider location";
+    if invalid_arg != "--provider" {
+        return (detail, None);
+    }
+    let Some(detail) = detail else {
+        return (None, None);
+    };
+    let Some(explanation) = detail.strip_suffix(PROVIDER_RECOVERY) else {
+        return (Some(detail), None);
+    };
+    (
+        Some(format!("{}.", explanation.trim_end_matches('.'))),
+        Some("ctx sources --all"),
+    )
 }
 
 fn clap_context_text(error: &clap::Error, kind: ClapContextKind) -> Option<String> {

@@ -129,6 +129,19 @@ fn value_validation_diagnostics_wrap_at_terminal_width() {
 }
 
 #[test]
+fn provider_validation_promotes_the_copyable_recovery_action() {
+    let output = human_output(&["ctx", "sources", "--provider", "unknown"], 100);
+    assert!(
+        output.contains("unknown provider \"unknown\"; examples:"),
+        "{output}"
+    );
+    assert!(!output.contains("run `ctx"), "{output}");
+    assert_eq!(output.matches("ctx sources --all").count(), 1, "{output}");
+    assert!(output.contains("Next\n  ctx sources --all\n"), "{output}");
+    assert_width_safe(&output, 100, &[]);
+}
+
+#[test]
 fn retired_once_has_bounded_human_recovery_without_force() {
     const RECOVERY: &str = "  ctx daemon run --idle-exit-seconds <SECONDS>";
     for width in [32, 80] {
@@ -147,23 +160,33 @@ fn retired_once_has_bounded_human_recovery_without_force() {
 
 #[test]
 fn machine_parse_errors_remain_raw_clap_bytes() {
-    let (error, arguments) =
-        error_and_arguments(&["ctx", "daemon", "run", "--once", "--format=json"]);
-    let expected = error.to_string();
-    assert!(expected.contains("--force"), "{expected}");
+    for (arguments, expected_fragment) in [
+        (
+            &["ctx", "daemon", "run", "--once", "--format=json"][..],
+            "--force",
+        ),
+        (
+            &["ctx", "sources", "--provider", "unknown", "--format=json"][..],
+            "run `ctx sources --all` to inspect every supported provider location",
+        ),
+    ] {
+        let (error, arguments) = error_and_arguments(arguments);
+        let expected = error.to_string();
+        assert!(expected.contains(expected_fragment), "{expected}");
 
-    let stderr = SharedBytes::default();
-    let stderr_copy = stderr.clone();
-    let mut ui = Ui::with_writers(
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never)),
-        stderr,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never)),
-    );
-    write_adapted_clap_output(&error, &arguments, true, &mut ui).unwrap();
-    ui.flush().unwrap();
+        let stderr = SharedBytes::default();
+        let stderr_copy = stderr.clone();
+        let mut ui = Ui::with_writers(
+            SharedBytes::default(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never)),
+            stderr,
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never)),
+        );
+        write_adapted_clap_output(&error, &arguments, true, &mut ui).unwrap();
+        ui.flush().unwrap();
 
-    assert_eq!(String::from_utf8(stderr_copy.bytes()).unwrap(), expected);
+        assert_eq!(String::from_utf8(stderr_copy.bytes()).unwrap(), expected);
+    }
 }
 
 #[test]
