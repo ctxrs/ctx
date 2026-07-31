@@ -3,6 +3,7 @@ use clap::Args;
 
 use crate::analytics::{count_bucket, IntegrationScope, IntegrationTelemetry, TargetSelection};
 use crate::output::JsonOutputFormat;
+use crate::ui::Ui;
 
 mod agents;
 mod install;
@@ -102,17 +103,19 @@ impl SkillStatusArgs {
 pub(crate) fn run_install_command(
     args: SkillInstallArgs,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let context = PathContext::from_env()?;
-    run_install(args, &context, telemetry)
+    run_install(args, &context, telemetry, ui)
 }
 
 pub(crate) fn run_status_command(
     args: SkillStatusArgs,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let context = PathContext::from_env()?;
-    run_status(args, &context, telemetry)
+    run_status(args, &context, telemetry, ui)
 }
 
 fn insert_target_analytics(

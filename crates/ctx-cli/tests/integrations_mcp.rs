@@ -2,6 +2,78 @@ mod support;
 
 use support::*;
 
+fn human_stdout(command: &mut assert_cmd::Command) -> String {
+    let output = command.assert().success().get_output().clone();
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert!(output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn integrations_mcp_human_receipts_use_ui_and_json_stays_plain() {
+    let temp = tempdir();
+
+    let missing = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "status",
+        "mcp",
+        "--agent",
+        "codex",
+    ]));
+    assert!(
+        missing.contains("ctx MCP integration needs attention"),
+        "{missing}"
+    );
+    assert!(missing.contains("missing"), "{missing}");
+
+    let installed = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "install",
+        "mcp",
+        "--agent",
+        "codex",
+    ]));
+    assert!(
+        installed.contains("ctx MCP integration installed"),
+        "{installed}"
+    );
+    assert!(installed.contains("modified"), "{installed}");
+
+    let current = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "status",
+        "mcp",
+        "--agent",
+        "codex",
+    ]));
+    assert!(
+        current.contains("ctx MCP integration is current"),
+        "{current}"
+    );
+    assert!(current.contains("current"), "{current}");
+
+    let machine = ctx(&temp)
+        .args([
+            "--color=always",
+            "integrations",
+            "status",
+            "mcp",
+            "--agent",
+            "codex",
+            "--format=json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(!machine.stdout.contains(&0x1b), "{:?}", machine.stdout);
+    let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(value["results"][0]["status"], "current");
+}
+
 #[test]
 fn integrations_mcp_install_defaults_to_detected_agents_and_is_idempotent() {
     let temp = tempdir();
