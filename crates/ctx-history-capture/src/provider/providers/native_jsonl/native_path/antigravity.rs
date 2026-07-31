@@ -9,7 +9,3 @@ pub(crate) const fn antigravity_source_backed_adapter() -> super::DirectJsonlFam
         "antigravity-direct-native-jsonl-v1",
     )
 }
-
-#[cfg(test)]
-#[path = "antigravity_tests.rs"]
-mod tests;

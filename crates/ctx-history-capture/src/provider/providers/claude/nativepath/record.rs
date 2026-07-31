@@ -16,9 +16,9 @@ use super::{
 };
 use crate::{OutputOutcome, OutputOutcomeMetadata};
 
-mod value_hydration;
+mod value_decoding;
 
-use value_hydration::sparse_output_rows;
+use value_decoding::sparse_output_rows;
 
 const CLAUDE_BODY_HASH_DOMAIN: &[u8] = b"ctx-claude-nativepath-body-v1\0";
 
@@ -642,7 +642,7 @@ pub(super) fn parse_native_record(
     parse_native_record_inner(bytes, raw_ordinal, locator, false)
 }
 
-pub(super) fn parse_native_record_for_hydration(
+pub(super) fn parse_native_record_for_decoding(
     bytes: &[u8],
     raw_ordinal: u64,
     locator: &ClaudePhysicalLocator,

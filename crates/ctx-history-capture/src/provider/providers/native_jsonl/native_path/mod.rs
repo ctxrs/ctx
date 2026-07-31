@@ -1,4 +1,4 @@
-//! Source-backed discovery, parsing, and exact hydration for native JSONL providers.
+//! Source-backed discovery, parsing, and complete Core projection for native JSONL providers.
 
 mod antigravity;
 mod copilot;

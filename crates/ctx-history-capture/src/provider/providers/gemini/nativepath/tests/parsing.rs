@@ -244,13 +244,13 @@ fn gemini_nativepath_structural_rejections_advance_with_durable_detail_and_resum
 }
 
 #[test]
-fn gemini_nativepath_hydration_failure_keeps_later_siblings_replayable() {
+fn gemini_nativepath_decoding_failure_keeps_later_siblings_replayable() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let path = write_transcript(
         &root,
         &[
-            header("hydration-retry", "main"),
+            header("decoding-retry", "main"),
             json!({
                 "timestamp": "2026-01-01T00:00:01.000Z",
                 "type": "user",
@@ -281,7 +281,7 @@ fn gemini_nativepath_hydration_failure_keeps_later_siblings_replayable() {
 }
 
 #[test]
-fn gemini_nativepath_invalid_hydration_size_and_touch_rows_do_not_block_later_records() {
+fn gemini_nativepath_invalid_decoding_size_and_touch_rows_do_not_block_later_records() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let overflow_calls = (0..=MAX_GEMINI_FILE_TOUCHES_PER_EVENT)

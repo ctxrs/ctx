@@ -1,4 +1,4 @@
-//! Provider-owned Claude Code discovery, parsing, and source-backed hydration.
+//! Provider-owned Claude Code discovery, parsing, and source-backed decoding.
 
 mod privacy;
 mod record;
