@@ -62,7 +62,7 @@ fn idle_cycles_emit_first_then_flush_a_coalesced_transition() {
 }
 
 #[test]
-fn run_once_has_no_runtime_event_but_preserves_provider_handoff() {
+fn scheduler_cycle_without_runtime_telemetry_preserves_provider_handoff() {
     let provider = PublicEventV1::ProviderRefreshCompleted(ProviderRefreshCompletedV1::new(
         Surface::Daemon,
         Outcome::Success,
@@ -117,25 +117,14 @@ fn released_daemon_service_artifacts_are_removed_after_forced_shutdown() -> Resu
 
 #[test]
 fn only_enabled_long_lived_daemon_uses_upgrade_scheduler() {
-    assert!(daemon_should_schedule_auto_upgrade(
-        true,
-        DaemonMode::Full,
-        false
-    ));
+    assert!(daemon_should_schedule_auto_upgrade(true, DaemonMode::Full));
     assert!(!daemon_should_schedule_auto_upgrade(
         false,
-        DaemonMode::Full,
-        false
+        DaemonMode::Full
     ));
     assert!(!daemon_should_schedule_auto_upgrade(
         true,
-        DaemonMode::Full,
-        true
-    ));
-    assert!(!daemon_should_schedule_auto_upgrade(
-        true,
-        DaemonMode::SourceRefreshOnly,
-        false
+        DaemonMode::SourceRefreshOnly
     ));
 }
 
@@ -172,7 +161,6 @@ fn persistent_default_never_has_a_finite_idle_exit() {
 fn test_daemon_run_args() -> DaemonRunArgs {
     DaemonRunArgs {
         foreground: false,
-        once: true,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: None,
@@ -226,7 +214,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
         ..DaemonRuntime::default()
     };
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
@@ -295,7 +283,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
             ..DaemonRuntime::default()
         };
 
-        let iteration = run_daemon_once_with_activity(
+        let iteration = run_daemon_scheduler_cycle_with_activity(
             &test_daemon_run_args(),
             temp.path(),
             &mut runtime,
@@ -355,7 +343,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 }
 
 #[test]
-fn daemon_run_once_publishes_core_without_entering_a_blocked_sidecar() -> Result<()> {
+fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
@@ -418,7 +406,7 @@ fn daemon_run_once_publishes_core_without_entering_a_blocked_sidecar() -> Result
     });
     let mut runtime = DaemonRuntime::default();
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
@@ -527,7 +515,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
     ));
     let mut runtime = DaemonRuntime::default();
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
@@ -547,10 +535,8 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
         crate::semantic::source_backed_refresh_coordinator::source_backed_index_root(temp.path())
     )
     .is_ok());
-    let mut sidecar_args = test_daemon_run_args();
-    sidecar_args.once = false;
-    let sidecar = run_daemon_once_with_activity(
-        &sidecar_args,
+    let sidecar = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
         None,
@@ -697,7 +683,6 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
     let error = run_daemon_inner(
         DaemonRunArgs {
             foreground: false,
-            once: true,
             idle_exit_seconds: None,
             loop_interval_seconds: None,
             max_chunks: None,
@@ -758,7 +743,6 @@ fn daemon_startup_repairs_verified_publication_before_service_readiness() -> Res
     let error = run_daemon_inner(
         DaemonRunArgs {
             foreground: false,
-            once: true,
             idle_exit_seconds: None,
             loop_interval_seconds: None,
             max_chunks: None,

@@ -3,9 +3,8 @@ use super::*;
 pub(super) fn daemon_should_schedule_auto_upgrade(
     daemon_enabled: bool,
     daemon_mode: DaemonMode,
-    run_once: bool,
 ) -> bool {
-    daemon_enabled && daemon_mode == DaemonMode::Full && !run_once
+    daemon_enabled && daemon_mode == DaemonMode::Full
 }
 
 #[cfg(test)]

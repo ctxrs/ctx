@@ -464,10 +464,8 @@ pub(crate) struct DaemonDisableArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct DaemonRunArgs {
-    #[arg(long, conflicts_with = "once", hide = true)]
+    #[arg(long, hide = true)]
     pub(crate) foreground: bool,
-    #[arg(long, help = "Run one maintenance pass and exit")]
-    pub(crate) once: bool,
     #[arg(long, value_parser = parse_daemon_idle_exit_seconds)]
     pub(crate) idle_exit_seconds: Option<u64>,
     #[arg(long, value_parser = parse_daemon_interval_seconds)]
@@ -600,8 +598,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_runtime_cap_is_only_an_inert_test_fixture_field() {
-        let cli = Cli::try_parse_from(["ctx", "daemon", "run", "--once"]).unwrap();
+    fn daemon_run_rejects_once_and_keeps_finite_idle_controls() {
+        let error = Cli::try_parse_from(["ctx", "daemon", "run", "--once"])
+            .expect_err("the removed --once surface must not parse");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "daemon",
+            "run",
+            "--idle-exit-seconds",
+            "2",
+            "--loop-interval-seconds",
+            "1",
+        ])
+        .unwrap();
         let CommandRoot::Daemon(DaemonArgs {
             command: DaemonCommand::Run(args),
         }) = cli.command
@@ -609,6 +620,8 @@ mod tests {
             panic!("expected daemon run command");
         };
 
+        assert_eq!(args.idle_exit_seconds, Some(2));
+        assert_eq!(args.loop_interval_seconds, Some(1));
         assert_eq!(args.max_seconds, None);
     }
 }

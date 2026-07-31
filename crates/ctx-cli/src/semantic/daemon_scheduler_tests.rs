@@ -31,8 +31,9 @@ use super::{
     daemon_mode_runs_source_backed_semantic_projection, daemon_semantic_job_path,
     daemon_source_backed_refresh_job_path, persist_pro_status, persist_relational_status,
     prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
-    record_daemon_job_retry, restore_daemon_consumer_retries, run_daemon_once_with_activity,
-    run_pro_catch_up_with_retry, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
+    record_daemon_job_retry, restore_daemon_consumer_retries,
+    run_daemon_scheduler_cycle_with_activity, run_pro_catch_up_with_retry, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -40,7 +41,6 @@ const READINESS_QUERY: &str = "readiness-boundary-regression";
 fn daemon_args() -> DaemonRunArgs {
     DaemonRunArgs {
         foreground: false,
-        once: false,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: None,
@@ -317,7 +317,7 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
             },
         ));
         let mut runtime = DaemonRuntime::default();
-        let core = run_daemon_once_with_activity(
+        let core = run_daemon_scheduler_cycle_with_activity(
             &daemon_args(),
             &worker_root,
             &mut runtime,
@@ -327,7 +327,7 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
             Some(&coordinator),
         )
         .unwrap();
-        let sidecar = run_daemon_once_with_activity(
+        let sidecar = run_daemon_scheduler_cycle_with_activity(
             &daemon_args(),
             &worker_root,
             &mut runtime,
@@ -437,7 +437,7 @@ fn install_jobs(
 }
 
 #[test]
-fn core_only_once_then_persistent_scheduler_drains_relational_before_optional_sidecars() {
+fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
@@ -445,10 +445,8 @@ fn core_only_once_then_persistent_scheduler_drains_relational_before_optional_si
         },
     ));
     let mut runtime = DaemonRuntime::default();
-    let mut once_args = daemon_args();
-    once_args.once = true;
-    let core = run_daemon_once_with_activity(
-        &once_args,
+    let core = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
         temp.path(),
         &mut runtime,
         None,
@@ -506,7 +504,7 @@ fn core_only_once_then_persistent_scheduler_drains_relational_before_optional_si
         })),
     );
 
-    let relational = run_daemon_once_with_activity(
+    let relational = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -530,7 +528,7 @@ fn core_only_once_then_persistent_scheduler_drains_relational_before_optional_si
     );
     assert_eq!(pinned_generation(temp.path()), generation);
 
-    let pro = run_daemon_once_with_activity(
+    let pro = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -554,7 +552,7 @@ fn core_only_once_then_persistent_scheduler_drains_relational_before_optional_si
     );
     assert_eq!(pinned_generation(temp.path()), generation);
 
-    let semantic = run_daemon_once_with_activity(
+    let semantic = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -595,7 +593,7 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
     ));
     let mut runtime = DaemonRuntime::default();
 
-    let core = run_daemon_once_with_activity(
+    let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -618,7 +616,7 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         Some(relational_status(&generation, "completed")),
         None,
     );
-    let relational = run_daemon_once_with_activity(
+    let relational = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -636,7 +634,7 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
     assert_eq!(relational_status["core_generation_id"], generation);
     assert_eq!(relational_status["receipt_core_generation_id"], generation);
 
-    let pro = run_daemon_once_with_activity(
+    let pro = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -657,7 +655,7 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         Some(generation.as_str())
     );
 
-    let drained = run_daemon_once_with_activity(
+    let drained = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         temp.path(),
         &mut runtime,
@@ -719,7 +717,6 @@ fn source_refresh_only_tick_creates_no_consumer_catch_up_status() {
     };
     let args = DaemonRunArgs {
         foreground: false,
-        once: true,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: None,
@@ -730,9 +727,16 @@ fn source_refresh_only_tick_creates_no_consumer_catch_up_status() {
         format: JsonOutputFormat::Json,
     };
 
-    let iteration =
-        run_daemon_once_with_activity(&args, temp.path(), &mut runtime, None, true, None, None)
-            .unwrap();
+    let iteration = run_daemon_scheduler_cycle_with_activity(
+        &args,
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
 
     assert!(!iteration.did_work);
     assert!(!iteration.failed);
@@ -907,7 +911,7 @@ fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
             Some(relational_status(&generation, "error")),
             None,
         );
-        let iteration = run_daemon_once_with_activity(
+        let iteration = run_daemon_scheduler_cycle_with_activity(
             &daemon_args(),
             temp.path(),
             &mut first,
@@ -937,7 +941,7 @@ fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
             Some(relational_status(&generation, "completed")),
             None,
         );
-        let iteration = run_daemon_once_with_activity(
+        let iteration = run_daemon_scheduler_cycle_with_activity(
             &daemon_args(),
             temp.path(),
             &mut restarted,
@@ -994,7 +998,7 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
                 "last_error": "injected semantic failure",
             })),
         );
-        let iteration = run_daemon_once_with_activity(
+        let iteration = run_daemon_scheduler_cycle_with_activity(
             &daemon_args(),
             temp.path(),
             &mut first,
@@ -1029,7 +1033,7 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
                 "source_work_remaining": false,
             })),
         );
-        let iteration = run_daemon_once_with_activity(
+        let iteration = run_daemon_scheduler_cycle_with_activity(
             &daemon_args(),
             temp.path(),
             &mut restarted,
