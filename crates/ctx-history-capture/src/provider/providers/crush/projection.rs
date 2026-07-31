@@ -1,19 +1,14 @@
-use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::native_source::NativeSqliteValue;
-use crate::provider::normalization::compact_provider_result_payload;
-#[cfg(test)]
 use crate::provider::normalization::provider_normalized_result_value;
 use crate::provider::normalization::{
-    provider_capped_json, provider_line_from_index, provider_policy_body,
-    provider_policy_event_text, provider_role, provider_timestamp_millis, provider_value_text,
+    provider_line_from_index, provider_role, provider_value_text,
 };
 use crate::{
-    compute_payload_hash, fnv1a64, CaptureError, OutputCommandContext, OutputObservationKind,
-    OutputOutcome, OutputOutcomeMetadata, ProviderAdapterContext, Result,
-    CRUSH_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, OutputCommandContext, OutputObservationKind, OutputOutcome,
+    OutputOutcomeMetadata, Result,
 };
 
 #[derive(Debug, Clone)]
@@ -78,32 +73,20 @@ pub(super) enum CrushRecordProjection {
 // This is the retained event shape consumed by source-backed page projection.
 #[allow(dead_code)]
 pub(super) struct CrushEventDraft {
-    pub(super) provider_event_index: u64,
-    pub(super) legacy_provider_event_index: u64,
-    pub(super) provider_event_hash: String,
-    pub(super) cursor: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) payload: Value,
-    pub(super) metadata: Value,
+    pub(super) occurred_at_unix_ms: Option<i64>,
 }
 
-// The projection carries exact hydration/accounting evidence alongside the Core
+// The projection carries exact row/accounting evidence alongside the Core
 // event even when the current coordinator reads only a subset.
 #[allow(dead_code)]
 pub(super) struct CrushMessageProjection {
-    pub(super) line_number: usize,
-    pub(super) provider_session_id: String,
     pub(super) event: Option<CrushEventDraft>,
     pub(super) event_type: EventType,
     pub(super) raw_parts: Value,
     pub(super) complete_text: Option<String>,
     pub(super) output: Option<CrushOutputProjection>,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) provider_event_index: u64,
-    pub(super) native_record_id: String,
-    pub(super) parent_session_id: Option<String>,
 }
 
 // Command classification is retained with the output evidence shape.
@@ -124,41 +107,29 @@ impl CrushOutputProjection {
     }
 }
 
-fn crush_output_outcome_label(outcome: OutputOutcome) -> &'static str {
-    match outcome {
-        OutputOutcome::Success => "success",
-        OutputOutcome::Failure => "failure",
-        OutputOutcome::Timeout => "timeout",
-        OutputOutcome::Unknown => "unknown",
-    }
-}
-
 pub(super) struct CrushChildMessageRow {
     pub(super) parent_rowid: Option<i64>,
-    pub(super) parent_created_at: Option<i64>,
-    pub(super) parent_updated_at: Option<i64>,
     pub(super) message: CrushMessageRow,
 }
 
 pub(super) fn project_message(
     message: &CrushMessageRow,
     session: Option<&CrushSessionRow>,
-    context: &ProviderAdapterContext,
 ) -> Result<CrushRecordProjection> {
-    let Some(session) = session else {
+    if session.is_none() {
         return Ok(CrushRecordProjection::Rejection {
-            line_number: provider_line_from_index(event_index(message)),
+            line_number: provider_line_from_index(message.rowid.max(0) as u64),
             reason: format!(
                 "Crush message {} references missing session {}",
                 message.id, message.session_id
             ),
         });
-    };
+    }
     let parts: Value = match serde_json::from_str(&message.parts) {
         Ok(parts) => parts,
         Err(error) => {
             return Ok(CrushRecordProjection::Rejection {
-                line_number: provider_line_from_index(event_index(message)),
+                line_number: provider_line_from_index(message.rowid.max(0) as u64),
                 reason: format!(
                     "invalid JSON in Crush message {} parts: {error}",
                     message.id
@@ -166,124 +137,31 @@ pub(super) fn project_message(
             });
         }
     };
-    let started_at = provider_timestamp_millis(session.created_at, context.imported_at);
-    let occurred_at = provider_timestamp_millis(message.created_at, started_at);
     let event_type = event_type(message, &parts);
     let output = matches!(event_type, EventType::ToolOutput | EventType::CommandOutput)
         .then(|| crush_output_projection(event_type, &parts));
-    let provider_event_index = event_index(message);
-    let legacy_provider_event_index = legacy_event_index(message);
-    let line = provider_line_from_index(provider_event_index);
     let retain_core_event = output
         .as_ref()
         .is_none_or(CrushOutputProjection::retain_in_core);
-    let complete_text = output
-        .is_none()
-        .then(|| parts_text(&parts).unwrap_or_else(|| format!("Crush {} message", message.role)));
+    let complete_text = output.is_none().then(|| parts_text(&parts)).flatten();
     let event = if retain_core_event {
-        let payload = crush_core_payload(
-            message,
-            &parts,
-            event_type,
-            output.as_ref(),
-            complete_text.as_deref(),
-        );
-        let provider_event_hash = crush_normalized_payload_hash(event_type, &payload)?;
         Some(CrushEventDraft {
-            provider_event_index,
-            legacy_provider_event_index,
-            provider_event_hash,
-            cursor: format!(
-                "session:{}:message:{}:rowid:{}",
-                message.session_id, message.id, message.rowid
-            ),
             event_type,
             role: Some(provider_role(Some(&message.role))),
-            occurred_at,
-            payload,
-            metadata: json!({
-                "source": "crush_messages",
-                "source_format": CRUSH_SQLITE_SOURCE_FORMAT,
-                "message_id": message.id.clone(),
-                "session_id": message.session_id.clone(),
-                "rowid": message.rowid,
-                "provider": message.provider.clone(),
-                "model": message.model.clone(),
-            }),
+            occurred_at_unix_ms: message.created_at,
         })
     } else {
         None
     };
     Ok(CrushRecordProjection::Message(Box::new(
         CrushMessageProjection {
-            line_number: line,
-            provider_session_id: session.id.clone(),
             event,
             event_type,
             raw_parts: parts,
             complete_text,
             output,
-            occurred_at,
-            provider_event_index,
-            native_record_id: message.id.clone(),
-            parent_session_id: session.parent_session_id.clone(),
         },
     )))
-}
-
-fn crush_core_payload(
-    message: &CrushMessageRow,
-    parts: &Value,
-    event_type: EventType,
-    output: Option<&CrushOutputProjection>,
-    complete_text: Option<&str>,
-) -> Value {
-    if let Some(output) = output {
-        let result_evidence = output.call_id.as_deref().map_or_else(Vec::new, |call_id| {
-            vec![json!({
-                "kind": "call_id",
-                "value": call_id,
-            })]
-        });
-        return json!({
-            "tool": output.command.as_ref().map(|command| command.tool_name.as_str()),
-            "call_id": output.call_id,
-            "result_evidence": result_evidence,
-            "result_outcome": crush_output_outcome_label(output.outcome.outcome),
-            "exit_code": output.outcome.exit_code,
-            "duration_ms": output.outcome.duration_ms,
-            "timed_out": output.outcome.outcome == OutputOutcome::Timeout,
-            "source_format": CRUSH_SQLITE_SOURCE_FORMAT,
-        });
-    }
-
-    let text = complete_text
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("Crush {} message", message.role));
-    let body = json!({
-        "message_id": message.id,
-        "role": message.role,
-        "parts": parts,
-        "provider": message.provider,
-        "model": message.model,
-        "is_summary_message": message.is_summary_message,
-        "created_at": message.created_at,
-        "updated_at": message.updated_at,
-    });
-    let retained_text = provider_policy_event_text(event_type, &text, &body);
-    let retained_body = provider_policy_body(event_type, &body);
-    json!({
-        "text": retained_text.text,
-        "text_retention": retained_text.retention.as_json(),
-        "result_evidence": [],
-        "result_outcome": Value::Null,
-        "source_format": CRUSH_SQLITE_SOURCE_FORMAT,
-        "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-    })
-}
-
-fn crush_normalized_payload_hash(event_type: EventType, payload: &Value) -> Result<String> {
-    compute_payload_hash(&compact_provider_result_payload(event_type, payload))
 }
 
 pub(super) fn decode_session(values: &[NativeSqliteValue]) -> Result<CrushSessionRow> {
@@ -304,10 +182,11 @@ pub(super) fn decode_message_child(values: &[NativeSqliteValue]) -> Result<Crush
             "Crush child message logical row has an invalid value count",
         ));
     }
+    let parent_rowid = optional_integer(values, 0)?;
+    optional_integer(values, 1)?;
+    optional_integer(values, 2)?;
     Ok(CrushChildMessageRow {
-        parent_rowid: optional_integer(values, 0)?,
-        parent_created_at: optional_integer(values, 1)?,
-        parent_updated_at: optional_integer(values, 2)?,
+        parent_rowid,
         message: decode_message_at(values, 3)?,
     })
 }
@@ -437,20 +316,6 @@ fn optional_real(values: &[NativeSqliteValue], index: usize) -> Result<Option<f6
             "Crush logical row is missing a projected optional real value",
         )),
     }
-}
-
-pub(super) fn event_index(message: &CrushMessageRow) -> u64 {
-    fnv1a64(message.id.as_bytes())
-}
-
-pub(super) fn legacy_event_index(message: &CrushMessageRow) -> u64 {
-    let base = message
-        .created_at
-        .or(message.updated_at)
-        .unwrap_or(message.rowid)
-        .max(0) as u64;
-    base.saturating_mul(4_096)
-        .saturating_add((fnv1a64(message.id.as_bytes()) & 0x0fff_ffff) % 4_096)
 }
 
 fn event_type(message: &CrushMessageRow, parts: &Value) -> EventType {
@@ -664,7 +529,6 @@ fn parts_text(parts: &Value) -> Option<String> {
 /// Returns complete normalized result bodies from Crush result parts in their
 /// native order. Only schema-owned part kinds and fields are considered; the
 /// function never searches arbitrary descendants. The caller owns any bound.
-#[cfg(test)]
 pub(crate) fn crush_normalized_result_content(parts: &Value) -> Option<String> {
     let items = parts.as_array()?;
     let mut results = Vec::new();
@@ -691,29 +555,6 @@ fn crush_tool_result_value(data: &Value) -> Option<&Value> {
     ["content", "data", "output"]
         .iter()
         .find_map(|key| data.get(*key))
-}
-
-pub(crate) fn crush_complete_message(
-    values: &[NativeSqliteValue],
-) -> Result<(String, String, String, String)> {
-    let child = decode_message_child(values)?;
-    if child.parent_rowid.is_none() {
-        return Err(CaptureError::InvalidPayload(
-            "Crush message parent is missing".into(),
-        ));
-    }
-    let message = child.message;
-    let parts: Value = serde_json::from_str(&message.parts)?;
-    let event_type = event_type(&message, &parts);
-    if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
-        return Err(CaptureError::InvalidPayload(
-            "Crush output rows are not complete-message content".to_owned(),
-        ));
-    }
-    let text = parts_text(&parts).unwrap_or_else(|| format!("Crush {} message", message.role));
-    let payload = crush_core_payload(&message, &parts, event_type, None, Some(&text));
-    let normalized_hash = crush_normalized_payload_hash(event_type, &payload)?;
-    Ok((message.session_id, message.id, normalized_hash, text))
 }
 
 fn push_json_text(parts: &mut Vec<String>, value: &Value) {
