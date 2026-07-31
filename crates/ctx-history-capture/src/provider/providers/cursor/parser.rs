@@ -4,10 +4,10 @@ use ctx_history_core::{ContentRef, EventRole, EventType};
 use serde::de::{
     self, Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{provider::normalization::provider_policy_event_text, Result};
+use crate::Result;
 
 const MAX_CURSOR_ATOM_CHARS: usize = 512;
 const MAX_CURSOR_PATH_CHARS: usize = 4_096;
@@ -433,12 +433,11 @@ struct CursorRetainedMessageText {
 }
 
 fn retained_cursor_message_text(event_type: EventType, value: &str) -> CursorRetainedMessageText {
-    let retained = provider_policy_event_text(event_type, value, &json!({}));
     let complete_content_ref = (event_type == EventType::Message)
         .then(|| ContentRef::from_bytes(value.as_bytes()))
         .flatten();
     CursorRetainedMessageText {
-        text: retained.text,
+        text: value.to_owned(),
         complete_content_ref,
     }
 }
@@ -474,13 +473,11 @@ pub(crate) fn cursor_complete_content_message_record(
                     let complete_text = block.get("text").and_then(Value::as_str)?;
                     let event_type = cursor_text_event_type(&classification);
                     let role = cursor_role(classification.role.as_deref());
-                    let retained =
-                        provider_policy_event_text(event_type, complete_text, &json!({}));
-                    if retained.text != indexed_text {
+                    if complete_text != indexed_text {
                         return None;
                     }
                     let body = super::projection::CursorEventBody::Text {
-                        text: retained.text,
+                        text: complete_text.to_owned(),
                     };
                     let encoded =
                         serde_json::to_vec(&("cursor-event-payload-v1", event_type, role, &body))

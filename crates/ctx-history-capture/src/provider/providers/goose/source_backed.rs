@@ -38,7 +38,7 @@ use super::{
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     provider::{
-        normalization::{provider_local_preview, provider_role, provider_timestamp_seconds},
+        normalization::{provider_role, provider_timestamp_seconds},
         source_backed::{
             family::document::{
                 ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
@@ -52,7 +52,7 @@ use crate::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteLogicalSnapshot, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
-    CaptureError, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
 };
 
 mod fingerprint;
@@ -769,11 +769,12 @@ fn goose_lexical_document(
         None,
         record_digest,
     )?;
-    let body = provider_local_preview(&event.searchable_text, PROVIDER_MAX_TEXT_CHARS).0;
-    let body = if body.is_empty() {
-        format!("{} {}", event_type(&event).as_str(), event.role)
+    let normalized_event_type = event_type(&event);
+    let normalized_role = provider_role(Some(&event.role));
+    let body = if event.searchable_text.is_empty() {
+        format!("{} {}", normalized_event_type.as_str(), event.role)
     } else {
-        body
+        event.searchable_text
     };
     if body.is_empty() {
         return Err(GooseSourceBackedErrorV0::EmptyLexicalBody);
@@ -791,8 +792,8 @@ fn goose_lexical_document(
             )
         },
     );
-    let event_type = event_type(&event).as_str().to_owned();
-    let role = Some(provider_role(Some(&event.role)).as_str().to_owned());
+    let event_type = normalized_event_type.as_str().to_owned();
+    let role = Some(normalized_role.as_str().to_owned());
     let touched_files = event
         .file_touches
         .into_iter()

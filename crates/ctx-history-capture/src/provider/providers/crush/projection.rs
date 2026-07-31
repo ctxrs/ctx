@@ -13,7 +13,7 @@ use crate::provider::normalization::{
 use crate::{
     compute_payload_hash, fnv1a64, CaptureError, OutputCommandContext, OutputObservationKind,
     OutputOutcome, OutputOutcomeMetadata, ProviderAdapterContext, Result,
-    CRUSH_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    CRUSH_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 #[derive(Debug, Clone)]
@@ -653,11 +653,6 @@ fn parts_text(parts: &Value) -> Option<String> {
                     }
                 }
                 _ => push_json_text(&mut text, data),
-            }
-            if text.iter().map(|part| part.chars().count()).sum::<usize>()
-                >= PROVIDER_MAX_TEXT_CHARS
-            {
-                break;
             }
         }
     } else {

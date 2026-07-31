@@ -459,15 +459,15 @@ fn astrbot_source_backed_reopens_full_conversation_and_platform_text_exactly() {
     let database = cwd.join("data/data_v4.db");
     let exact_text = format!(
         "astrbot-exact-content-{}-full-body-tail-sentinel",
-        "x".repeat(4_096)
+        "x".repeat(20_000)
     );
     let exact_output = format!(
         "astrbot-tool-output-{}-output-tail-sentinel",
-        "o".repeat(4_096)
+        "o".repeat(20_000)
     );
     let platform_text = format!(
         "astrbot-platform-content-{}-platform-tail-sentinel",
-        "p".repeat(4_096)
+        "p".repeat(20_000)
     );
     create_database(&database, "exact-session", &exact_text);
     let conn = Connection::open(&database).expect("open platform fixture");

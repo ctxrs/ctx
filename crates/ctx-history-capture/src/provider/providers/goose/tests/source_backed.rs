@@ -6,6 +6,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
+use serde_json::{json, Value};
 
 use super::{create_goose_tables, insert_message, insert_session};
 use crate::provider::providers::goose::source_backed::{
@@ -290,6 +291,74 @@ fn goose_active_wal_noop_replace_delete_and_batch_hydration() {
     assert_eq!(deleted.removals.len(), 1);
     assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
     assert_eq!(goose_source_backed_work(), GooseSourceBackedWork::default());
+}
+
+#[test]
+fn goose_source_backed_retains_complete_text_and_structured_tool_arguments() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("sessions.db");
+    let index = temp.path().join("index");
+    let writer = create_database(&database);
+    insert_session(&writer, "complete-session");
+    let complete_text = format!("goose-head-{} goosetailsentinel", "x".repeat(20_000));
+    insert_message(&writer, 1, "complete-session", &complete_text);
+    insert_message(&writer, 2, "complete-session", "placeholder");
+    let tool_arguments = json!({
+        "command": format!("{} goosestructuredtail", "a".repeat(20_000)),
+        "path": "src/main.rs",
+    });
+    writer
+        .execute(
+            "update messages set role = 'assistant', content_json = ?1 where id = 2",
+            [json!([{
+                "type": "toolRequest",
+                "toolCall": {
+                    "name": "shell",
+                    "arguments": tool_arguments,
+                }
+            }])
+            .to_string()],
+        )
+        .unwrap();
+
+    let registry = registry(&database);
+    let receipt = refresh_source_backed_generation(&index, &registry, options()).unwrap();
+    let source = receipt.sources[0].observation().source();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let mut events = verified.source_event_page(source, None, 10).unwrap().items;
+    events.sort_by_key(|event| event.event_sequence);
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        verified
+            .search_event_candidates("goosetailsentinel", 8)
+            .unwrap()
+            .first()
+            .map(|candidate| candidate.event.event_id),
+        Some(events[0].event_id)
+    );
+    assert_eq!(
+        verified
+            .search_event_candidates("goosestructuredtail", 8)
+            .unwrap()
+            .first()
+            .map(|candidate| candidate.event.event_id),
+        Some(events[1].event_id)
+    );
+
+    let request =
+        EventHydrationRequest::new(events[1].event_id, events[1].locator.clone()).unwrap();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_event(&request)
+        .unwrap();
+    let hydrated_body = String::from_utf8(hydrated.provider_bytes).unwrap();
+    let encoded_arguments = hydrated_body
+        .lines()
+        .find_map(|line| line.strip_prefix("tool input: "))
+        .expect("complete structured Goose tool arguments");
+    let decoded_arguments: Value = serde_json::from_str(encoded_arguments).unwrap();
+    assert_eq!(decoded_arguments, tool_arguments);
+    assert!(encoded_arguments.contains("goosestructuredtail"));
 }
 
 fn assert_goose_snapshot_work(

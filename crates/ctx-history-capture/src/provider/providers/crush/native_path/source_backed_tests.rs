@@ -350,8 +350,23 @@ fn document_for_only_message(source: &OpenedSource) -> LexicalDocument {
 fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("full-body.db");
-    let text = format!("crush-head-{}-crush-tail", "x".repeat(3_000));
+    let text = format!("crush-head-{}-crush-tail", "x".repeat(20_000));
+    let tool_arguments = json!({
+        "command": format!("{}crush-structured-tail", "a".repeat(20_000)),
+        "path": "src/main.rs",
+    });
     write_database(&path, "session", "message", &text);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "update messages set parts = ?1 where id = 'message'",
+            [json!([
+                {"type": "text", "data": {"text": text}},
+                {"type": "tool_call", "data": {"name": "shell", "input": tool_arguments}}
+            ])
+            .to_string()],
+        )
+        .unwrap();
     let inventory = TestInventory::new(inventory(
         b"full-body-inventory",
         vec![database("full-body-project", &path)],
@@ -363,8 +378,16 @@ fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
     .unwrap();
     let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
     let document = document_for_only_message(&source);
-    assert_eq!(document.body, text);
-    assert!(document.body.ends_with("crush-tail"));
+    assert!(document.body.starts_with(&text));
+    assert!(document.body.contains("crush-tail\ntool call: shell"));
+    let encoded_arguments = document
+        .body
+        .lines()
+        .find_map(|line| line.strip_prefix("tool input: "))
+        .expect("complete structured Crush tool arguments");
+    let decoded_arguments: serde_json::Value = serde_json::from_str(encoded_arguments).unwrap();
+    assert_eq!(decoded_arguments, tool_arguments);
+    assert!(encoded_arguments.contains("crush-structured-tail"));
     assert!(finish_opened_source(source).unwrap());
 
     let resolver =
@@ -379,7 +402,7 @@ fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
     assert_eq!(resolver.hydration_counters(), (1, 1));
     assert_eq!(
         hydrated.decoded_display_text.as_deref(),
-        Some(text.as_str())
+        Some(document.body.as_str())
     );
 }
 

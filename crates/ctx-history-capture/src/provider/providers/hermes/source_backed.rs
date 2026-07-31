@@ -553,6 +553,7 @@ fn project_message(
         Some(prepared) => prepared.native,
         None => hermes_native_event(&row, ordinal)?,
     };
+    let body = native.complete_text;
     let native_item_key = NativeItemKey::composite(
         HERMES_MESSAGE_NAMESPACE,
         vec![TypedKey::utf8(&row.session_id)?, TypedKey::I64(row.id)],
@@ -578,12 +579,6 @@ fn project_message(
         None,
         record_digest,
     )?;
-    let body = native
-        .payload
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Hermes event");
     Ok(LexicalDocument {
         event_id,
         session_id: session.session_id,
@@ -600,7 +595,7 @@ fn project_message(
         occurred_at_unix_ms: Some(native.occurred_at.timestamp_millis()),
         event_type: native.event_type.as_str().to_owned(),
         role: native.role.map(|role| role.as_str().to_owned()),
-        body: body.to_owned(),
+        body,
         workspace: session.workspace,
         cwd: session.cwd,
         touched_files: Vec::new(),

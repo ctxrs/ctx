@@ -246,7 +246,7 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     let path = temp.path().join("sessions.db");
     let conn = create_database(&path);
     insert_checkpoint(&conn, b"opaque checkpoint state");
-    let long_message = format!("deepagents-head-{}-deepagents-tail", "x".repeat(3_000));
+    let long_message = format!("deepagents-head-{}-deepagents-tail", "x".repeat(20_000));
     let mut messages = vec![message("human", &long_message, "message-0")];
     messages.extend((1..130).map(|index| {
         message(

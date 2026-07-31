@@ -146,7 +146,7 @@ fn cold_route_preserves_continue_projection_and_exact_hydration() {
 
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
-    let long_text = format!("{}continue-tail-term", "x".repeat(3_000));
+    let long_text = format!("{} continuetailsentinel", "x".repeat(20_000));
     let source_path = write_session(
         &sessions,
         "primary.json",
@@ -186,13 +186,18 @@ fn cold_route_preserves_continue_projection_and_exact_hydration() {
     assert!(receipt.sources[0].frontier().is_some());
 
     let source = continue_source_key("continue-primary").unwrap();
-    let mut events = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(&source, None, 8)
-        .unwrap()
-        .items;
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let mut events = verified.source_event_page(&source, None, 8).unwrap().items;
     events.sort_by_key(|event| event.event_sequence);
     assert_eq!(events.len(), 2);
+    assert_eq!(
+        verified
+            .search_event_candidates("continuetailsentinel", 8)
+            .unwrap()
+            .first()
+            .map(|candidate| candidate.event.event_id),
+        Some(events[0].event_id)
+    );
     assert!(events.iter().all(|event| {
         event.parent_session_id.is_none()
             && event.root_session_id == event.session_id

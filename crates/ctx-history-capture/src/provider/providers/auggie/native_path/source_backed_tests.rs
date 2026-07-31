@@ -142,7 +142,7 @@ fn cold_route_is_an_exact_semantic_oracle_with_full_bodies_and_locators() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("home/.augment/sessions");
     let path = sessions.join("session.json");
-    let request_text = format!("full-prefix-{}-auggie-tail", "x".repeat(3_000));
+    let request_text = format!("full-prefix-{}-auggietailsentinel", "x".repeat(20_000));
     write_session(&path, &request_text, "bounded response");
     let registry = registry(&sessions);
     let index_root = temp.path().join("index");
@@ -171,11 +171,8 @@ fn cold_route_is_an_exact_semantic_oracle_with_full_bodies_and_locators() {
         .source()
         .exact_descriptor_eq(&source));
     let expected_session = auggie_session_id(&source, "auggie-source-session").unwrap();
-    let mut events = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(&source, None, 8)
-        .unwrap()
-        .items;
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let mut events = verified.source_event_page(&source, None, 8).unwrap().items;
     events.sort_by_key(|event| event.event_sequence);
     assert_eq!(events.len(), 2);
     assert!(events
@@ -197,6 +194,14 @@ fn cold_route_is_an_exact_semantic_oracle_with_full_bodies_and_locators() {
     }));
     assert_eq!(events[0].event_sequence, 0);
     assert_eq!(events[0].role.as_deref(), Some("user"));
+    assert_eq!(
+        verified
+            .search_event_candidates("auggietailsentinel", 8)
+            .unwrap()
+            .first()
+            .map(|candidate| candidate.event.event_id),
+        Some(events[0].event_id)
+    );
     assert_eq!(events[1].event_sequence, 1);
     assert_eq!(events[1].role.as_deref(), Some("assistant"));
     assert_eq!(

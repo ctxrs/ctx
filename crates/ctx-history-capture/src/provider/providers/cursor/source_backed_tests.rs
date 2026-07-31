@@ -21,7 +21,7 @@ use crate::{
         SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus, PROVIDER_MAX_TEXT_CHARS,
+    ProviderSourceStatus,
 };
 
 fn registry(root: &Path) -> SourceBackedProviderRegistry {
@@ -140,11 +140,7 @@ fn tool_result(text: &str) -> Value {
 fn shared_family_cursor_cold_noop_and_grouped_full_body_hydration() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("cursor-data");
-    let long = format!(
-        "needle {}{}",
-        "prefix-".repeat(1_024),
-        "suffix-".repeat(PROVIDER_MAX_TEXT_CHARS)
-    );
+    let long = format!("needle {}cursortailsentinel", "prefix-".repeat(3_000));
     let rows = [user(&long), assistant("Cursor response")];
     let cold_payload_bytes = rows
         .iter()
@@ -180,7 +176,7 @@ fn shared_family_cursor_cold_noop_and_grouped_full_body_hydration() {
     assert_eq!(events.len(), 2);
     assert_eq!(
         index
-            .search_event_candidates("needle", 10)
+            .search_event_candidates("cursortailsentinel", 10)
             .unwrap()
             .first()
             .map(|candidate| candidate.event.event_id),

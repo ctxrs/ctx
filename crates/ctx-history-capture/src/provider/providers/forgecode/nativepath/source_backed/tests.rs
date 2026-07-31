@@ -89,13 +89,29 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
 fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let source_path = directory.path().join(".forge.db");
-    let complete = format!("{}-forgecode-tail-sentinel", "x".repeat(8_192));
+    let complete = format!("{}-forgecode-tail-sentinel", "x".repeat(20_000));
+    let tool_arguments = json!({
+        "command": format!("{}forgecode-structured-tail", "a".repeat(20_000)),
+        "path": "src/main.rs",
+    });
     write_source(
         &source_path,
         "exact-conversation",
         json!([
             text_message(&complete),
-            text_message("second exact message")
+            {
+                "message": {
+                    "text": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "name": "shell",
+                            "call_id": "call-1",
+                            "arguments": tool_arguments,
+                        }]
+                    }
+                }
+            }
         ]),
     );
     let scanned = scan(ForgeCodeSourceSelectionV0::selected(
@@ -153,13 +169,24 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
         .collect::<Vec<_>>();
     let event = resolver.hydrate_event(&requests[0]).unwrap();
     assert_eq!(event.provider_bytes, complete.as_bytes());
+    let encoded_arguments = scanned.documents[1]
+        .body
+        .lines()
+        .find_map(|line| line.strip_prefix("tool input: "))
+        .expect("complete structured ForgeCode tool arguments");
+    let decoded_arguments: Value = serde_json::from_str(encoded_arguments).unwrap();
+    assert_eq!(decoded_arguments, tool_arguments);
+    assert!(encoded_arguments.contains("forgecode-structured-tail"));
     let session = resolver
         .hydrate_session(
             &SessionHydrationRequest::new(scanned.documents[0].session_id, requests).unwrap(),
         )
         .unwrap();
     assert_eq!(session.len(), 2);
-    assert_eq!(session[1].provider_bytes, b"second exact message");
+    assert_eq!(
+        session[1].provider_bytes,
+        scanned.documents[1].body.as_bytes()
+    );
 }
 
 #[test]
