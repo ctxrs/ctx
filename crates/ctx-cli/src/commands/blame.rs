@@ -174,10 +174,9 @@ pub(crate) fn run(
     let target_kind = ProBlameTargetV1::from_protocol(&target);
     let mut telemetry = ProBlameTelemetryV1::new(Some(target_kind), ProSurfaceV1::Cli);
     let result = (|| {
-        let result = crate::pro::human_blame_result(
-            crate::pro::blame(&data_root, target, limit, cursor)
-                .map_err(crate::pro::actionable_error),
-            !json,
+        let result = present_blame_result(
+            crate::pro::blame(&data_root, target, limit, cursor),
+            json,
             ui,
         )?;
         telemetry.complete(result.matches.len(), result.next.is_some());
@@ -187,6 +186,10 @@ pub(crate) fn run(
         Ok(())
     })();
     finish_blame_telemetry(&data_root, &mut telemetry, started, result)
+}
+
+fn present_blame_result<T>(result: Result<T>, json: bool, ui: &mut crate::ui::Ui) -> Result<T> {
+    crate::pro::human_blame_result(result, !json, ui)
 }
 
 fn referral_cta_eligible(
@@ -323,6 +326,136 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn blame_routes_recognized_human_errors_to_pro_recovery_without_changing_machine_errors() {
+        for (raw, title, action) in [
+            (
+                "authentication_denied: private identity detail at /private/auth",
+                "ctx Pro sign-in was denied",
+                Some("ctx pro"),
+            ),
+            (
+                "pro_not_installed: no helper at /private/helper",
+                "ctx Pro is not set up",
+                Some("ctx pro"),
+            ),
+            (
+                "entitlement_expired: private grant detail at /private/grant",
+                "ctx Pro is locked",
+                Some("ctx pro manage"),
+            ),
+            (
+                "key_store_unavailable: private vault detail at /private/vault",
+                "The secure key store is unavailable",
+                Some("ctx pro"),
+            ),
+            (
+                "key_store_unavailable: interrupted Pro deletion must be completed at /private/vault",
+                "A previous ctx Pro deletion is incomplete",
+                Some("ctx pro uninstall --delete-data"),
+            ),
+            (
+                "protocol_mismatch: private helper detail at /private/helper",
+                "The ctx Pro helper needs repair",
+                Some("ctx pro"),
+            ),
+            (
+                "invalid_response: malformed helper frame at /private/helper",
+                "ctx Pro returned an invalid response",
+                Some("ctx pro"),
+            ),
+            (
+                "resource_not_found: private graph detail at /private/graph",
+                crate::pro::RESOURCE_NOT_FOUND_DIAGNOSTIC,
+                None,
+            ),
+        ] {
+            let captured = SharedWriter::default();
+            let stderr = captured.clone();
+            let stdout_context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+                crate::ui::StreamKind::Stdout,
+            ));
+            let stderr_context = crate::ui::RenderContext::for_test(
+                crate::ui::TestContext::tty(crate::ui::StreamKind::Stderr, 80)
+                    .color(crate::ui::ColorMode::Never),
+            );
+            let mut ui =
+                crate::ui::Ui::with_writers(io::sink(), stdout_context, stderr, stderr_context);
+
+            present_blame_result::<()>(Err(anyhow!(raw)), false, &mut ui).unwrap_err();
+            ui.flush().unwrap();
+            let rendered = captured.text();
+            let code = raw.split(':').next().unwrap();
+
+            assert!(
+                rendered.starts_with(&format!("✗ {title}")),
+                "{raw}: {rendered}"
+            );
+            assert!(
+                !rendered.starts_with(&format!("✗ {code}:")),
+                "{raw}: {rendered}"
+            );
+            assert!(!rendered.contains("/private"), "{raw}: {rendered}");
+            match action {
+                Some(action) => assert!(
+                    rendered.contains(&format!("Next\n  {action}\n")),
+                    "{raw}: {rendered}"
+                ),
+                None => assert!(!rendered.contains("\nNext\n"), "{raw}: {rendered}"),
+            }
+        }
+
+        for (raw, expected) in [
+            (
+                "authentication_denied: WorkOS sign-in was denied",
+                "authentication_denied: WorkOS sign-in was denied",
+            ),
+            (
+                "pro_not_installed: private helper detail",
+                "pro_not_installed: ctx Pro is not set up; run `ctx pro`",
+            ),
+            (
+                "entitlement_expired: private grant detail",
+                "entitlement_expired: ctx Pro is locked; run `ctx pro manage` to restore access",
+            ),
+            (
+                "protocol_mismatch: private helper detail",
+                "protocol_mismatch: the Pro helper needs repair; run `ctx pro`",
+            ),
+            (
+                "key_store_unavailable: private vault detail",
+                "key_store_unavailable: unlock or repair the already selected secure key store, then run `ctx pro`; a fresh installation can select the owner-private local vault only when the native store is genuinely unavailable, and ctx never downgrades existing state",
+            ),
+            (
+                "key_store_unavailable: interrupted Pro deletion must be completed",
+                "key_store_unavailable: unlock or repair the already selected secure key store, then run `ctx pro`; a fresh installation can select the owner-private local vault only when the native store is genuinely unavailable, and ctx never downgrades existing state",
+            ),
+            (
+                "cancelled: uninstall confirmation was not provided",
+                "cancelled: uninstall confirmation was not provided",
+            ),
+            (
+                "invalid_request: qualification helpers are unsupported on this platform",
+                "invalid_request: qualification helpers are unsupported on this platform",
+            ),
+            (
+                "invalid_response: malformed helper frame at /private/helper",
+                "invalid_response: malformed helper frame at /private/helper",
+            ),
+        ] {
+            let captured = SharedWriter::default();
+            let stderr = captured.clone();
+            let context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+                crate::ui::StreamKind::Stderr,
+            ));
+            let mut ui = crate::ui::Ui::with_writers(io::sink(), context, stderr, context);
+            let error = present_blame_result::<()>(Err(anyhow!(raw)), true, &mut ui).unwrap_err();
+            ui.flush().unwrap();
+            assert_eq!(error.to_string(), expected);
+            assert!(captured.text().is_empty());
         }
     }
 
