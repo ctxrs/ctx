@@ -233,40 +233,22 @@ impl DaemonRuntimeSnapshotV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DaemonOperationPayloadV1 {
+pub(crate) enum DaemonOperationV1 {
     Enable,
     Disable,
     Status,
-    RunOnce(DaemonRunFactsV1),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DaemonOperationV1(DaemonOperationPayloadV1);
-
-#[allow(dead_code, non_upper_case_globals)]
 impl DaemonOperationV1 {
-    pub(crate) const Enable: Self = Self(DaemonOperationPayloadV1::Enable);
-    pub(crate) const Disable: Self = Self(DaemonOperationPayloadV1::Disable);
-    pub(crate) const Status: Self = Self(DaemonOperationPayloadV1::Status);
-
-    pub(crate) fn run_once(run: DaemonRunFactsV1) -> Self {
-        Self(DaemonOperationPayloadV1::RunOnce(run))
-    }
-
     pub(crate) fn name(self) -> &'static str {
-        match self.0 {
-            DaemonOperationPayloadV1::Enable => "enable",
-            DaemonOperationPayloadV1::Disable => "disable",
-            DaemonOperationPayloadV1::Status => "status",
-            DaemonOperationPayloadV1::RunOnce(_) => "run_once",
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::Status => "status",
         }
     }
 
-    pub(crate) fn insert_properties(self, properties: &mut Map<String, Value>) {
-        if let DaemonOperationPayloadV1::RunOnce(run) = self.0 {
-            insert_run_properties(properties, run);
-        }
-    }
+    pub(crate) fn insert_properties(self, _properties: &mut Map<String, Value>) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,16 +415,16 @@ mod tests {
 
     #[test]
     fn daemon_operation_properties_are_closed_and_constant_keyed() {
-        let mut properties = Map::new();
-        DaemonOperationV1::run_once(auto_search_run()).insert_properties(&mut properties);
-        assert_eq!(
-            DaemonOperationV1::run_once(auto_search_run()).name(),
-            "run_once"
-        );
-        assert_eq!(properties["start_mode"], "auto");
-        assert_eq!(properties["supervisor"], "cli_autostart");
-        assert_eq!(properties["trigger_command"], "search");
-        assert_eq!(properties.len(), 3);
+        for (operation, expected) in [
+            (DaemonOperationV1::Enable, "enable"),
+            (DaemonOperationV1::Disable, "disable"),
+            (DaemonOperationV1::Status, "status"),
+        ] {
+            let mut properties = Map::new();
+            operation.insert_properties(&mut properties);
+            assert_eq!(operation.name(), expected);
+            assert!(properties.is_empty());
+        }
     }
 
     #[test]

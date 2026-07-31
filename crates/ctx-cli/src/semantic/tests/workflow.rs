@@ -324,7 +324,7 @@ fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
         .expect("test foreground query should be accepted");
     let mut runtime = DaemonRuntime::default();
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,

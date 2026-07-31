@@ -18,7 +18,6 @@ fn test_chunk(event_id: Uuid, seq: u64, source_hash: &str) -> SemanticChunkDocum
 fn test_daemon_run_args() -> DaemonRunArgs {
     DaemonRunArgs {
         foreground: false,
-        once: true,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: Some(1),

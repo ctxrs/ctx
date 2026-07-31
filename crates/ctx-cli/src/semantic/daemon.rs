@@ -37,7 +37,8 @@ use super::{
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
         daemon_retry_due, daemon_run_start_mode, restore_daemon_consumer_retries,
-        restore_daemon_source_refresh_retry, run_daemon_once_with_activity, DaemonSidecarDrain,
+        restore_daemon_source_refresh_retry, run_daemon_scheduler_cycle_with_activity,
+        DaemonSidecarDrain,
     },
     daemon_status::{
         daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
@@ -213,9 +214,6 @@ pub(crate) fn run_daemon_command(
 
 fn daemon_operation_for_command(command: &DaemonCommand) -> Option<DaemonOperationV1> {
     match command {
-        DaemonCommand::Run(args) if args.once => {
-            Some(DaemonOperationV1::run_once(daemon_run_facts(args)))
-        }
         DaemonCommand::Run(_) => None,
         DaemonCommand::Status(_) => Some(DaemonOperationV1::Status),
         DaemonCommand::Enable(_) => Some(DaemonOperationV1::Enable),
@@ -518,13 +516,12 @@ pub(super) fn run_daemon_inner(
         drop(lock);
         return Ok(daemon_report(data_root));
     }
-    let run_once = args.once;
     let run_started = Instant::now();
     let started_at_ms = utc_now().timestamp_millis();
     let recovered_previous_run =
         daemon_previous_status_needs_recovery(read_daemon_status(data_root).as_ref());
-    let mut telemetry = (!run_once)
-        .then(|| DaemonTelemetry::new(daemon_run_facts(&args), run_started, started_at_ms as u64));
+    let mut telemetry =
+        DaemonTelemetry::new(daemon_run_facts(&args), run_started, started_at_ms as u64);
     let idle_exit = args.idle_exit_seconds.map(StdDuration::from_secs);
     let safety_interval = args.loop_interval_seconds.map_or_else(
         || daemon_safety_reconcile_interval(started_at_ms as u64),
@@ -636,16 +633,13 @@ pub(super) fn run_daemon_inner(
         if daemon_should_schedule_auto_upgrade(
             runtime.config.daemon.enabled,
             runtime.config.daemon.mode,
-            args.once,
         ) {
             prepared_auto_upgrade =
                 crate::upgrade::prepare_daemon_auto_upgrade(data_root, &runtime.config)
                     .unwrap_or(None);
         }
-        if let Some(telemetry) = telemetry.as_ref() {
-            let events = telemetry.ready_events(recovered_previous_run, Instant::now());
-            send_daemon_events(data_root, &events);
-        }
+        let events = telemetry.ready_events(recovered_previous_run, Instant::now());
+        send_daemon_events(data_root, &events);
         let mut idle_since: Option<Instant> = None;
         let mut observed_query_generation = 0;
         let mut observed_refresh_generation = 0;
@@ -704,7 +698,6 @@ pub(super) fn run_daemon_inner(
                 && daemon_should_schedule_auto_upgrade(
                     runtime.config.daemon.enabled,
                     runtime.config.daemon.mode,
-                    args.once,
                 )
             {
                 prepared_auto_upgrade =
@@ -736,10 +729,8 @@ pub(super) fn run_daemon_inner(
                 &mut idle_since,
                 &mut observed_refresh_generation,
             );
-            if let Some(telemetry) = telemetry.as_mut() {
-                let events = telemetry.liveness_events(Instant::now());
-                send_daemon_events(data_root, &events);
-            }
+            let events = telemetry.liveness_events(Instant::now());
+            send_daemon_events(data_root, &events);
             let retry_due = !runtime.config.daemon.mode.runs_only_source_refresh()
                 && daemon_retry_due(&runtime);
             let source_refresh_pending = refresh_service
@@ -783,7 +774,7 @@ pub(super) fn run_daemon_inner(
             let cycle_started = Instant::now();
             let semantic_runtime_active =
                 daemon_semantic_runtime_active(&runtime, query_service.as_ref());
-            let mut iteration = run_daemon_once_with_activity(
+            let mut iteration = run_daemon_scheduler_cycle_with_activity(
                 &args,
                 data_root,
                 &mut runtime,
@@ -799,7 +790,7 @@ pub(super) fn run_daemon_inner(
             let continue_immediately = iteration.continue_immediately;
             let cycle_duration = cycle_started.elapsed();
             let iteration_events =
-                daemon_iteration_events(telemetry.as_mut(), &mut iteration, cycle_duration);
+                daemon_iteration_events(Some(&mut telemetry), &mut iteration, cycle_duration);
             send_daemon_events(data_root, &iteration_events);
             wakeup.record_cycle(iteration.did_work);
             write_daemon_lifecycle_status_with_runtime(
@@ -813,9 +804,6 @@ pub(super) fn run_daemon_inner(
                 &config_reload.to_json(),
             )?;
             failed |= iteration.failed;
-            if run_once {
-                break;
-            }
             if continue_immediately {
                 continue;
             }
@@ -953,10 +941,8 @@ pub(super) fn run_daemon_inner(
         Err(error) => {
             drop(installation_daemon_lease);
             drop(lock);
-            if let Some(telemetry) = telemetry.as_mut() {
-                let events = telemetry.fatal_events(Instant::now());
-                send_daemon_events(data_root, &events);
-            }
+            let events = telemetry.fatal_events(Instant::now());
+            send_daemon_events(data_root, &events);
             return Err(error);
         }
     };
@@ -974,10 +960,8 @@ pub(super) fn run_daemon_inner(
     if let Some(handoff) = auto_upgrade_handoff.as_ref() {
         handoff.wait_for_installation_quiescence()?;
     }
-    if let Some(telemetry) = telemetry.as_mut() {
-        let events = telemetry.stopped_events(failed, Instant::now());
-        send_daemon_events(data_root, &events);
-    }
+    let events = telemetry.stopped_events(failed, Instant::now());
+    send_daemon_events(data_root, &events);
     if let Some(prepared) = prepared_auto_upgrade {
         crate::upgrade::finish_daemon_auto_upgrade(
             prepared,

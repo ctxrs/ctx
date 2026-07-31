@@ -5,7 +5,6 @@ fn daemon_autostart_records_lifecycle_trigger_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let args = DaemonRunArgs {
         foreground: false,
-        once: true,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: None,
@@ -28,7 +27,6 @@ fn daemon_report_marks_orphaned_running_status_recoverable() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let args = DaemonRunArgs {
         foreground: false,
-        once: true,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: None,
@@ -61,7 +59,6 @@ fn daemon_report_preserves_terminal_status_when_advisory_metadata_is_unreleased(
         let temp = tempfile::tempdir()?;
         let args = DaemonRunArgs {
             foreground: false,
-            once: true,
             idle_exit_seconds: None,
             loop_interval_seconds: None,
             max_chunks: None,

@@ -11,7 +11,7 @@ fn immediate_follow_up(mut iteration: DaemonIteration) -> DaemonIteration {
     iteration
 }
 
-pub(super) fn run_daemon_once_with_activity(
+pub(super) fn run_daemon_scheduler_cycle_with_activity(
     args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
@@ -41,22 +41,6 @@ pub(super) fn run_daemon_once_with_activity(
     }
     if source_refresh_requested {
         return run_full_source_backed_refresh(data_root, runtime, source_refresh, false);
-    }
-    if args.once {
-        if !runtime.history_retry.ready() {
-            let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
-            write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
-            let state = daemon_source_backed_cycle_state(&job);
-            return Ok(DaemonIteration::new(false, false, state));
-        }
-        if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-            return Ok(DaemonIteration::new(
-                false,
-                false,
-                DaemonCycleStateV1::unknown(),
-            ));
-        }
-        return run_full_source_backed_refresh(data_root, runtime, source_refresh, true);
     }
     if let Some(iteration) = run_pending_source_backed_relational_catch_up(data_root, runtime)? {
         return Ok(iteration);
