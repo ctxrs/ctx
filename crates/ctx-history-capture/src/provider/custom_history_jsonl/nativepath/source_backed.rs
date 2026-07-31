@@ -17,12 +17,12 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
+    derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CtxHistoryJsonlEventRecord,
-    CtxHistoryJsonlRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionEdgeType, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    StableEntityId, TypedKey, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+    CtxHistoryJsonlRecord, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionEdgeType, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, TypedKey,
+    CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

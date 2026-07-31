@@ -763,7 +763,7 @@ fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
-        .add_document(document(&source, 1, "visible generation"))
+        .add_core_record(document(&source, 1, "visible generation"))
         .unwrap();
     initial.certify_source(certificate(&source, 1, 1)).unwrap();
     let receipt = initial.commit(|_| true).unwrap();
