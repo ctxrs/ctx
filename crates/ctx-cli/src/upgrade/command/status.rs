@@ -177,7 +177,14 @@ fn render_upgrade_status_human(
             context,
             &[
                 Field::new("Version", current_version),
-                Field::new("State", if managed { status } else { "unmanaged" }),
+                Field::new(
+                    "State",
+                    if managed {
+                        human_upgrade_state(status)
+                    } else {
+                        "unmanaged"
+                    },
+                ),
                 Field::new("Automatic upgrades", auto_upgrade),
             ],
         ),
@@ -258,6 +265,13 @@ fn render_upgrade_status_human(
         document.append(hint(context, Hint { text }, Some(Action { command })));
     }
     document
+}
+
+fn human_upgrade_state(status: &str) -> &str {
+    match status {
+        "up_to_date" => "up to date",
+        _ => status,
+    }
 }
 
 fn path_shadow_paths(path: Option<&Value>) -> Option<(&str, &str)> {
@@ -355,6 +369,11 @@ mod ui_tests {
         );
         let rendered = document.render_plain();
         assert!(rendered.starts_with("✓ ctx is up to date\n"));
+        assert!(
+            rendered.contains("State               up to date"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("up_to_date"), "{rendered}");
         assert!(rendered.contains("Automatic upgrades  apply"));
         assert!(!rendered.contains("/opt/ctx"));
     }

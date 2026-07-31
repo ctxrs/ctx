@@ -85,6 +85,7 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
 
 fn render_import_report_human(context: &RenderContext, report: &ImportReport) -> Document {
     let totals = &report.totals;
+    let rejected_records = rejected_record_count(totals);
     let (state, title, detail) = import_outcome_copy(totals);
     let mut document = outcome(
         context,
@@ -133,17 +134,21 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
         ));
     }
 
-    if totals.failed_sources > 0 || totals.failed > 0 {
+    if totals.failed_sources > 0 || rejected_records > 0 {
         document.push_blank();
-        document.append(hint(
-            context,
-            Hint {
-                text: "Inspect source availability and import support.",
-            },
-            Some(Action {
-                command: "ctx sources",
-            }),
-        ));
+        let fully_failed = totals.imported_sources == 0 && totals.failed_sources > 0;
+        let (text, command) = if !fully_failed && rejected_records > 0 {
+            (
+                "Diagnose rejected records while keeping the imported history available.",
+                "ctx doctor",
+            )
+        } else {
+            (
+                "Inspect source availability and import support.",
+                "ctx sources",
+            )
+        };
+        document.append(hint(context, Hint { text }, Some(Action { command })));
     }
     document
 }
@@ -153,28 +158,37 @@ fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, St
         return (
             OutcomeState::Error,
             "History import failed",
-            counted_failure(totals.failed_sources, "source failed", "sources failed"),
+            counted_failure(
+                u64::try_from(totals.failed_sources).unwrap_or(u64::MAX),
+                "source failed",
+                "sources failed",
+            ),
         );
     }
-    if totals.failed_sources > 0 || totals.failed > 0 {
+    let rejected_records = rejected_record_count(totals);
+    if totals.failed_sources > 0 || rejected_records > 0 {
         let mut details = Vec::new();
         if totals.failed_sources > 0 {
             details.push(counted_failure(
-                totals.failed_sources,
+                u64::try_from(totals.failed_sources).unwrap_or(u64::MAX),
                 "source failed",
                 "sources failed",
             ));
         }
-        if totals.failed > 0 {
+        if rejected_records > 0 {
             details.push(counted_failure(
-                totals.failed,
+                rejected_records,
                 "record was rejected",
                 "records were rejected",
             ));
         }
         return (
             OutcomeState::Warning,
-            "History import completed with warnings",
+            if rejected_records > 0 {
+                "History import completed with rejections"
+            } else {
+                "History import completed with source failures"
+            },
             format!(
                 "{}; imported history remains available.",
                 details.join("; ")
@@ -192,7 +206,15 @@ fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, St
     )
 }
 
-fn counted_failure(count: usize, singular: &str, plural: &str) -> String {
+fn rejected_record_count(totals: &ImportTotals) -> u64 {
+    if totals.failed > 0 {
+        u64::try_from(totals.failed).unwrap_or(u64::MAX)
+    } else {
+        totals.current_rejected_records.unwrap_or(0)
+    }
+}
+
+fn counted_failure(count: u64, singular: &str, plural: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
@@ -457,18 +479,50 @@ mod tests {
         let warning =
             render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
         assert!(warning.starts_with(
-            "! History import completed with warnings\n\
+            "! History import completed with rejections\n\
              1 source failed; 2 records were rejected; imported history remains available.\n"
         ));
         assert!(
             warning.ends_with(concat!(
-                "Hint: Inspect source availability and import support.\n",
+                "Hint: Diagnose rejected records while keeping the imported history available.\n",
                 "\n",
                 "Next\n",
-                "  ctx sources\n",
+                "  ctx doctor\n",
             )),
             "{warning:?}"
         );
+    }
+
+    #[test]
+    fn persisted_rejections_remain_a_human_warning_with_diagnosis() {
+        let report = ImportReport {
+            resume: true,
+            totals: ImportTotals {
+                current_source_count: Some(1),
+                current_indexed_documents: Some(7),
+                current_rejected_records: Some(2),
+                current_sources_with_rejections: Some(1),
+                work_result: ProviderImportWorkResult::NoOp,
+                ..ImportTotals::default()
+            },
+            sources: Vec::new(),
+        };
+
+        let rendered =
+            render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(
+            rendered.starts_with("! History import completed with rejections\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("2 records were rejected; imported history remains available."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Searchable events        7"),
+            "{rendered}"
+        );
+        assert!(rendered.ends_with("Next\n  ctx doctor\n"), "{rendered}");
     }
 
     #[test]

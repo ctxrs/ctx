@@ -6,8 +6,9 @@ use serde_json::{json, Value};
 use crate::{
     analytics::{count_bucket, IntegrationResult, IntegrationTelemetry},
     ui::{
-        diagnostic, empty_state, fields, outcome, section, Action, Diagnostic, DiagnosticLevel,
-        Document, EmptyState, Field, Outcome, OutcomeState, RenderContext, Ui,
+        diagnostic, empty_state, fields, hint, outcome, section, Action, Diagnostic,
+        DiagnosticLevel, Document, EmptyState, Field, Hint, Outcome, OutcomeState, RenderContext,
+        Ui,
     },
 };
 
@@ -178,7 +179,9 @@ pub(super) fn run_status(
             })
         );
     } else {
-        let document = render_status_results(ui.stdout_context(), &results);
+        let recovery_command = status_install_command(&args, &results);
+        let document =
+            render_status_results(ui.stdout_context(), &results, recovery_command.as_deref());
         ui.write_stdout(&document)?;
     }
     Ok(())
@@ -477,7 +480,11 @@ fn force_install_command(target: &McpTarget) -> String {
     )
 }
 
-fn render_status_results(context: &RenderContext, results: &[McpStatusResult]) -> Document {
+fn render_status_results(
+    context: &RenderContext,
+    results: &[McpStatusResult],
+    recovery_command: Option<&str>,
+) -> Document {
     if results.is_empty() {
         return empty_state(
             context,
@@ -523,7 +530,64 @@ fn render_status_results(context: &RenderContext, results: &[McpStatusResult]) -
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("Targets", fields(context, &target_fields)));
+    if let Some(command) = recovery_command {
+        document.push_blank();
+        document.append(hint(
+            context,
+            Hint {
+                text: "Install or refresh MCP configuration for the affected targets.",
+            },
+            Some(Action { command }),
+        ));
+    }
     document
+}
+
+fn status_install_command(args: &McpStatusArgs, results: &[McpStatusResult]) -> Option<String> {
+    let repairable = results
+        .iter()
+        .filter(|result| {
+            matches!(
+                result.status,
+                ConfigStatus::Missing | ConfigStatus::Conflict
+            )
+        })
+        .collect::<Vec<_>>();
+    if repairable.is_empty() {
+        return None;
+    }
+
+    let mut tokens = ["ctx", "integrations", "install", "mcp"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let has_unrepairable = results.iter().any(|result| {
+        matches!(
+            result.status,
+            ConfigStatus::Invalid | ConfigStatus::Unsupported
+        )
+    });
+    if args.all_agents && !has_unrepairable {
+        tokens.push("--all-agents".to_owned());
+    } else if !args.agent.is_empty() && !has_unrepairable {
+        for agent in dedupe_agents(args.agent.iter().copied()) {
+            tokens.extend(["--agent".to_owned(), agent.id().to_owned()]);
+        }
+    } else {
+        for agent in dedupe_agents(repairable.iter().map(|result| result.target.agent)) {
+            tokens.extend(["--agent".to_owned(), agent.id().to_owned()]);
+        }
+    }
+    if args.project {
+        tokens.push("--project".to_owned());
+    }
+    if results
+        .iter()
+        .any(|result| result.status == ConfigStatus::Conflict)
+    {
+        tokens.push("--force".to_owned());
+    }
+    Some(tokens.join(" "))
 }
 
 fn mcp_install_target_detail(result: &McpInstallResult) -> String {
@@ -628,11 +692,15 @@ mod tests {
                 "ctx MCP integration installed",
             ),
             (
-                render_status_results(&render_context(80, ColorMode::Never), &[missing]),
+                render_status_results(
+                    &render_context(80, ColorMode::Never),
+                    &[missing],
+                    Some("ctx integrations install mcp --agent qwen-code"),
+                ),
                 "ctx MCP integration needs attention",
             ),
             (
-                render_status_results(&render_context(80, ColorMode::Never), &[current]),
+                render_status_results(&render_context(80, ColorMode::Never), &[current], None),
                 "ctx MCP integration is current",
             ),
         ] {
@@ -643,10 +711,44 @@ mod tests {
         }
 
         let color = render_context(80, ColorMode::Always);
-        let document = render_status_results(&color, &[status_target(&target)]);
+        let document = render_status_results(&color, &[status_target(&target)], None);
         let styled = document.render(&color);
         assert!(styled.as_bytes().contains(&0x1b), "{styled:?}");
         assert_eq!(strip_ansi(&styled), document.render_plain());
+    }
+
+    #[test]
+    fn missing_mcp_status_offers_the_exact_selected_install_action() {
+        let path_context = McpPathContext::for_tests("/home/test".into(), "/repo/test".into());
+        let args = McpStatusArgs {
+            agent: vec![McpAgentArg::Codex],
+            all_agents: false,
+            project: true,
+            format: crate::output::JsonOutputFormat::Text,
+        };
+        let result = McpStatusResult {
+            target: McpAgentArg::Codex.target(true, &path_context),
+            status: ConfigStatus::Missing,
+            error: None,
+        };
+
+        let command = status_install_command(&args, std::slice::from_ref(&result)).unwrap();
+        assert_eq!(
+            command,
+            "ctx integrations install mcp --agent codex --project"
+        );
+        for width in [32, 48, 80, 120] {
+            let context = render_context(width, ColorMode::Never);
+            let document =
+                render_status_results(&context, std::slice::from_ref(&result), Some(&command));
+            assert_eq!(semantic_command(&document), command);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains("Install or refresh MCP configuration"),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]
