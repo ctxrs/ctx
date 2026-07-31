@@ -259,6 +259,16 @@ fn committed_noop_crash_recovers_same_generation_then_replays_without_identity_c
 fn changed_nonempty_catalog_recovers_only_generation_bound_a_and_queues_b() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
+    let discovery_home = temp.path().join("recovery-home");
+    let discovery_cwd = temp.path().join("recovery-cwd");
+    fs::create_dir_all(&discovery_home).unwrap();
+    fs::create_dir_all(&discovery_cwd).unwrap();
+    let _discovery = install_test_discovery_context(DiscoveryContext::new(
+        &discovery_home,
+        &discovery_cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    ));
     let source_a_path = temp.path().join("catalog-a.jsonl");
     let source_a = write_custom_source(&source_a_path, "catalog-a", "catalog-a-marker");
     let (generation_id, catalog_a) =

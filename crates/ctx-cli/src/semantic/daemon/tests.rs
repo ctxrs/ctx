@@ -707,6 +707,20 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
 #[test]
 fn daemon_startup_repairs_verified_publication_before_service_readiness() -> Result<()> {
     let root = tempfile::tempdir()?;
+    let discovery_root = tempfile::tempdir()?;
+    let discovery_home = discovery_root.path().join("discovery-home");
+    let discovery_cwd = discovery_root.path().join("discovery-cwd");
+    fs::create_dir_all(&discovery_home)?;
+    fs::create_dir_all(&discovery_cwd)?;
+    let _discovery =
+        super::super::source_backed_refresh_coordinator::install_test_discovery_context(
+            ctx_history_capture::DiscoveryContext::new(
+                &discovery_home,
+                &discovery_cwd,
+                ctx_history_capture::DiscoveryPlatform::Linux,
+                ctx_history_capture::DiscoveryPlatformDirs::default(),
+            ),
+        );
     let generation_id = ctx_history_index::GenerationWriter::open(
         super::super::source_backed_refresh_coordinator::source_backed_index_root(root.path()),
         ctx_history_index::WriterOptions::default(),
