@@ -194,11 +194,16 @@ fn run_pending_core_pro_catch_up(
         run_pro_catch_up_with_retry(data_root, runtime, generation, Some(authority.as_ref()))?;
     runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
     runtime.sidecar_drain.generation = Some(generation.to_owned());
-    Ok(Some(immediate_follow_up(DaemonIteration::new(
-        run.did_work,
-        false,
-        DaemonCycleStateV1::unknown(),
-    ))))
+    Ok(Some(core_pro_catch_up_iteration(run.did_work)))
+}
+
+fn core_pro_catch_up_iteration(did_work: bool) -> DaemonIteration {
+    let iteration = DaemonIteration::new(did_work, false, DaemonCycleStateV1::unknown());
+    if did_work {
+        immediate_follow_up(iteration)
+    } else {
+        iteration
+    }
 }
 
 fn run_pending_core_refresh(
