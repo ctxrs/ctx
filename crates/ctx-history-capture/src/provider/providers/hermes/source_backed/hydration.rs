@@ -77,8 +77,7 @@ impl HermesLocatorResolver {
             }
             coordinates.push(decode_message_coordinate(locator)?);
         }
-        let (source_root, _, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.data_root, &self.path)?;
+        let (_, sqlite_snapshot) = open_root_authorized_snapshot(&self.data_root, &self.path)?;
         #[cfg(test)]
         self.snapshot_opens
             .set(self.snapshot_opens.get().saturating_add(1));
@@ -141,7 +140,6 @@ impl HermesLocatorResolver {
         if closing_evidence != opening_evidence {
             return Err(HermesSourceBackedError::StaleSourceEvidence);
         }
-        source_root.revalidate()?;
         Ok(hydrated)
     }
 }

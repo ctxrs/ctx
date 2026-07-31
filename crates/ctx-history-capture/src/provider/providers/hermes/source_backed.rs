@@ -94,7 +94,7 @@ pub(crate) fn scan_hermes_source_backed(
     mut emit: impl FnMut(HermesSourceBackedPage) -> HermesSourceBackedResult<()>,
 ) -> HermesSourceBackedResult<HermesSourceBackedScan> {
     candidate.source.validate_contract()?;
-    let (source_root, _, sqlite_snapshot) =
+    let (_, sqlite_snapshot) =
         open_root_authorized_snapshot(&candidate.data_root, &candidate.path)?;
     let opening_evidence = sqlite_snapshot.evidence().clone();
     let projection = project_hermes_snapshot(candidate, sqlite_snapshot.connection()?, &mut emit)?;
@@ -103,7 +103,6 @@ pub(crate) fn scan_hermes_source_backed(
     if closing_evidence != opening_evidence {
         return Err(HermesSourceBackedError::SourceChanged);
     }
-    source_root.revalidate()?;
     Ok(HermesSourceBackedScan {
         certificate: projection.certificate,
         row_decode_passes: 1,
@@ -301,11 +300,7 @@ fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {
 fn open_root_authorized_snapshot(
     data_root: &Path,
     path: &Path,
-) -> HermesSourceBackedResult<(
-    ProviderSourceRoot,
-    SqliteSourceDirectoryAuthority,
-    SqliteSourceReadSnapshot,
-)> {
+) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
     open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
@@ -313,11 +308,7 @@ fn open_root_authorized_snapshot_with_hook(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
-) -> HermesSourceBackedResult<(
-    ProviderSourceRoot,
-    SqliteSourceDirectoryAuthority,
-    SqliteSourceReadSnapshot,
-)> {
+) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -335,18 +326,10 @@ fn open_root_authorized_snapshot_with_hook(
         .map_err(CaptureError::from)?;
     let sqlite_authority =
         retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
-    admission_directory.revalidate()?;
-    admission_root.revalidate()?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
-    // Stock SQLite may create an empty WAL and SHM while pinning the first WAL
-    // read. The SQLite guard retains and revalidates the admission authority;
-    // establish the outer directory stamp after that legitimate transition so
-    // final provider-root revalidation still catches later mutation.
-    let source_root = ProviderSourceRoot::open(parent)?;
-    source_root.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| HermesSourceBackedError::CountOverflow)?;
@@ -354,7 +337,7 @@ fn open_root_authorized_snapshot_with_hook(
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(CaptureError::from)?;
-    Ok((source_root, sqlite_authority, sqlite_snapshot))
+    Ok((sqlite_authority, sqlite_snapshot))
 }
 
 fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) -> Vec<u8> {

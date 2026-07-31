@@ -217,6 +217,106 @@ fn idle_wal_writer_first_scan_succeeds_and_append_changes_revision() {
 }
 
 #[test]
+fn terminal_family_treats_empty_wal_create_remove_and_sibling_churn_as_noops() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let path = temp.path().join("state.db");
+    let wal = path.with_file_name("state.db-wal");
+    let sibling = temp.path().join("unrelated-sibling");
+    create_state_db(&path, "terminal-noop", "terminal noop");
+    let writer = Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("pragma journal_mode = wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer
+        .execute_batch("pragma wal_autocheckpoint = 0")
+        .unwrap();
+    assert!(!wal.exists());
+
+    let (_, absent_snapshot) = open_root_authorized_snapshot_with_hook(&data_root, &path, || {
+        fs::write(&sibling, b"sibling churn during open").unwrap();
+    })
+    .unwrap();
+    let absent_revision = *absent_snapshot.evidence().revision();
+    let absent_terminal = absent_snapshot.terminal_revalidator();
+    absent_snapshot.finish().unwrap();
+    fs::write(&wal, b"").unwrap();
+    absent_terminal().unwrap();
+
+    let (_, empty_snapshot) = open_root_authorized_snapshot(&data_root, &path).unwrap();
+    assert_eq!(empty_snapshot.evidence().revision(), &absent_revision);
+    assert_eq!(empty_snapshot.evidence().wal_length(), None);
+    let empty_terminal = empty_snapshot.terminal_revalidator();
+    empty_snapshot.finish().unwrap();
+    fs::remove_file(&wal).unwrap();
+    empty_terminal().unwrap();
+
+    fs::write(&sibling, b"sibling churn after seal").unwrap();
+    empty_terminal().unwrap();
+    drop(writer);
+}
+
+#[test]
+fn terminal_family_rejects_nonempty_wal_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "terminal-wal", "before terminal mutation");
+    let writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute("update messages set content = content where id = 7", [])
+        .unwrap();
+
+    let (_, snapshot) = open_root_authorized_snapshot(&data_root, &path).unwrap();
+    let terminal = snapshot.terminal_revalidator();
+    snapshot.finish().unwrap();
+    writer
+        .execute(
+            "update messages set content = 'after terminal mutation' where id = 7",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        terminal(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    drop(writer);
+}
+
+#[test]
+fn concurrent_committed_wal_mutation_during_snapshot_open_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "concurrent-wal", "before concurrent mutation");
+    let writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute("update messages set content = content where id = 7", [])
+        .unwrap();
+
+    let result = open_root_authorized_snapshot_with_hook(&data_root, &path, || {
+        writer
+            .execute(
+                "update messages set content = 'during snapshot open' where id = 7",
+                [],
+            )
+            .unwrap();
+    });
+    assert!(matches!(
+        result,
+        Err(HermesSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::SourceChanged
+        ))
+    ));
+    drop(writer);
+}
+
+#[test]
 fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");

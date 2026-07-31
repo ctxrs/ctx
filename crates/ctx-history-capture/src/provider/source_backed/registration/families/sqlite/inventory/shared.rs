@@ -260,13 +260,13 @@ impl RetainedSqliteInventoryLeaf {
         let authority =
             retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)
                 .map_err(route_error)?;
-        let retained = Self {
+        // The SQLite authority certifies the parent object's identity and opens
+        // only the named DB family. Directory metadata also reflects unrelated
+        // sibling churn and is not part of this leaf's source authority.
+        Ok(Self {
             authority,
             database_name,
-        };
-        directory.revalidate().map_err(route_error)?;
-        source_root.revalidate().map_err(route_error)?;
-        Ok(retained)
+        })
     }
 
     fn open(&self) -> SourceBackedRouteResult<SqliteSourceReadSnapshot> {
