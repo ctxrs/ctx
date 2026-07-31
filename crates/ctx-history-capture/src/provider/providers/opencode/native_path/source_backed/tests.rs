@@ -5,10 +5,11 @@ use std::{
 };
 
 use ctx_history_core::{
-    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, EventRole, EventType,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
+    BatchHydrationRequest, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
+    EventRole, EventType, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
+    TypedKey,
 };
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -70,6 +71,7 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         assert_eq!(scan.certificate.counts().complete_records, 2);
         assert_eq!(scan.certificate.counts().retained_records, 2);
         assert_eq!(scan.certificate.counts().indexed_documents, 2);
+        assert_eq!(scan.certificate.parser_revision(), PARSER_REVISION);
         assert!(scan.certificate.frontier().is_none());
         assert_eq!(
             scan.source.schema_variant(),
@@ -298,6 +300,139 @@ fn agent_switched_production_event_is_accepted_by_relational_projection_types() 
             .unwrap(),
         EventRole::Unknown
     );
+}
+
+#[test]
+fn unchanged_agent_switched_v2_generation_is_reprojected_to_canonical_role() {
+    const PRE_FIX_PARSER_REVISION: &str = "opencode-family-source-backed-v2";
+
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let template_index = temp.path().join("template-index");
+    let upgrade_index = temp.path().join("upgrade-index");
+    create_agent_switched_fixture(&path);
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+
+    let mut template_registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut template_registry,
+        provider_source_for_path(registration.provider(), path.clone()),
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+    )
+    .unwrap();
+    let template =
+        refresh_source_backed_generation(&template_index, &template_registry, options.clone())
+            .unwrap();
+    let template_certificate = &template.sources[0];
+    assert_eq!(template_certificate.parser_revision(), PARSER_REVISION);
+    assert!(template_certificate.frontier().is_some());
+
+    let (direct_scan, mut documents) = collect_scan(registration, &path);
+    assert_eq!(
+        direct_scan.certificate.content_digest(),
+        template_certificate.content_digest()
+    );
+    assert_eq!(documents.len(), 1);
+    assert_eq!(
+        documents[0].role.as_deref(),
+        Some(EventRole::Unknown.as_str())
+    );
+    documents[0].role = Some("agent-switched".to_owned());
+    let v2_certificate = CertifiedSource::certify_with_frontier(
+        template_certificate.observation().clone(),
+        template_certificate.observation().clone(),
+        PRE_FIX_PARSER_REVISION,
+        *template_certificate.content_digest(),
+        template_certificate.counts(),
+        template_certificate.frontier().cloned(),
+    )
+    .unwrap();
+
+    let mut v2_writer = GenerationWriter::open(&upgrade_index, options.clone()).unwrap();
+    v2_writer
+        .begin_source(v2_certificate.observation().source().clone())
+        .unwrap();
+    v2_writer.add_document(documents.remove(0)).unwrap();
+    v2_writer.certify_source(v2_certificate).unwrap();
+    let v2 = v2_writer.commit(|_| true).unwrap();
+    let v2_index = VerifiedIndex::open(&upgrade_index).unwrap();
+    let v2_source = v2_index.manifest().sources[0].observation().source();
+    assert_eq!(
+        v2_index.manifest().sources[0].parser_revision(),
+        PRE_FIX_PARSER_REVISION
+    );
+    assert_eq!(
+        v2_index
+            .source_event_page(v2_source, None, 1)
+            .unwrap()
+            .items[0]
+            .role
+            .as_deref(),
+        Some("agent-switched")
+    );
+    drop(v2_index);
+
+    let work = Arc::new(Mutex::new(Vec::new()));
+    let mut upgrade_registry = SourceBackedProviderRegistry::new();
+    adapter::register_with_work_observer(
+        &mut upgrade_registry,
+        provider_source_for_path(registration.provider(), path),
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+        Arc::clone(&work),
+    )
+    .unwrap();
+    let upgraded =
+        refresh_source_backed_generation(&upgrade_index, &upgrade_registry, options.clone())
+            .unwrap();
+
+    assert_ne!(upgraded.commit.generation_id, v2.generation_id);
+    assert_ne!(upgraded.commit.opstamp, v2.opstamp);
+    assert_eq!(upgraded.sources[0].parser_revision(), PARSER_REVISION);
+    let upgrade_work = work.lock().unwrap()[0];
+    assert_one_snapshot(upgrade_work);
+    assert_eq!(upgrade_work.logical_rows_observed, 1);
+    assert_eq!(upgrade_work.projection_passes, 1);
+    assert_eq!(upgrade_work.logical_rows_projected, 1);
+    assert_eq!(upgrade_work.documents_staged, 1);
+    assert_eq!(upgrade_work.exact_replays, 0);
+
+    let upgraded_index = VerifiedIndex::open(&upgrade_index).unwrap();
+    let upgraded_source = upgraded_index.manifest().sources[0].observation().source();
+    let upgraded_event = &upgraded_index
+        .source_event_page(upgraded_source, None, 1)
+        .unwrap()
+        .items[0];
+    assert_eq!(
+        upgraded_event.role.as_deref(),
+        Some(EventRole::Unknown.as_str())
+    );
+    assert_eq!(
+        upgraded_event
+            .role
+            .as_deref()
+            .unwrap()
+            .parse::<EventRole>()
+            .unwrap(),
+        EventRole::Unknown
+    );
+    drop(upgraded_index);
+
+    let unchanged =
+        refresh_source_backed_generation(&upgrade_index, &upgrade_registry, options).unwrap();
+    assert_eq!(
+        unchanged.commit.generation_id,
+        upgraded.commit.generation_id
+    );
+    assert_eq!(unchanged.commit.opstamp, upgraded.commit.opstamp);
+    let unchanged_work = work.lock().unwrap()[1];
+    assert_one_snapshot(unchanged_work);
+    assert_zero_projection_replay(unchanged_work, 1);
 }
 
 #[test]
