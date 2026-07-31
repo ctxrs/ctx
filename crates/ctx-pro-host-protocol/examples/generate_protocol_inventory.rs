@@ -7,8 +7,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-#[path = "generate_protocol_inventory/blame.rs"]
-mod blame;
 #[path = "generate_protocol_inventory/fixtures.rs"]
 mod fixtures;
 #[path = "generate_protocol_inventory/messages.rs"]

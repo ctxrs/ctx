@@ -5,8 +5,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_pro_host_protocol::{
-    BlameRequest, BlameTarget, MaterializationAuthority, ProFilesystemLayout,
-    QuerySnapshotExpectation, SourceManifestReceiptIdentity, StatusResult,
+    BlameRequest, BlameTarget, CoreMaterializationReceiptIdentity, CoreProjectionCurrentness,
+    MaterializedCoverage, ProFilesystemLayout, ProOperation, QuerySnapshotExpectation,
+    StatusResult,
 };
 
 use crate::pro::verified_executable::VerifiedHelperExecutable;
@@ -29,19 +30,24 @@ pub(super) fn current_blame_request(
     status: &StatusResult,
     expected_core_generation_id: &str,
 ) -> Result<BlameRequest> {
-    if status.authority != MaterializationAuthority::Source {
-        bail!(
-            "not_materialized: Pro helper has no v0.26 source-manifest authority; rebuild it from provider sources"
-        );
-    }
     status
         .validate()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    let receipt = status.source_receipt.as_ref().ok_or_else(|| {
-        anyhow!(
-            "source_unavailable: source-backed Pro graph is not ready ({})",
-            graph_state_name(status.state)
-        )
+    if status.currentness != CoreProjectionCurrentness::Current
+        || status.coverage != MaterializedCoverage::Complete
+    {
+        bail!("not_materialized: Pro Core projection is not current with complete target coverage");
+    }
+    let operation = match &target {
+        BlameTarget::File { .. } => ProOperation::FileBlame,
+        BlameTarget::Commit { .. } => ProOperation::CommitBlame,
+        BlameTarget::PullRequest { .. } => ProOperation::PullRequestBlame,
+    };
+    if !status.available_operations.contains(&operation) {
+        bail!("repository_unavailable: requested Pro blame operation is not currently available");
+    }
+    let receipt = status.core_receipt.as_ref().ok_or_else(|| {
+        anyhow!("not_materialized: current Pro Core projection has no completed receipt")
     })?;
     if receipt.core_generation_id != expected_core_generation_id {
         bail!(
@@ -54,23 +60,11 @@ pub(super) fn current_blame_request(
         target,
         limit,
         cursor,
-        expected_snapshot: QuerySnapshotExpectation::Source {
-            receipt: SourceManifestReceiptIdentity::from_receipt(receipt)
+        expected_snapshot: QuerySnapshotExpectation::Core {
+            receipt: CoreMaterializationReceiptIdentity::from_receipt(receipt)
                 .map_err(|error| anyhow!("invalid_response: {}", error.message))?,
         },
     })
-}
-
-fn graph_state_name(state: ctx_pro_host_protocol::GraphState) -> &'static str {
-    use ctx_pro_host_protocol::GraphState;
-
-    match state {
-        GraphState::NotMaterialized => "not_materialized",
-        GraphState::NeedsRebuild => "needs_rebuild",
-        GraphState::Partial => "partial",
-        GraphState::NeedsResume => "needs_resume",
-        GraphState::Ready => "ready",
-    }
 }
 
 pub(crate) fn default_helper_path(data_root: &Path) -> PathBuf {

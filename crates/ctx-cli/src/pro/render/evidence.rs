@@ -5,7 +5,7 @@ use ctx_pro_host_protocol::{
 use crate::ui::{Document, Line, RenderContext, Span, Token};
 
 use super::layout::{
-    display_width, enum_text, line_range_text, push_atomic, push_authored, push_heading, FIELD_GAP,
+    display_width, line_range_text, push_atomic, push_authored, push_heading, FIELD_GAP,
 };
 
 pub(super) fn render_list(document: &mut Document, context: &RenderContext, result: &BlameResult) {
@@ -17,12 +17,7 @@ pub(super) fn render_list(document: &mut Document, context: &RenderContext, resu
     for evidence in &result.evidence {
         let reference = format!("[{}]", evidence.number);
         let citation = citation_text(&evidence.citation);
-        let citation_token =
-            if evidence.citation.event_id.is_some() || evidence.citation.session_id.is_some() {
-                Token::Command
-            } else {
-                Token::Text
-            };
+        let citation_token = Token::Command;
         let same_line_width = 2usize
             .saturating_add(display_width(&reference))
             .saturating_add(FIELD_GAP)
@@ -87,45 +82,13 @@ pub(super) fn render_continuation(
 }
 
 fn citation_text(citation: &EvidenceCitation) -> String {
-    if let Some(event_id) = citation.event_id {
-        return format!("ctx show event {event_id}");
-    }
-    if let Some(session_id) = citation.session_id {
-        return format!("ctx show session {session_id}");
-    }
-    if let Some(observation_id) = citation.observation_id {
-        let mut value = format!("observation {observation_id}");
-        if let Some(sequence) = citation.observation_seq {
-            value.push_str(&format!(" sequence {sequence}"));
-        }
-        if let Some(kind) = citation.observation_kind {
-            value.push_str(&format!(" ({})", enum_text(kind)));
-        }
-        return value;
-    }
-    if let Some(locator) = &citation.source_locator {
-        return serde_json::to_string(locator).unwrap_or_else(|_| "source record".to_owned());
-    }
-    if let Some(path) = &citation.source_path {
-        let mut location = path.clone();
-        if let Some(line) = citation.fixture_line {
-            location.push_str(&format!(":{line}"));
-        }
-        if let Some(ordinal) = citation.source_record_ordinal {
-            location.push_str(&format!(" record {ordinal}"));
-            if let Some(subrecord) = citation.source_record_subrecord_index {
-                location.push_str(&format!(".{subrecord}"));
-            }
-        }
-        if let Some(range) = &citation.byte_range {
-            location.push_str(&format!(" bytes {}-{}", range.start, range.end_exclusive));
-        }
-        if let Some(sha256) = &citation.source_sha256 {
-            location.push_str(&format!(" sha256 {sha256}"));
-        }
-        return location;
-    }
-    "canonical evidence".to_owned()
+    format!(
+        "ctx show event {} · Core {} · source {} · sequence {}",
+        citation.event_id,
+        &citation.core_generation_id[..12],
+        citation.source.identity(),
+        citation.event_sequence,
+    )
 }
 
 fn continuation_command(result: &BlameResult, cursor: &str) -> String {

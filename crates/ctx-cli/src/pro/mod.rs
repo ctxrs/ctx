@@ -24,8 +24,8 @@ mod verified_executable;
 mod workos_device;
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
-    blame, preflight_source_manifest_materialization, stable_error_code, stable_error_diagnostic,
-    sync_source_manifest_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
+    blame, preflight_core_materialization, stable_error_code, stable_error_diagnostic,
+    sync_core_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
 pub(crate) use pricing::PRO_MONTHLY_PRICE_DISPLAY;

@@ -256,7 +256,6 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                         crate::commands::import::load_explicit_source_catalog_authority(
                             execution.data_root,
                         )?,
-                    source_manifest: None,
                     resolver: None,
                     scanned_routes: 1,
                     unsupported_routes: 0,
@@ -366,7 +365,6 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
                     crate::commands::import::load_explicit_source_catalog_authority(
                         execution.data_root,
                     )?,
-                source_manifest: None,
                 resolver: None,
                 scanned_routes: 1,
                 unsupported_routes: 0,
@@ -502,7 +500,6 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
                     crate::commands::import::load_explicit_source_catalog_authority(
                         execution.data_root,
                     )?,
-                source_manifest: None,
                 resolver: None,
                 scanned_routes: 0,
                 unsupported_routes: 0,

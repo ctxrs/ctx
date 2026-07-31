@@ -4,16 +4,14 @@
 //! generated inventory and fingerprint; they do not define a compatible range.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use ctx_history_core::NativeRecordCoordinate;
-pub use ctx_history_core::{ContentRef, SourceRecordLocator};
+pub use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
 
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
 pub const PROTOCOL_VERSION: u16 = 1;
 include!("protocol_fingerprint.rs");
 pub const FRAME_HEADER_BYTES: usize = FRAME_MAGIC.len() + 2 + 4;
-pub const MAX_FRAME_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_FRAME_PAYLOAD_BYTES: usize = 80 * 1024 * 1024;
 pub const MAX_BLAME_RESULTS: u32 = 100;
 pub const MAX_BLAME_CURSOR_BYTES: usize = 256;
 pub const MAX_BLAME_EVIDENCE: usize = 3_200;
@@ -55,8 +53,9 @@ pub use lifecycle::{
 };
 mod message;
 pub use message::{
-    Capability, GraphState, HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope,
-    HostMessage, MaterializationAuthority, StatusRequest, StatusResult,
+    Capability, CoreProjectionCurrentness, HelloRequest, HelloResult, HelperEnvelope,
+    HelperMessage, HostEnvelope, HostMessage, MaterializedCoverage, ProAccessState,
+    ProAccessStatus, ProOperation, StatusRequest, StatusResult,
 };
 mod query;
 pub use query::{
@@ -67,43 +66,21 @@ pub use query::{
     PullRequestCommit, PullRequestCommitRelationship, QuerySnapshotExpectation,
     ResolvedBlameTarget, WorktreeStatus,
 };
-mod source_materialization;
-pub use source_materialization::{
-    certified_source_revision_sha256, legacy_source_manifest_sha256,
-    source_manifest_receipt_sha256, AdmitSourceManifestPageRequest,
-    BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest, DeleteSourceRequest,
-    FinishAdmittedSourceManifestRequest, FinishSourceManifestAdmissionRequest,
-    FinishSourceManifestRequest, MaterializeSourcePageRequest, MaterializeSourcePagesRequest,
-    PrepareSourceRequest, ReadSourceProgressPageRequest, SourceCommandFact, SourceDeleted,
-    SourceDisposition, SourceManifest, SourceManifestAdmissionBegan, SourceManifestAdmissionCursor,
-    SourceManifestAdmissionReceipt, SourceManifestAdmitted, SourceManifestBegan,
-    SourceManifestFinished, SourceManifestHeader, SourceManifestPage, SourceManifestPageAdmitted,
-    SourceManifestPageEntries, SourceManifestReceipt, SourceManifestReceiptIdentity,
-    SourceMessageFact, SourceOutcome, SourcePageMaterialized, SourcePagesMaterialized,
-    SourcePrepared, SourceProgress, SourceProgressPage, SourceProgressReceipt, SourceRecord,
-    SourceRecordMetadata, SourceRemoval, SourceRepositoryContext, SourceResultFact,
-    SourceSessionRelationships, SourceWorktreeRootLocator, TransientSourceContent,
-    TransientSourceFact, MAX_SOURCE_CONTENT_BYTES, MAX_SOURCE_CONTENT_BYTES_PER_PAGE,
-    MAX_SOURCE_CONTROL_WIRE_BYTES, MAX_SOURCE_FACTS_PER_RECORD, MAX_SOURCE_IDENTITY_BYTES,
-    MAX_SOURCE_INVENTORY_SOURCES, MAX_SOURCE_MANIFEST_PAGE_ITEMS,
-    MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES, MAX_SOURCE_MANIFEST_REMOVALS, MAX_SOURCE_MANIFEST_SOURCES,
-    MAX_SOURCE_MANIFEST_WIRE_BYTES, MAX_SOURCE_MATERIALIZATION_BATCH_CONTENT_BYTES,
-    MAX_SOURCE_MATERIALIZATION_BATCH_ITEMS, MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS,
-    MAX_SOURCE_MATERIALIZATION_BATCH_WIRE_BYTES, MAX_SOURCE_PAGE_WIRE_BYTES, MAX_SOURCE_PATH_BYTES,
-    MAX_SOURCE_PROGRESS_PAGE_ITEMS, MAX_SOURCE_PROGRESS_PAGE_WIRE_BYTES,
-    MAX_SOURCE_PROGRESS_SOURCES, MAX_SOURCE_RECORDS_PER_PAGE, MAX_SOURCE_TOUCHED_FILES_PER_RECORD,
-    SOURCE_MATERIALIZATION_CONTRACT_VERSION,
+mod core_materialization;
+pub use core_materialization::{
+    core_materialization_id, core_source_snapshot_sha256, ApplyCoreSourceDeltaPageRequest,
+    BeginCoreMaterializationRequest, CoreGenerationHead, CoreMaterializationBegan,
+    CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
+    CoreRecordPage, CoreRecordPageMaterialized, CoreSourceDelta, CoreSourceDeltaPage,
+    CoreSourceDeltaPageApplied, CoreSourceRemoval, CoreSourceState,
+    FinishCoreMaterializationRequest, MaterializeCoreRecordPageRequest,
+    CORE_MATERIALIZATION_CONTRACT_VERSION, MAX_CORE_CONTROL_WIRE_BYTES,
+    MAX_CORE_MATERIALIZER_REVISION_BYTES, MAX_CORE_RECORD_PAGE_CONTENT_BYTES,
+    MAX_CORE_RECORD_PAGE_ITEMS, MAX_CORE_RECORD_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
 };
 mod fake;
 pub use fake::{FakeBlameFailure, FakeHelper};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObservationKind {
-    Event,
-    FileTouch,
-    VcsChange,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,98 +92,34 @@ pub struct ByteRange {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceCitation {
-    pub observation_id: Option<Uuid>,
-    pub observation_seq: Option<u64>,
-    pub observation_kind: Option<ObservationKind>,
-    pub session_id: Option<Uuid>,
-    pub event_id: Option<Uuid>,
-    pub event_seq: Option<u64>,
-    pub source_locator: Option<SourceRecordLocator>,
-    pub source_path: Option<String>,
-    pub fixture_line: Option<u64>,
-    pub source_record_ordinal: Option<u64>,
-    pub source_record_subrecord_index: Option<u32>,
+    pub core_generation_id: String,
+    pub source: SourceKey,
+    pub session_id: StableEntityId,
+    pub event_id: StableEntityId,
+    pub event_sequence: u64,
     pub byte_range: Option<ByteRange>,
-    pub source_sha256: Option<String>,
+    pub evidence_sha256: Option<String>,
 }
 
 impl EvidenceCitation {
     #[must_use]
     pub fn is_usable(&self) -> bool {
-        let coordinate_is_complete = self.observation_id.is_some()
-            == (self.observation_seq.is_some() && self.observation_kind.is_some());
-        let fields_are_valid = coordinate_is_complete
-            && self.observation_id.is_none_or(|id| !id.is_nil())
-            && self.session_id.is_none_or(|id| !id.is_nil())
-            && self.event_id.is_none_or(|id| !id.is_nil())
-            && self
-                .source_path
-                .as_deref()
-                .is_none_or(|path| !path.trim().is_empty() && path.len() <= MAX_BLAME_TARGET_BYTES)
-            && self.fixture_line.is_none_or(|line| line > 0)
+        use ctx_history_core::StableEntityKind;
+
+        self.core_generation_id.len() == 64
+            && is_lower_sha256(&self.core_generation_id)
+            && self.source.validate_contract().is_ok()
+            && self.session_id.validate_contract().is_ok()
+            && self.event_id.validate_contract().is_ok()
+            && self.session_id.entity_kind() == StableEntityKind::Session
+            && self.event_id.entity_kind() == StableEntityKind::Event
+            && self.event_id.source_digest() == self.source.identity().digest()
+            && self.event_id.source_descriptor_digest() == self.source.exact_descriptor_digest()
             && self
                 .byte_range
                 .as_ref()
                 .is_none_or(|range| range.start <= range.end_exclusive)
-            && self.source_sha256.as_deref().is_none_or(is_lower_sha256)
-            && (self.source_record_subrecord_index.is_none()
-                || self.source_record_ordinal.is_some());
-        if !fields_are_valid {
-            return false;
-        }
-        if let Some(locator) = &self.source_locator {
-            return self.has_exact_source_locator(locator);
-        }
-        let canonical =
-            self.observation_id.is_some() || self.event_id.is_some() || self.session_id.is_some();
-        let source = self.source_path.is_some()
-            && (self.fixture_line.is_some()
-                || self.source_record_ordinal.is_some()
-                || self.byte_range.is_some()
-                || self.source_sha256.is_some());
-        canonical || source
-    }
-
-    fn has_exact_source_locator(&self, locator: &SourceRecordLocator) -> bool {
-        let record_digest = lower_hex(locator.record_digest());
-        if locator.validate_contract().is_err()
-            || self.observation_id.is_some()
-            || self.observation_seq.is_some()
-            || self.observation_kind.is_some()
-            || self.session_id.is_some()
-            || self.event_id.is_some()
-            || self.event_seq.is_some()
-            || self.source_path.is_some()
-            || self.fixture_line.is_some()
-            || self.source_record_subrecord_index.is_some()
-            || self.source_sha256.as_deref() != Some(record_digest.as_str())
-        {
-            return false;
-        }
-        match locator.coordinate() {
-            NativeRecordCoordinate::Jsonl {
-                byte_offset,
-                byte_length,
-                physical_ordinal,
-                ..
-            } => {
-                let Some(end_exclusive) = byte_offset.checked_add(*byte_length) else {
-                    return false;
-                };
-                self.source_record_ordinal == Some(*physical_ordinal)
-                    && self.byte_range
-                        == Some(ByteRange {
-                            start: *byte_offset,
-                            end_exclusive,
-                        })
-            }
-            NativeRecordCoordinate::ProviderSqlite { .. }
-            | NativeRecordCoordinate::Document { .. }
-            | NativeRecordCoordinate::TreeRecord { .. }
-            | NativeRecordCoordinate::ProviderNative { .. } => {
-                self.source_record_ordinal.is_none() && self.byte_range.is_none()
-            }
-        }
+            && self.evidence_sha256.as_deref().is_none_or(is_lower_sha256)
     }
 }
 
@@ -215,16 +128,6 @@ fn is_lower_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-fn lower_hex(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(64);
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

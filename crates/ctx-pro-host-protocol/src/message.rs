@@ -4,14 +4,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AdmitSourceManifestPageRequest, AuthorizationRequest, AuthorizationResult,
-    BeginSourceManifestAdmissionRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
-    DeleteSourceRequest, ErrorClass, FinishAdmittedSourceManifestRequest,
-    FinishSourceManifestAdmissionRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
-    MaterializeSourcePagesRequest, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
-    ProtocolError, ReadSourceProgressPageRequest, SourceDeleted, SourceManifestAdmissionBegan,
-    SourceManifestAdmitted, SourceManifestFinished, SourceManifestPageAdmitted,
-    SourceManifestReceipt, SourcePagesMaterialized, SourcePrepared, SourceProgressPage,
+    ApplyCoreSourceDeltaPageRequest, AuthorizationRequest, AuthorizationResult,
+    BeginCoreMaterializationRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
+    CoreMaterializationBegan, CoreMaterializationFinished, CoreMaterializationReceipt,
+    CoreRecordPageMaterialized, CoreSourceDeltaPageApplied, ErrorClass,
+    FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
+    MaterializeCoreRecordPageRequest, PrepareGraphKeyDeletionRequest, ProtocolError,
     PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
@@ -79,9 +77,8 @@ impl<'de> Deserialize<'de> for HelperEnvelope {
     }
 }
 
-// `AdmitSourceManifestPage` is 1,080 bytes versus 736 bytes for the next-largest
-// variant. Boxing it would add a heap allocation per page at this serialization
-// boundary without changing the protocol representation, so retain it by value.
+// Core record pages intentionally carry complete records and can dominate this
+// enum's stack size. Boxing changes only the Rust representation, never wire V1.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -96,14 +93,10 @@ pub enum HostMessage {
     PrepareGraphKeyDeletion(PrepareGraphKeyDeletionRequest),
     ConfirmGraphKeyDeletion(ConfirmGraphKeyDeletionRequest),
     Status(StatusRequest),
-    BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest),
-    AdmitSourceManifestPage(AdmitSourceManifestPageRequest),
-    FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest),
-    ReadSourceProgressPage(ReadSourceProgressPageRequest),
-    PrepareSource(PrepareSourceRequest),
-    MaterializeSourcePages(MaterializeSourcePagesRequest),
-    DeleteSource(DeleteSourceRequest),
-    FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest),
+    BeginCoreMaterialization(BeginCoreMaterializationRequest),
+    ApplyCoreSourceDeltaPage(ApplyCoreSourceDeltaPageRequest),
+    MaterializeCoreRecordPage(MaterializeCoreRecordPageRequest),
+    FinishCoreMaterialization(FinishCoreMaterializationRequest),
     Blame(BlameRequest),
 }
 
@@ -120,14 +113,10 @@ pub enum HelperMessage {
     GraphKeyDeletionPrepared(GraphKeyDeletionPrepared),
     GraphKeyDeleted(GraphKeyDeleted),
     Status(StatusResult),
-    SourceManifestAdmissionBegan(SourceManifestAdmissionBegan),
-    SourceManifestPageAdmitted(SourceManifestPageAdmitted),
-    SourceManifestAdmitted(SourceManifestAdmitted),
-    SourceProgressPage(SourceProgressPage),
-    SourcePrepared(SourcePrepared),
-    SourcePagesMaterialized(SourcePagesMaterialized),
-    SourceDeleted(SourceDeleted),
-    SourceManifestFinished(SourceManifestFinished),
+    CoreMaterializationBegan(CoreMaterializationBegan),
+    CoreSourceDeltaPageApplied(CoreSourceDeltaPageApplied),
+    CoreRecordPageMaterialized(CoreRecordPageMaterialized),
+    CoreMaterializationFinished(CoreMaterializationFinished),
     Blame(BlameResult),
     Error(ProtocolError),
 }
@@ -139,7 +128,7 @@ pub enum Capability {
     EntitlementAuthorization,
     GraphKeyDeletion,
     Status,
-    SourceMaterialization,
+    CoreMaterialization,
     Query,
     GitRead,
 }
@@ -150,7 +139,7 @@ impl Capability {
             Self::EntitlementAuthorization => "entitlement_authorization",
             Self::GraphKeyDeletion => "graph_key_deletion",
             Self::Status => "status",
-            Self::SourceMaterialization => "source_materialization",
+            Self::CoreMaterialization => "core_materialization",
             Self::Query => "query",
             Self::GitRead => "git_read",
         }
@@ -191,53 +180,175 @@ pub struct HelloResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StatusRequest {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphState {
-    NotMaterialized,
-    NeedsRebuild,
-    Partial,
-    NeedsResume,
-    Ready,
+pub struct StatusRequest {
+    pub requested_core_generation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MaterializationAuthority {
-    Source,
+pub enum CoreProjectionCurrentness {
+    NotMaterialized,
+    Partial,
+    Stale,
+    NeedsRebuild,
+    Current,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializedCoverage {
+    NotMaterialized,
+    Partial,
+    Complete,
+    Empty,
+    Abstained,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProAccessState {
+    Available,
+    Locked,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProAccessStatus {
+    pub entitlement: ProAccessState,
+    pub graph_key: ProAccessState,
+    pub local_repository: ProAccessState,
+}
+
+impl ProAccessStatus {
+    fn all_available(&self) -> bool {
+        self.entitlement == ProAccessState::Available
+            && self.graph_key == ProAccessState::Available
+            && self.local_repository == ProAccessState::Available
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProOperation {
+    FileBlame,
+    CommitBlame,
+    PullRequestBlame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResult {
-    pub state: GraphState,
-    pub authority: MaterializationAuthority,
-    pub source_receipt: Option<SourceManifestReceipt>,
+    pub currentness: CoreProjectionCurrentness,
+    pub requested_core_generation_id: Option<String>,
+    pub core_receipt: Option<CoreMaterializationReceipt>,
+    pub coverage: MaterializedCoverage,
+    pub access: ProAccessStatus,
+    pub supported_operations: BTreeSet<ProOperation>,
+    pub available_operations: BTreeSet<ProOperation>,
 }
 
 impl StatusResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if let Some(receipt) = &self.source_receipt {
+        if let Some(receipt) = &self.core_receipt {
             receipt.validate()?;
         }
-        match self.authority {
-            MaterializationAuthority::Source => {
-                if self.state == GraphState::Ready && self.source_receipt.is_none() {
+        if let Some(generation) = &self.requested_core_generation_id {
+            validate_lower_sha256(generation, "requested Core generation")?;
+        }
+        match self.currentness {
+            CoreProjectionCurrentness::NotMaterialized => {
+                if self.core_receipt.is_some()
+                    || self.coverage != MaterializedCoverage::NotMaterialized
+                {
                     return Err(ProtocolError::new(
                         ErrorClass::Sequence,
-                        "ready source status requires a completed receipt",
-                    ));
-                }
-                if self.state != GraphState::Ready && self.source_receipt.is_some() {
-                    return Err(ProtocolError::new(
-                        ErrorClass::Sequence,
-                        "incomplete source status cannot report a completed receipt",
+                        "unmaterialized Core status cannot carry a receipt or coverage",
                     ));
                 }
             }
+            CoreProjectionCurrentness::Current => {
+                let receipt = self.core_receipt.as_ref().ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "current Core status requires a completed receipt",
+                    )
+                })?;
+                if self
+                    .requested_core_generation_id
+                    .as_deref()
+                    .is_some_and(|requested| requested != receipt.core_generation_id)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "current Core status receipt does not match the requested generation",
+                    ));
+                }
+            }
+            CoreProjectionCurrentness::Stale => {
+                let receipt = self.core_receipt.as_ref().ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "stale Core status requires the last completed receipt",
+                    )
+                })?;
+                if self
+                    .requested_core_generation_id
+                    .as_deref()
+                    .is_none_or(|requested| requested == receipt.core_generation_id)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "stale Core status requires distinct requested and receipt generations",
+                    ));
+                }
+            }
+            CoreProjectionCurrentness::Partial | CoreProjectionCurrentness::NeedsRebuild => {}
+        }
+        let terminal_coverage = matches!(
+            self.coverage,
+            MaterializedCoverage::Complete
+                | MaterializedCoverage::Empty
+                | MaterializedCoverage::Abstained
+        );
+        if terminal_coverage != (self.currentness == CoreProjectionCurrentness::Current) {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "terminal materialized coverage requires a current Core projection",
+            ));
+        }
+        if !self
+            .available_operations
+            .is_subset(&self.supported_operations)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "available Pro operations must be a subset of supported operations",
+            ));
+        }
+        let blame_ready = self.currentness == CoreProjectionCurrentness::Current
+            && self.coverage == MaterializedCoverage::Complete
+            && self.access.all_available();
+        if !blame_ready && !self.available_operations.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "unready Core coverage or access cannot advertise available blame operations",
+            ));
         }
         Ok(())
     }
+}
+
+fn validate_lower_sha256(value: &str, label: &'static str) -> Result<(), ProtocolError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Ok(());
+    }
+    Err(ProtocolError::new(
+        ErrorClass::InvalidRequest,
+        format!("{label} must be lowercase SHA-256"),
+    ))
 }
