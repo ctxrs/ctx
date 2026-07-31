@@ -17,7 +17,7 @@ use crate::provider::source_backed::{
 pub(crate) struct HermesTreeAuthority {
     opening_evidence: SqliteSourceEvidence,
     _sqlite_authority: SqliteSourceDirectoryAuthority,
-    snapshot: Mutex<Option<(ProviderSourceRoot, SqliteSourceReadSnapshot)>>,
+    snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
     terminal_revalidate:
         Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
 }
@@ -46,14 +46,13 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
                 "selected Hermes database is unavailable",
             ));
         }
-        let (root, sqlite_authority, snapshot) =
+        let (sqlite_authority, snapshot) =
             open_root_authorized_snapshot(&self.data_root, self.path()).map_err(route_error)?;
         let opening_evidence = snapshot.evidence().clone();
         let fingerprint =
             observe_hermes_logical_snapshot(snapshot.connection().map_err(route_error)?)
                 .map_err(route_error)?;
         snapshot.revalidate().map_err(route_error)?;
-        root.revalidate().map_err(route_error)?;
         record_logical_observation();
         let fingerprint = DocumentLeafFingerprint::new(fingerprint);
         Ok(CompleteDocumentTree::new(
@@ -63,7 +62,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
                 opening_evidence,
                 _sqlite_authority: sqlite_authority,
                 terminal_revalidate: snapshot.terminal_revalidator(),
-                snapshot: Mutex::new(Some((root, snapshot))),
+                snapshot: Mutex::new(Some(snapshot)),
             },
         ))
     }
@@ -79,7 +78,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
                 "Hermes logical source changed after physical discovery",
             ));
         }
-        let (root, snapshot) = take_snapshot(&authority.snapshot)?;
+        let snapshot = take_snapshot(&authority.snapshot)?;
         sink.begin_source(source.clone())?;
         let mut sink_error = None;
         let scan = project_hermes_snapshot(
@@ -122,8 +121,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             ));
         }
         snapshot.revalidate().map_err(route_error)?;
-        root.revalidate().map_err(route_error)?;
-        restore_snapshot(&authority.snapshot, (root, snapshot))?;
+        restore_snapshot(&authority.snapshot, snapshot)?;
         record_projection();
         Ok(document_terminal(scan.certificate))
     }
@@ -132,9 +130,8 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
-        let (root, snapshot) = take_snapshot(&tree.authority.snapshot)?;
+        let snapshot = take_snapshot(&tree.authority.snapshot)?;
         let evidence = snapshot.finish().map_err(route_error)?;
-        root.revalidate().map_err(route_error)?;
         if evidence != tree.authority.opening_evidence {
             return Err(hermes_changed(format!(
                 "{}: physical source changed before commit",
@@ -189,8 +186,8 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
 }
 
 fn take_snapshot(
-    slot: &Mutex<Option<(ProviderSourceRoot, SqliteSourceReadSnapshot)>>,
-) -> SourceBackedRouteResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
+    slot: &Mutex<Option<SqliteSourceReadSnapshot>>,
+) -> SourceBackedRouteResult<SqliteSourceReadSnapshot> {
     slot.lock()
         .map_err(|_| hermes_internal("Hermes SQLite snapshot lock was poisoned"))?
         .take()
@@ -198,8 +195,8 @@ fn take_snapshot(
 }
 
 fn restore_snapshot(
-    slot: &Mutex<Option<(ProviderSourceRoot, SqliteSourceReadSnapshot)>>,
-    snapshot: (ProviderSourceRoot, SqliteSourceReadSnapshot),
+    slot: &Mutex<Option<SqliteSourceReadSnapshot>>,
+    snapshot: SqliteSourceReadSnapshot,
 ) -> SourceBackedRouteResult<()> {
     let mut slot = slot
         .lock()

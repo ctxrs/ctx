@@ -46,12 +46,20 @@ struct TestState {
     terminal_callbacks: usize,
     counters: Vec<SqliteInventorySnapshotCounters>,
     mutate_before_finish: bool,
-    mutate_after_seal: bool,
+    after_seal_action: Option<TestAfterSealAction>,
     scan_barrier: Option<Arc<Barrier>>,
     active_scans: usize,
     peak_scans: usize,
     active_scans_by_path: HashMap<PathBuf, usize>,
     max_active_scans_per_path: usize,
+}
+
+enum TestAfterSealAction {
+    MutateDatabase,
+    CreateEmptyWal,
+    RemoveEmptyWal,
+    CreateNonemptyWal,
+    MutateSibling,
 }
 
 #[derive(Clone)]
@@ -101,6 +109,11 @@ impl TestProvider {
         assert!(state.active_scans_by_path.is_empty());
         state.peak_scans = 0;
         state.max_active_scans_per_path = 0;
+    }
+
+    fn set_after_seal_action(&self, action: TestAfterSealAction) {
+        let replaced = self.state.lock().unwrap().after_seal_action.replace(action);
+        assert!(replaced.is_none(), "test terminal action was already set");
     }
 }
 
@@ -264,13 +277,37 @@ impl SqliteInventoryProvider for TestProvider {
     }
 
     fn after_snapshots_sealed(&self) {
-        let mutate_after_seal = {
+        let action = {
             let mut state = self.state.lock().unwrap();
             state.terminal_callbacks = state.terminal_callbacks.saturating_add(1);
-            std::mem::take(&mut state.mutate_after_seal)
+            state.after_seal_action.take()
         };
-        if mutate_after_seal {
-            self.mutate("-after-seal");
+        let Some(action) = action else {
+            return;
+        };
+        let database = self.catalog.lock().unwrap()[0].path.clone();
+        match action {
+            TestAfterSealAction::MutateDatabase => self.mutate("-after-seal"),
+            TestAfterSealAction::CreateEmptyWal => {
+                fs::write(sqlite_component_path(&database, "-wal"), b"").unwrap();
+            }
+            TestAfterSealAction::RemoveEmptyWal => {
+                fs::remove_file(sqlite_component_path(&database, "-wal")).unwrap();
+            }
+            TestAfterSealAction::CreateNonemptyWal => {
+                fs::write(
+                    sqlite_component_path(&database, "-wal"),
+                    b"nonempty concurrent WAL sentinel",
+                )
+                .unwrap();
+            }
+            TestAfterSealAction::MutateSibling => {
+                fs::write(
+                    database.parent().unwrap().join("unrelated-sibling"),
+                    b"unrelated sibling churn",
+                )
+                .unwrap();
+            }
         }
     }
 
@@ -488,7 +525,7 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
             [],
         )
         .unwrap();
-    parallel_provider.state.lock().unwrap().mutate_after_seal = true;
+    parallel_provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
     let retained_generation = parallel_deleted.commit.generation_id;
     assert!(refresh_source_backed_generation(
         &parallel_index_root,
@@ -651,7 +688,75 @@ fn active_wal_logical_noop_works_from_a_read_only_provider_tree() {
 }
 
 #[test]
-fn mutation_before_and_after_seal_fails_closed_at_commit() {
+fn empty_wal_create_remove_and_sibling_churn_are_terminal_noops() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider_dir).unwrap();
+    let database = provider_dir.join("history.sqlite");
+    let writer = idle_wal_database(&database, "baseline");
+    let wal = sqlite_component_path(&database, "-wal");
+    assert!(!wal.exists(), "idle WAL fixture must start without a WAL");
+    let provider = test_provider(database.clone());
+    let registry = test_registry(&data_root, &database, provider.clone());
+    let cold = publish(&index_root, &registry);
+
+    provider.set_after_seal_action(TestAfterSealAction::CreateEmptyWal);
+    let after_create = publish(&index_root, &registry);
+    assert_eq!(after_create.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
+
+    provider.set_after_seal_action(TestAfterSealAction::RemoveEmptyWal);
+    let after_remove = publish(&index_root, &registry);
+    assert_eq!(after_remove.commit.generation_id, cold.commit.generation_id);
+    assert!(!wal.exists());
+
+    provider.set_after_seal_action(TestAfterSealAction::MutateSibling);
+    let after_sibling = publish(&index_root, &registry);
+    assert_eq!(
+        after_sibling.commit.generation_id,
+        cold.commit.generation_id
+    );
+    assert_eq!(
+        fs::read(provider_dir.join("unrelated-sibling")).unwrap(),
+        b"unrelated sibling churn"
+    );
+    assert_no_snapshot_temp_leak(&data_root);
+    drop(writer);
+}
+
+#[test]
+fn nonempty_wal_creation_fails_closed_and_clean_retry_succeeds() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider_dir).unwrap();
+    let database = provider_dir.join("history.sqlite");
+    let writer = idle_wal_database(&database, "baseline");
+    let wal = sqlite_component_path(&database, "-wal");
+    let provider = test_provider(database.clone());
+    let registry = test_registry(&data_root, &database, provider.clone());
+    let cold = publish(&index_root, &registry);
+
+    provider.set_after_seal_action(TestAfterSealAction::CreateNonemptyWal);
+    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        cold.commit.generation_id
+    );
+    assert!(fs::metadata(&wal).unwrap().len() > 0);
+
+    fs::remove_file(&wal).unwrap();
+    let retried = publish(&index_root, &registry);
+    assert_eq!(retried.commit.generation_id, cold.commit.generation_id);
+    assert_no_snapshot_temp_leak(&data_root);
+    drop(writer);
+}
+
+#[test]
+fn concurrent_mutation_before_and_after_seal_fails_closed_and_retries() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let provider_dir = temp.path().join("provider");
     let data_root = temp.path().join("data");
@@ -674,10 +779,15 @@ fn mutation_before_and_after_seal_fails_closed_at_commit() {
     );
 
     let replacement = publish(&index_root, &registry);
-    provider.state.lock().unwrap().mutate_after_seal = true;
+    provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
     assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        replacement.commit.generation_id
+    );
+    let retried = publish(&index_root, &registry);
+    assert_ne!(
+        retried.commit.generation_id,
         replacement.commit.generation_id
     );
     assert_no_snapshot_temp_leak(&data_root);
@@ -785,6 +895,31 @@ fn active_wal_database(path: &Path, body: &str) -> Connection {
         .execute("insert into messages (id, body) values (1, ?1)", [body])
         .unwrap();
     connection
+}
+
+fn idle_wal_database(path: &Path, body: &str) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch("create table messages (id integer primary key, body text not null)")
+        .unwrap();
+    connection
+        .execute("insert into messages (id, body) values (1, ?1)", [body])
+        .unwrap();
+    let mode: String = connection
+        .query_row("pragma journal_mode = wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    connection
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
+    assert!(!sqlite_component_path(path, "-wal").exists());
+    connection
+}
+
+fn sqlite_component_path(database: &Path, suffix: &str) -> PathBuf {
+    let mut component = database.as_os_str().to_os_string();
+    component.push(suffix);
+    PathBuf::from(component)
 }
 
 fn test_document(source: &SourceKey, id: i64, body: &str) -> LexicalDocument {

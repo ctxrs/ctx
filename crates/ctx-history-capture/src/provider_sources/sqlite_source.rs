@@ -10,10 +10,10 @@
 //! mode. A database with WAL or SHM state is copied once, with bounded I/O, to a
 //! private temporary directory below the ctx data root; SQLite may create its
 //! own SHM only there. Rollback journals remain typed unavailable because
-//! recovery could require database writes. Source DB/WAL identity and state,
-//! plus bounded SHM content, are captured before acquisition and revalidated
-//! after it and again before observations are published. Concurrent commits,
-//! rewrites, truncation, and sidecar creation/deletion therefore fail closed.
+//! recovery could require database writes. Source DB identity and non-empty WAL
+//! state are authoritative; absent and zero-byte WALs are equivalent, while SHM
+//! is bounded volatile lock coordination. Concurrent commits, rewrites,
+//! truncation, and authoritative component replacement therefore fail closed.
 
 use std::{
     ffi::{c_char, c_void, OsStr, OsString},
@@ -497,9 +497,9 @@ impl SqliteSourceDirectoryAuthority {
 /// completed read snapshot.
 ///
 /// The witness retains no provider handles. Commit-time validation reopens the
-/// approved parent through the same no-follow capability path and compares the
-/// complete DB/WAL/SHM evidence, bounding live descriptors by active workers
-/// rather than total discovered databases.
+/// approved parent through the same no-follow capability path, certifies the
+/// main database, any non-empty WAL, and relevant SHM state. This bounds live
+/// descriptors by active workers rather than total discovered databases.
 #[must_use = "revalidate the terminal fence before publishing snapshot observations"]
 #[derive(Debug)]
 struct SqliteSourceTerminalFenceInner {

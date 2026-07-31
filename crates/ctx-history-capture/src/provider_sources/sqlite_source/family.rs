@@ -130,13 +130,7 @@ impl SqliteSourceFamily {
         }
         self.database
             .revalidate(&self.authority, &expected.database)?;
-        revalidate_optional_member(
-            &self.authority,
-            self.wal.as_ref(),
-            expected.wal.as_ref(),
-            &self.wal_name,
-            &self.wal_path,
-        )?;
+        self.revalidate_wal(expected)?;
         revalidate_optional_member(
             &self.authority,
             self.shared_memory.as_ref(),
@@ -144,11 +138,6 @@ impl SqliteSourceFamily {
             &self.shared_memory_name,
             &self.shared_memory_path,
         )?;
-        match (self.wal.as_ref(), expected.wal_token.as_ref()) {
-            (Some(wal), Some(expected_token)) if wal.bounded_token()? == *expected_token => {}
-            (None, None) => {}
-            _ => return Err(SqliteSourceAccessError::SourceChanged),
-        }
         match (
             self.shared_memory.as_ref(),
             expected.shared_memory_token.as_ref(),
@@ -169,6 +158,29 @@ impl SqliteSourceFamily {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
         Ok(())
+    }
+
+    fn revalidate_wal(&self, expected: &SqliteFamilyEvidence) -> SqliteSourceAccessResult<()> {
+        match expected.wal.as_ref() {
+            None | Some(NativeFileState { length: 0, .. }) => {
+                revalidate_empty_or_absent_wal(&self.authority, &self.wal_name, &self.wal_path)
+            }
+            Some(expected_state) => {
+                let wal = self
+                    .wal
+                    .as_ref()
+                    .ok_or(SqliteSourceAccessError::SourceChanged)?;
+                wal.revalidate(&self.authority, expected_state)?;
+                if expected.wal_token.as_ref().is_some_and(|expected_token| {
+                    wal.bounded_token()
+                        .is_ok_and(|token| &token == expected_token)
+                }) {
+                    Ok(())
+                } else {
+                    Err(SqliteSourceAccessError::SourceChanged)
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -372,6 +384,25 @@ fn revalidate_optional_member(
     }
 }
 
+fn revalidate_empty_or_absent_wal(
+    authority: &SqliteSourceDirectoryAuthority,
+    name: &OsStr,
+    path: &Path,
+) -> SqliteSourceAccessResult<()> {
+    let Some(wal) =
+        SqliteFamilyMember::open_optional(authority, name.to_os_string(), path.to_path_buf())
+            .map_err(map_revalidation_error)?
+    else {
+        return Ok(());
+    };
+    let state = wal.capture_state().map_err(map_revalidation_error)?;
+    if state.length != 0 {
+        return Err(SqliteSourceAccessError::SourceChanged);
+    }
+    wal.revalidate(authority, &state)
+        .map_err(map_revalidation_error)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SqliteFamilyEvidence {
     parent_identity: NativeFileIdentity,
@@ -416,7 +447,10 @@ impl SqliteSourceEvidence {
         Self {
             identity,
             length: native.database.length,
-            wal_length: native.wal.as_ref().map(|state| state.length),
+            wal_length: native
+                .wal
+                .as_ref()
+                .and_then(|state| (state.length != 0).then_some(state.length)),
             shared_memory_length: native.shared_memory.as_ref().map(|state| state.length),
             schema: sqlite.schema.clone(),
             source: sqlite.source.clone(),
@@ -429,11 +463,12 @@ impl SqliteFamilyEvidence {
     fn hash_into(&self, digest: &mut Sha256) {
         self.parent_identity.hash_into(digest);
         self.database.hash_into(digest);
-        hash_optional_state(digest, self.wal.as_ref());
+        let committed_wal = self.wal.as_ref().filter(|state| state.length != 0);
+        hash_optional_state(digest, committed_wal);
         // SHM is SQLite's volatile lock coordination, not provider content.
         // Stock read-only WAL readers may update its reader marks, so source
         // revisions intentionally derive from the DB, WAL, and SQLite evidence.
-        match self.wal_token {
+        match committed_wal.and(self.wal_token) {
             Some(wal_token) => {
                 digest.update([1]);
                 digest.update(wal_token);
@@ -448,7 +483,8 @@ impl SqliteSnapshotEvidence {
         digest.update(self.schema.schema_version.to_le_bytes());
         digest.update(self.schema.user_version.to_le_bytes());
         digest.update(self.schema.application_id.to_le_bytes());
-        digest.update(self.source.data_version.to_le_bytes());
+        // data_version is connection-local and can differ solely because an
+        // equivalent source used the immutable-main versus copied-family path.
         digest.update(self.source.page_count.to_le_bytes());
         digest.update(self.source.freelist_count.to_le_bytes());
     }
