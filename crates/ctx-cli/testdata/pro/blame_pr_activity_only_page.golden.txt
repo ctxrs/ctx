@@ -6,7 +6,7 @@ Code produced
   No associated commits on this page.
 
 PR activity
-  reviewed
+  Reviewed
     session reviewer
       confidence    explicit
       state         asserted

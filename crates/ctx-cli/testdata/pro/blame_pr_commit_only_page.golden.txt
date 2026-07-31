@@ -3,7 +3,7 @@ Repository    ctxrs/ctx
 Selector      42
 
 Code produced
-  contains_commit
+  Contains commit
     commit deadbeef
       evidence      [1]
       Agent production  not proven
