@@ -112,7 +112,7 @@ mod unix {
     }
 
     fn start_v025_daemon_at_root(temp: &FiniteDaemonTestRoot, target: &Path, root: &Path) -> Child {
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("config.toml"),
             "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[upgrade]\nauto = \"apply\"\n",

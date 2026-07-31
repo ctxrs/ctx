@@ -390,33 +390,6 @@ impl SnapshotBudget {
     }
 }
 
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-
-    #[test]
-    fn snapshot_budget_admits_component_over_512_mib_within_cumulative_limit() {
-        const FORMER_COMPONENT_LIMIT: u64 = 512 * 1024 * 1024;
-
-        let mut budget = SnapshotBudget::new(Instant::now() + Duration::from_secs(1));
-        budget
-            .admit_length(FORMER_COMPONENT_LIMIT + 1, Uuid::new_v4())
-            .unwrap();
-        assert_eq!(budget.bytes, FORMER_COMPONENT_LIMIT + 1);
-    }
-
-    #[test]
-    fn snapshot_budget_rejects_cumulative_files_over_total() {
-        let event_id = Uuid::new_v4();
-        let mut budget = SnapshotBudget::new(Instant::now() + Duration::from_secs(1));
-        budget
-            .admit_length(SNAPSHOT_MAX_TOTAL_BYTES - 1, event_id)
-            .unwrap();
-        let error = budget.admit_length(2, event_id).unwrap_err();
-        assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
-    }
-}
-
 struct ObservedSqliteSet {
     database: AdmittedFile,
     sidecars: Vec<(PathBuf, Option<AdmittedFile>)>,
@@ -541,50 +514,77 @@ fn create_snapshot_tempdir(
         .map_err(|cause| map_io_error(event_id, cause))
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod macos_tests {
-    use std::{fs, os::unix::fs::symlink, path::Path};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    use rusqlite::Connection;
-    use uuid::Uuid;
+    #[test]
+    fn snapshot_budget_admits_component_over_512_mib_within_cumulative_limit() {
+        const FORMER_COMPONENT_LIMIT: u64 = 512 * 1024 * 1024;
 
-    use super::create_snapshot_tempdir;
-    use crate::{provider::sqlite::open_provider_sqlite_readonly, CaptureError};
-
-    fn create_sqlite(path: &Path) {
-        let connection = Connection::open(path).unwrap();
-        connection
-            .execute_batch("create table proof(value text); insert into proof values ('ok');")
+        let mut budget = SnapshotBudget::new(Instant::now() + Duration::from_secs(1));
+        budget
+            .admit_length(FORMER_COMPONENT_LIMIT + 1, Uuid::new_v4())
             .unwrap();
+        assert_eq!(budget.bytes, FORMER_COMPONENT_LIMIT + 1);
     }
 
     #[test]
-    fn broker_snapshot_normalizes_fixed_tmp_alias_but_not_arbitrary_symlink_ancestors() {
-        let trusted_root = tempfile::Builder::new()
-            .prefix("ctx-nanoclaw-macos-alias-")
-            .tempdir_in("/private/tmp")
+    fn snapshot_budget_rejects_cumulative_files_over_total() {
+        let event_id = Uuid::new_v4();
+        let mut budget = SnapshotBudget::new(Instant::now() + Duration::from_secs(1));
+        budget
+            .admit_length(SNAPSHOT_MAX_TOTAL_BYTES - 1, event_id)
             .unwrap();
-        let fixed_alias_root = Path::new("/tmp").join(trusted_root.path().file_name().unwrap());
-        let fixed_snapshot = create_snapshot_tempdir(&fixed_alias_root, Uuid::new_v4()).unwrap();
-        assert!(fixed_snapshot.path().starts_with("/private/tmp"));
-        let fixed_database = fixed_snapshot.path().join("fixed.sqlite");
-        create_sqlite(&fixed_database);
-        open_provider_sqlite_readonly(&fixed_database).unwrap();
+        let error = budget.admit_length(2, event_id).unwrap_err();
+        assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
+    }
 
-        let real_root = trusted_root.path().join("real");
-        let arbitrary_alias_root = trusted_root.path().join("arbitrary-link");
-        fs::create_dir(&real_root).unwrap();
-        symlink(&real_root, &arbitrary_alias_root).unwrap();
-        let arbitrary_snapshot =
-            create_snapshot_tempdir(&arbitrary_alias_root, Uuid::new_v4()).unwrap();
-        let arbitrary_database = arbitrary_snapshot.path().join("arbitrary.sqlite");
-        create_sqlite(&arbitrary_database);
-        let error = open_provider_sqlite_readonly(&arbitrary_database)
-            .err()
-            .expect("arbitrary symlink ancestor must remain rejected");
-        assert!(matches!(
-            error,
-            CaptureError::InvalidProviderTranscriptPath { .. }
-        ));
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use std::{fs, os::unix::fs::symlink, path::Path};
+
+        use rusqlite::Connection;
+
+        use super::*;
+        use crate::{provider::sqlite::open_provider_sqlite_readonly, CaptureError};
+
+        fn create_sqlite(path: &Path) {
+            let connection = Connection::open(path).unwrap();
+            connection
+                .execute_batch("create table proof(value text); insert into proof values ('ok');")
+                .unwrap();
+        }
+
+        #[test]
+        fn broker_snapshot_normalizes_fixed_tmp_alias_but_not_arbitrary_symlink_ancestors() {
+            let trusted_root = tempfile::Builder::new()
+                .prefix("ctx-nanoclaw-macos-alias-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            let fixed_alias_root = Path::new("/tmp").join(trusted_root.path().file_name().unwrap());
+            let fixed_snapshot =
+                create_snapshot_tempdir(&fixed_alias_root, Uuid::new_v4()).unwrap();
+            assert!(fixed_snapshot.path().starts_with("/private/tmp"));
+            let fixed_database = fixed_snapshot.path().join("fixed.sqlite");
+            create_sqlite(&fixed_database);
+            open_provider_sqlite_readonly(&fixed_database).unwrap();
+
+            let real_root = trusted_root.path().join("real");
+            let arbitrary_alias_root = trusted_root.path().join("arbitrary-link");
+            fs::create_dir(&real_root).unwrap();
+            symlink(&real_root, &arbitrary_alias_root).unwrap();
+            let arbitrary_snapshot =
+                create_snapshot_tempdir(&arbitrary_alias_root, Uuid::new_v4()).unwrap();
+            let arbitrary_database = arbitrary_snapshot.path().join("arbitrary.sqlite");
+            create_sqlite(&arbitrary_database);
+            let error = open_provider_sqlite_readonly(&arbitrary_database)
+                .err()
+                .expect("arbitrary symlink ancestor must remain rejected");
+            assert!(matches!(
+                error,
+                CaptureError::InvalidProviderTranscriptPath { .. }
+            ));
+        }
     }
 }
