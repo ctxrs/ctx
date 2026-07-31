@@ -1079,6 +1079,8 @@ fn upgrade_status_reports_path_shadowing() {
         status["path"]["background_apply"]["reason"],
         "path_shadowed"
     );
+    assert_eq!(status["warnings"], status["path"]["warnings"]);
+    assert_eq!(status["warnings"].as_array().unwrap().len(), 2);
     assert!(status["warnings"]
         .as_array()
         .unwrap()
@@ -1113,7 +1115,31 @@ fn upgrade_status_reports_path_shadowing() {
         "{stdout}"
     );
     assert!(stdout.contains("ctx upgrade enable"), "{stdout}");
-    assert!(stderr.contains("PATH resolves ctx to"), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(!stdout.contains("PATH resolves ctx to"), "{stdout}");
+    assert!(
+        !stdout.contains("multiple ctx binaries are on PATH"),
+        "{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_status_preserves_non_shadow_path_warning() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let empty_path = temp.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    let mut command = ctx(&temp);
+    command.args(["upgrade", "status"]).env("PATH", &empty_path);
+    let output = fake_release_env(&mut command, &release)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("not discoverable on PATH"), "{stderr}");
 }
 
 #[cfg(unix)]
