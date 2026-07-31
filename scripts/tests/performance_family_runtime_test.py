@@ -61,8 +61,8 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
             {"mode": "wait", "source_count": 1, "status": "completed"},
         )
         snapshot = refresh_snapshot(search, root, env)
-        status = run_json(["status", "--format=json"], env, root)
-        job = status["daemon"]["jobs"]["source_backed_refresh"]
+        status = snapshot.status
+        job = snapshot.job
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["request_state"], "published")
         self.assertEqual(job["source_count"], 1)
