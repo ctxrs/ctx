@@ -146,7 +146,6 @@ pub(super) fn kimi_lexical_body(
     } else {
         kimi_event_text(record_type, value, event_type)
     };
-    let body = provider_local_preview(&body, PROVIDER_MAX_TEXT_CHARS).0;
     if body.is_empty() {
         return Ok(None);
     }

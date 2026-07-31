@@ -216,6 +216,68 @@ fn shared_family_junie_noop_one_pass_replacement_and_grouped_hydration_oracle() 
 }
 
 #[test]
+fn shared_family_junie_retains_bodies_beyond_sixteen_kibibytes() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("junie");
+    let prompt = format!("{} junie-prompt-tail", "prompt ".repeat(3_000));
+    let response = format!("{} junie-response-tail", "response ".repeat(2_100));
+    write_tree(
+        &root,
+        "session-long",
+        &[
+            json!({"kind": "UserPromptEvent", "prompt": prompt}),
+            json!({
+                "kind": "SessionA2uxEvent",
+                "timestampMs": 1_783_339_200_001_i64,
+                "event": {"agentEvent": {
+                    "kind": "ResultBlockUpdatedEvent",
+                    "stepId": "long-result",
+                    "result": response,
+                }},
+            }),
+        ],
+    );
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let mut events = index.source_event_page(source, None, 10).unwrap().items;
+    events.sort_by_key(|event| event.event_sequence);
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        index
+            .search_event_candidates("junie-prompt-tail", 10)
+            .unwrap()[0]
+            .event
+            .event_id,
+        events[0].event_id
+    );
+    assert_eq!(
+        index
+            .search_event_candidates("junie-response-tail", 10)
+            .unwrap()[0]
+            .event
+            .event_id,
+        events[1].event_id
+    );
+    let requests = events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap()
+        .into_records();
+    assert_eq!(hydrated[0].provider_bytes, prompt.as_bytes());
+    assert_eq!(hydrated[1].provider_bytes, response.as_bytes());
+    assert!(prompt.len() > 16 * 1024);
+    assert!(response.len() > 16 * 1024);
+}
+
+#[test]
 fn shared_family_junie_complete_deletion_and_missing_root_are_distinct() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("junie");

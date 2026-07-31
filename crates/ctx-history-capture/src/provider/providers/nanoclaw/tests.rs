@@ -43,7 +43,7 @@ use crate::provider::source_backed::{
 };
 use crate::{
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus, NANOCLAW_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    ProviderSourceStatus, NANOCLAW_SOURCE_FORMAT,
 };
 
 const SOURCE_BACKED_LINEAGE: [u8; 32] = [0x4a; 32];
@@ -319,10 +319,11 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = create_project(&temp, "document-cold", 1);
     let (inbound, outbound) = create_message_stores(&root, "session-0000");
-    let full_body = format!(
-        "{}nanoclaw-complete-tail",
-        "full compound content ".repeat(PROVIDER_MAX_TEXT_CHARS / 10)
-    );
+    let full_body = serde_json::to_string(&serde_json::json!({
+        "command": format!("{}nanoclaw-complete-tail", "argument ".repeat(2_100)),
+        "options": {"recursive": true, "mode": "complete"},
+    }))
+    .unwrap();
     insert_inbound(&inbound, "inbound", 1, 1_000, &full_body);
     insert_outbound(&outbound, "outbound", 2, 2_000, "outbound body");
     let registry = registry(&root);
@@ -347,6 +348,13 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
 
     let events = source_events(&index_root);
     assert_eq!(events.len(), 2);
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let inbound_event_id = index
+        .search_event_candidates("nanoclaw-complete-tail", 10)
+        .unwrap()[0]
+        .event
+        .event_id;
+    assert!(full_body.len() > 16 * 1024);
     let canonical_root = fs::canonicalize(&root).unwrap().display().to_string();
     for event in &events {
         assert_eq!(event.parent_session_id, None);
@@ -401,6 +409,12 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
             .collect::<Vec<_>>(),
         [b"outbound body".as_slice(), full_body.as_bytes()]
     );
+    let inbound = hydrated
+        .records()
+        .iter()
+        .find(|record| record.event_id == inbound_event_id)
+        .unwrap();
+    assert!(serde_json::from_slice::<serde_json::Value>(&inbound.provider_bytes).is_ok());
 }
 
 #[test]

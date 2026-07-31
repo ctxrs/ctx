@@ -178,6 +178,62 @@ fn shared_family_mux_cold_noop_and_grouped_full_body_hydration() {
 }
 
 #[test]
+fn shared_family_mux_retains_complete_structured_tool_input() {
+    let (temp, root, session) = fixture();
+    let input = json!({
+        "command": format!("{} mux-structured-tail", "argument ".repeat(2_100)),
+        "environment": {"CTX_MODE": "complete"},
+    });
+    write_chat(
+        &session,
+        &[json!({
+            "id": "tool-call-0",
+            "workspaceId": "session-1",
+            "role": "assistant",
+            "createdAt": "2026-07-28T12:00:00Z",
+            "parts": [{
+                "type": "dynamic-tool",
+                "toolName": "shell",
+                "state": "input-available",
+                "input": input,
+            }],
+            "metadata": {"historySequence": 0},
+        })],
+    );
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let event = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(source, None, 10)
+        .unwrap()
+        .items
+        .pop()
+        .unwrap();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(
+        index
+            .search_event_candidates("mux-structured-tail", 10)
+            .unwrap()[0]
+            .event
+            .event_id,
+        event.event_id
+    );
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator).unwrap())
+        .unwrap();
+    let structured = std::str::from_utf8(&hydrated.provider_bytes)
+        .unwrap()
+        .strip_prefix("tool call: shell\ninput: ")
+        .unwrap();
+
+    assert_eq!(serde_json::from_str::<Value>(structured).unwrap(), input);
+    assert!(hydrated.provider_bytes.len() > 16 * 1024);
+}
+
+#[test]
 fn shared_family_mux_replacement_truncate_deletion_and_unavailable_root() {
     let (temp, root, session) = fixture();
     write_chat(
@@ -269,8 +325,8 @@ fn shared_family_mux_replacement_truncate_deletion_and_unavailable_root() {
 #[test]
 fn shared_family_mux_compound_identity_and_exact_content_parity() {
     let (temp, root, session) = fixture();
-    let chat_body = format!("chat-{}-tail", "c".repeat(2_048));
-    let partial_body = format!("partial-{}-tail", "p".repeat(2_048));
+    let chat_body = format!("chat-{}-mux-chat-tail", "c".repeat(20_000));
+    let partial_body = format!("partial-{}-mux-partial-tail", "p".repeat(20_000));
     write_chat(&session, &[message("chat-0", "user", 0, &chat_body)]);
     fs::write(
         session.join("partial.json"),
@@ -287,6 +343,22 @@ fn shared_family_mux_compound_identity_and_exact_content_parity() {
     let index = VerifiedIndex::open(&index_root).unwrap();
     let mut events = index.source_event_page(source, None, 10).unwrap().items;
     events.sort_by_key(|event| event.event_sequence);
+    assert_eq!(
+        index.search_event_candidates("mux-chat-tail", 10).unwrap()[0]
+            .event
+            .event_id,
+        events[0].event_id
+    );
+    assert_eq!(
+        index
+            .search_event_candidates("mux-partial-tail", 10)
+            .unwrap()[0]
+            .event
+            .event_id,
+        events[1].event_id
+    );
+    assert!(chat_body.len() > 16 * 1024);
+    assert!(partial_body.len() > 16 * 1024);
     assert_eq!(
         events
             .iter()

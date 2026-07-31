@@ -15,7 +15,7 @@ use crate::{
         refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus, PROVIDER_MAX_TEXT_CHARS,
+    ProviderSourceStatus,
 };
 
 fn create_database(path: &Path, rowid_offset: usize, user_text: &str, include_legacy: bool) {
@@ -115,11 +115,7 @@ fn insert_conversation(connection: &Connection, key: &str, session: &str, text: 
 fn cold_scan_keeps_full_policy_body_and_exactly_hydrates_the_conversation_row() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("data.sqlite3");
-    let long_user_text = format!(
-        "{}kiro-tail-term{}",
-        "x".repeat(3_000),
-        "y".repeat(PROVIDER_MAX_TEXT_CHARS)
-    );
+    let long_user_text = format!("{}kiro-tail-term", "x".repeat(20_000));
     create_database(&path, 0, &long_user_text, true);
 
     let scan = scan_kiro_source_backed_v0(
@@ -145,8 +141,8 @@ fn cold_scan_keeps_full_policy_body_and_exactly_hydrates_the_conversation_row() 
         .iter()
         .find(|document| document.role.as_deref() == Some("user"))
         .unwrap();
-    assert_eq!(user.body.chars().count(), PROVIDER_MAX_TEXT_CHARS);
-    assert!(user.body.contains("kiro-tail-term"));
+    assert_eq!(user.body, long_user_text);
+    assert!(user.body.len() > 16 * 1024);
     assert_eq!(user.parent_session_id, None);
     assert_eq!(user.root_session_id, user.session_id);
     assert_eq!(user.provider_session_id.as_deref(), Some("kiro-session"));
@@ -188,6 +184,58 @@ fn cold_scan_keeps_full_policy_body_and_exactly_hydrates_the_conversation_row() 
     let hydrated = resolver.hydrate(&user.locator).unwrap();
     assert_eq!(hydrated.decoded_display_text, long_user_text);
     assert_eq!(hydrated.provider_bytes, long_user_text.as_bytes());
+}
+
+#[test]
+fn cold_scan_keeps_complete_structured_tool_content_beyond_sixteen_kibibytes() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("data.sqlite3");
+    create_database(&path, 0, "user body", false);
+    let structured = json!({
+        "command": format!("{}kiro-structured-tail", "argument ".repeat(2_100)),
+        "environment": {"CTX_MODE": "complete"},
+    });
+    let value = json!({
+        "history": [{
+            "user": {
+                "content": {"Prompt": {"prompt": "user body"}},
+                "timestamp": "2026-07-28T12:00:01Z"
+            },
+            "assistant": {
+                "ToolUse": {
+                    "content": structured,
+                    "tool_uses": [{"name": "shell", "input": structured}]
+                },
+                "timestamp": "2026-07-28T12:00:02Z"
+            }
+        }]
+    })
+    .to_string();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "update conversations_v2 set value = ?1 where key = '/workspace'",
+            [&value],
+        )
+        .unwrap();
+
+    let scan = scan_kiro_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        KIRO_SQLITE_SOURCE_FORMAT,
+    )
+    .unwrap();
+    let tool = scan
+        .documents
+        .iter()
+        .find(|document| document.event_type == "tool_call")
+        .unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<Value>(&tool.body).unwrap(),
+        structured
+    );
+    assert!(tool.body.len() > 16 * 1024);
 }
 
 #[test]
