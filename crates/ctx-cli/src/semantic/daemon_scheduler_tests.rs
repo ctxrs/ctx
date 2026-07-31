@@ -516,7 +516,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
         Some(&coordinator),
     )
     .unwrap();
-    assert!(pro.continue_immediately);
+    assert!(!pro.continue_immediately);
     assert_eq!(&*calls.borrow(), &["relational_projection"]);
     let pro_status = read_pro_status(temp.path()).expect("Pro attempt receipt");
     assert_eq!(pro_status["status"], "error", "{pro_status:#}");
@@ -622,7 +622,7 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         Some(&coordinator),
     )
     .unwrap();
-    assert!(pro.continue_immediately);
+    assert!(!pro.continue_immediately);
     let first_pro_status = read_pro_status(temp.path()).unwrap();
     assert_eq!(first_pro_status["status"], "error");
     assert_eq!(first_pro_status["retryable"], false);
@@ -704,11 +704,27 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
     let scheduled =
         run_pending_core_pro_catch_up(temp.path(), &mut runtime, Some(&coordinator)).unwrap();
 
-    assert!(scheduled.is_some(), "local completion is diagnostic only");
+    let scheduled = scheduled.expect("local completion must still validate the helper");
+    assert!(!scheduled.did_work);
+    assert!(
+        !scheduled.continue_immediately,
+        "validated replay must wait for the normal daemon interval"
+    );
     assert_eq!(
         runtime.sidecar_drain.pro_attempted_generation.as_deref(),
         Some(generation.as_str())
     );
+}
+
+#[test]
+fn pro_catch_up_requests_immediate_drain_only_after_materializer_work() {
+    let replay = super::core_pro_catch_up_iteration(false);
+    assert!(!replay.did_work);
+    assert!(!replay.continue_immediately);
+
+    let materialized = super::core_pro_catch_up_iteration(true);
+    assert!(materialized.did_work);
+    assert!(materialized.continue_immediately);
 }
 
 #[test]
