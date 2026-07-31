@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::normalization::provider_role;
 
 pub(super) fn source_backed_retained_event_kind(
     effective_type: &str,
@@ -279,6 +280,9 @@ pub(super) fn lexical_document(
         searchable
     };
     let (file_touches, _) = source_backed_retained_file_touches(kind, &retained.body);
+    // Keep provider-authentic role/type evidence in the retained projection and
+    // expose only the canonical role vocabulary through lexical metadata.
+    let role = provider_role(Some(&retained.role));
     let event_sequence = *next_sequence;
     *next_sequence = checked_add(*next_sequence, 1)?;
     Ok(LexicalDocument {
@@ -300,7 +304,7 @@ pub(super) fn lexical_document(
         event_sequence,
         occurred_at_unix_ms: Some(normalized_time),
         event_type: event_kind_label(kind).to_owned(),
-        role: Some(retained.role),
+        role: Some(role.as_str().to_owned()),
         body,
         workspace: None,
         cwd: session.directory.clone(),

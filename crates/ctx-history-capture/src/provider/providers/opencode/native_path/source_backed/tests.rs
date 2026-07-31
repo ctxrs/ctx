@@ -5,8 +5,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
+    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, EventRole, EventType,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
@@ -197,6 +197,107 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         let stale_batch = batch_resolver.hydrate_batch(&batch_request).unwrap_err();
         assert_eq!(stale_batch.kind, HydrationFailureKind::StaleRecordEvidence);
     }
+}
+
+#[test]
+fn agent_switched_capture_canonicalizes_the_provider_role() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let provider_text = create_agent_switched_fixture(&path);
+
+    let (scan, documents) = collect_scan(registration, &path);
+
+    assert_eq!(scan.certificate.counts().complete_records, 1);
+    assert_eq!(scan.certificate.counts().retained_records, 1);
+    assert_eq!(scan.certificate.counts().indexed_documents, 1);
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].event_type, EventType::Notice.as_str());
+    assert_eq!(
+        documents[0].role.as_deref(),
+        Some(EventRole::Unknown.as_str())
+    );
+    assert_eq!(documents[0].body, provider_text);
+}
+
+#[test]
+fn agent_switched_exact_hydration_preserves_provider_text() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let provider_text = create_agent_switched_fixture(&path);
+    let (_, documents) = collect_scan(registration, &path);
+    let request =
+        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
+
+    let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
+    let hydrated = resolver.hydrate_event(&request).unwrap();
+
+    assert_eq!(hydrated.provider_bytes, provider_text.as_bytes());
+    assert_eq!(documents[0].body.as_bytes(), hydrated.provider_bytes);
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "update session_message
+         set type = 'model-switched'
+         where id = 'message-0'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        resolver.hydrate_event(&request).unwrap_err().kind,
+        HydrationFailureKind::StaleRecordEvidence
+    );
+}
+
+#[test]
+fn agent_switched_production_event_is_accepted_by_relational_projection_types() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let index = temp.path().join("index");
+    create_agent_switched_fixture(&path);
+    let source = provider_source_for_path(registration.provider(), path);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+    )
+    .unwrap();
+    let refresh = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let source = refresh.sources[0].observation().source();
+
+    let page = VerifiedIndex::open(&index)
+        .unwrap()
+        .source_event_page(source, None, 1)
+        .unwrap();
+
+    assert!(page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].event_type.parse::<EventType>().unwrap(),
+        EventType::Notice
+    );
+    assert_eq!(
+        page.items[0]
+            .role
+            .as_deref()
+            .unwrap()
+            .parse::<EventRole>()
+            .unwrap(),
+        EventRole::Unknown
+    );
 }
 
 #[test]
@@ -823,6 +924,25 @@ fn create_fixture(path: &Path, provider: &str, rows: usize) -> Vec<String> {
         expected.push(data);
     }
     expected
+}
+
+fn create_agent_switched_fixture(path: &Path) -> String {
+    create_fixture(path, "opencode", 1);
+    let provider_text = "agent switched from build to plan".to_owned();
+    let data = json!({
+        "agent": "plan",
+        "text": provider_text,
+    })
+    .to_string();
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "update session_message
+         set type = 'agent-switched', data = ?1
+         where id = 'message-0'",
+        [&data],
+    )
+    .unwrap();
+    provider_text
 }
 
 fn collect_scan(
