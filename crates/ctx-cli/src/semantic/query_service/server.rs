@@ -7,7 +7,7 @@ use std::{
 #[cfg(unix)]
 use std::{fs, net::Shutdown, os::unix::net::UnixStream};
 
-use crate::semantic::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
+use crate::semantic::source_backed_refresh_coordinator::CoreRefreshEngine;
 
 use super::transport::{remove_daemon_service_endpoint, DaemonIpcService};
 
@@ -28,7 +28,7 @@ pub(in crate::semantic) struct DaemonQueryService {
     pub(in crate::semantic) data_root: PathBuf,
     pub(in crate::semantic) service: DaemonIpcService,
     pub(in crate::semantic) activity: Arc<DaemonQueryActivity>,
-    pub(in crate::semantic) source_refresh: Arc<SourceBackedRefreshCoordinator>,
+    pub(in crate::semantic) source_refresh: Arc<CoreRefreshEngine>,
     pub(in crate::semantic) thread: Option<std::thread::JoinHandle<()>>,
     #[cfg(unix)]
     pub(in crate::semantic) socket_path: PathBuf,

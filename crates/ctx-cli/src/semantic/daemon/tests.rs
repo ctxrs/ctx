@@ -135,7 +135,7 @@ fn explicit_finite_idle_exit_remains_due_with_retry_and_refresh_pending() {
     let retry_due = super::super::daemon_scheduler::daemon_retry_due(&runtime);
     assert!(retry_due);
 
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     coordinator.enqueue_for_test(None);
     let source_refresh_pending = coordinator.has_pending_request();
     assert!(source_refresh_pending);
@@ -239,7 +239,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 
     fn run_mode(daemon_mode: DaemonMode, calls: Arc<AtomicUsize>) -> Result<serde_json::Value> {
         let temp = tempfile::tempdir()?;
-        let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+        let coordinator = CoreRefreshEngine::with_executor(Arc::new(
             move |execution: SourceBackedRefreshExecution<'_>| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 execution.report_progress("refreshing", 0, 1, Some("all-providers".to_owned()))?;
@@ -255,16 +255,11 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                         crate::commands::import::load_explicit_source_catalog_authority(
                             execution.data_root,
                         )?,
-                    resolver: None,
                     scanned_routes: 1,
                     unsupported_routes: 0,
-                    certified_source_count: 3,
-                    certified_source_bytes: 4096,
-                    current: SourceBackedRefreshCurrent {
-                        source_count: 3,
-                        certified_source_bytes: 4096,
-                        ..SourceBackedRefreshCurrent::default()
-                    },
+                    certified_source_count: 0,
+                    certified_source_bytes: 0,
+                    current: SourceBackedRefreshCurrent::default(),
                     timings: SourceBackedRefreshTimings {
                         discovery_us: 7,
                         scan_stage_us: 11,
@@ -344,7 +339,7 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
     let temp = tempfile::tempdir()?;
     let refresh_calls = Arc::new(AtomicUsize::new(0));
     let executor_calls = refresh_calls.clone();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
             let writer = ctx_history_index::GenerationWriter::open(
@@ -358,7 +353,6 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
                     crate::commands::import::load_explicit_source_catalog_authority(
                         execution.data_root,
                     )?,
-                resolver: None,
                 scanned_routes: 1,
                 unsupported_routes: 0,
                 certified_source_count: 0,

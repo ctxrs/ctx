@@ -15,10 +15,9 @@ use crate::{
     semantic::{
         daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
         source_backed_refresh_coordinator::{
-            coordinate_source_backed_refresh, source_backed_index_root,
-            SourceBackedRefreshCoordinator, SourceBackedRefreshCurrent,
-            SourceBackedRefreshExecution, SourceBackedRefreshMode, SourceBackedRefreshPublication,
-            SourceBackedRefreshTimings,
+            coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
+            SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
+            SourceBackedRefreshPublication, SourceBackedRefreshTimings,
         },
         source_epoch_status_report,
     },
@@ -31,8 +30,8 @@ use super::{
     daemon_semantic_job_path, persist_pro_status, persist_relational_status,
     prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
     record_daemon_job_retry, restore_daemon_consumer_retries,
-    run_daemon_scheduler_cycle_with_activity, run_pro_catch_up_with_retry, write_daemon_job_status,
-    DaemonRetryBackoff, DaemonRuntime,
+    run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
+    run_pro_catch_up_with_retry, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -71,9 +70,6 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         generation_id: receipt.generation_id.clone(),
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        resolver: Some(std::sync::Arc::new(
-            ctx_history_capture::SourceBackedProviderRegistry::new().resolver_registry(),
-        )),
         scanned_routes: 0,
         unsupported_routes: 0,
         certified_source_count: 0,
@@ -196,7 +192,6 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         generation_id: receipt.generation_id,
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        resolver: None,
         scanned_routes: 1,
         unsupported_routes: 0,
         certified_source_count: 1,
@@ -294,7 +289,7 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
                     .expect("release blocked relational test job");
             })),
         });
-        let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
+        let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
             move |execution: SourceBackedRefreshExecution<'_>| {
                 let publication = publish_readiness_generation(execution.index_root);
                 execution.report_progress("committed", 1, 1, None)?;
@@ -427,7 +422,7 @@ fn install_jobs(
 #[test]
 fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
@@ -455,10 +450,6 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     );
     assert!(!coordinator.has_pending_request());
     assert!(super::relational_generation_needs_catch_up(
-        temp.path(),
-        &generation
-    ));
-    assert!(super::pro_generation_needs_catch_up(
         temp.path(),
         &generation
     ));
@@ -573,7 +564,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
 #[test]
 fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
@@ -661,6 +652,63 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
     );
     assert_eq!(&*calls.borrow(), &["relational_projection"]);
     assert_eq!(pinned_generation(temp.path()), generation);
+}
+
+#[test]
+fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
+        |execution: SourceBackedRefreshExecution<'_>| {
+            Ok(publish_empty_authoritative_generation(execution.index_root))
+        },
+    ));
+    let mut runtime = DaemonRuntime::default();
+    let core = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(core.continue_immediately);
+    let generation = coordinator
+        .pinned_core_publication()
+        .expect("pinned Core publication")
+        .generation_id()
+        .to_owned();
+    runtime.sidecar_drain.generation = None;
+    runtime.sidecar_drain.pro_attempted_generation = None;
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "completed",
+            "pending": false,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": generation,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+        }),
+    )
+    .unwrap();
+
+    let scheduled =
+        run_pending_core_pro_catch_up(temp.path(), &mut runtime, Some(&coordinator)).unwrap();
+
+    assert!(scheduled.is_some(), "local completion is diagnostic only");
+    assert_eq!(
+        runtime.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
 }
 
 #[test]

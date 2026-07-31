@@ -31,7 +31,7 @@ impl io::Write for SharedWriter {
     }
 }
 
-fn recovered_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
+fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let generation_id = ctx_history_index::GenerationWriter::open(
@@ -48,11 +48,34 @@ fn recovered_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, St
         &json!({
             "mode": "background",
             "owner": "daemon",
-            "kind": "source_backed",
-            "status": "running",
-            "request_id": "crashed-after-publication",
-            "request_state": "running",
+            "kind": "core_refresh",
+            "status": "completed",
+            "request_id": "core-publication",
+            "request_state": "published",
+            "previous_generation": null,
+            "published_generation": generation_id,
             "requested_explicit_source_catalog": catalog.to_json(),
+            "published_explicit_source_catalog": catalog.to_json(),
+            "generation_changed": true,
+            "certified_source_count": 0,
+            "certified_source_bytes": 0,
+            "receipt": {
+                "previous_generation": null,
+                "published_generation": generation_id,
+                "generation_changed": true,
+                "published_explicit_source_catalog": catalog.to_json(),
+                "current": {
+                    "current_source_count": 0,
+                    "current_indexed_documents": 0,
+                    "current_complete_records": 0,
+                    "current_retained_records": 0,
+                    "current_rejected_records": 0,
+                    "current_ignored_records": 0,
+                    "current_certified_source_bytes": 0,
+                    "current_sources_with_rejections": 0,
+                    "removed_source_count": 0,
+                },
+            },
             "progress": {
                 "phase": "committed",
                 "completed_sources": 0,
@@ -64,8 +87,6 @@ fn recovered_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, St
         }),
     )
     .unwrap();
-    super::super::source_backed_refresh_coordinator::reconcile_verified_source_epoch(&data_root)
-        .unwrap();
     (temp, data_root, generation_id)
 }
 
@@ -229,8 +250,8 @@ fn catalog_status_requires_matching_job_and_terminal_receipt_authority() {
 }
 
 #[test]
-fn recovered_publication_is_ready_in_json_and_human_status() {
-    let (_temp, data_root, generation_id) = recovered_publication_fixture();
+fn core_publication_is_ready_in_json_and_human_status() {
+    let (_temp, data_root, generation_id) = core_publication_fixture();
     let config = AppConfig::default();
     let json_status = crate::commands::status::status_read_model(&data_root, &config)
         .unwrap()

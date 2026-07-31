@@ -20,7 +20,7 @@ fn retained_generation_hint_avoids_reopening_the_large_index_when_enqueuing() {
     )
     .unwrap();
 
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let response = coordinator.enqueue_periodic(&data_root).unwrap();
 
     assert_eq!(
@@ -53,7 +53,7 @@ fn retained_generation_hint_recovers_commit_before_stale_job_receipt() {
     )
     .unwrap();
 
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let response = coordinator.enqueue_periodic(&data_root).unwrap();
 
     assert_eq!(

@@ -18,10 +18,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     deadline: Option<Instant>,
     semantic_enabled: bool,
     query_activity: Option<&DaemonQueryActivity>,
-    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+    source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<DaemonIteration> {
     let source_refresh_requested =
-        source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request);
+        source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
         return Ok(
             run_pending_core_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(|| {
@@ -171,30 +171,18 @@ fn run_pending_core_semantic_catch_up(
 fn run_pending_core_pro_catch_up(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
-    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+    source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<Option<DaemonIteration>> {
     if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
         return Ok(None);
     }
-    let Some(authority) =
-        source_refresh.and_then(SourceBackedRefreshCoordinator::retained_published_generation)
+    let Some(authority) = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication)
     else {
         return Ok(None);
     };
     let generation = authority.generation_id();
     if runtime.sidecar_drain.generation.as_deref() == Some(generation)
         && runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
-    {
-        return Ok(None);
-    }
-    if !pro_generation_needs_catch_up(data_root, generation) {
-        return Ok(None);
-    }
-    if runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
-        && read_pro_status(data_root).is_some_and(|status| {
-            status.get("core_generation_id").and_then(Value::as_str) == Some(generation)
-                && status.get("retryable").and_then(Value::as_bool) == Some(false)
-        })
     {
         return Ok(None);
     }
@@ -216,7 +204,7 @@ fn run_pending_core_pro_catch_up(
 fn run_pending_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
-    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+    source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<Option<DaemonIteration>> {
     let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root)) else {
         return Ok(None);
@@ -237,7 +225,7 @@ fn run_pending_core_refresh(
 fn run_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
-    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+    source_refresh: Option<&CoreRefreshEngine>,
     enqueue_periodic: bool,
 ) -> Result<DaemonIteration> {
     let run = match source_refresh {
@@ -350,7 +338,7 @@ fn run_pro_catch_up_with_retry(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     core_generation_id: &str,
-    authority: Option<&GenerationBoundSourceBackedResolver>,
+    authority: Option<&PinnedCorePublication>,
 ) -> Result<SourceBackedProCatchUpRun> {
     prepare_pro_retry_for_generation(runtime, data_root, core_generation_id);
     if !runtime.pro_retry.ready() {
@@ -709,14 +697,12 @@ use super::{
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_pro_catch_up::{
-        generation_needs_catch_up as pro_generation_needs_catch_up,
         persist_status_json as persist_pro_status, read_status_json as read_pro_status,
         run_after_core_publication, status_generation as pro_status_generation,
         SourceBackedProCatchUpRun,
     },
     source_backed_refresh_coordinator::{
-        pin_published_generation, GenerationBoundSourceBackedResolver,
-        SourceBackedRefreshCoordinator,
+        pin_published_generation, CoreRefreshEngine, PinnedCorePublication,
     },
     source_backed_relational_catch_up::{
         generation_needs_catch_up as relational_generation_needs_catch_up,

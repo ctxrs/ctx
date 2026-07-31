@@ -112,10 +112,8 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) certified_source_count: Option<usize>,
     pub(super) certified_source_bytes: Option<u64>,
     pub(super) receipt: Option<SourceBackedRefreshReceipt>,
-    pub(super) retained_publication: Option<SourceBackedRefreshReceipt>,
     pub(super) timings: Option<SourceBackedRefreshTimings>,
     pub(super) publication_probe_us: u64,
-    pub(super) retirement_us: u64,
     pub(super) daemon_mode: DaemonMode,
     pub(super) trigger: &'static str,
     pub(super) trigger_provenance: &'static str,
@@ -157,9 +155,6 @@ impl SourceBackedRefreshAttempt {
                 .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
-            "retained_publication": self.retained_publication
-                .as_ref()
-                .map(SourceBackedRefreshReceipt::to_json),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -187,7 +182,7 @@ impl SourceBackedRefreshAttempt {
         compact_json(json!({
             "mode": SourceBackedRefreshMode::Background.as_str(),
             "owner": "daemon",
-            "kind": "source_backed",
+            "kind": "core_refresh",
             "status": status,
             "request_id": self.request_id,
             "request_state": self.state.as_str(),
@@ -203,9 +198,6 @@ impl SourceBackedRefreshAttempt {
                 .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
-            "retained_publication": self.retained_publication
-                .as_ref()
-                .map(SourceBackedRefreshReceipt::to_json),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -228,7 +220,6 @@ impl SourceBackedRefreshAttempt {
         self.timings.map(|timings| {
             let mut timings = timings.to_json();
             timings["publication_probe"] = json!(self.publication_probe_us);
-            timings["retirement"] = json!(self.retirement_us);
             timings
         })
     }

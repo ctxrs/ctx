@@ -1,42 +1,10 @@
 use super::*;
 
-#[cfg(test)]
-thread_local! {
-    static TEST_DISCOVERY_CONTEXT: std::cell::RefCell<Option<DiscoveryContext>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(in crate::semantic) struct TestDiscoveryContextGuard;
-
-#[cfg(test)]
-impl Drop for TestDiscoveryContextGuard {
-    fn drop(&mut self) {
-        TEST_DISCOVERY_CONTEXT.with(|slot| {
-            *slot.borrow_mut() = None;
-        });
-    }
-}
-
-#[cfg(test)]
-pub(in crate::semantic) fn install_test_discovery_context(
-    discovery: DiscoveryContext,
-) -> TestDiscoveryContextGuard {
-    TEST_DISCOVERY_CONTEXT.with(|slot| {
-        assert!(
-            slot.borrow().is_none(),
-            "source-backed test discovery context is already installed"
-        );
-        *slot.borrow_mut() = Some(discovery);
-    });
-    TestDiscoveryContextGuard
-}
-
 pub(super) fn execute_source_backed_refresh(
     executor: &dyn SourceBackedRefreshExecutor,
     data_root: &Path,
     request_id: &str,
-    coordinator: &SourceBackedRefreshCoordinator,
+    coordinator: &CoreRefreshEngine,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
@@ -65,83 +33,6 @@ pub(super) fn execute_capture_owned_refresh(
 ) -> Result<SourceBackedRefreshPublication> {
     let discovery = source_backed_discovery_context()?;
     execute_capture_owned_refresh_with(execution, &discovery, refresh_all_provider_sources)
-}
-
-pub(super) struct RecoveredCaptureOwnedPublication {
-    pub(super) generation_id: String,
-    pub(super) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
-    pub(super) resolver: Arc<SourceBackedResolverRegistry>,
-    pub(super) verified_index: Arc<VerifiedIndex>,
-}
-
-pub(super) fn recover_capture_owned_resolver(
-    data_root: &Path,
-    published_explicit_source_catalog: &ExplicitSourceCatalogAuthority,
-) -> Result<Option<RecoveredCaptureOwnedPublication>> {
-    let Some(generation_id) = retained_generation_hint(data_root)? else {
-        return Ok(None);
-    };
-    if !source_backed_index_root(data_root)
-        .join("meta.json")
-        .is_file()
-    {
-        return Ok(None);
-    }
-
-    let retained_generation = Arc::new(open_published_generation(data_root)?.ok_or_else(|| {
-        anyhow!("retained source-backed generation {generation_id} is unavailable")
-    })?);
-    if retained_generation.generation_id() != generation_id {
-        bail!(
-            "retained source-backed generation hint {generation_id} does not match verified generation {}",
-            retained_generation.generation_id()
-        );
-    }
-    let Some(resolver) = reconstruct_generation_bound_resolver(
-        data_root,
-        published_explicit_source_catalog,
-        &retained_generation,
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(RecoveredCaptureOwnedPublication {
-        generation_id,
-        published_explicit_source_catalog: published_explicit_source_catalog.clone(),
-        resolver,
-        verified_index: retained_generation,
-    }))
-}
-
-fn reconstruct_generation_bound_resolver(
-    data_root: &Path,
-    published_explicit_source_catalog: &ExplicitSourceCatalogAuthority,
-    retained_generation: &VerifiedIndex,
-) -> Option<Arc<SourceBackedResolverRegistry>> {
-    let reconstruct = || -> Result<Arc<SourceBackedResolverRegistry>> {
-        let discovery = source_backed_discovery_context()?.with_data_root(data_root);
-        let mut report = discover_provider_sources_with_context(&discovery);
-        validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
-            .context("validate provider roots before restoring source hydration")?;
-        published_explicit_source_catalog
-            .validate_source_roots(data_root)
-            .context(
-                "validate published explicit provider roots before restoring source hydration",
-            )?;
-        published_explicit_source_catalog.prepare_discovery_report(data_root, &mut report)?;
-        let mut build =
-            build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
-        published_explicit_source_catalog.register_routes_after_discovery_merge(
-            data_root,
-            Some(retained_generation),
-            &mut build,
-        )?;
-        reject_unowned_retained_source_families(
-            &build.registry,
-            &retained_generation.manifest().sources,
-        )?;
-        Ok(Arc::new(build.registry.resolver_registry()))
-    };
-    reconstruct().ok()
 }
 
 pub(super) fn execute_capture_owned_refresh_with<Refresh>(
@@ -249,7 +140,6 @@ pub(super) fn refresh_all_provider_sources(
         );
     }
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
-    let resolver = Arc::new(executor.registry().resolver_registry());
     let receipt = executor
         .refresh(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
@@ -266,7 +156,6 @@ pub(super) fn refresh_all_provider_sources(
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         published_explicit_source_catalog,
-        resolver: Some(resolver),
         scanned_routes: receipt.scanned_routes,
         unsupported_routes: receipt.unsupported_routes.len(),
         certified_source_count: receipt.certified_source_count,
@@ -319,11 +208,9 @@ fn refresh_without_executable_routes(
     })
     .map_err(|error| anyhow!("report empty source-backed publication progress: {error}"))?;
 
-    let resolver = Arc::new(registry.resolver_registry());
     Ok(SourceBackedRefreshPublication {
         generation_id: generation,
         published_explicit_source_catalog,
-        resolver: Some(resolver),
         scanned_routes: 0,
         unsupported_routes: registry.unsupported_route_count(),
         certified_source_count: 0,
@@ -338,10 +225,6 @@ fn refresh_without_executable_routes(
 }
 
 fn source_backed_discovery_context() -> Result<DiscoveryContext> {
-    #[cfg(test)]
-    if let Some(discovery) = TEST_DISCOVERY_CONTEXT.with(|slot| slot.borrow().clone()) {
-        return Ok(discovery);
-    }
     let home = identity::home_dir()
         .context("resolve the user home for source-backed provider discovery")?;
     Ok(DiscoveryContext::from_process(home))
@@ -430,7 +313,7 @@ fn reject_unowned_retained_source_families(
         format!("; {omitted} additional uncovered provider family/families omitted")
     };
     bail!(
-        "{TERMINAL_COVERAGE_ERROR_CODE}: retained source generation has no current resolver-owning route family for {}{omitted}",
+        "{TERMINAL_COVERAGE_ERROR_CODE}: retained source generation has no current executable route family for {}{omitted}",
         uncovered.join(", ")
     )
 }
@@ -449,21 +332,9 @@ fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReas
     }
 }
 
-#[allow(dead_code)] // Used by the retained resolver's future batch consumer.
-pub(super) fn hydration_failure_queues_refresh(kind: HydrationFailureKind) -> bool {
-    matches!(
-        kind,
-        HydrationFailureKind::TemporarilyUnavailable
-            | HydrationFailureKind::ConfirmedDeleted
-            | HydrationFailureKind::StaleSourceEvidence
-            | HydrationFailureKind::StaleRecordEvidence
-            | HydrationFailureKind::MissingRecord
-    )
-}
-
 fn record_source_backed_refresh_progress(
     data_root: &Path,
-    coordinator: &SourceBackedRefreshCoordinator,
+    coordinator: &CoreRefreshEngine,
     request_id: &str,
     phase: &str,
     completed_sources: usize,

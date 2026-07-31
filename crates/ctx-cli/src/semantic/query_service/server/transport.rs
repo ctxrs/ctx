@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::semantic::{
     daemon_wakeup::DaemonWakeup, health_search::create_private_dir_all,
     model_runtime::SharedSemanticRuntime, paths_status::daemon_root_path,
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_refresh_coordinator::CoreRefreshEngine,
 };
 
 #[cfg(unix)]
@@ -44,8 +44,8 @@ use super::{
 fn source_refresh_coordinator(
     _data_root: &Path,
     _service: DaemonIpcService,
-) -> Result<Arc<SourceBackedRefreshCoordinator>> {
-    Ok(Arc::new(SourceBackedRefreshCoordinator::new()))
+) -> Result<Arc<CoreRefreshEngine>> {
+    Ok(Arc::new(CoreRefreshEngine::new()))
 }
 
 #[cfg(unix)]
