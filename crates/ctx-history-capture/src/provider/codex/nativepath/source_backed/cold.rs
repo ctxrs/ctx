@@ -146,7 +146,7 @@ struct ChangedSourceStartV0 {
 struct ColdPreparedPageV0 {
     source_index: usize,
     page_index: u64,
-    documents: Vec<LexicalDocument>,
+    documents: Vec<CodexCoreDocument>,
 }
 
 #[derive(Debug)]
@@ -442,6 +442,8 @@ fn run_cold_scan_lane_v0(
         }
         let mut page_index = 0_u64;
         let mut staged_documents = 0_u64;
+        let mut repository_attributor =
+            crate::repository_attribution::RepositoryAttributor::default();
 
         loop {
             if cancellation.load(AtomicOrdering::Acquire) {
@@ -472,6 +474,7 @@ fn run_cold_scan_lane_v0(
                         job.session_id,
                         owner,
                         row,
+                        &mut repository_attributor,
                     )?);
                     staged_documents = staged_documents
                         .checked_add(1)
@@ -657,28 +660,33 @@ fn consume_cold_lanes_v0(
                     ),
                 )?;
                 for document in page.documents {
-                    if !document.source.exact_descriptor_eq(&plan.source_key)
-                        || document.session_id != plan.session_id
-                        || document.provider_session_id.as_deref()
+                    if !document
+                        .document
+                        .source
+                        .exact_descriptor_eq(&plan.source_key)
+                        || document.document.session_id != plan.session_id
+                        || document.document.provider_session_id.as_deref()
                             != Some(plan.native_session_id.as_str())
                     {
                         return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                             "document identity does not match its assigned source",
                         ));
                     }
-                    let (_, _, _, physical_ordinal) = validate_codex_locator(&document.locator)?;
-                    if physical_ordinal != document.event_sequence
+                    let (_, _, _, physical_ordinal) =
+                        validate_codex_locator(&document.document.locator)?;
+                    if physical_ordinal != document.document.event_sequence
                         || lane_state
                             .last_event_sequence
-                            .is_some_and(|last| document.event_sequence <= last)
+                            .is_some_and(|last| document.document.event_sequence <= last)
                     {
                         return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                             "document event sequence is not strictly increasing",
                         ));
                     }
-                    let event_sequence = document.event_sequence;
+                    let event_sequence = document.document.event_sequence;
                     let add_started = Instant::now();
-                    let add_result = writer.add_document(document);
+                    let add_result =
+                        writer.add_document_with_annotation(document.document, document.annotation);
                     timings.writer_add_document += add_started.elapsed();
                     add_result?;
                     lane_state.last_event_sequence = Some(event_sequence);

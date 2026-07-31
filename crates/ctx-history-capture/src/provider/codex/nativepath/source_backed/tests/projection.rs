@@ -1,6 +1,121 @@
 use super::*;
 
 #[test]
+fn codex_production_path_persists_native_workdir_arguments_and_certified_binding() {
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let control = temp.path().join("control");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir(&control).unwrap();
+    fs::create_dir(&repository).unwrap();
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "ctx test"],
+        vec!["config", "user.email", "ctx@example.invalid"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/codex-fixture.git",
+        ],
+    ] {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+    for arguments in [vec!["add", "tracked.txt"], vec!["commit", "-qm", "fixture"]] {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let native_session_id = "019fa000-0000-7000-8000-000000000099";
+    let arguments = serde_json::json!({
+        "cmd": "git status",
+        "workdir": repository,
+        "yield_time_ms": 10000,
+    });
+    let records = [
+        serde_json::json!({
+            "timestamp": "2026-07-28T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": native_session_id,
+                "timestamp": "2026-07-28T12:00:00Z",
+                "cwd": control,
+                "originator": "codex_cli_rs",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "openai"
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "timestamp": "2026-07-28T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call-repository",
+                "arguments": arguments.to_string()
+            }
+        })
+        .to_string(),
+    ];
+    fs::write(
+        session_path(&sessions, native_session_id),
+        format!("{}\n", records.join("\n")),
+    )
+    .unwrap();
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let event = verified
+        .events_for_session(session_id.as_uuid())
+        .unwrap()
+        .remove(0);
+    let core = verified
+        .core_record_by_id(event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        core.repository_candidate_evidence.session_cwd.as_deref(),
+        Some(control.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        core.repository_candidate_evidence
+            .declared_tool_workdir
+            .as_deref(),
+        Some(repository.to_string_lossy().as_ref())
+    );
+    assert_eq!(core.repository_bindings.len(), 1);
+    assert_eq!(
+        core.repository_bindings[0].logical_repository_id,
+        "forge:github.com/acme/codex-fixture"
+    );
+    assert_eq!(
+        core.content.structured_content.as_ref().unwrap()["provider_native_tool"]["arguments"],
+        arguments.to_string()
+    );
+    assert!(core.repository_vcs_observations.is_empty());
+}
+
+#[test]
 fn source_backed_projection_preserves_semantics_without_legacy_operations() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -83,12 +198,22 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
     let mut scanner =
         CodexNativeScanner::new_source_backed_v0(catalog_source.clone(), None).unwrap();
     let mut documents = Vec::new();
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     while let Some(page) = scanner.next_page().unwrap() {
         let CodexNativeOwnedPage::Core(page) = page;
         let owner = page.owner.unwrap();
         for row in page.source_backed_rows {
             documents.push(
-                codex_lexical_document(&catalog_source, &source, session_id, &owner, row).unwrap(),
+                codex_lexical_document(
+                    &catalog_source,
+                    &source,
+                    session_id,
+                    &owner,
+                    row,
+                    &mut repository_attributor,
+                )
+                .unwrap()
+                .document,
             );
         }
     }

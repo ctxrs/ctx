@@ -24,10 +24,12 @@ pub use contracts::{
     RevalidationTarget, WriterOptions, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
     LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
+pub use ctx_history_core::CoreRecordAnnotation;
 pub(crate) use identity::{
-    hex, register_compact_identity, register_event_identity, register_session_identity, sha256_hex,
-    source_sort_key, source_token, validate_event_identity_against_base,
-    validate_referenced_session_identity_against_base, validate_session_identity_against_base,
+    hex, prior_core_record, register_compact_identity, register_event_identity,
+    register_session_identity, sha256_hex, source_sort_key, source_token,
+    validate_event_identity_against_base, validate_referenced_session_identity_against_base,
+    validate_session_identity_against_base,
 };
 pub use policy::{
     current_source_generation_policy, current_source_generation_policy_hash,
@@ -558,6 +560,14 @@ impl GenerationWriter {
     }
 
     pub fn add_document(&mut self, document: LexicalDocument) -> Result<()> {
+        self.add_document_with_annotation(document, CoreRecordAnnotation::default())
+    }
+
+    pub fn add_document_with_annotation(
+        &mut self,
+        document: LexicalDocument,
+        annotation: CoreRecordAnnotation,
+    ) -> Result<()> {
         let locator_bytes = document.validate()?;
         let encoded_identities = EncodedDocumentIdentities::new(&document)?;
         if document.event_id.entity_kind() != StableEntityKind::Event {
@@ -617,7 +627,21 @@ impl GenerationWriter {
         if matches!(&pending_source.mode, PendingSourceMode::Retain { .. }) {
             return Err(IndexError::DocumentSourceNotActive);
         }
-        let core_record_bytes = document.to_core_record()?.encode_stored()?;
+        let mut core_record = document.to_core_record_with_annotation(annotation)?;
+        if core_record.needs_prior_repository_certificate() {
+            if let Some(base_searcher) = &self.base_searcher {
+                if let Some(prior) = prior_core_record(
+                    base_searcher,
+                    self.fields,
+                    document.event_id,
+                    &document.source,
+                )? {
+                    core_record.reuse_prior_repository_certificate(&prior);
+                    core_record.validate_contract()?;
+                }
+            }
+        }
+        let core_record_bytes = core_record.encode_stored()?;
         let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
             validate_event_identity_against_base(

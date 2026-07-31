@@ -55,7 +55,8 @@ pub(super) fn codex_lexical_document(
     session_id: StableEntityId,
     owner: &CodexSessionRow,
     row: CodexSourceBackedRowV0,
-) -> CodexSourceBackedResultV0<LexicalDocument> {
+    attributor: &mut crate::repository_attribution::RepositoryAttributor,
+) -> CodexSourceBackedResultV0<CodexCoreDocument> {
     let native_session_id = owner.native_session_id.as_str();
     let parent_session_id = owner
         .parent_native_session_id
@@ -77,6 +78,8 @@ pub(super) fn codex_lexical_document(
         role,
         lexical_body,
         touched_paths,
+        repository_tool,
+        repository_files,
     } = row;
     let event_id = codex_event_identity(source, native_session_id, raw_ordinal)?;
     let locator = SourceRecordLocator::new(
@@ -95,7 +98,26 @@ pub(super) fn codex_lexical_document(
     if lexical_body.is_empty() {
         return Err(CodexSourceBackedErrorV0::MissingLexicalBody);
     }
-    Ok(LexicalDocument {
+    let (declared_tool_workdir, command, structured_content) =
+        repository_tool.map_or((None, None, None), |evidence| {
+            (
+                evidence.declared_workdir,
+                evidence.command,
+                Some(evidence.structured_content),
+            )
+        });
+    let annotation = attributor.attribute(crate::repository_attribution::AttributionInput {
+        // Current Codex session/tool records expose cwd, workdir, command, and
+        // file activity, but no structured credential-free project identity.
+        provider_native_repository_aliases: Vec::new(),
+        session_cwd: owner.cwd.clone(),
+        declared_tool_workdir,
+        command,
+        structured_content,
+        file_observations: repository_files,
+        vcs_observations: Vec::new(),
+    });
+    let document = LexicalDocument {
         event_id,
         session_id,
         parent_session_id,
@@ -119,6 +141,10 @@ pub(super) fn codex_lexical_document(
         workspace: owner.cwd.clone(),
         cwd: owner.cwd.clone(),
         touched_files: touched_paths,
+    };
+    Ok(CodexCoreDocument {
+        document,
+        annotation,
     })
 }
 

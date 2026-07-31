@@ -296,6 +296,8 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         counters.peak_active_scanners = counters.peak_active_scanners.max(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
+        let mut repository_attributor =
+            crate::repository_attribution::RepositoryAttributor::default();
         let mut staged_for_source = 0_u64;
         loop {
             let scanner_started = Instant::now();
@@ -318,11 +320,18 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             validate_owner(owner, &native_session_id)?;
             for row in page.source_backed_rows {
                 let conversion_started = Instant::now();
-                let document =
-                    codex_lexical_document(&source, &source_key, session_id, owner, row)?;
+                let document = codex_lexical_document(
+                    &source,
+                    &source_key,
+                    session_id,
+                    owner,
+                    row,
+                    &mut repository_attributor,
+                )?;
                 timings.scanner_worker_busy += conversion_started.elapsed();
                 let add_started = Instant::now();
-                let add_result = writer.add_document(document);
+                let add_result =
+                    writer.add_document_with_annotation(document.document, document.annotation);
                 timings.writer_add_document += add_started.elapsed();
                 add_result?;
                 staged_for_source = staged_for_source

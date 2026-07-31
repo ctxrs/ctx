@@ -1,12 +1,11 @@
 use ctx_history_core::{
     core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreContent, CoreContentPolicyStatus, CoreRecord, CoreRecordError,
-    ProjectionContractError, RepositoryCandidateEvidence, SourceKey, SourceRecordLocator,
+    CertifiedSourceInventory, CoreContent, CoreContentPolicyStatus, CoreRecord,
+    CoreRecordAnnotation, CoreRecordError, ProjectionContractError, SourceKey, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, CORE_CONTENT_POLICY_REVISION,
     CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -314,6 +313,13 @@ impl LexicalDocument {
     /// the complete Core contract. Provider adapters can replace this with
     /// direct `CoreRecord` production without changing stored/query semantics.
     pub fn to_core_record(&self) -> Result<CoreRecord> {
+        self.to_core_record_with_annotation(CoreRecordAnnotation::default())
+    }
+
+    pub fn to_core_record_with_annotation(
+        &self,
+        annotation: CoreRecordAnnotation,
+    ) -> Result<CoreRecord> {
         let record = CoreRecord {
             record_version: CORE_RECORD_VERSION,
             event_id: self.event_id,
@@ -338,14 +344,14 @@ impl LexicalDocument {
                 policy_revision: CORE_CONTENT_POLICY_REVISION,
                 policy_status: CoreContentPolicyStatus::Selected,
                 normalized_body: Some(self.body.clone()),
-                structured_content: None,
+                structured_content: annotation.structured_content,
             },
-            metadata: BTreeMap::new(),
-            repository_candidate_evidence: RepositoryCandidateEvidence::default(),
-            repository_bindings: Vec::new(),
-            repository_abstentions: Vec::new(),
-            repository_file_observations: Vec::new(),
-            repository_vcs_observations: Vec::new(),
+            metadata: annotation.metadata,
+            repository_candidate_evidence: annotation.repository_candidate_evidence,
+            repository_bindings: annotation.repository_bindings,
+            repository_abstentions: annotation.repository_abstentions,
+            repository_file_observations: annotation.repository_file_observations,
+            repository_vcs_observations: annotation.repository_vcs_observations,
         };
         record.validate_contract()?;
         Ok(record)

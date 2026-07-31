@@ -142,6 +142,23 @@ pub struct CoreRecord {
     pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
 }
 
+/// Provider-owned additions applied while the transitional lexical ingestion
+/// seam constructs a complete Core record.
+///
+/// This keeps provider normalization out of the index writer while allowing a
+/// single provider to adopt the Core contract without changing every legacy
+/// `LexicalDocument` constructor at once.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CoreRecordAnnotation {
+    pub structured_content: Option<serde_json::Value>,
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    pub repository_candidate_evidence: RepositoryCandidateEvidence,
+    pub repository_bindings: Vec<RepositoryBinding>,
+    pub repository_abstentions: Vec<RepositoryAbstention>,
+    pub repository_file_observations: Vec<RepositoryFileObservation>,
+    pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
+}
+
 impl CoreRecord {
     pub fn validate_contract(&self) -> CoreRecordResult<()> {
         if self.record_version != CORE_RECORD_VERSION {
@@ -210,6 +227,63 @@ impl CoreRecord {
         let record: Self = serde_json::from_slice(encoded)?;
         record.validate_contract()?;
         Ok(record)
+    }
+
+    pub fn needs_prior_repository_certificate(&self) -> bool {
+        self.repository_bindings.is_empty()
+            && self.repository_abstentions.iter().any(|abstention| {
+                abstention.reason == RepositoryAbstentionReason::CandidateMissingBeforeCertification
+            })
+    }
+
+    /// Retains a previously certified logical identity when the same event is
+    /// rebuilt after its local candidate disappeared. The old local route is
+    /// deliberately revoked; only immutable identity and scoped observations
+    /// survive.
+    pub fn reuse_prior_repository_certificate(&mut self, prior: &Self) -> bool {
+        let missing_before_certification = self.needs_prior_repository_certificate();
+        let same_event = self.event_id == prior.event_id
+            && self.session_id == prior.session_id
+            && self.source.exact_descriptor_eq(&prior.source);
+        if !missing_before_certification || !same_event || prior.repository_bindings.is_empty() {
+            return false;
+        }
+
+        self.repository_bindings = prior
+            .repository_bindings
+            .iter()
+            .cloned()
+            .map(|mut binding| {
+                binding.local_root_authorization = None;
+                binding
+            })
+            .collect();
+        self.repository_file_observations = prior.repository_file_observations.clone();
+        self.repository_vcs_observations = prior.repository_vcs_observations.clone();
+        let evidence_kind = self
+            .repository_abstentions
+            .iter()
+            .find(|abstention| {
+                abstention.reason == RepositoryAbstentionReason::CandidateMissingBeforeCertification
+            })
+            .map(|abstention| abstention.evidence_kind)
+            .unwrap_or(RepositoryEvidenceKind::SessionCwd);
+        let association_policy_revision = self
+            .repository_abstentions
+            .iter()
+            .map(|abstention| abstention.association_policy_revision)
+            .max()
+            .unwrap_or(CORE_REPOSITORY_CONTRACT_REVISION);
+        self.repository_abstentions.retain(|abstention| {
+            abstention.reason != RepositoryAbstentionReason::CandidateMissingBeforeCertification
+        });
+        self.repository_abstentions.push(RepositoryAbstention {
+            evidence_kind,
+            reason: RepositoryAbstentionReason::Unavailable,
+            detail: Some("prior_certificate_reused_without_local_authorization".to_owned()),
+            association_policy_revision,
+        });
+        true
     }
 
     fn validate_repositories(&self) -> CoreRecordResult<()> {

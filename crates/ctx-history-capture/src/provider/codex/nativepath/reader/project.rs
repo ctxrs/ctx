@@ -88,7 +88,17 @@ impl CodexNativeScanner {
                     event_type_supports_structured_file_touches(built.row.event_type),
                     MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
                     |(_, touch)| {
-                        built.row.touched_paths.push(touch.path);
+                        built.row.touched_paths.push(touch.path.clone());
+                        built.row.repository_files.push(
+                            crate::repository_attribution::UnscopedFileObservation {
+                                path: touch.path,
+                                prior_path: touch.old_path,
+                                kind:
+                                    crate::provider::codex::nativepath::rows::repository_file_kind(
+                                        touch.change_kind,
+                                    ),
+                            },
+                        );
                         Ok::<(), CaptureError>(())
                     },
                 )?;

@@ -15,11 +15,11 @@ use std::{
 use ctx_history_core::{
     derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
     CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    CertifiedSourceInventory, CoreRecordAnnotation, EventHydrationRequest, EventIdentityInput,
+    HydratedProviderRecord, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::VerifiedIndex;
@@ -361,6 +361,12 @@ use identity::{
     certify_scan, codex_event_identity, codex_lexical_document, codex_session_identity,
     codex_source_key, decode_append_proof, validate_owner,
 };
+
+#[derive(Debug)]
+struct CodexCoreDocument {
+    document: LexicalDocument,
+    annotation: CoreRecordAnnotation,
+}
 #[cfg(test)]
 use ingestion::ingest_codex_source_backed_inner_v0;
 pub use ingestion::ingest_codex_source_backed_v0;
