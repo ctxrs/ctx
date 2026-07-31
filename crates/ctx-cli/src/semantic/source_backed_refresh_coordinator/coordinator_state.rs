@@ -657,6 +657,7 @@ impl SourceBackedRefreshCoordinator {
             daemon_mode: metadata.daemon_mode,
             trigger: metadata.trigger,
             trigger_provenance: metadata.trigger_provenance,
+            failure_type: None,
             last_error: None,
             post_publication_error: None,
         };
@@ -769,6 +770,10 @@ impl SourceBackedRefreshCoordinator {
         };
 
         let execution = execute(&request_id, self);
+        let execution_failure_type = execution
+            .as_ref()
+            .err()
+            .and_then(source_backed_refresh_failure_type);
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
@@ -876,6 +881,7 @@ impl SourceBackedRefreshCoordinator {
                 Err(error) => {
                     attempt.state = SourceBackedRefreshState::Failed;
                     attempt.progress.phase = "failed".to_owned();
+                    attempt.failure_type = execution_failure_type;
                     attempt.last_error = Some(error);
                 }
             }
@@ -927,6 +933,17 @@ impl SourceBackedRefreshCoordinator {
     ) -> std::sync::MutexGuard<'_, SourceBackedRefreshCoordinatorState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
+}
+
+fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|cause| {
+        let route = cause.downcast_ref::<SourceBackedRouteError>()?;
+        match route.kind {
+            SourceBackedRouteErrorKind::Unsupported => Some("unsupported_schema"),
+            SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
+            _ => None,
+        }
+    })
 }
 
 fn find_attempt<'a>(
