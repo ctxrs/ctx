@@ -23,6 +23,7 @@ const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 #[derive(Clone)]
 pub(super) struct IndexSourceFields {
     token: Arc<str>,
+    identity_digest: [u8; 32],
     descriptor_digest: [u8; 32],
     provider: Arc<str>,
     source_format: Arc<str>,
@@ -32,6 +33,7 @@ impl IndexSourceFields {
     pub(super) fn new(document_source: &ctx_history_core::SourceKey, token: &str) -> Self {
         Self {
             token: Arc::from(token),
+            identity_digest: document_source.identity().digest(),
             descriptor_digest: document_source.exact_descriptor_digest(),
             provider: Arc::from(document_source.provider()),
             source_format: Arc::from(document_source.source_format()),
@@ -385,7 +387,8 @@ impl IndexDocument {
             target.add_text(fields.touched_file, touched_file);
         }
         target.add_bytes(fields.core_record, core_record_bytes);
-        target
+        target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
+        Ok(target)
     }
 }
 
@@ -545,6 +548,50 @@ mod tests {
         let digest = [0xa5; 32];
         let token = SourceToken::new(&digest);
         assert_eq!(token.as_str().unwrap(), crate::hex(&digest));
+    }
+
+    #[test]
+    fn source_event_order_key_has_exact_source_order_and_size_layout() {
+        let source = source("codex_session_jsonl");
+        let document = lexical_document(&source);
+        let core_record_bytes = document.to_core_record().unwrap().encode_stored().unwrap();
+        let content_bytes = document.body.len();
+        let index_source = IndexSourceFields::new(&source, &crate::source_token(&source));
+        let key = SourceEventOrderKey::for_document(
+            &index_source,
+            document.event_id.digest(),
+            core_record_bytes.len(),
+            content_bytes,
+        )
+        .unwrap()
+        .into_bytes();
+
+        assert_eq!(&key[..32], &source.identity().digest());
+        assert_eq!(
+            &key[32..SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN],
+            &source.exact_descriptor_digest()
+        );
+        assert_eq!(
+            &key[SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET],
+            &document.event_id.digest()
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                key[SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET
+                    ..SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            core_record_bytes.len()
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                key[SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET..]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            content_bytes
+        );
     }
 
     #[test]

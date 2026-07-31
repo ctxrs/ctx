@@ -703,7 +703,7 @@ impl GenerationWriter {
             core_content_bytes,
             encoded_identities,
             index_fields,
-        );
+        )?;
         self.writer_mut()?.add_document(target)?;
         let pending = self
             .pending
