@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ctx_history_core::ContentRef;
+use ctx_history_core::{ContentRef, RepositoryFileObservationKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -48,6 +48,7 @@ pub(crate) struct ClaudePhysicalLocator {
 pub(crate) struct ClaudeFileTouch {
     pub(crate) path: String,
     pub(crate) previous_path: Option<String>,
+    pub(crate) kind: RepositoryFileObservationKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,23 +56,30 @@ pub(crate) struct ClaudeFileTouch {
 pub(crate) struct ToolCallRequest {
     pub(crate) call_id: Option<String>,
     pub(crate) tool_name: Option<String>,
+    pub(crate) input: Value,
+    pub(crate) command: Option<String>,
+    pub(crate) declared_workdir: Option<String>,
     pub(crate) file_touches: Vec<ClaudeFileTouch>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ClaudeOutputOutcome {
+    Success,
     Failure,
     Timeout,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ClaudeSparseOutputDiagnostic {
+pub(crate) struct ClaudeToolResult {
     pub(crate) call_id: Option<String>,
     pub(crate) outcome: ClaudeOutputOutcome,
     pub(crate) exit_code: Option<i32>,
     pub(crate) duration_ms: Option<u64>,
+    pub(crate) content: Value,
+    pub(crate) tool_use_result: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +97,7 @@ pub(crate) struct ClaudeRetainedRow {
     pub(crate) body_text_retention: Option<Value>,
     pub(crate) complete_body_ref: Option<ContentRef>,
     pub(crate) tool_call: Option<ToolCallRequest>,
-    pub(crate) sparse_output: Option<ClaudeSparseOutputDiagnostic>,
+    pub(crate) tool_result: Option<ClaudeToolResult>,
     pub(crate) locator: ClaudePhysicalLocator,
 }
 

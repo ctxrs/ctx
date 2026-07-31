@@ -1,0 +1,1 @@
+{"agent:main:parent":{"sessionId":"parent-session"},"agent:worker:child":{"sessionId":"child-session","spawnedBy":"agent:main:parent"}}

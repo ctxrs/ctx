@@ -215,11 +215,12 @@ pub(super) fn openclaw_output_metadata(value: &Value) -> Option<OpenClawOutputMe
         .get("role")
         .or_else(|| value.get("role"))
         .and_then(Value::as_str)?;
-    if role != "tool" {
+    if !matches!(role, "tool" | "toolResult") {
         return None;
     }
     let tool_name = message
-        .get("name")
+        .get("toolName")
+        .or_else(|| message.get("name"))
         .or_else(|| message.get("tool_name"))
         .or_else(|| message.get("tool"))
         .and_then(Value::as_str)
@@ -231,17 +232,20 @@ pub(super) fn openclaw_output_metadata(value: &Value) -> Option<OpenClawOutputMe
     } else {
         OutputObservationKind::Tool
     };
-    let timed_out = openclaw_value_timed_out(message);
-    let exit_code = openclaw_i64_field(message, &["exit_code", "exitCode"])
+    let details = message.get("details").unwrap_or(message);
+    let timed_out = openclaw_value_timed_out(details);
+    let exit_code = openclaw_i64_field(details, &["exit_code", "exitCode", "exit_code"])
         .and_then(|value| i32::try_from(value).ok());
-    let duration_ms = openclaw_i64_field(message, &["duration_ms", "durationMs"])
+    let duration_ms = openclaw_i64_field(details, &["duration_ms", "durationMs"])
         .and_then(|value| u64::try_from(value).ok());
     let outcome = if timed_out {
         OutputOutcome::Timeout
-    } else if provider_output_event_is_failure(message) {
+    } else if provider_output_event_is_failure(details) {
         OutputOutcome::Failure
-    } else if provider_result_outcome_evidence(EventType::ToolOutput, message).as_str()
+    } else if provider_result_outcome_evidence(EventType::ToolOutput, details).as_str()
         == Some("success")
+        || details.get("status").and_then(Value::as_str) == Some("completed")
+        || exit_code == Some(0)
     {
         OutputOutcome::Success
     } else {

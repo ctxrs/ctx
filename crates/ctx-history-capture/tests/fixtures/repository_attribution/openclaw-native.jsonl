@@ -1,0 +1,3 @@
+{"type":"session","id":"child-session","cwd":"/tmp/repository","timestamp":"2026-07-31T12:00:00Z"}
+{"type":"message","id":"assistant-1","timestamp":"2026-07-31T12:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"exec","arguments":{"command":"git commit -m exact","workdir":"/tmp/repository"}}]}}
+{"type":"message","id":"result-1","timestamp":"2026-07-31T12:00:02Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"exec","content":[{"type":"text","text":"[main abcdef1] exact"}],"details":{"status":"completed","exitCode":0,"cwd":"/tmp/repository"}}}

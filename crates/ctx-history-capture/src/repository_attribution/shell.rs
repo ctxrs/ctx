@@ -151,7 +151,12 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                     );
                 };
                 match subcommand {
-                    "commit" | "rebase" => {
+                    "commit" | "rebase" | "merge" => {
+                        if subcommand == "merge"
+                            && !arguments.iter().any(|argument| argument == "--no-ff")
+                        {
+                            return BoundedOutcomePlanDisposition::Unrecognized;
+                        }
                         if plan.is_some() {
                             return outcome_abstained(
                                 RepositoryAbstentionReason::Ambiguous,
@@ -620,10 +625,18 @@ fn strip_comments_and_bound_heredocs(
             continue;
         }
         if let Some(active) = quote {
-            if character == active {
+            if character == active || (active == '\0' && character == '\'') {
                 quote = None;
             }
             output.push(character);
+            previous_was_space = false;
+            continue;
+        }
+        if character == '$' && characters.peek() == Some(&'\'') {
+            characters.next();
+            output.push('$');
+            output.push('\'');
+            quote = Some('\0');
             previous_was_space = false;
             continue;
         }
@@ -681,7 +694,7 @@ fn tokenize(command: &str) -> Result<Tokenization, (RepositoryAbstentionReason, 
             continue;
         }
         if let Some(active) = quote {
-            if character == active {
+            if character == active || (active == '\0' && character == '\'') {
                 quote = None;
             } else {
                 token.push(character);
@@ -690,6 +703,10 @@ fn tokenize(command: &str) -> Result<Tokenization, (RepositoryAbstentionReason, 
         }
         match character {
             '\'' | '"' => quote = Some(character),
+            '$' if characters.peek() == Some(&'\'') => {
+                characters.next();
+                quote = Some('\0');
+            }
             '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' => {
                 return Ok(Tokenization {
                     blocks_session_fallback: incomplete_segment_blocks_session_fallback(
@@ -1069,5 +1086,20 @@ mod outcome_tests {
         assert!(bounded_outcome_operation("git ci -m alias").is_none());
         assert!(bounded_outcome_operation("git commit -m exact && echo $HEAD").is_none());
         assert!(bounded_outcome_operation("bash -lc 'git commit -m hidden'").is_none());
+        assert_eq!(
+            bounded_outcome_operation("git add file && git commit -m $'line one\\nline two'"),
+            Some(BoundedOutcomeOperation::Commit {
+                rewrites_history: false,
+                exact_oid_output: false,
+            })
+        );
+        assert_eq!(
+            bounded_outcome_operation("git merge --no-ff feature"),
+            Some(BoundedOutcomeOperation::Commit {
+                rewrites_history: false,
+                exact_oid_output: false,
+            })
+        );
+        assert!(bounded_outcome_operation("git merge feature").is_none());
     }
 }
