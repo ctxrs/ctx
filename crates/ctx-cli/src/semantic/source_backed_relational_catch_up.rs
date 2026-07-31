@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,15 +8,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ctx_history_core::SourceKey;
+use ctx_history_core::{CertifiedSource, SourceKey};
 use ctx_history_index::{
-    EventRecord, SourceEventCursor, SourceEventPage, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    CoreSourceEventPage, SourceEventCursor, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 use ctx_history_relational::{
-    CommittedCoreGeneration, RawSqlOptions, RawSqlValue, RelationalProjectionError,
-    RelationalProjectionMetadata, RelationalProjectionReceipt, RelationalProjectionRecord,
-    RelationalProjectionStatus, RelationalSessionMetadata, RelationalSourceMetadata,
-    SourceBackedRelationalProjection, RAW_SQL_MAX_ROWS_CAP,
+    CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionMetadata,
+    RelationalProjectionPlan, RelationalProjectionReceipt, RelationalProjectionRecord,
+    RelationalProjectionStatus, RelationalSourceHealth, RelationalSourceMetadata,
+    SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -38,21 +38,17 @@ use super::{
 
 const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "relational-catch-up.json";
 const SOURCE_BACKED_RELATIONAL_LOCK_FILE: &str = "relational-catch-up.lock";
-const CERTIFICATE_DIGEST_BYTES: usize = 32;
 const SOURCE_BACKED_RELATIONAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SOURCE_BACKED_RELATIONAL_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
-mod record_metadata;
 mod status;
 
-use record_metadata::{records_for_event, SessionAggregate, SourceMetadataSeed};
 use status::SourceBackedRelationalCatchUpStatus;
 
 #[derive(Debug, Error)]
 enum SourceBackedRelationalCatchUpError {
     #[error(
-        "source_relational_generation_mismatch: expected Core generation {expected}, \
-         but exact index carries {actual}"
+        "source_relational_generation_mismatch: expected Core generation {expected}, but exact index carries {actual}"
     )]
     GenerationMismatch { expected: String, actual: String },
     #[error("source_relational_index_unavailable: {0}")]
@@ -131,11 +127,6 @@ pub(super) fn status_generation(data_root: &Path) -> Option<String> {
     read_status(data_root).map(|status| status.core_generation_id)
 }
 
-/// Waits for the daemon-owned relational projection of one exact Core generation.
-///
-/// Import uses this read-only observation seam after lexical publication. Pro and
-/// semantic projections remain independently scheduled and never extend the
-/// foreground import boundary.
 pub(crate) fn wait_for_completed_generation(
     data_root: &Path,
     core_generation_id: &str,
@@ -150,11 +141,6 @@ pub(crate) fn wait_for_completed_generation(
     )
 }
 
-/// Converges the required relational projection for an exact Core generation.
-///
-/// Import owns this disposable projection in the foreground so a successful
-/// command always fulfills its synchronous Core contract. SQLite's immediate
-/// transaction serializes a concurrent daemon catch-up of the same generation.
 pub(crate) fn converge_required_generation(
     data_root: &Path,
     core_generation_id: &str,
@@ -190,7 +176,7 @@ fn wait_for_completed_generation_with(
                 let detail = status
                     .last_error
                     .as_deref()
-                    .unwrap_or("daemon source-backed relational catch-up failed");
+                    .unwrap_or("daemon Core relational catch-up failed");
                 anyhow::bail!("{code}: {detail}");
             }
         }
@@ -240,8 +226,11 @@ where
         .is_some_and(|status| status.is_completed_for(core_generation_id))
         && ready_projection_metadata(data_root, core_generation_id).is_some()
     {
+        let Some(prior) = prior else {
+            anyhow::bail!("completed relational status disappeared");
+        };
         return Ok(SourceBackedRelationalCatchUpRun {
-            status: prior.expect("checked above").to_json()?,
+            status: prior.to_json()?,
             did_work: false,
         });
     }
@@ -290,7 +279,7 @@ fn project_exact_core_generation(
         Some(index) => index,
         None => Arc::new(open_verified_index(&index_root).map_err(|error| {
             SourceBackedRelationalCatchUpError::IndexUnavailable(format!(
-                "open verified source-backed index {}: {error}",
+                "open verified Core index {}: {error}",
                 index_root.display()
             ))
         })?),
@@ -304,28 +293,29 @@ fn project_exact_core_generation(
 
     let generation = committed_generation(&index)?;
     let projection_path = sql_compatibility_path(data_root);
-    let (mut projection, reset) = open_disposable_projection(&projection_path)?;
-    let metadata = projection
-        .metadata()
+    let (mut projection, candidate_path) = open_disposable_projection(&projection_path)?;
+    let plan = projection
+        .plan_generation(&generation)
         .map_err(SourceBackedRelationalCatchUpError::projection)?;
-    if metadata.status == RelationalProjectionStatus::Ready
-        && metadata.active_core_generation_id.as_deref() == Some(core_generation_id)
-    {
+    if let RelationalProjectionPlan::NoOp(receipt) = plan {
         return Ok(ProjectionOutcome {
-            receipt: receipt_from_metadata(core_generation_id, &metadata),
+            receipt,
             did_work: false,
         });
     }
 
-    let rebuild = reset || metadata.status == RelationalProjectionStatus::Empty;
-    let changed_sources = (!rebuild)
-        .then(|| changed_source_ids(&projection, &index))
-        .transpose()?;
-    let selection = changed_sources
-        .as_ref()
-        .map_or(RelationalSourceSelection::All, |sources| {
-            RelationalSourceSelection::Changed(sources)
-        });
+    let (rebuild, selection) = match &plan {
+        RelationalProjectionPlan::Rebuild => (true, RelationalSourceSelection::All),
+        RelationalProjectionPlan::CatchUp { changed_source_ids } => (
+            false,
+            RelationalSourceSelection::Changed(changed_source_ids),
+        ),
+        RelationalProjectionPlan::NoOp(_) => {
+            return Err(SourceBackedRelationalCatchUpError::Projection(
+                "relational work plan changed during one pinned run".to_owned(),
+            ));
+        }
+    };
     let records = RelationalRecordStream::new(&index, selection, MAX_SOURCE_EVENT_PAGE_ITEMS);
     let receipt = if rebuild {
         projection.rebuild_stream(&generation, records)
@@ -339,6 +329,14 @@ fn project_exact_core_generation(
             actual: receipt.core_generation_id,
         });
     }
+
+    if let Some(candidate_path) = candidate_path {
+        projection
+            .seal_for_replacement()
+            .map_err(SourceBackedRelationalCatchUpError::projection)?;
+        drop(projection);
+        publish_candidate(&candidate_path, &projection_path)?;
+    }
     Ok(ProjectionOutcome {
         receipt,
         did_work: true,
@@ -349,41 +347,69 @@ fn committed_generation(
     index: &VerifiedIndex,
 ) -> std::result::Result<CommittedCoreGeneration, SourceBackedRelationalCatchUpError> {
     let manifest = index.manifest();
-    let manifest_json = serde_json::to_vec(manifest).map_err(|error| {
-        SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-            "serialize exact generation manifest: {error}"
-        ))
-    })?;
+    let sources = manifest
+        .sources
+        .iter()
+        .map(relational_source_metadata)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(CommittedCoreGeneration {
         generation_id: index.generation_id().to_owned(),
-        manifest_json,
+        manifest_version: manifest.manifest_version,
+        core_record_version: manifest.core_record_version,
+        core_record_contract_fingerprint: manifest.core_record_contract_fingerprint.clone(),
+        lexical_schema_version: manifest.lexical_schema_version,
+        policy_schema_hash: manifest.policy_schema_hash.clone(),
         indexed_documents: manifest.indexed_documents,
-        certified_sources: manifest.sources.len(),
-        certified_source_bytes: manifest.certified_source_bytes,
+        sources,
+    })
+}
+
+fn relational_source_metadata(
+    certificate: &CertifiedSource,
+) -> std::result::Result<RelationalSourceMetadata, SourceBackedRelationalCatchUpError> {
+    let encoded = serde_json::to_vec(certificate).map_err(|error| {
+        SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
+            "serialize Core source revision: {error}"
+        ))
+    })?;
+    Ok(RelationalSourceMetadata {
+        source: certificate.observation().source().clone(),
+        parser_revision: certificate.parser_revision().to_owned(),
+        revision_digest: Sha256::digest(encoded).into(),
+        indexed_event_count: certificate.counts().indexed_documents,
+        health: RelationalSourceHealth::Ready,
     })
 }
 
 fn open_disposable_projection(
     path: &Path,
-) -> std::result::Result<(SourceBackedRelationalProjection, bool), SourceBackedRelationalCatchUpError>
-{
+) -> std::result::Result<
+    (SourceBackedRelationalProjection, Option<PathBuf>),
+    SourceBackedRelationalCatchUpError,
+> {
     match SourceBackedRelationalProjection::open(path) {
-        Ok(projection) => Ok((projection, false)),
+        Ok(projection) => Ok((projection, None)),
         Err(
             RelationalProjectionError::MissingSchema
             | RelationalProjectionError::UnsupportedSchema { .. }
-            | RelationalProjectionError::IncompatibleState(_),
+            | RelationalProjectionError::IncompatibleState(_)
+            | RelationalProjectionError::MissingStableView(_),
         ) => {
-            reset_disposable_projection(path)?;
-            SourceBackedRelationalProjection::open(path)
-                .map(|projection| (projection, true))
+            let candidate = candidate_projection_path(path);
+            reset_candidate_projection(&candidate)?;
+            SourceBackedRelationalProjection::open(&candidate)
+                .map(|projection| (projection, Some(candidate)))
                 .map_err(SourceBackedRelationalCatchUpError::projection)
         }
         Err(error) => Err(SourceBackedRelationalCatchUpError::projection(error)),
     }
 }
 
-fn reset_disposable_projection(
+fn candidate_projection_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.core-candidate", path.display()))
+}
+
+fn reset_candidate_projection(
     path: &Path,
 ) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
     for candidate in [
@@ -396,130 +422,26 @@ fn reset_disposable_projection(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(SourceBackedRelationalCatchUpError::Projection(format!(
-                    "reset disposable projection {}: {error}",
+                    "reset disposable candidate {}: {error}",
                     candidate.display()
-                )))
+                )));
             }
         }
     }
     Ok(())
 }
 
-fn changed_source_ids(
-    projection: &SourceBackedRelationalProjection,
-    index: &VerifiedIndex,
-) -> std::result::Result<BTreeSet<Uuid>, SourceBackedRelationalCatchUpError> {
-    let prior = stored_certificate_digests(projection)?;
-    let mut changed = BTreeSet::new();
-    for certificate in &index.manifest().sources {
-        let certificate_json = serde_json::to_vec(certificate).map_err(|error| {
-            SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                "serialize source certificate: {error}"
-            ))
-        })?;
-        let digest: [u8; CERTIFICATE_DIGEST_BYTES] = Sha256::digest(certificate_json).into();
-        let source_id = certificate.observation().source().identity().as_uuid();
-        if prior.get(&source_id) != Some(&digest) {
-            changed.insert(source_id);
-        }
-    }
-    Ok(changed)
-}
-
-fn stored_certificate_digests(
-    projection: &SourceBackedRelationalProjection,
-) -> std::result::Result<
-    BTreeMap<Uuid, [u8; CERTIFICATE_DIGEST_BYTES]>,
-    SourceBackedRelationalCatchUpError,
-> {
-    let mut output = BTreeMap::new();
-    let mut after: Option<Uuid> = None;
-    loop {
-        let sql = match after {
-            Some(source_id) => format!(
-                "SELECT source_id, certificate_digest FROM source_backed_sources \
-                 WHERE source_id > '{source_id}' ORDER BY source_id LIMIT {RAW_SQL_MAX_ROWS_CAP}"
-            ),
-            None => format!(
-                "SELECT source_id, certificate_digest FROM source_backed_sources \
-                 ORDER BY source_id LIMIT {RAW_SQL_MAX_ROWS_CAP}"
-            ),
-        };
-        let result = projection
-            .raw_sql_query(
-                &sql,
-                RawSqlOptions {
-                    max_rows: RAW_SQL_MAX_ROWS_CAP,
-                    max_value_bytes: 64,
-                    ..RawSqlOptions::default()
-                },
-            )
-            .map_err(SourceBackedRelationalCatchUpError::projection)?;
-        let returned = result.rows.len();
-        for row in result.rows {
-            let [source_value, digest_value]: [RawSqlValue; 2] = row.try_into().map_err(|_| {
-                SourceBackedRelationalCatchUpError::InvalidMetadata(
-                    "stored certificate query returned the wrong column count".to_owned(),
-                )
-            })?;
-            let RawSqlValue::Text {
-                value: source_id,
-                truncated: false,
-                ..
-            } = source_value
-            else {
-                return Err(SourceBackedRelationalCatchUpError::InvalidMetadata(
-                    "stored source identity is not complete text".to_owned(),
-                ));
-            };
-            let source_id = Uuid::parse_str(&source_id).map_err(|error| {
-                SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                    "stored source identity is invalid: {error}"
-                ))
-            })?;
-            let RawSqlValue::Blob {
-                bytes: CERTIFICATE_DIGEST_BYTES,
-                preview_hex,
-                truncated: false,
-            } = digest_value
-            else {
-                return Err(SourceBackedRelationalCatchUpError::InvalidMetadata(
-                    "stored certificate digest is malformed".to_owned(),
-                ));
-            };
-            let digest = decode_digest(&preview_hex)?;
-            output.insert(source_id, digest);
-            after = Some(source_id);
-        }
-        if returned < RAW_SQL_MAX_ROWS_CAP {
-            break;
-        }
-    }
-    Ok(output)
-}
-
-fn decode_digest(
-    value: &str,
-) -> std::result::Result<[u8; CERTIFICATE_DIGEST_BYTES], SourceBackedRelationalCatchUpError> {
-    if value.len() != CERTIFICATE_DIGEST_BYTES * 2 {
-        return Err(SourceBackedRelationalCatchUpError::InvalidMetadata(
-            "stored certificate digest has the wrong length".to_owned(),
-        ));
-    }
-    let mut output = [0_u8; CERTIFICATE_DIGEST_BYTES];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let digits = std::str::from_utf8(chunk).map_err(|error| {
-            SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                "stored certificate digest is not UTF-8 hex: {error}"
-            ))
-        })?;
-        output[index] = u8::from_str_radix(digits, 16).map_err(|error| {
-            SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                "stored certificate digest is not hex: {error}"
-            ))
-        })?;
-    }
-    Ok(output)
+fn publish_candidate(
+    candidate: &Path,
+    destination: &Path,
+) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
+    fs::rename(candidate, destination).map_err(|error| {
+        SourceBackedRelationalCatchUpError::Projection(format!(
+            "publish Core relational candidate {} to {}: {error}",
+            candidate.display(),
+            destination.display()
+        ))
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -550,8 +472,6 @@ struct RelationalRecordStream<'a> {
     page_items_loaded: usize,
     #[cfg(test)]
     max_page_items: usize,
-    #[cfg(test)]
-    max_session_aggregates: usize,
 }
 
 impl<'a> RelationalRecordStream<'a> {
@@ -573,8 +493,6 @@ impl<'a> RelationalRecordStream<'a> {
             page_items_loaded: 0,
             #[cfg(test)]
             max_page_items: 0,
-            #[cfg(test)]
-            max_session_aggregates: 0,
         }
     }
 
@@ -587,24 +505,26 @@ impl<'a> RelationalRecordStream<'a> {
             if !self.selection.includes(source.identity().as_uuid()) {
                 continue;
             }
-
             let page = load_source_page(self.index, source, None, self.page_size)?;
             self.observe_page(&page);
-            self.current = Some(SourceRecordStream::new(source.clone(), page)?);
+            self.current = Some(SourceRecordStream::new(
+                relational_source_metadata(certificate)?,
+                page,
+            )?);
             return Ok(true);
         }
         Ok(false)
     }
 
     #[cfg(test)]
-    fn observe_page(&mut self, page: &SourceEventPage) {
+    fn observe_page(&mut self, page: &CoreSourceEventPage) {
         self.pages_loaded += 1;
         self.page_items_loaded += page.items.len();
         self.max_page_items = self.max_page_items.max(page.items.len());
     }
 
     #[cfg(not(test))]
-    fn observe_page(&mut self, _page: &SourceEventPage) {}
+    fn observe_page(&mut self, _page: &CoreSourceEventPage) {}
 
     #[cfg(test)]
     fn observe_page_items(&mut self, page_items: usize) {
@@ -615,14 +535,6 @@ impl<'a> RelationalRecordStream<'a> {
 
     #[cfg(not(test))]
     fn observe_page_items(&mut self, _page_items: usize) {}
-
-    #[cfg(test)]
-    fn observe_session_aggregates(&mut self, sessions: usize) {
-        self.max_session_aggregates = self.max_session_aggregates.max(sessions);
-    }
-
-    #[cfg(not(test))]
-    fn observe_session_aggregates(&mut self, _sessions: usize) {}
 }
 
 impl Iterator for RelationalRecordStream<'_> {
@@ -637,24 +549,15 @@ impl Iterator for RelationalRecordStream<'_> {
                 match self.prepare_next_source() {
                     Ok(true) => {}
                     Ok(false) => return None,
-                    Err(error) => {
-                        self.failed = true;
-                        return Some(Err(stream_error(error)));
-                    }
+                    Err(error) => return self.fail(error),
                 }
             }
-
-            let result = self
-                .current
-                .as_mut()
-                .expect("prepared above")
-                .next_record(self.index, self.page_size);
-            let session_aggregates = self
-                .current
-                .as_ref()
-                .map_or(0, SourceRecordStream::session_aggregates);
-            self.observe_session_aggregates(session_aggregates);
-            match result {
+            let Some(current) = self.current.as_mut() else {
+                return self.fail(SourceBackedRelationalCatchUpError::InvalidMetadata(
+                    "Core source stream was not initialized".to_owned(),
+                ));
+            };
+            match current.next_record(self.index, self.page_size) {
                 Ok(Some((record, page_items))) => {
                     if let Some(page_items) = page_items {
                         self.observe_page_items(page_items);
@@ -662,57 +565,40 @@ impl Iterator for RelationalRecordStream<'_> {
                     return Some(Ok(record));
                 }
                 Ok(None) => self.current = None,
-                Err(error) => {
-                    self.failed = true;
-                    return Some(Err(stream_error(error)));
-                }
+                Err(error) => return self.fail(error),
             }
         }
     }
 }
 
-fn stream_error(error: SourceBackedRelationalCatchUpError) -> RelationalProjectionError {
-    RelationalProjectionError::InvalidRecord(error.to_string())
+impl RelationalRecordStream<'_> {
+    fn fail(
+        &mut self,
+        error: SourceBackedRelationalCatchUpError,
+    ) -> Option<std::result::Result<RelationalProjectionRecord, RelationalProjectionError>> {
+        self.failed = true;
+        Some(Err(RelationalProjectionError::InvalidRecord(
+            error.to_string(),
+        )))
+    }
 }
 
 struct SourceRecordStream {
-    source: SourceKey,
+    source: RelationalSourceMetadata,
     stage: SourceRecordStage,
-    metadata: Option<RelationalSourceMetadata>,
-    sessions: BTreeMap<Uuid, SessionAggregate>,
-    session_records: Option<std::collections::btree_map::IntoValues<Uuid, SessionAggregate>>,
-    events: SourceEventStream,
+    page: CorePageStream,
 }
 
 impl SourceRecordStream {
     fn new(
-        source: SourceKey,
-        page: SourceEventPage,
+        source: RelationalSourceMetadata,
+        page: CoreSourceEventPage,
     ) -> std::result::Result<Self, SourceBackedRelationalCatchUpError> {
-        let first = page.items.first().map(SourceMetadataSeed::new);
-        let metadata = RelationalSourceMetadata {
-            source: source.clone(),
-            source_root: first
-                .as_ref()
-                .and_then(|seed| seed.source_path.as_deref())
-                .and_then(|path| Path::new(path).parent())
-                .map(|path| path.to_string_lossy().into_owned())
-                .filter(|path| !path.is_empty()),
-            source_path: first.as_ref().and_then(|seed| seed.source_path.clone()),
-            cwd: first.and_then(|seed| seed.cwd),
-        };
         Ok(Self {
             source,
             stage: SourceRecordStage::Begin,
-            metadata: Some(metadata),
-            sessions: BTreeMap::new(),
-            session_records: None,
-            events: SourceEventStream::from_page(page)?,
+            page: CorePageStream::from_page(page)?,
         })
-    }
-
-    fn session_aggregates(&self) -> usize {
-        self.sessions.len()
     }
 
     fn next_record(
@@ -726,63 +612,47 @@ impl SourceRecordStream {
         loop {
             match self.stage {
                 SourceRecordStage::Begin => {
-                    self.stage = SourceRecordStage::Events;
+                    self.stage = SourceRecordStage::Records;
                     return Ok(Some((
-                        RelationalProjectionRecord::BeginSource(
-                            self.metadata.take().expect("begin metadata is present"),
-                        ),
+                        RelationalProjectionRecord::BeginSource(Box::new(self.source.clone())),
                         None,
                     )));
                 }
-                SourceRecordStage::Events => {
-                    if let Some(record) = self.events.pending.pop_front() {
-                        return Ok(Some((record, None)));
+                SourceRecordStage::Records => {
+                    if let Some(record) = self.page.items.next() {
+                        return Ok(Some((
+                            RelationalProjectionRecord::CoreRecord(Box::new(record.core_record)),
+                            None,
+                        )));
                     }
-                    if let Some(event) = self.events.items.next() {
-                        let provisional_session = self.observe_event(&event)?;
-                        self.events.pending = records_for_event(event, provisional_session)?;
-                        continue;
-                    }
-                    if self.events.terminal {
-                        self.session_records =
-                            Some(std::mem::take(&mut self.sessions).into_values());
-                        self.stage = SourceRecordStage::Sessions;
+                    if self.page.terminal {
+                        self.stage = SourceRecordStage::End;
                         continue;
                     }
                     let page = load_source_page(
                         index,
-                        &self.source,
-                        self.events.cursor.as_ref(),
+                        &self.source.source,
+                        self.page.cursor.as_ref(),
                         page_size,
                     )?;
                     let page_items = page.items.len();
-                    self.events.replace_page(page)?;
-                    if let Some(event) = self.events.items.next() {
-                        let provisional_session = self.observe_event(&event)?;
-                        self.events.pending = records_for_event(event, provisional_session)?;
-                        let record = self.events.pending.pop_front().expect("event record");
-                        return Ok(Some((record, Some(page_items))));
-                    }
-                    self.session_records = Some(std::mem::take(&mut self.sessions).into_values());
-                    self.stage = SourceRecordStage::Sessions;
-                    return self
-                        .next_record(index, page_size)
-                        .map(|record| record.map(|(record, _)| (record, Some(page_items))));
-                }
-                SourceRecordStage::Sessions => {
-                    if let Some(session) = self.session_records.as_mut().and_then(Iterator::next) {
+                    self.page.replace_page(page)?;
+                    if let Some(record) = self.page.items.next() {
                         return Ok(Some((
-                            RelationalProjectionRecord::Session(session.into_metadata()?),
-                            None,
+                            RelationalProjectionRecord::CoreRecord(Box::new(record.core_record)),
+                            Some(page_items),
                         )));
                     }
                     self.stage = SourceRecordStage::End;
+                    return self
+                        .next_record(index, page_size)
+                        .map(|record| record.map(|(record, _)| (record, Some(page_items))));
                 }
                 SourceRecordStage::End => {
                     self.stage = SourceRecordStage::Done;
                     return Ok(Some((
                         RelationalProjectionRecord::EndSource {
-                            source_id: self.source.identity().as_uuid(),
+                            source_id: self.source.source.identity().as_uuid(),
                         },
                         None,
                     )));
@@ -791,52 +661,30 @@ impl SourceRecordStream {
             }
         }
     }
-
-    fn observe_event(
-        &mut self,
-        event: &EventRecord,
-    ) -> std::result::Result<Option<RelationalSessionMetadata>, SourceBackedRelationalCatchUpError>
-    {
-        match self.sessions.entry(event.session_id.as_uuid()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                let session = SessionAggregate::new(event);
-                let metadata = session.to_metadata()?;
-                entry.insert(session);
-                Ok(Some(metadata))
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().observe(event);
-                Ok(None)
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
 enum SourceRecordStage {
     Begin,
-    Events,
-    Sessions,
+    Records,
     End,
     Done,
 }
 
-struct SourceEventStream {
+struct CorePageStream {
     cursor: Option<SourceEventCursor>,
-    items: std::vec::IntoIter<EventRecord>,
+    items: std::vec::IntoIter<ctx_history_index::CoreEventRecord>,
     terminal: bool,
-    pending: VecDeque<RelationalProjectionRecord>,
 }
 
-impl SourceEventStream {
+impl CorePageStream {
     fn from_page(
-        page: SourceEventPage,
+        page: CoreSourceEventPage,
     ) -> std::result::Result<Self, SourceBackedRelationalCatchUpError> {
         let mut stream = Self {
             cursor: None,
             items: Vec::new().into_iter(),
             terminal: false,
-            pending: VecDeque::new(),
         };
         stream.replace_page(page)?;
         Ok(stream)
@@ -844,7 +692,7 @@ impl SourceEventStream {
 
     fn replace_page(
         &mut self,
-        page: SourceEventPage,
+        page: CoreSourceEventPage,
     ) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
         self.terminal = page.terminal;
         self.cursor = if page.terminal {
@@ -855,7 +703,7 @@ impl SourceEventStream {
         self.items = page.items.into_iter();
         if self.items.len() == 0 && !self.terminal {
             return Err(SourceBackedRelationalCatchUpError::InvalidMetadata(
-                "non-terminal source event page is empty".to_owned(),
+                "non-terminal Core page is empty".to_owned(),
             ));
         }
         Ok(())
@@ -867,12 +715,12 @@ fn load_source_page(
     source: &SourceKey,
     cursor: Option<&SourceEventCursor>,
     page_size: usize,
-) -> std::result::Result<SourceEventPage, SourceBackedRelationalCatchUpError> {
+) -> std::result::Result<CoreSourceEventPage, SourceBackedRelationalCatchUpError> {
     let page = index
-        .source_event_page(source, cursor, page_size)
+        .core_source_event_page(source, cursor, page_size)
         .map_err(|error| {
             SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-                "enumerate exact source {}: {error}",
+                "enumerate Core source {}: {error}",
                 source.identity()
             ))
         })?;
@@ -886,27 +734,13 @@ fn load_source_page(
 }
 
 fn next_page_cursor(
-    page: &SourceEventPage,
+    page: &CoreSourceEventPage,
 ) -> std::result::Result<SourceEventCursor, SourceBackedRelationalCatchUpError> {
     page.next_cursor.clone().ok_or_else(|| {
         SourceBackedRelationalCatchUpError::InvalidMetadata(
-            "non-terminal source event page has no cursor".to_owned(),
+            "non-terminal Core page has no cursor".to_owned(),
         )
     })
-}
-
-fn receipt_from_metadata(
-    core_generation_id: &str,
-    metadata: &RelationalProjectionMetadata,
-) -> RelationalProjectionReceipt {
-    RelationalProjectionReceipt {
-        core_generation_id: core_generation_id.to_owned(),
-        build_generation: metadata.build_generation,
-        source_count: metadata.source_count,
-        session_count: metadata.session_count,
-        event_count: metadata.event_count,
-        file_touch_count: metadata.file_touch_count,
-    }
 }
 
 fn status_name(status: RelationalProjectionStatus) -> &'static str {
@@ -930,6 +764,7 @@ fn ready_projection_metadata(
     projection_metadata(data_root).filter(|metadata| {
         metadata.status == RelationalProjectionStatus::Ready
             && metadata.active_core_generation_id.as_deref() == Some(core_generation_id)
+            && metadata.active_materializer_revision == Some(RELATIONAL_MATERIALIZER_REVISION)
             && metadata.target_core_generation_id.is_none()
     })
 }
