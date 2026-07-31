@@ -49,7 +49,10 @@ enum ReferralCommand {
 
 #[derive(Debug, Args)]
 struct ReferralCreateArgs {
-    #[arg(value_parser = parse_referral_codename_unchecked)]
+    #[arg(
+        value_parser = parse_referral_codename_unchecked,
+        help = "Stable public name to include in your referral link"
+    )]
     codename: ReferralCodename,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     format: JsonOutputFormat,
@@ -67,9 +70,13 @@ struct ReferralPayoutArgs {
     no_open: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     format: JsonOutputFormat,
-    #[arg(long, value_parser = parse_country_code)]
+    #[arg(
+        long,
+        value_parser = parse_country_code,
+        help = "Two-letter country code for payout onboarding"
+    )]
     country: Option<CountryCode>,
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help = "Legal entity that will receive payouts")]
     entity_type: Option<ReferralEntityType>,
 }
 

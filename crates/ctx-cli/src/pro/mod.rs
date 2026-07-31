@@ -461,7 +461,7 @@ fn human_error_presentation<'a>(
         },
         "source_unavailable" => HumanErrorPresentation {
             title: "Local history is not ready",
-            detail: Some("Index local agent history before using ctx blame."),
+            detail: Some("Index local agent history before retrying this command."),
             hint: "Set up local history.",
             action: Some("ctx setup"),
         },
@@ -614,6 +614,11 @@ mod tests {
                 assert!(!plain.contains("secret"));
                 assert!(!plain.contains("/private"));
                 assert!(!plain.contains("helper_"));
+                if raw.starts_with("source_unavailable") {
+                    assert!(normalized
+                        .contains("Index local agent history before retrying this command."));
+                    assert!(!normalized.contains("ctx blame"));
+                }
                 assert!(
                     styled.contains(&format!("\u{1b}[36m{action}")),
                     "{styled:?}"
