@@ -40,6 +40,10 @@ impl SourceBackedRefreshExecutor for TestExecutor {
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
         generation_id: generation_id.into(),
+        published_explicit_source_catalog: load_explicit_source_catalog_authority(
+            tempfile::tempdir().unwrap().path(),
+        )
+        .unwrap(),
         source_manifest: None,
         resolver: None,
         scanned_routes: 1,
@@ -102,54 +106,8 @@ fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatal
     .unwrap()
 }
 
-#[test]
-fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
-    let temp = tempfile::tempdir().unwrap();
-    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
-    let periodic = coordinator.enqueue_periodic(temp.path()).unwrap();
-    let response = coordinator
-        .handle_ipc_request(
-            temp.path(),
-            &json!({
-                "schema_version": 1,
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "explicit_source_catalog": authority.to_json(),
-            }),
-        )
-        .unwrap()
-        .expect("source refresh response");
-
-    assert_eq!(request_id(&response), request_id(&periodic));
-    assert_eq!(response["coalesced_requests"], 1);
-    assert_eq!(response["owner"], "daemon");
-    assert_eq!(response["trigger"], "import");
-    assert_eq!(response["trigger_provenance"], "explicit_source_catalog");
-    assert_eq!(
-        ExplicitSourceCatalogAuthority::from_json(&response["requested_explicit_source_catalog"])
-            .unwrap(),
-        authority
-    );
-
-    let request_id = request_id(&response);
-    let run = coordinator
-        .run_next_with(
-            |_, _| Ok(test_publication("catalog-generation")),
-            || Ok(Some("catalog-generation".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-    assert!(!run.failed);
-    let published = coordinator.status(&request_id).unwrap();
-    assert_eq!(published["request_state"], "published");
-    assert_eq!(
-        ExplicitSourceCatalogAuthority::from_json(&published["published_explicit_source_catalog"])
-            .unwrap(),
-        authority
-    );
-}
+#[path = "source_backed_refresh_coordinator_tests_receipt.rs"]
+mod receipt_tests;
 
 #[test]
 fn differing_catalog_authority_queues_a_serial_successor() {
@@ -185,7 +143,9 @@ fn differing_catalog_authority_queues_a_serial_successor() {
         .run_next_with(
             |request_id, _| {
                 assert_eq!(request_id, first_request_id);
-                Ok(test_publication("catalog-generation-1"))
+                let mut publication = test_publication("catalog-generation-1");
+                publication.published_explicit_source_catalog = first_authority.clone();
+                Ok(publication)
             },
             || Ok(Some("catalog-generation-1".to_owned())),
             |_| Ok(()),
@@ -201,7 +161,9 @@ fn differing_catalog_authority_queues_a_serial_successor() {
         .run_next_with(
             |request_id, _| {
                 assert_eq!(request_id, second_request_id);
-                Ok(test_publication("catalog-generation-2"))
+                let mut publication = test_publication("catalog-generation-2");
+                publication.published_explicit_source_catalog = second_authority.clone();
+                Ok(publication)
             },
             || Ok(Some("catalog-generation-2".to_owned())),
             |_| Ok(()),
@@ -395,6 +357,8 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     assert_eq!(first.scanned_routes, 0);
     assert_eq!(first.unsupported_routes, 1);
     assert_eq!(first.certified_source_count, 0);
+    let empty_catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
+    assert_eq!(first.published_explicit_source_catalog, empty_catalog);
     let verified = VerifiedIndex::open(&index_root).unwrap();
     assert!(verified.manifest().sources.is_empty());
     assert!(verified.manifest().removals.is_empty());
@@ -413,6 +377,33 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     assert_eq!(replay.generation_id, first.generation_id);
     assert_eq!(replay.scanned_routes, 0);
     assert_eq!(replay.unsupported_routes, 1);
+    assert_eq!(replay.published_explicit_source_catalog, empty_catalog);
+
+    let coordinator = SourceBackedRefreshCoordinator::new();
+    let request = coordinator.enqueue_periodic(&data_root).unwrap();
+    let request_id = request_id(&request);
+    let generation_id = replay.generation_id.clone();
+    let run = coordinator
+        .run_next_with(
+            |_, _| Ok(replay),
+            || Ok(Some(generation_id)),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(!run.failed);
+    assert_eq!(
+        run.job["published_explicit_source_catalog"],
+        empty_catalog.to_json()
+    );
+    assert_eq!(
+        run.job["receipt"]["published_explicit_source_catalog"],
+        empty_catalog.to_json()
+    );
+    assert_eq!(
+        coordinator.status(&request_id).unwrap()["request_state"],
+        "published"
+    );
 }
 
 #[test]
@@ -511,6 +502,10 @@ fn duplicate_concurrent_requests_launch_one_writer() {
     assert_eq!(status["receipt"]["previous_generation"], "generation-1");
     assert_eq!(status["receipt"]["published_generation"], "generation-2");
     assert_eq!(status["receipt"]["generation_changed"], true);
+    assert_eq!(
+        status["receipt"]["published_explicit_source_catalog"],
+        status["published_explicit_source_catalog"]
+    );
     assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
     assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
     assert_eq!(status["receipt"]["current"]["current_rejected_records"], 1);

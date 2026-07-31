@@ -77,6 +77,81 @@ fn refresh_report_uses_typed_pending_ready_stale_and_unavailable_states() {
 }
 
 #[test]
+fn catalog_status_requires_matching_job_and_terminal_receipt_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let authority = load_explicit_source_catalog_authority(temp.path())
+        .unwrap()
+        .to_json();
+    let ready_job = json!({
+        "request_state": "published",
+        "published_generation": "generation-1",
+        "published_explicit_source_catalog": authority,
+        "receipt": {
+            "published_explicit_source_catalog": authority,
+        },
+    });
+    let ready = catalog_report(temp.path(), Some("generation-1"), Some(&ready_job), None);
+
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["published_authority_present"], true);
+
+    for unverified in [
+        json!({
+            "request_state": "published",
+            "published_generation": "generation-1",
+        }),
+        json!({
+            "request_state": "published",
+            "published_generation": "generation-1",
+            "published_explicit_source_catalog": authority,
+            "receipt": {},
+        }),
+        json!({
+            "request_state": "published",
+            "published_generation": "generation-1",
+            "published_explicit_source_catalog": authority,
+            "receipt": {
+                "published_explicit_source_catalog": {
+                    "schema_version": 1,
+                    "revision": 7,
+                    "integrity": {
+                        "algorithm": "sha256",
+                        "digest": "77".repeat(32),
+                    },
+                },
+            },
+        }),
+        json!({
+            "request_state": "published",
+            "published_generation": "generation-1",
+            "published_explicit_source_catalog": {
+                "schema_version": 99,
+                "revision": 0,
+                "integrity": {
+                    "algorithm": "sha256",
+                    "digest": "00".repeat(32),
+                },
+            },
+            "receipt": {
+                "published_explicit_source_catalog": {
+                    "schema_version": 99,
+                    "revision": 0,
+                    "integrity": {
+                        "algorithm": "sha256",
+                        "digest": "00".repeat(32),
+                    },
+                },
+            },
+        }),
+    ] {
+        let report = catalog_report(temp.path(), Some("generation-1"), Some(&unverified), None);
+        assert_eq!(report["status"], "unavailable");
+        assert_eq!(report["reason"], "catalog_publication_unverified");
+        assert_eq!(report["published_authority_present"], false);
+    }
+}
+
+#[test]
 fn pro_source_manifest_receipt_is_generation_bound() {
     let ready_job = json!({
         "status": "completed",

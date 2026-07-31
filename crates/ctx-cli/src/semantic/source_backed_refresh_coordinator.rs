@@ -48,6 +48,7 @@ use super::{
 
 mod capture_refresh;
 mod coordinator_state;
+mod current_state;
 mod old_store_retirement;
 
 use capture_refresh::{
@@ -67,6 +68,7 @@ pub(crate) use coordinator_state::{
     GenerationBoundSourceBackedResolver, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
     SourceBackedRefreshReceipt, SourceBackedRefreshTimings, SourceBackedResolverAccessError,
 };
+pub(crate) use current_state::SourceBackedRefreshCurrent;
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -204,6 +206,8 @@ impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 #[derive(Debug, Clone)]
 pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
+    /// Exact explicit-source catalog snapshot registered into this publication.
+    pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     /// Exact metadata-only Pro handoff for this Core generation. Test
     /// executors may omit it; the capture-owned production executor never does.
     pub(crate) source_manifest: Option<SourceManifest>,
@@ -217,76 +221,6 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) certified_source_bytes: u64,
     pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) timings: SourceBackedRefreshTimings,
-}
-
-/// Exact cardinalities of the generation that was verified after publication.
-///
-/// These are current-state facts, not deltas attributed to one refresh.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) struct SourceBackedRefreshCurrent {
-    pub(crate) source_count: usize,
-    pub(crate) indexed_documents: u64,
-    pub(crate) complete_records: u64,
-    pub(crate) retained_records: u64,
-    pub(crate) rejected_records: u64,
-    pub(crate) ignored_records: u64,
-    pub(crate) certified_source_bytes: u64,
-    pub(crate) sources_with_rejections: usize,
-    pub(crate) removed_source_count: usize,
-}
-
-impl SourceBackedRefreshCurrent {
-    fn from_sources(sources: &[CertifiedSource], removed_source_count: usize) -> Result<Self> {
-        let mut current = Self {
-            source_count: sources.len(),
-            removed_source_count,
-            ..Self::default()
-        };
-        for source in sources {
-            let counts = source.counts();
-            current.add_counts(counts)?;
-            current.sources_with_rejections = current
-                .sources_with_rejections
-                .checked_add(usize::from(counts.rejected_records > 0))
-                .ok_or_else(|| anyhow!("source-backed current rejection-source count overflow"))?;
-        }
-        Ok(current)
-    }
-
-    fn add_counts(&mut self, counts: ScannedSourceCounts) -> Result<()> {
-        self.indexed_documents =
-            checked_current_count(self.indexed_documents, counts.indexed_documents)?;
-        self.complete_records =
-            checked_current_count(self.complete_records, counts.complete_records)?;
-        self.retained_records =
-            checked_current_count(self.retained_records, counts.retained_records)?;
-        self.rejected_records =
-            checked_current_count(self.rejected_records, counts.rejected_records)?;
-        self.ignored_records = checked_current_count(self.ignored_records, counts.ignored_records)?;
-        self.certified_source_bytes =
-            checked_current_count(self.certified_source_bytes, counts.certified_bytes)?;
-        Ok(())
-    }
-
-    fn to_json(self) -> Value {
-        json!({
-            "current_source_count": self.source_count,
-            "current_indexed_documents": self.indexed_documents,
-            "current_complete_records": self.complete_records,
-            "current_retained_records": self.retained_records,
-            "current_rejected_records": self.rejected_records,
-            "current_ignored_records": self.ignored_records,
-            "current_certified_source_bytes": self.certified_source_bytes,
-            "current_sources_with_rejections": self.sources_with_rejections,
-            "removed_source_count": self.removed_source_count,
-        })
-    }
-}
-
-fn checked_current_count(current: u64, next: u64) -> Result<u64> {
-    current
-        .checked_add(next)
-        .ok_or_else(|| anyhow!("source-backed current generation count overflow"))
 }
 
 pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
@@ -824,6 +758,14 @@ fn published_refresh_receipt(
         .ok_or_else(|| {
             anyhow!("published daemon source refresh receipt has no generation_changed fact")
         })?;
+    let published_explicit_source_catalog = value
+        .get("published_explicit_source_catalog")
+        .ok_or_else(|| {
+            anyhow!(
+                "published daemon source refresh receipt has no explicit source catalog authority"
+            )
+        })
+        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
     let current_value = value
         .get("current")
         .and_then(Value::as_object)
@@ -851,13 +793,22 @@ fn published_refresh_receipt(
         .get("generation_changed")
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
+    let top_published_explicit_source_catalog = response
+        .get("published_explicit_source_catalog")
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh has no explicit source catalog authority")
+        })
+        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
     if previous_generation != top_previous_generation
         || published_generation != top_published_generation
         || generation_changed != top_generation_changed
         || generation_changed != identity_changed
+        || published_explicit_source_catalog != top_published_explicit_source_catalog
     {
-        bail!("published daemon source refresh receipt has inconsistent generation identity facts");
+        bail!(
+            "published daemon source refresh receipt has inconsistent publication identity facts"
+        );
     }
 
     let manifest = pin.index.manifest();
@@ -884,6 +835,7 @@ fn published_refresh_receipt(
         previous_generation,
         published_generation,
         generation_changed,
+        published_explicit_source_catalog,
         current,
     })
 }
