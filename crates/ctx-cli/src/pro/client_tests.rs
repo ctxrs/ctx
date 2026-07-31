@@ -99,6 +99,18 @@ fn terminal_empty_status_is_quiet_and_not_blame_ready() {
 }
 
 #[test]
+fn invalid_status_contradiction_fails_closed() {
+    let mut contradictory = status(MaterializedCoverage::Complete);
+    contradictory.core_receipt = None;
+    assert!(contradictory.validate().is_err());
+
+    assert_eq!(
+        super::client_status::status_outcome(&contradictory, None),
+        (false, false, Some("protocol_mismatch"))
+    );
+}
+
+#[test]
 fn stale_core_receipt_fails_closed() {
     let status = status(MaterializedCoverage::Complete);
     let error = support::current_blame_request(

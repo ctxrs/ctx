@@ -355,6 +355,12 @@ pub(crate) fn lifecycle_status_json(data_root: &Path) -> serde_json::Value {
 }
 
 pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) -> serde_json::Value {
+    let helper_response_valid = !matches!(
+        helper.error_code.as_deref(),
+        Some("invalid_response" | "protocol_mismatch")
+    );
+    let ready = helper_response_valid && helper.ready;
+    let materialized = helper_response_valid && helper.materialized;
     let (state, next_command, next_reason) = if !helper.installed {
         match helper.setup_repairability {
             ProSetupRepairability::Automated => (
@@ -374,7 +380,7 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
         }
     } else {
         match helper.error_code.as_deref() {
-            None if helper.ready => ("ready", Some("ctx pro manage"), "billing_and_account"),
+            None if ready => ("ready", Some("ctx pro manage"), "billing_and_account"),
             Some("entitlement_expired") => (
                 "locked",
                 Some("ctx pro manage"),
@@ -397,8 +403,8 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
         "payload_type": "pro_status",
         "state": state,
         "installed": helper.installed,
-        "ready": helper.ready,
-        "materialized": helper.materialized,
+        "ready": ready,
+        "materialized": materialized,
         "helper_version": helper.helper_version,
         "protocol_version": helper.protocol_version,
         "capabilities": helper.capabilities,

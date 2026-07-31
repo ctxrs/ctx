@@ -617,6 +617,18 @@ fn lifecycle_status_keeps_readiness_separate_from_access_transitions() {
 }
 
 #[test]
+fn lifecycle_status_fails_closed_for_invalid_helper_response_axes() {
+    for error_code in ["invalid_response", "protocol_mismatch"] {
+        let mut contradictory = pro_status("active");
+        contradictory.error_code = Some(error_code.to_owned());
+
+        let value = lifecycle_status_value(contradictory, false);
+        assert_eq!(value["ready"], false, "{error_code}");
+        assert_eq!(value["materialized"], false, "{error_code}");
+    }
+}
+
+#[test]
 fn ready_materialized_setup_replay_skips_commercial_mutation_only_for_current_access() {
     for access_state in ["trial", "active", "canceling_paid"] {
         assert_eq!(

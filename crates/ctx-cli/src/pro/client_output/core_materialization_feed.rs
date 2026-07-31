@@ -31,7 +31,6 @@ pub(super) struct CoreMaterializationSyncReport {
     pub(super) record_pages: u64,
     #[cfg(test)]
     pub(super) materialized_records: u64,
-    #[cfg(test)]
     pub(super) replayed: bool,
 }
 
@@ -288,7 +287,6 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
         record_pages,
         #[cfg(test)]
         materialized_records,
-        #[cfg(test)]
         replayed: began.replayed,
     })
 }
