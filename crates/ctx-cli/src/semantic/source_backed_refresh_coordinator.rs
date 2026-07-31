@@ -52,6 +52,8 @@ mod current_state;
 mod old_store_retirement;
 mod recovery;
 
+#[cfg(test)]
+pub(in crate::semantic) use capture_refresh::install_test_discovery_context;
 use capture_refresh::{
     execute_capture_owned_refresh, execute_source_backed_refresh, hydration_failure_queues_refresh,
     recover_capture_owned_resolver,

@@ -1,5 +1,37 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DISCOVERY_CONTEXT: std::cell::RefCell<Option<DiscoveryContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(in crate::semantic) struct TestDiscoveryContextGuard;
+
+#[cfg(test)]
+impl Drop for TestDiscoveryContextGuard {
+    fn drop(&mut self) {
+        TEST_DISCOVERY_CONTEXT.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+pub(in crate::semantic) fn install_test_discovery_context(
+    discovery: DiscoveryContext,
+) -> TestDiscoveryContextGuard {
+    TEST_DISCOVERY_CONTEXT.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "source-backed test discovery context is already installed"
+        );
+        *slot.borrow_mut() = Some(discovery);
+    });
+    TestDiscoveryContextGuard
+}
+
 pub(super) fn execute_source_backed_refresh(
     executor: &dyn SourceBackedRefreshExecutor,
     data_root: &Path,
@@ -338,6 +370,10 @@ fn refresh_without_executable_routes(
 }
 
 fn source_backed_discovery_context() -> Result<DiscoveryContext> {
+    #[cfg(test)]
+    if let Some(discovery) = TEST_DISCOVERY_CONTEXT.with(|slot| slot.borrow().clone()) {
+        return Ok(discovery);
+    }
     let home = identity::home_dir()
         .context("resolve the user home for source-backed provider discovery")?;
     Ok(DiscoveryContext::from_process(home))
