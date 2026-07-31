@@ -282,12 +282,13 @@ fn missing_blame_resource_matches_cli_json_error_code() {
     );
     let result = &responses[1]["result"];
     assert_eq!(result["isError"], true, "{result:#}");
-    assert_eq!(result["structuredContent"]["error"], "resource_not_found");
+    let diagnostic = "No indexed Pro resource matches the requested blame target.";
+    assert_eq!(result["structuredContent"]["error"], diagnostic);
     assert_eq!(
         result["structuredContent"]["error_code"],
         "resource_not_found"
     );
-    assert_eq!(result["content"][0]["text"], "resource_not_found");
+    assert_eq!(result["content"][0]["text"], diagnostic);
 }
 
 #[cfg(unix)]
