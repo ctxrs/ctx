@@ -111,6 +111,7 @@ pub(crate) use source_backed_refresh_coordinator::{
     SourceBackedRefreshExecutor, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     SourceBackedRefreshPublication,
 };
+pub(crate) use source_backed_relational_catch_up::wait_for_completed_generation as wait_for_source_backed_relational_generation;
 mod daemon_scheduler;
 #[cfg(test)]
 use daemon_scheduler::*;

@@ -676,7 +676,6 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             vec!["daemon", "run", "--help"],
             vec![
                 "Usage: ctx daemon run",
-                "--once",
                 "--idle-exit-seconds <IDLE_EXIT_SECONDS>",
                 "--loop-interval-seconds <LOOP_INTERVAL_SECONDS>",
                 "--max-chunks <MAX_CHUNKS>",
@@ -719,7 +718,14 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             !help.contains("--max-seconds"),
             "{args:?} help must not expose a daemon runtime cap in\n{help}"
         );
+        assert!(!help.contains("--once"), "{args:?} help:\n{help}");
     }
+
+    ctx(&temp)
+        .args(["daemon", "run", "--once"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '--once'"));
 }
 
 #[test]

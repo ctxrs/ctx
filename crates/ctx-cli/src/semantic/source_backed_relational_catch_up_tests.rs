@@ -700,6 +700,56 @@ fn generation_mismatch_is_persistent_and_never_creates_a_fallback_database() {
 }
 
 #[test]
+fn foreground_wait_requires_exact_ready_generation_and_surfaces_daemon_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let generation = initial_generation(temp.path(), &source);
+    run_after_core_publication(temp.path(), &generation).unwrap();
+
+    wait_for_completed_generation_with(temp.path(), &generation, false, Duration::ZERO, || {
+        panic!("ready relational generation must not poll")
+    })
+    .unwrap();
+
+    let wrong_generation = "f".repeat(64);
+    run_after_core_publication(temp.path(), &wrong_generation).unwrap();
+    let error = wait_for_completed_generation_with(
+        temp.path(),
+        &wrong_generation,
+        false,
+        Duration::ZERO,
+        || panic!("failed relational generation must not poll"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source_relational_generation_mismatch"),
+        "{error:#}"
+    );
+
+    let unavailable = tempfile::tempdir().unwrap();
+    let pending_generation = "e".repeat(64);
+    let pending =
+        status::SourceBackedRelationalCatchUpStatus::pending(&pending_generation, 1, None);
+    persist_status(unavailable.path(), &pending).unwrap();
+    let error = wait_for_completed_generation_with(
+        unavailable.path(),
+        &pending_generation,
+        true,
+        Duration::from_secs(1),
+        || panic!("--no-daemon import must not poll without a relational owner"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no foreground writer was started"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn materializer_has_no_provider_hydration_or_legacy_store_authority() {
     let source = include_str!("source_backed_relational_catch_up.rs");
     for forbidden in [

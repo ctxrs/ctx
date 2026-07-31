@@ -11,7 +11,7 @@ const SOURCE_BACKED_RELATIONAL_STATUS_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SourceBackedRelationalCatchUpState {
+pub(super) enum SourceBackedRelationalCatchUpState {
     Pending,
     Error,
     Completed,
@@ -22,7 +22,7 @@ pub(super) struct SourceBackedRelationalCatchUpStatus {
     schema_version: u16,
     owner: String,
     kind: String,
-    status: SourceBackedRelationalCatchUpState,
+    pub(super) status: SourceBackedRelationalCatchUpState,
     pending: bool,
     retryable: bool,
     pub(super) core_generation_id: String,
@@ -34,8 +34,8 @@ pub(super) struct SourceBackedRelationalCatchUpStatus {
     last_attempt_at_ms: i64,
     #[serde(default)]
     last_attempt_duration_us: u64,
-    error_code: Option<String>,
-    last_error: Option<String>,
+    pub(super) error_code: Option<String>,
+    pub(super) last_error: Option<String>,
 }
 
 impl SourceBackedRelationalCatchUpStatus {

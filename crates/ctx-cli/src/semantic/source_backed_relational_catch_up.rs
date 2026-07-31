@@ -3,7 +3,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -25,7 +26,9 @@ use uuid::Uuid;
 use crate::source_sql::sql_compatibility_path;
 
 use super::{
-    paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
+    paths_status::{
+        daemon_jobs_path, daemon_report, read_daemon_job_status, write_daemon_job_status,
+    },
     source_backed_refresh_coordinator::{
         daemon_cycle_verified_index, nonzero_duration_micros, open_verified_index,
         source_backed_index_root,
@@ -34,6 +37,8 @@ use super::{
 
 const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "relational-catch-up.json";
 const CERTIFICATE_DIGEST_BYTES: usize = 32;
+const SOURCE_BACKED_RELATIONAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const SOURCE_BACKED_RELATIONAL_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 mod record_metadata;
 mod status;
@@ -95,6 +100,74 @@ pub(super) fn generation_needs_catch_up(data_root: &Path, core_generation_id: &s
 
 pub(super) fn status_generation(data_root: &Path) -> Option<String> {
     read_status(data_root).map(|status| status.core_generation_id)
+}
+
+/// Waits for the daemon-owned relational projection of one exact Core generation.
+///
+/// Import uses this read-only observation seam after lexical publication. Pro and
+/// semantic projections remain independently scheduled and never extend the
+/// foreground import boundary.
+pub(crate) fn wait_for_completed_generation(
+    data_root: &Path,
+    core_generation_id: &str,
+    fail_if_daemon_unavailable: bool,
+) -> Result<()> {
+    wait_for_completed_generation_with(
+        data_root,
+        core_generation_id,
+        fail_if_daemon_unavailable,
+        SOURCE_BACKED_RELATIONAL_WAIT_TIMEOUT,
+        || thread::sleep(SOURCE_BACKED_RELATIONAL_POLL_INTERVAL),
+    )
+}
+
+fn wait_for_completed_generation_with(
+    data_root: &Path,
+    core_generation_id: &str,
+    fail_if_daemon_unavailable: bool,
+    timeout: Duration,
+    mut wait: impl FnMut(),
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = read_status(data_root) {
+            if status.is_completed_for(core_generation_id)
+                && ready_projection_metadata(data_root, core_generation_id).is_some()
+            {
+                return Ok(());
+            }
+            if status.core_generation_id == core_generation_id
+                && status.status == status::SourceBackedRelationalCatchUpState::Error
+            {
+                let code = status
+                    .error_code
+                    .as_deref()
+                    .unwrap_or("source_relational_projection_unavailable");
+                let detail = status
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("daemon source-backed relational catch-up failed");
+                anyhow::bail!("{code}: {detail}");
+            }
+        }
+        if fail_if_daemon_unavailable {
+            let daemon = daemon_report(data_root);
+            let owns_relational_catch_up = daemon.get("running").and_then(Value::as_bool)
+                == Some(true)
+                && daemon.get("mode").and_then(Value::as_str) == Some("full");
+            if !owns_relational_catch_up {
+                anyhow::bail!(
+                    "the ctx daemon is unavailable for required relational catch-up; no foreground writer was started"
+                );
+            }
+        }
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "source_relational_projection_unavailable: timed out waiting for daemon relational generation {core_generation_id}"
+            );
+        }
+        wait();
+    }
 }
 
 pub(super) fn read_status_json(data_root: &Path) -> Option<Value> {
