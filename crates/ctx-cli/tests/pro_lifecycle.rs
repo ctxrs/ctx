@@ -411,6 +411,31 @@ fn invalid_referral_codenames_are_rejected_without_echoing_the_secret() {
         assert!(!stderr.contains(INVALID_SECRET));
         assert!(!data_root.exists());
     }
+
+    let parent = tempdir().unwrap();
+    let data_root = parent.path().join("missing-data-root");
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .arg("--data-root")
+        .arg(&data_root)
+        .args(["--color=always", "referral", "create", INVALID_SECRET])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("That referral codename is unavailable"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ctx referral create <codename>"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("invalid_request"), "{stderr}");
+    assert!(!stderr.contains(INVALID_SECRET), "{stderr}");
+    assert!(stderr.as_bytes().contains(&0x1b), "{stderr:?}");
+    assert!(!data_root.exists());
 }
 
 #[test]
