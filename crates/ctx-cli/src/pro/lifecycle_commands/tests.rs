@@ -49,6 +49,39 @@ fn test_ui(width: usize) -> (Ui, SharedWriter, SharedWriter) {
     )
 }
 
+#[test]
+fn lifecycle_human_recovery_preserves_manage_context() {
+    let manage = ProArgs {
+        command: Some(ProCommand::Manage(ProManageArgs {
+            no_open: false,
+            format: JsonOutputFormat::Text,
+        })),
+        format: JsonOutputFormat::Text,
+        referral: None,
+    };
+    assert_eq!(render::human_retry_command(&manage), "ctx pro manage");
+
+    let manage_without_browser = ProArgs {
+        command: Some(ProCommand::Manage(ProManageArgs {
+            no_open: true,
+            format: JsonOutputFormat::Text,
+        })),
+        format: JsonOutputFormat::Text,
+        referral: None,
+    };
+    assert_eq!(
+        render::human_retry_command(&manage_without_browser),
+        "ctx pro manage --no-open"
+    );
+
+    let setup = ProArgs {
+        command: None,
+        format: JsonOutputFormat::Text,
+        referral: None,
+    };
+    assert_eq!(render::human_retry_command(&setup), "ctx pro");
+}
+
 fn run_uninstall(
     data_root: &Path,
     service: Option<&mut dyn ProDeletionService>,

@@ -25,12 +25,20 @@ pub(super) fn protocol_error(error: ProtocolError) -> anyhow::Error {
 }
 
 pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
-    let text = error.to_string();
+    error
+        .chain()
+        .find_map(|cause| stable_error_code_from_text(&cause.to_string()))
+}
+
+fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
     let code = text.split(':').next().unwrap_or_default();
     match code {
         "pro_not_installed" => Some("pro_not_installed"),
         "commercial_unavailable" => Some("commercial_unavailable"),
         "commercial_access_locked" => Some("commercial_access_locked"),
+        "commercial_identity_conflict" => Some("commercial_identity_conflict"),
+        "checkout_expired" => Some("checkout_expired"),
+        "checkout_timeout" => Some("checkout_timeout"),
         "anonymous_trial_already_consumed" => Some("anonymous_trial_already_consumed"),
         "anonymous_trial_identity_ambiguous" => Some("anonymous_trial_identity_ambiguous"),
         "anonymous_trial_installation_limit" => Some("anonymous_trial_installation_limit"),
@@ -53,6 +61,15 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
         "corrupt_graph" => Some("corrupt_graph"),
         "invalid_request" => Some("invalid_request"),
         "invalid_response" => Some("invalid_response"),
+        "authentication_expired" => Some("authentication_expired"),
+        "authentication_required" => Some("authentication_required"),
+        "rate_limited" => Some("rate_limited"),
+        "service_unavailable" => Some("service_unavailable"),
+        "referral_unavailable" => Some("referral_unavailable"),
+        "referral_payout_unavailable" => Some("referral_payout_unavailable"),
+        "referral_codename_conflict" => Some("referral_codename_conflict"),
+        "referral_not_found" => Some("referral_not_found"),
+        "referral_not_eligible" => Some("referral_not_eligible"),
         "cancelled" => Some("cancelled"),
         "helper_crashed" => Some("helper_crashed"),
         "helper_timeout" => Some("helper_timeout"),
@@ -73,10 +90,30 @@ mod tests {
             (ErrorClass::StaleFact, "stale_fact"),
             (ErrorClass::LineOutOfRange, "line_out_of_range"),
             (ErrorClass::StaleSnapshot, "stale_snapshot"),
+            (ErrorClass::Sequence, "invalid_response"),
+            (ErrorClass::Internal, "helper_crashed"),
         ] {
             let mapped = protocol_error(ProtocolError::new(class, "untrusted helper detail"));
             assert_eq!(mapped.to_string(), expected);
             assert_eq!(stable_error_code(&mapped), Some(expected));
+            assert!(!mapped.to_string().contains("untrusted helper detail"));
+        }
+    }
+
+    #[test]
+    fn commercial_and_referral_codes_survive_anyhow_context_without_changing_error_text() {
+        for code in [
+            "authentication_expired",
+            "checkout_expired",
+            "checkout_timeout",
+            "commercial_identity_conflict",
+            "rate_limited",
+            "referral_not_eligible",
+            "service_unavailable",
+        ] {
+            let error = anyhow!("{code}: bounded service cause").context("referral request failed");
+            assert_eq!(error.to_string(), "referral request failed");
+            assert_eq!(stable_error_code(&error), Some(code));
         }
     }
 }

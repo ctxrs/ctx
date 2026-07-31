@@ -224,6 +224,8 @@ pub(crate) trait ProDeletionService {
 
 pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
     let started = Instant::now();
+    let human_output = !args.json_output();
+    let retry_command = render::human_retry_command(&args);
     let mut telemetry = ProLifecycleTelemetryV1::new(args.telemetry_operation());
     let result = run_lifecycle_inner(args, &data_root, &mut telemetry, ui);
     if let Err(error) = &result {
@@ -239,7 +241,7 @@ pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf, ui: &mut Ui) -> R
         },
         started.elapsed(),
     );
-    result
+    crate::pro::human_result(result, human_output, retry_command, ui)
 }
 
 fn run_lifecycle_inner(
