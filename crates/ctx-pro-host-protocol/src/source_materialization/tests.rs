@@ -414,8 +414,14 @@ fn source_backed_pro_page_count_finish_cas_and_deletion_witness_are_bounded() {
         expected_prior: progress(false),
         next_frontier: certified_source().frontier().cloned(),
         terminal: true,
-        records: vec![source_record(b"", 1); MAX_SOURCE_RECORDS_PER_PAGE + 1],
+        records: (1..=MAX_SOURCE_RECORDS_PER_PAGE)
+            .map(|sequence| source_record(b"", sequence as u64))
+            .collect(),
     };
+    request.validate().unwrap();
+    request
+        .records
+        .push(source_record(b"", MAX_SOURCE_RECORDS_PER_PAGE as u64 + 1));
     assert_eq!(request.validate().unwrap_err().class, ErrorClass::Bounds);
     request.records.clear();
 
