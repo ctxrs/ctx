@@ -10,19 +10,13 @@ use std::{
 use std::cell::Cell;
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use rusqlite::{limits::Limit, Connection};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-mod hydration;
 
 use super::{
     nativepath::{
@@ -38,8 +32,7 @@ use crate::{
             ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
             DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
         },
-        hydration_failure, route_error, SourceBackedRouteError, SourceBackedRouteErrorKind,
-        SourceBackedRouteResult,
+        route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
@@ -48,7 +41,6 @@ use crate::{
     CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
     WARP_SQLITE_SOURCE_FORMAT,
 };
-use hydration::hydrate_warp_group;
 
 const WARP_SOURCE_ANCHOR_NAMESPACE: &str = "warp.selected-surface";
 const WARP_NATIVE_SESSION_NAMESPACE: &str = "warp.conversation";
@@ -57,7 +49,6 @@ const WARP_LOGICAL_SESSION_KIND: &str = "warp-conversation";
 const WARP_LOGICAL_ITEM_KIND: &str = "warp-task-message";
 const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
 const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v1";
-const WARP_TASK_MESSAGE_RELATION: &str = "agent_tasks.task-message.v2";
 const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
 const WARP_MISSING_TREE_DOMAIN: &[u8] = b"ctx.warp.missing-logical-tree.v1\0";
 const WARP_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.warp.logical-leaf.v1\0";
@@ -77,7 +68,6 @@ pub(super) struct WarpSourceBackedWork {
     pub(super) logical_observation_queries: u64,
     pub(super) provider_projections: u64,
     pub(super) projection_queries: u64,
-    pub(super) hydration_queries: u64,
 }
 
 #[cfg(test)]
@@ -119,7 +109,7 @@ pub(crate) enum WarpSourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -132,12 +122,8 @@ pub(crate) enum WarpSourceBackedErrorV0 {
     ScanCountMismatch,
     #[error("Warp source-backed digest is not canonical lowercase SHA-256")]
     InvalidDigest,
-    #[error("Warp source-backed parser emitted an empty lexical record")]
-    EmptyLexicalRecord,
-    #[error("locator is not a Warp task-message row")]
-    InvalidLocator,
-    #[error("Warp locator task row digest no longer matches")]
-    StaleTaskRow,
+    #[error("Warp source-backed parser emitted empty normalized content")]
+    EmptyNormalizedContent,
 }
 
 pub(crate) type WarpSourceBackedResultV0<T> = Result<T, WarpSourceBackedErrorV0>;
@@ -175,44 +161,18 @@ impl WarpSourceSelectionV0 {
     }
 }
 
-type WarpEventHydrator = fn(
-    &WarpSourceSelectionV0,
-    &EventHydrationRequest,
-) -> Result<HydratedProviderRecord, HydrationFailure>;
-
 pub(crate) fn project_warp_source_backed_v0(
     selection: WarpSourceSelectionV0,
-    hydrate_event: WarpEventHydrator,
 ) -> WarpSourceBackedResultV0<WarpReplacementTreeAdapter> {
     Ok(WarpReplacementTreeAdapter {
         source: warp_source_key(&selection)?,
         selection,
-        hydrate_event,
     })
-}
-
-pub(crate) fn resolve_warp_locator_v0(
-    selection: &WarpSourceSelectionV0,
-    request: &EventHydrationRequest,
-) -> Result<HydratedProviderRecord, HydrationFailure> {
-    let batch = BatchHydrationRequest::new(vec![request.clone()])
-        .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-    hydrate_warp_group(selection, &batch)?
-        .into_records()
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                "Warp one-record hydration returned no record",
-            )
-        })
 }
 
 pub(crate) struct WarpReplacementTreeAdapter {
     selection: WarpSourceSelectionV0,
     source: SourceKey,
-    hydrate_event: WarpEventHydrator,
 }
 
 pub(crate) struct WarpPresentAuthority {
@@ -317,20 +277,6 @@ impl ReplacementDocumentTree for WarpReplacementTreeAdapter {
             }
         };
         Ok(current)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        if request.events().len() == 1 {
-            let record = (self.hydrate_event)(&self.selection, &request.events()[0])?;
-            let result = BatchHydrationResult::new(vec![record])
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-            result.validate_for_request(request)?;
-            return Ok(result);
-        }
-        hydrate_warp_group(&self.selection, request)
     }
 }
 
@@ -737,10 +683,10 @@ impl WarpNativeSink for WarpProjectionSink<'_, '_, '_> {
                 .ok_or(CaptureError::SystemInvariant(
                     "Warp event has no session lineage",
                 ))?;
-            let document = lexical_document(&self.source, &self.source_path, lineage, event)
+            let document = core_record(&self.source, &self.source_path, lineage, event)
                 .map_err(source_backed_capture_error)?;
             self.sink
-                .emit_document(document)
+                .emit_core_record(document)
                 .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
             self.indexed_documents =
                 self.indexed_documents
@@ -762,12 +708,12 @@ impl From<WarpNativeSession> for WarpSessionLineage {
     }
 }
 
-fn lexical_document(
+fn core_record(
     source: &SourceKey,
-    source_path: &str,
+    _source_path: &str,
     lineage: &WarpSessionLineage,
     event: WarpNativeEvent,
-) -> WarpSourceBackedResultV0<LexicalDocument> {
+) -> WarpSourceBackedResultV0<CoreRecord> {
     let session_id = warp_session_id(source, &event.identity.conversation_id)?;
     let parent_session_id = lineage
         .parent_conversation_id
@@ -797,56 +743,61 @@ fn lexical_document(
         native_item_key: &item_key,
         subrecord_selector: None,
     })?;
-    let record_digest = digest_bytes(event.source_record_digest.as_str())?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: WARP_TASK_MESSAGE_RELATION.to_owned(),
-            primary_key: TypedKey::composite(vec![
-                TypedKey::utf8(event.identity.task_id.clone())?,
-                TypedKey::U64(u64::from(event.native_order.message_ordinal)),
-            ])?,
-            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8(event.identity.task_id.clone())?,
+        TypedKey::U64(u64::from(event.native_order.message_ordinal)),
+    ])?;
     let body = if event.lexical_body.is_empty() {
         event.kind.to_owned()
     } else {
         event.lexical_body
     };
     if body.is_empty() {
-        return Err(WarpSourceBackedErrorV0::EmptyLexicalRecord);
+        return Err(WarpSourceBackedErrorV0::EmptyNormalizedContent);
     }
-    Ok(LexicalDocument {
+    let is_tool = matches!(
+        event.event_type,
+        ctx_history_core::EventType::ToolCall
+            | ctx_history_core::EventType::ToolOutput
+            | ctx_history_core::EventType::CommandOutput
+    );
+    let native_tool = is_tool.then(|| {
+        serde_json::json!({
+            "kind": event.kind,
+            "request_id": event.request_id,
+            "call_id": event.call_id,
+            "result_outcome": event.result_outcome,
+        })
+    });
+    let agent_type = if is_primary {
+        AgentType::Primary
+    } else {
+        AgentType::Subagent
+    };
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id,
         root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(event.identity.conversation_id),
-        branch: None,
-        source_path: Some(source_path.to_owned()),
-        agent_type: if is_primary {
-            AgentType::Primary
-        } else {
-            AgentType::Subagent
-        }
-        .as_str()
-        .to_owned(),
+        source.clone(),
+        event.native_order.provider_event_index,
+        event.event_type.as_str(),
+        agent_type.as_str(),
         is_primary,
-        event_sequence: event.native_order.provider_event_index,
-        occurred_at_unix_ms: event.occurred_at.map(|value| value.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: event.role.map(|role| role.as_str().to_owned()),
+        WARP_SOURCE_BACKED_PARSER_REVISION,
         body,
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    })
+    )?;
+    record.parent_session_id = parent_session_id;
+    record.provider_session_id = Some(event.identity.conversation_id);
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = event.occurred_at.map(|value| value.timestamp_millis());
+    record.role = event.role.map(|role| role.as_str().to_owned());
+    if let Some(native_tool) = native_tool {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_tool": native_tool,
+        }));
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn warp_session_id(

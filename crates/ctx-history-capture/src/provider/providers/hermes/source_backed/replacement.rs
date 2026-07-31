@@ -1,10 +1,5 @@
 use std::sync::Mutex;
 
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind,
-};
-
 use super::*;
 use crate::provider::source_backed::{
     family::document::{
@@ -87,7 +82,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             &mut |page| {
                 for record in page.records {
                     if let HermesSourceBackedRecord::Event(document) = record {
-                        if let Err(error) = sink.emit_document(document) {
+                        if let Err(error) = sink.emit_core_record(document) {
                             let detail = error.to_string();
                             sink_error = Some(error);
                             return Err(HermesSourceBackedError::Capture(
@@ -151,37 +146,6 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             );
         }
         Ok(tree.tree_fingerprint)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let locators = request
-            .events()
-            .iter()
-            .map(|event| event.locator())
-            .collect::<Vec<_>>();
-        let hydrated = HermesLocatorResolver::new(
-            self.data_root.clone(),
-            self.path.clone(),
-            self.source.clone(),
-        )
-        .hydrate_locators(&locators)
-        .map_err(hermes_hydration_failure)?;
-        let records = request
-            .events()
-            .iter()
-            .zip(hydrated)
-            .map(|(event, hydrated)| HydratedProviderRecord {
-                event_id: event.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-            .collect();
-        BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
-            kind: HydrationFailureKind::InvalidLocator,
-            detail: error.to_string(),
-        })
     }
 }
 
@@ -279,22 +243,6 @@ fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
         parser_revision: HERMES_SOURCE_PARSER_REVISION,
         content_digest: *certificate.content_digest(),
         counts: certificate.counts(),
-    }
-}
-
-fn hermes_hydration_failure(error: HermesSourceBackedError) -> HydrationFailure {
-    let kind = match error {
-        HermesSourceBackedError::InvalidLocator | HermesSourceBackedError::Resolver(_) => {
-            HydrationFailureKind::InvalidLocator
-        }
-        HermesSourceBackedError::MissingRecord => HydrationFailureKind::MissingRecord,
-        HermesSourceBackedError::StaleRecordEvidence
-        | HermesSourceBackedError::StaleSourceEvidence => HydrationFailureKind::StaleRecordEvidence,
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    HydrationFailure {
-        kind,
-        detail: error.to_string(),
     }
 }
 

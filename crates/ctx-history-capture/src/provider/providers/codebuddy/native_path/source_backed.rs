@@ -1,12 +1,10 @@
 //! Thin CodeBuddy adapter for the shared replacement-document lifecycle.
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    EventIdentityInput, HydrationFailure, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, TypedKey,
+    derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 
 #[cfg(test)]
 use std::sync::{
@@ -14,23 +12,16 @@ use std::sync::{
     Arc, Barrier, Mutex,
 };
 
-use crate::provider::{
-    provider_safe_path_segment,
-    source_backed::{
-        document_leaf_execution_policy,
-        family::document::{
-            register_replacement_document_tree_route, ChangedDocumentSink,
-            DocumentLeafExecutionPolicy, DocumentSourceTerminal, ReplacementDocumentTree,
-        },
-        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+use crate::provider::source_backed::{
+    document_leaf_execution_policy,
+    family::document::{
+        register_replacement_document_tree_route, ChangedDocumentSink, DocumentLeafExecutionPolicy,
+        DocumentSourceTerminal, ReplacementDocumentTree,
     },
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
 };
 
 use super::*;
-
-mod hydration;
-
-use hydration::hydrate_codebuddy_group;
 
 const IDENTITY_VERSION: u32 = 1;
 const PARSER_REVISION: &str = "codebuddy-source-backed-v1";
@@ -39,8 +30,8 @@ const SESSION_KEY_NAMESPACE: &str = "codebuddy-native-session-v1";
 const EVENT_KEY_NAMESPACE: &str = "codebuddy-native-event-v1";
 const CODEBUDDY_CLI_SCHEMA_VARIANT: &str = "cli-jsonl-v1";
 const CODEBUDDY_EXTENSION_SCHEMA_VARIANT: &str = "ide-structured-message-v1";
-const CODEBUDDY_CLI_LOCATOR_TAG: &str = "codebuddy-jsonl-range-v1";
-const CODEBUDDY_EXTENSION_LOCATOR_TAG: &str = "codebuddy-structured-message-v1";
+const CODEBUDDY_CLI_NATIVE_COORDINATE_TAG: &str = "codebuddy-jsonl-range-v1";
+const CODEBUDDY_EXTENSION_NATIVE_COORDINATE_TAG: &str = "codebuddy-structured-message-v1";
 const EXTENSION_CANONICAL_DOMAIN: &[u8] = b"ctx-codebuddy-structured-source-v1\0";
 
 pub(crate) fn codebuddy_cli_complete_content_record(
@@ -211,13 +202,6 @@ impl ReplacementDocumentTree for CodeBuddyDocumentAdapter {
     ) -> SourceBackedRouteResult<[u8; 32]> {
         revalidate_codebuddy_tree(tree).map_err(codebuddy_route_error)
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
-        hydrate_codebuddy_group(&self.root, request)
-    }
 }
 
 fn scan_changed_codebuddy_source(
@@ -233,7 +217,6 @@ fn scan_changed_codebuddy_source(
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     let observation = source_observation(&source, source_key.clone())?;
-    let certified_revision_digest = source_revision_digest(&source);
     let mut counts = ScannedSourceCounts::default();
     let mut structured_digest = Sha256::new();
     let mut structured_bytes = 0_u64;
@@ -254,10 +237,9 @@ fn scan_changed_codebuddy_source(
                 CodeBuddyRecordClassification::AcceptedMessage(core) => {
                     counts.retained_records =
                         checked_add(counts.retained_records, 1, "retained records")?;
-                    sink.emit_document(codebuddy_lexical_document(
+                    sink.emit_core_record(codebuddy_core_record(
                         &source,
                         &source_key,
-                        certified_revision_digest,
                         record,
                         core,
                     )?)
@@ -409,17 +391,12 @@ fn source_observation(source: &CodeBuddySource, key: SourceKey) -> Result<Source
     )
 }
 
-fn source_revision_digest(source: &CodeBuddySource) -> [u8; 32] {
-    Sha256::digest(source.source_revision.as_bytes()).into()
-}
-
-fn codebuddy_lexical_document(
+fn codebuddy_core_record(
     source: &CodeBuddySource,
     source_key: &SourceKey,
-    certified_revision_digest: [u8; 32],
     record: &CodeBuddyRecord,
     core: &CodeBuddyCoreRow,
-) -> Result<LexicalDocument> {
+) -> Result<CoreRecord> {
     let provider_session_id = core.session.provider_session_id.clone();
     let session_key = contract(
         NativeSessionKey::native_id(
@@ -465,141 +442,68 @@ fn codebuddy_lexical_document(
         }),
         "event identity",
     )?;
-    let record_digest: [u8; 32] = Sha256::digest(&record.native_bytes).into();
-    let locator = match source.shape {
-        CodeBuddySourceShape::Cli => cli_locator(
-            source_key,
-            record,
-            &provider_session_id,
-            native_message_id,
-            record_digest,
+    let native_event_id = match source.shape {
+        CodeBuddySourceShape::Cli => contract(
+            TypedKey::composite(vec![
+                contract(
+                    TypedKey::utf8(CODEBUDDY_CLI_NATIVE_COORDINATE_TAG),
+                    "CLI coordinate tag",
+                )?,
+                contract(
+                    TypedKey::utf8(&provider_session_id),
+                    "CLI native session key",
+                )?,
+                contract(TypedKey::utf8(native_message_id), "CLI native key")?,
+                TypedKey::U64(record.native_ordinal),
+            ]),
+            "CLI native event coordinate",
         )?,
-        CodeBuddySourceShape::Extension => extension_locator(
-            source_key,
-            record,
-            native_message_id,
-            &core.event.legacy_provider_event_hash,
-            certified_revision_digest,
-            record_digest,
+        CodeBuddySourceShape::Extension => contract(
+            TypedKey::composite(vec![
+                contract(
+                    TypedKey::utf8(CODEBUDDY_EXTENSION_NATIVE_COORDINATE_TAG),
+                    "structured coordinate tag",
+                )?,
+                contract(
+                    TypedKey::utf8(native_message_id),
+                    "structured native file key",
+                )?,
+                TypedKey::U64(record.native_ordinal),
+                contract(
+                    TypedKey::utf8(&core.event.legacy_provider_event_hash),
+                    "structured native record key",
+                )?,
+            ]),
+            "structured native event coordinate",
         )?,
     };
-    Ok(LexicalDocument {
-        event_id,
-        session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source_key.clone(),
-        locator,
-        provider_session_id: Some(provider_session_id),
-        branch: None,
-        source_path: Some(source.canonical_path.display().to_string()),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: record.native_ordinal,
-        occurred_at_unix_ms: Some(core.event.occurred_at.timestamp_millis()),
-        event_type: core.event.event_type.as_str().to_owned(),
-        role: Some(core.event.role.as_str().to_owned()),
-        body: if core.event.text.trim().is_empty() {
-            core.event.event_type.as_str().to_owned()
-        } else {
-            core.event.text.clone()
-        },
-        workspace: None,
-        cwd: core.session.cwd.clone(),
-        touched_files: Vec::new(),
-    })
-}
-
-fn cli_locator(
-    source: &SourceKey,
-    record: &CodeBuddyRecord,
-    provider_session_id: &str,
-    native_message_id: &str,
-    record_digest: [u8; 32],
-) -> Result<SourceRecordLocator> {
-    let byte_offset = record.byte_start.ok_or(CaptureError::SystemInvariant(
-        "CodeBuddy CLI record lost its byte offset",
-    ))?;
-    let byte_end = record
-        .byte_end_exclusive
-        .ok_or(CaptureError::SystemInvariant(
-            "CodeBuddy CLI record lost its byte end",
-        ))?;
-    let byte_length = byte_end
-        .checked_sub(byte_offset)
-        .filter(|length| *length != 0)
-        .ok_or(CaptureError::SystemInvariant(
-            "CodeBuddy CLI record has an invalid byte range",
-        ))?;
-    contract(
-        SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset,
-                byte_length,
-                physical_ordinal: record.native_ordinal,
-                native_session_key: Some(contract(
-                    TypedKey::utf8(provider_session_id),
-                    "CLI locator session key",
-                )?),
-                native_event_key: Some(contract(
-                    TypedKey::composite(vec![
-                        contract(TypedKey::utf8(CODEBUDDY_CLI_LOCATOR_TAG), "CLI tag")?,
-                        contract(TypedKey::utf8(native_message_id), "CLI native key")?,
-                    ]),
-                    "CLI locator event key",
-                )?),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            record_digest,
+    let body = if core.event.text.trim().is_empty() {
+        core.event.event_type.as_str().to_owned()
+    } else {
+        core.event.text.clone()
+    };
+    let mut projected = contract(
+        CoreRecord::new_selected(
+            event_id,
+            session_id,
+            session_id,
+            source_key.clone(),
+            record.native_ordinal,
+            core.event.event_type.as_str(),
+            AgentType::Primary.as_str(),
+            true,
+            PARSER_REVISION,
+            body,
         ),
-        "CLI source record locator",
-    )
-}
-
-fn extension_locator(
-    source: &SourceKey,
-    record: &CodeBuddyRecord,
-    message_id: &str,
-    native_record_id: &str,
-    source_revision_digest: [u8; 32],
-    record_digest: [u8; 32],
-) -> Result<SourceRecordLocator> {
-    if !provider_safe_path_segment(message_id) {
-        return Err(invalid_source_backed(
-            "structured message identity is not a safe path segment",
-        ));
-    }
-    contract(
-        SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::TreeRecord {
-                relative_file_key: contract(
-                    TypedKey::utf8(format!("messages/{message_id}.json")),
-                    "structured relative file key",
-                )?,
-                record_coordinate: contract(
-                    TypedKey::composite(vec![
-                        contract(
-                            TypedKey::utf8(CODEBUDDY_EXTENSION_LOCATOR_TAG),
-                            "structured locator tag",
-                        )?,
-                        TypedKey::U64(record.native_ordinal),
-                        contract(
-                            TypedKey::utf8(native_record_id),
-                            "structured native record key",
-                        )?,
-                    ]),
-                    "structured record coordinate",
-                )?,
-            },
-            LocatorRevisionPolicy::ExactSourceRevision,
-            Some(source_revision_digest),
-            record_digest,
-        ),
-        "structured source record locator",
-    )
+        "Core record",
+    )?;
+    projected.provider_session_id = Some(provider_session_id);
+    projected.native_event_id = Some(native_event_id);
+    projected.occurred_at_unix_ms = Some(core.event.occurred_at.timestamp_millis());
+    projected.role = Some(core.event.role.as_str().to_owned());
+    projected.cwd = core.session.cwd.clone();
+    contract(projected.validate_contract(), "completed Core record")?;
+    Ok(projected)
 }
 
 fn decode_sha256(value: &str) -> Result<[u8; 32]> {

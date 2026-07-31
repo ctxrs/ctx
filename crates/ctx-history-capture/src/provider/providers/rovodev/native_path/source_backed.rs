@@ -19,14 +19,11 @@ use std::sync::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, EventIdentityInput, EventRole, EventType, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -90,7 +87,7 @@ pub(crate) enum RovoDevSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("Rovo Dev source-backed discovery requires an authoritative sessions directory")]
@@ -105,8 +102,6 @@ pub(crate) enum RovoDevSourceBackedError {
     CountMismatch,
     #[error("Rovo Dev source-backed event coordinate exceeds its supported range")]
     CoordinateOverflow,
-    #[error("locator is not a Rovo Dev session-tree record")]
-    InvalidLocator,
 }
 
 pub(crate) type RovoDevSourceBackedResult<T> = Result<T, RovoDevSourceBackedError>;
@@ -835,8 +830,6 @@ pub(crate) struct RovoDevDocumentTreeAdapter {
     #[cfg(test)]
     projection_scans: Option<Arc<AtomicUsize>>,
     #[cfg(test)]
-    hydration_scans: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
     terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     counters: RovoDevWorkCounters,
 }
@@ -849,8 +842,6 @@ impl RovoDevDocumentTreeAdapter {
             #[cfg(test)]
             projection_scans: None,
             #[cfg(test)]
-            hydration_scans: None,
-            #[cfg(test)]
             terminal_revalidation_hook: None,
             counters: RovoDevWorkCounters::default(),
         }
@@ -859,12 +850,6 @@ impl RovoDevDocumentTreeAdapter {
     #[cfg(test)]
     fn with_projection_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
         self.projection_scans = Some(scans);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_hydration_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
-        self.hydration_scans = Some(scans);
         self
     }
 
@@ -947,17 +932,6 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
                 "Rovo Dev sessions root disappeared before terminal revalidation",
             )),
         }
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        #[cfg(test)]
-        if let Some(scans) = self.hydration_scans.as_ref() {
-            scans.fetch_add(1, Ordering::Relaxed);
-        }
-        document::hydrate_rovodev_group(&self.root, &self.context, request)
     }
 }
 

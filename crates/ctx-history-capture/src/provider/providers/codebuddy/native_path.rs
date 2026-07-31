@@ -1,9 +1,9 @@
-//! Production source-backed CodeBuddy discovery, parsing, and hydration.
+//! Production source-backed CodeBuddy discovery, parsing, and direct Core projection.
 //!
 //! CodeBuddy owns two unrelated persisted products: extension session
 //! directories made of whole-JSON message files, and CLI project JSONL
 //! transcripts. They share bounded normalization while retaining independent
-//! source authority, typed locators, and exact hydration.
+//! source authority, native coordinates, and complete normalized content.
 
 use std::{
     collections::BTreeMap,

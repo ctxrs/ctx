@@ -2,8 +2,8 @@
 //!
 //! Discovery and parsing remain ForgeCode-owned. Publication, replacement,
 //! deletion, and projection frontiers remain shared concerns: this module
-//! emits bounded lexical pages, one certified SQLite snapshot, and exact
-//! native-row hydration without retaining publication state.
+//! emits bounded complete Core pages from one certified SQLite snapshot
+//! without retaining publication state.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,15 +12,11 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
-    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -36,15 +32,10 @@ use crate::{
     CaptureError, ProviderAdapterContext, ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
-use super::super::complete_content::{
-    forgecode_complete_message, forgecode_logical_record_digest,
-    load_forgecode_conversation_values_by_ids,
-};
 use super::source::{
     discover_forgecode_source, ForgeCodeConversationRow, ForgeCodeDiscovery, ForgeCodeFrontier,
-    ForgeCodePage, ForgeCodeScanner, ForgeCodeSourceObservation, ForgeCodeSqliteDatabase,
-    FORGECODE_NATIVE_PAGE_MAX_BYTES, FORGECODE_NATIVE_PARSER_REVISION,
-    FORGECODE_NATIVE_POLICY_REVISION,
+    ForgeCodePage, ForgeCodeScanner, ForgeCodeSourceObservation, FORGECODE_NATIVE_PAGE_MAX_BYTES,
+    FORGECODE_NATIVE_PARSER_REVISION, FORGECODE_NATIVE_POLICY_REVISION,
 };
 
 const FORGECODE_PROVIDER_ID: &str = "forgecode";
@@ -55,7 +46,6 @@ const FORGECODE_LOGICAL_SESSION_KIND: &str = "forgecode-conversation";
 const FORGECODE_NATIVE_SESSION_NAMESPACE: &str = "forgecode-conversation-id-v1";
 const FORGECODE_LOGICAL_EVENT_KIND: &str = "forgecode-message";
 const FORGECODE_NATIVE_EVENT_POSITION_KIND: &str = "forgecode-message-index-v1";
-const FORGECODE_LOCATOR_RELATION: &str = "conversations.messages";
 const FORGECODE_RECORD_DIGEST_DOMAIN: &[u8] = b"ctx.forgecode.source-backed-scan-v0\0";
 const FORGECODE_SOURCE_BACKED_PARSER_REVISION: &str =
     "forgecode-nativepath-source-backed-v0:parser=1;policy=6";
@@ -67,15 +57,13 @@ pub(crate) enum ForgeCodeSourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error("ForgeCode source-backed scan was finished before a terminal page")]
     IncompleteScan,
     #[error("ForgeCode source-backed scan lost its conversation row")]
     MissingConversationRow,
     #[error("ForgeCode source-backed scan counters overflowed")]
     CountOverflow,
-    #[error("ForgeCode source-backed resolver was registered twice for one source")]
-    DuplicateResolverSource,
 }
 
 pub(crate) type ForgeCodeSourceBackedResultV0<T> = Result<T, ForgeCodeSourceBackedErrorV0>;
@@ -171,9 +159,9 @@ impl ForgeCodeSourceBackedSourceV0 {
 }
 
 pub(crate) struct ForgeCodeSourceBackedPageV0 {
-    pub(crate) documents: Vec<LexicalDocument>,
+    pub(crate) documents: Vec<CoreRecord>,
     // Rejection and page-bound accounting remain attached to emitted pages as
-    // release evidence even when Core consumes only lexical documents.
+    // release evidence even when Core consumes only selected event content.
     #[allow(dead_code)]
     pub(crate) failures: Vec<ProviderImportFailure>,
     #[allow(dead_code)]
@@ -309,7 +297,7 @@ fn project_source_backed_page(
         let Some(row) = row else {
             return Err(ForgeCodeSourceBackedErrorV0::MissingConversationRow);
         };
-        match lexical_document(source, row, retained, &direct_touches) {
+        match core_record(source, row, retained, &direct_touches) {
             Ok(document) => documents.push(document),
             Err(error) => {
                 projection_rejections = checked_add(projection_rejections, 1)?;
@@ -381,12 +369,12 @@ fn observe_source_record(
     Ok(())
 }
 
-fn lexical_document(
+fn core_record(
     source: &ForgeCodeSourceBackedSourceV0,
     row: &ForgeCodeConversationRow,
     retained: super::source::ForgeCodeRetainedEvent,
     direct_touches: &BTreeMap<u64, Vec<String>>,
-) -> ForgeCodeSourceBackedResultV0<LexicalDocument> {
+) -> ForgeCodeSourceBackedResultV0<CoreRecord> {
     let session_id = forgecode_session_id(&source.source, &row.conversation_id)?;
     let subrecord_index = retained
         .provider_event_index
@@ -397,17 +385,6 @@ fn lexical_document(
         TypedKey::utf8(&row.conversation_id)?,
         TypedKey::U64(subrecord_index),
     ])?;
-    let locator = SourceRecordLocator::new(
-        source.source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: FORGECODE_LOCATOR_RELATION.to_owned(),
-            primary_key,
-            row_version: Some(TypedKey::bytes(row.source_record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        row.source_record_digest,
-    )?;
     let lexical_text = retained
         .event
         .payload
@@ -416,30 +393,36 @@ fn lexical_document(
         .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| retained.event.event_type.as_str().replace('_', " "));
-    Ok(LexicalDocument {
+    let native_file_touches = direct_touches
+        .get(&retained.provider_event_index)
+        .filter(|touches| !touches.is_empty())
+        .map(|touches| serde_json::json!(touches));
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.source.clone(),
-        locator,
-        provider_session_id: Some(row.conversation_id.clone()),
-        branch: forgecode_branch(row),
-        source_path: Some(source.canonical_path.display().to_string()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: subrecord_index,
-        occurred_at_unix_ms: Some(retained.event.occurred_at.timestamp_millis()),
-        event_type: retained.event.event_type.as_str().to_owned(),
-        role: retained.event.role.map(|role| role.as_str().to_owned()),
-        body: lexical_text,
-        workspace: Some(row.workspace_id.to_string()),
-        cwd: None,
-        touched_files: direct_touches
-            .get(&retained.provider_event_index)
-            .cloned()
-            .unwrap_or_default(),
-    })
+        session_id,
+        source.source.clone(),
+        subrecord_index,
+        retained.event.event_type.as_str(),
+        AgentType::Primary.as_str(),
+        true,
+        FORGECODE_SOURCE_BACKED_PARSER_REVISION,
+        lexical_text,
+    )?;
+    record.provider_session_id = Some(row.conversation_id.clone());
+    record.native_event_id = Some(primary_key);
+    record.occurred_at_unix_ms = Some(retained.event.occurred_at.timestamp_millis());
+    record.role = retained.event.role.map(|role| role.as_str().to_owned());
+    record.branch = forgecode_branch(row);
+    record.workspace = Some(row.workspace_id.to_string());
+    if let Some(native_file_touches) = native_file_touches {
+        record.metadata.insert(
+            "provider_native_file_touches".to_owned(),
+            native_file_touches,
+        );
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn forgecode_branch(row: &ForgeCodeConversationRow) -> Option<String> {
@@ -540,201 +523,6 @@ fn forgecode_schema_evidence(native: &ForgeCodeSourceObservation) -> Vec<u8> {
 fn checked_add(left: u64, right: u64) -> ForgeCodeSourceBackedResultV0<u64> {
     left.checked_add(right)
         .ok_or(ForgeCodeSourceBackedErrorV0::CountOverflow)
-}
-
-#[derive(Debug)]
-pub(crate) struct ForgeCodeSourceBackedResolverV0 {
-    data_root: PathBuf,
-    sources: Vec<ForgeCodeSourceBackedSourceV0>,
-}
-
-impl ForgeCodeSourceBackedResolverV0 {
-    pub(crate) fn new(
-        data_root: &Path,
-        sources: impl IntoIterator<Item = ForgeCodeSourceBackedSourceV0>,
-    ) -> ForgeCodeSourceBackedResultV0<Self> {
-        let mut registered = Vec::<ForgeCodeSourceBackedSourceV0>::new();
-        for source in sources {
-            if registered
-                .iter()
-                .any(|candidate| candidate.source == source.source)
-            {
-                return Err(ForgeCodeSourceBackedErrorV0::DuplicateResolverSource);
-            }
-            registered.push(source);
-        }
-        Ok(Self {
-            data_root: data_root.to_path_buf(),
-            sources: registered,
-        })
-    }
-
-    pub(crate) fn hydrate(
-        &self,
-        requests: &[EventHydrationRequest],
-        expected_session_id: Option<StableEntityId>,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        let Some(first) = requests.first() else {
-            return Ok(Vec::new());
-        };
-        let route = self
-            .sources
-            .iter()
-            .find(|source| source.source.exact_descriptor_eq(first.locator().source()))
-            .ok_or_else(|| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-        let mut coordinates = Vec::with_capacity(requests.len());
-        for request in requests {
-            request
-                .locator()
-                .validate_contract()
-                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-            if !route.source.exact_descriptor_eq(request.locator().source()) {
-                return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-            }
-            coordinates.push(decode_locator(request.locator())?);
-        }
-        let (database, cached_rows) =
-            ForgeCodeSqliteDatabase::open(&self.data_root, &route.canonical_path, |connection| {
-                let mut ids = coordinates
-                    .iter()
-                    .map(|coordinate| coordinate.conversation_id.clone())
-                    .collect::<Vec<_>>();
-                ids.sort_unstable();
-                ids.dedup();
-                load_forgecode_conversation_values_by_ids(connection, &ids).map(|rows| {
-                    rows.into_iter()
-                        .map(|(id, values)| {
-                            let digest = forgecode_logical_record_digest(&values);
-                            (id, (values, digest))
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                })
-            })
-            .map_err(|error| match error {
-                CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                    hydration_failure(HydrationFailureKind::MissingRecord)
-                }
-                _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
-            })?;
-        database
-            .finish_if_active(&route.canonical_path)
-            .map_err(|_| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
-        let mut hydrated = Vec::with_capacity(requests.len());
-        for (request, coordinate) in requests.iter().zip(coordinates) {
-            let (values, digest) = cached_rows
-                .get(&coordinate.conversation_id)
-                .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
-            if digest != request.locator().record_digest() || coordinate.row_version != *digest {
-                return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
-            }
-            let subrecord_index = u32::try_from(coordinate.subrecord_index)
-                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-            let (conversation_id, _, text) = forgecode_complete_message(values, subrecord_index)
-                .map_err(|_| hydration_failure(HydrationFailureKind::MissingRecord))?;
-            if conversation_id != coordinate.conversation_id {
-                return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
-            }
-            let session_id = forgecode_session_id(&route.source, &conversation_id)
-                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-            if expected_session_id.is_some_and(|expected| expected != session_id) {
-                return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-            }
-            let event_id =
-                forgecode_event_id(&route.source, session_id, coordinate.subrecord_index)
-                    .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-            if request.event_id() != event_id {
-                return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-            }
-            hydrated.push(HydratedProviderRecord {
-                event_id,
-                provider_bytes: text.into_bytes(),
-            });
-        }
-        Ok(hydrated)
-    }
-}
-
-impl ContentSourceResolver for ForgeCodeSourceBackedResolverV0 {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        self.hydrate(std::slice::from_ref(request), None)?
-            .pop()
-            .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))
-    }
-
-    fn hydrate_session(
-        &self,
-        request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        self.hydrate(request.events(), Some(request.session_id()))
-    }
-
-    fn hydrate_batch(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let records = self.hydrate(request.events(), None)?;
-        let result = BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
-            kind: HydrationFailureKind::InvalidLocator,
-            detail: error.to_string(),
-        })?;
-        result.validate_for_request(request)?;
-        Ok(result)
-    }
-}
-
-struct ForgeCodeLocatorCoordinate {
-    conversation_id: String,
-    subrecord_index: u64,
-    row_version: [u8; 32],
-}
-
-fn decode_locator(
-    locator: &SourceRecordLocator,
-) -> Result<ForgeCodeLocatorCoordinate, HydrationFailure> {
-    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-    }
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-    };
-    if logical_relation != FORGECODE_LOCATOR_RELATION {
-        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-    }
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-    };
-    let [TypedKey::Utf8(conversation_id), TypedKey::U64(subrecord_index)] = parts.as_slice() else {
-        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-    };
-    let Some(TypedKey::Bytes(row_version)) = row_version.as_ref() else {
-        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
-    };
-    let row_version: [u8; 32] = row_version
-        .as_slice()
-        .try_into()
-        .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-    Ok(ForgeCodeLocatorCoordinate {
-        conversation_id: conversation_id.clone(),
-        subrecord_index: *subrecord_index,
-        row_version,
-    })
-}
-
-fn hydration_failure(kind: HydrationFailureKind) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: "ForgeCode source-backed native hydration failed".to_owned(),
-    }
 }
 
 pub(crate) struct ForgeCodeTreeAuthority {
@@ -845,7 +633,7 @@ impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
                         ))?;
             }
             for document in page.documents {
-                if let Err(error) = sink.emit_document(document) {
+                if let Err(error) = sink.emit_core_record(document) {
                     let detail = error.to_string();
                     sink_error = Some(error);
                     return Err(CaptureError::InvalidPayload(detail));
@@ -900,25 +688,6 @@ impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
             .map_err(route_error)?;
         (tree.authority.terminal_revalidate)().map_err(route_error)?;
         Ok(tree.tree_fingerprint)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let source = ForgeCodeSourceBackedSourceV0 {
-            source: self
-                .source_key()
-                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?,
-            canonical_path: if self.path.is_dir() {
-                self.path.join(".forge.db")
-            } else {
-                self.path.clone()
-            },
-        };
-        let resolver = ForgeCodeSourceBackedResolverV0::new(&self.data_root, [source])
-            .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-        resolver.hydrate_batch(request)
     }
 }
 

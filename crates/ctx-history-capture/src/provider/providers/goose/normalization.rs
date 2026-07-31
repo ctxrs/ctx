@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::FileChangeKind;
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -339,7 +340,7 @@ pub(super) enum GooseNativeEventKind {
     ToolOutput,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct GooseNativeFileTouch {
     pub(super) ordinal: u32,
     pub(super) path: String,
@@ -411,8 +412,8 @@ pub(super) fn normalize_goose_native_message(
         GooseRetainedContentClass::Message => GooseNativeEventKind::Message,
         GooseRetainedContentClass::ToolCall => GooseNativeEventKind::ToolCall,
     };
-    let searchable_text =
-        goose_content_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
+    let searchable_text = goose_complete_content_text(&content)
+        .unwrap_or_else(|| format!("Goose {} message", message.role));
     let file_touches = if kind == GooseNativeEventKind::ToolCall {
         goose_native_file_touches(&content)?
     } else {

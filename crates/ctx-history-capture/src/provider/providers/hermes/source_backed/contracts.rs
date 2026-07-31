@@ -9,7 +9,7 @@ pub(crate) enum HermesSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("Hermes source-backed source has an invalid profile path: {0:?}")]
@@ -20,14 +20,6 @@ pub(crate) enum HermesSourceBackedError {
     CountOverflow,
     #[error("Hermes source-backed logical-row digest is malformed")]
     InvalidLogicalDigest,
-    #[error("Hermes source-backed locator is not a supported message row")]
-    InvalidLocator,
-    #[error("Hermes source-backed locator references a stale source snapshot")]
-    StaleSourceEvidence,
-    #[error("Hermes source-backed locator references a stale logical row")]
-    StaleRecordEvidence,
-    #[error("Hermes source-backed locator row is missing")]
-    MissingRecord,
 }
 
 pub(crate) type HermesSourceBackedResult<T> = Result<T, HermesSourceBackedError>;
@@ -204,7 +196,6 @@ pub(crate) struct HermesSourceBackedSession {
     pub(crate) ended_at_unix_ms: Option<i64>,
     pub(crate) workspace: Option<String>,
     pub(crate) cwd: Option<String>,
-    pub(crate) locator: SourceRecordLocator,
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +216,7 @@ pub(crate) struct HermesSourceBackedRejection {
 #[derive(Debug, Clone)]
 pub(crate) enum HermesSourceBackedRecord {
     Session(HermesSourceBackedSession),
-    Event(LexicalDocument),
+    Event(CoreRecord),
     Rejected(HermesSourceBackedRejection),
 }
 

@@ -7,9 +7,7 @@ mod schema;
 mod source_backed;
 mod wire;
 
-pub(crate) use source_backed::{
-    project_warp_source_backed_v0, resolve_warp_locator_v0, WarpSourceSelectionV0,
-};
+pub(crate) use source_backed::{project_warp_source_backed_v0, WarpSourceSelectionV0};
 
 pub(crate) struct WarpTaskContent {
     pub(crate) event_type: EventType,
