@@ -415,14 +415,14 @@ fn lexical_index_status(
     pending_inventory_units: usize,
     failed_inventory_units: usize,
 ) -> &'static str {
-    if !initialized {
-        "missing"
-    } else if failed_inventory_units > 0 {
+    if failed_inventory_units > 0 {
         "failed"
     } else if pending_inventory_units > 0 && indexed_items > 0 {
         "partial"
     } else if pending_inventory_units > 0 {
         "pending"
+    } else if !initialized {
+        "missing"
     } else if indexed_items > 0 {
         "ready"
     } else if inventory_units == 0 {
@@ -508,8 +508,13 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
     }
     if selection.semantic {
         let semantic_status = semantic_job_status(status);
+        let semantic_job_status = string_at(
+            status,
+            &["daemon", "jobs", "semantic_index", "status"],
+            "unknown",
+        );
         let reason = string_at(status, &["daemon", "jobs", "semantic_index", "reason"], "");
-        if semantic_status == "skipped" && reason == "model_cache_missing" {
+        if semantic_job_status == "skipped" && reason == "model_cache_missing" {
             return Some(
                 "semantic indexing is skipped because the local embedding model cache is missing"
                     .to_owned(),
