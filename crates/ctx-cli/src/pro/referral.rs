@@ -88,6 +88,30 @@ impl ReferralArgs {
             ReferralCommand::Payout(args) => args.format.is_json(),
         }
     }
+
+    fn retry_command(&self) -> String {
+        match &self.command {
+            ReferralCommand::Create(args) => {
+                format!("ctx referral create {}", args.codename.as_str())
+            }
+            ReferralCommand::Status(_) => "ctx referral status".to_owned(),
+            ReferralCommand::Payout(args) => {
+                let mut command = "ctx referral payout".to_owned();
+                if args.no_open {
+                    command.push_str(" --no-open");
+                }
+                if let Some(country) = &args.country {
+                    command.push_str(" --country ");
+                    command.push_str(country.as_str());
+                }
+                if let Some(entity_type) = args.entity_type {
+                    command.push_str(" --entity-type ");
+                    command.push_str(entity_type.as_str());
+                }
+                command
+            }
+        }
+    }
 }
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -460,73 +484,77 @@ fn run_with_service(
     ui: &mut Ui,
     opener: &impl Fn(&str) -> Result<()>,
 ) -> Result<()> {
-    args.validate_invocation()?;
     let json_output = args.json_output();
-    match args.command {
-        ReferralCommand::Create(args) => {
-            let auth_mode = if json_output {
-                ReferralAuthMode::CachedOnly
-            } else {
-                ReferralAuthMode::Interactive {
-                    browser_enabled: true,
+    let retry_command = args.retry_command();
+    let result = (|| {
+        args.validate_invocation()?;
+        match args.command {
+            ReferralCommand::Create(args) => {
+                let auth_mode = if json_output {
+                    ReferralAuthMode::CachedOnly
+                } else {
+                    ReferralAuthMode::Interactive {
+                        browser_enabled: true,
+                    }
+                };
+                let result = service.create(args.codename.as_str(), auth_mode, ui)?;
+                if args.format.is_json() {
+                    write_json(output, &create_output(&result))
+                } else {
+                    let document = render_create_human(ui.stdout_context(), &result);
+                    ui.write_stdout(&document)?;
+                    Ok(())
                 }
-            };
-            let result = service.create(args.codename.as_str(), auth_mode, ui)?;
-            if args.format.is_json() {
-                write_json(output, &create_output(&result))
-            } else {
-                let document = render_create_human(ui.stdout_context(), &result);
+            }
+            ReferralCommand::Status(args) => {
+                let auth_mode = if json_output {
+                    ReferralAuthMode::CachedOnly
+                } else {
+                    ReferralAuthMode::Interactive {
+                        browser_enabled: true,
+                    }
+                };
+                let result = service.status(auth_mode, ui)?;
+                if args.format.is_json() {
+                    write_json(output, &status_output(&result))
+                } else {
+                    let document = render_status_human(ui.stdout_context(), &result);
+                    ui.write_stdout(&document)?;
+                    Ok(())
+                }
+            }
+            ReferralCommand::Payout(args) => {
+                let auth_mode = if json_output {
+                    ReferralAuthMode::CachedOnly
+                } else {
+                    ReferralAuthMode::Interactive {
+                        browser_enabled: !args.no_open,
+                    }
+                };
+                let result = service.payout(
+                    args.country.as_ref().map(CountryCode::as_str),
+                    args.entity_type.map(ReferralEntityType::as_str),
+                    auth_mode,
+                    ui,
+                )?;
+                if args.format.is_json() {
+                    return write_json(output, &payout_output(&result, false));
+                }
+                let mut browser_opened = false;
+                if !args.no_open {
+                    browser_opened = opener(&result.url).is_ok();
+                }
+                let document = render_payout_human(ui.stdout_context(), &result, browser_opened);
                 ui.write_stdout(&document)?;
+                if !args.no_open {
+                    let notice = render_payout_browser_notice(ui.stderr_context(), browser_opened);
+                    ui.write_stderr(&notice)?;
+                }
                 Ok(())
             }
         }
-        ReferralCommand::Status(args) => {
-            let auth_mode = if json_output {
-                ReferralAuthMode::CachedOnly
-            } else {
-                ReferralAuthMode::Interactive {
-                    browser_enabled: true,
-                }
-            };
-            let result = service.status(auth_mode, ui)?;
-            if args.format.is_json() {
-                write_json(output, &status_output(&result))
-            } else {
-                let document = render_status_human(ui.stdout_context(), &result);
-                ui.write_stdout(&document)?;
-                Ok(())
-            }
-        }
-        ReferralCommand::Payout(args) => {
-            let auth_mode = if json_output {
-                ReferralAuthMode::CachedOnly
-            } else {
-                ReferralAuthMode::Interactive {
-                    browser_enabled: !args.no_open,
-                }
-            };
-            let result = service.payout(
-                args.country.as_ref().map(CountryCode::as_str),
-                args.entity_type.map(ReferralEntityType::as_str),
-                auth_mode,
-                ui,
-            )?;
-            if args.format.is_json() {
-                return write_json(output, &payout_output(&result, false));
-            }
-            let mut browser_opened = false;
-            if !args.no_open {
-                browser_opened = opener(&result.url).is_ok();
-            }
-            let document = render_payout_human(ui.stdout_context(), &result, browser_opened);
-            ui.write_stdout(&document)?;
-            if !args.no_open {
-                let notice = render_payout_browser_notice(ui.stderr_context(), browser_opened);
-                ui.write_stderr(&notice)?;
-            }
-            Ok(())
-        }
-    }
+    })();
+    super::human_result(result, !json_output, &retry_command, ui)
 }
 
 fn write_json(output: &mut impl io::Write, value: &impl Serialize) -> Result<()> {
