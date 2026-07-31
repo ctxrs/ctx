@@ -24,7 +24,7 @@ struct EdgeCandidate {
 struct ProjectionCatalog {
     summary: ProviderImportSummary,
     manifest_line: Option<usize>,
-    manifest_is_structurally_invalid: bool,
+    manifest_failure: Option<(ProviderSourceFailureKind, String)>,
     sources: BTreeMap<String, CustomSourceCatalogEntry>,
     sessions: BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
     events: BTreeMap<CustomEventKey, CustomEventCatalogEntry>,
@@ -42,7 +42,7 @@ impl ProjectionCatalog {
         Self {
             summary: ProviderImportSummary::default(),
             manifest_line: None,
-            manifest_is_structurally_invalid: false,
+            manifest_failure: None,
             sources: BTreeMap::new(),
             sessions: BTreeMap::new(),
             events: BTreeMap::new(),
@@ -233,23 +233,21 @@ fn visit_record(
     match record {
         CtxHistoryJsonlRecord::Manifest(manifest) => {
             if manifest.schema_version != CTX_HISTORY_JSONL_V1_SCHEMA_VERSION {
-                push_provider_import_failure(
-                    &mut catalog.summary,
-                    line.line_number,
-                    format!(
-                        "unsupported custom history schema version `{}`",
-                        manifest.schema_version
-                    ),
-                );
-                catalog.manifest_is_structurally_invalid = true;
+                catalog.manifest_failure.get_or_insert_with(|| {
+                    (
+                        ProviderSourceFailureKind::SchemaIncompatible,
+                        format!(
+                            "unsupported custom history schema version `{}`",
+                            manifest.schema_version
+                        ),
+                    )
+                });
             }
             if catalog.manifest_line.replace(line.line_number).is_some() {
-                push_provider_import_failure(
-                    &mut catalog.summary,
-                    line.line_number,
-                    "duplicate manifest record".to_owned(),
-                );
-                catalog.manifest_is_structurally_invalid = true;
+                catalog.manifest_failure = Some((
+                    ProviderSourceFailureKind::InvalidSource,
+                    format!("duplicate manifest record at line {}", line.line_number),
+                ));
             }
         }
         CtxHistoryJsonlRecord::Source(source) => {
@@ -568,26 +566,21 @@ fn finish_projection(
     prior_prefix_bytes: Option<u64>,
 ) -> CustomHistorySourceBackedResult<ParsedProjection> {
     if catalog.manifest_line.is_none() {
-        push_provider_import_failure(
-            &mut catalog.summary,
-            0,
+        catalog.manifest_failure = Some((
+            ProviderSourceFailureKind::InvalidSource,
             "missing manifest record for ctx-history-jsonl-v1".to_owned(),
-        );
-        catalog.manifest_is_structurally_invalid = true;
+        ));
+    }
+    if let Some((kind, detail)) = catalog.manifest_failure {
+        return Err(CustomHistorySourceBackedError::StructuralManifest { kind, detail });
     }
     catalog.touch_keys.clear();
     catalog.edge_keys.clear();
 
-    let mut session_roots = BTreeMap::new();
+    let mut session_roots;
     let mut event_touches = BTreeMap::new();
     let mut appended_touch_changes_prior_document = false;
-    if catalog.manifest_is_structurally_invalid {
-        catalog.sources.clear();
-        catalog.sessions.clear();
-        catalog.events.clear();
-        catalog.touches.clear();
-        catalog.edges.clear();
-    } else {
+    {
         let resolution =
             session_catalog(&catalog.sources, &catalog.sessions, &mut catalog.summary)?;
         catalog

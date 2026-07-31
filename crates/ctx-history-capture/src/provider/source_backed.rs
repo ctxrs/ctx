@@ -43,8 +43,8 @@ use super::codex::nativepath::{
 use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
     scan_custom_history_source_backed_explicit, CustomHistorySourceBackedDisposition,
-    CustomHistorySourceBackedInput, CustomHistorySourceBackedOutcome,
-    CustomHistorySourceBackedResolver,
+    CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
+    CustomHistorySourceBackedOutcome, CustomHistorySourceBackedResolver,
 };
 pub use super::providers::crush::native_path::source_backed::{
     CrushProjectDatabaseV0, CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,

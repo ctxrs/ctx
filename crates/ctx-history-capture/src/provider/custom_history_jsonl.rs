@@ -12,8 +12,8 @@ mod nativepath;
 pub(crate) use nativepath::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
     scan_custom_history_source_backed_explicit, CustomHistorySourceBackedDisposition,
-    CustomHistorySourceBackedInput, CustomHistorySourceBackedOutcome,
-    CustomHistorySourceBackedResolver,
+    CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
+    CustomHistorySourceBackedOutcome, CustomHistorySourceBackedResolver,
 };
 
 pub fn decode_custom_history_jsonl_v1_cursor(encoded: &str) -> Result<String> {
