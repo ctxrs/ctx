@@ -1,6 +1,4 @@
-use ctx_history_core::EventType;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -12,13 +10,12 @@ mod records;
 mod source_backed;
 
 use records::{hash_optional_bytes, hash_optional_i64, hash_optional_u64};
-pub(super) use records::{lingma_complete_user_message, lingma_complete_values};
 #[cfg(test)]
 pub(crate) use source_backed::scan_lingma_source_backed_v0;
 pub(crate) use source_backed::{
     reject_duplicate_paths, scan_lingma_snapshot_v0, LingmaDatabaseSourceV0,
-    LingmaSourceBackedErrorV0, LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0,
-    LingmaSourceInventoryV0, PARSER_REVISION as LINGMA_SOURCE_BACKED_PARSER_REVISION,
+    LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
+    PARSER_REVISION as LINGMA_SOURCE_BACKED_PARSER_REVISION,
 };
 
 const CORE_PAGE_LOOKAHEAD_ROWS: usize = 65;
@@ -112,7 +109,7 @@ impl Candidate {
         self.field_bytes[0].is_some() && self.field_bytes[2].is_some()
     }
 
-    fn can_hydrate(&self) -> bool {
+    fn can_decode(&self) -> bool {
         self.required_fields_present() && self.encoded_bytes <= CORE_PAGE_MAX_SOURCE_BYTES
     }
 }
@@ -127,18 +124,6 @@ struct LingmaRow {
     error_result: Option<String>,
     gmt_create: Option<i64>,
     extra: Option<String>,
-}
-
-/// Shape retained only so the untouched released complete-content wrapper can
-/// compile. Provider-local fallback construction now rejects below.
-pub(super) struct LingmaCoreEvent {
-    pub(super) provider_event_index: u64,
-    pub(super) provider_event_hash: String,
-    pub(super) released_provider_event_hash: String,
-    pub(super) cursor: String,
-    pub(super) event_type: EventType,
-    pub(super) idempotency_key: String,
-    pub(super) payload: Value,
 }
 
 fn detect_schema(conn: &Connection) -> Result<SqliteEncoding> {

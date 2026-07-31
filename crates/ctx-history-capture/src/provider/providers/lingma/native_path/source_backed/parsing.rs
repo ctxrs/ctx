@@ -2,8 +2,7 @@ use std::collections::BTreeSet;
 
 #[cfg(test)]
 use ctx_history_core::CertifiedSourceInventory;
-use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceKey};
-use ctx_history_index::LexicalDocument;
+use ctx_history_core::{CertifiedSource, CoreRecord, ScannedSourceCounts, SourceKey};
 use sha2::Digest;
 
 use crate::{
@@ -18,10 +17,7 @@ use super::super::{
     visit_raw_rows, Candidate, RawRow, SqliteEncoding,
 };
 #[cfg(test)]
-use super::{
-    discovery::LingmaRootAuthorizedSource, identity::LingmaSourceBackedRecordV0,
-    INVENTORY_DISCOVERY_REVISION,
-};
+use super::{discovery::LingmaRootAuthorizedSource, INVENTORY_DISCOVERY_REVISION};
 use super::{
     discovery::{LingmaDatabaseSourceV0, LingmaSourceInventoryV0},
     identity::{project_row, ParsedRow},
@@ -32,15 +28,15 @@ const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 type DuplicateRequestIdentity = (Vec<u8>, Vec<u8>);
 
 pub(crate) trait LingmaSourceBackedSinkV0 {
-    fn emit(&mut self, document: LexicalDocument) -> LingmaSourceBackedResultV0<()>;
+    fn emit(&mut self, record: CoreRecord) -> LingmaSourceBackedResultV0<()>;
 }
 
 impl<F> LingmaSourceBackedSinkV0 for F
 where
-    F: FnMut(LexicalDocument) -> LingmaSourceBackedResultV0<()>,
+    F: FnMut(CoreRecord) -> LingmaSourceBackedResultV0<()>,
 {
-    fn emit(&mut self, document: LexicalDocument) -> LingmaSourceBackedResultV0<()> {
-        self(document)
+    fn emit(&mut self, record: CoreRecord) -> LingmaSourceBackedResultV0<()> {
+        self(record)
     }
 }
 
@@ -48,12 +44,12 @@ where
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaDatabaseScanV0 {
     pub(super) certificate: CertifiedSource,
-    pub(super) records: Vec<LingmaSourceBackedRecordV0>,
+    pub(super) records: Vec<CoreRecord>,
 }
 
 #[cfg(test)]
 impl LingmaDatabaseScanV0 {
-    pub(crate) fn records(&self) -> &[LingmaSourceBackedRecordV0] {
+    pub(crate) fn records(&self) -> &[CoreRecord] {
         &self.records
     }
 }
@@ -111,8 +107,8 @@ where
         let root_authority = LingmaRootAuthorizedSource::retain(data_root, &database.path)?;
         let sqlite_snapshot = root_authority.open_snapshot()?;
         let mut records = Vec::new();
-        let certificate = scan_lingma_snapshot_v0(database, sqlite_snapshot, &mut |document| {
-            records.push(LingmaSourceBackedRecordV0 { document });
+        let certificate = scan_lingma_snapshot_v0(database, sqlite_snapshot, &mut |record| {
+            records.push(record);
             Ok(())
         })?;
         root_authority.source_root.revalidate()?;
@@ -163,8 +159,7 @@ pub(crate) fn scan_lingma_snapshot_v0(
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
-    let source_path = database.path.display().to_string();
-    let parsed = scan_rows(connection, encoding, &source, &source_path, sink)?;
+    let parsed = scan_rows(connection, encoding, &source, sink)?;
     before_database_certification();
     sqlite_snapshot.finish()?;
     let schema_evidence = format!(
@@ -205,7 +200,6 @@ fn scan_rows(
     connection: &rusqlite::Connection,
     encoding: SqliteEncoding,
     source: &SourceKey,
-    source_path: &str,
     sink: &mut impl LingmaSourceBackedSinkV0,
 ) -> LingmaSourceBackedResultV0<ParsedScan> {
     let mut after_rowid = None;
@@ -226,21 +220,20 @@ fn scan_rows(
         }
         let rowids = candidates
             .iter()
-            .filter(|candidate| candidate.can_hydrate())
+            .filter(|candidate| candidate.can_decode())
             .map(|candidate| candidate.rowid)
             .collect::<Vec<_>>();
         let mut candidate_index = 0;
         visit_raw_rows(connection, &rowids, |raw| {
             while candidates
                 .get(candidate_index)
-                .is_some_and(|candidate| !candidate.can_hydrate())
+                .is_some_and(|candidate| !candidate.can_decode())
             {
                 process_candidate(
                     &candidates[candidate_index],
                     None,
                     encoding,
                     source,
-                    source_path,
                     &duplicate_requests,
                     sink,
                     &mut page,
@@ -266,7 +259,6 @@ fn scan_rows(
                 Some(raw),
                 encoding,
                 source,
-                source_path,
                 &duplicate_requests,
                 sink,
                 &mut page,
@@ -281,14 +273,13 @@ fn scan_rows(
         })?;
         while candidates
             .get(candidate_index)
-            .is_some_and(|candidate| !candidate.can_hydrate())
+            .is_some_and(|candidate| !candidate.can_decode())
         {
             process_candidate(
                 &candidates[candidate_index],
                 None,
                 encoding,
                 source,
-                source_path,
                 &duplicate_requests,
                 sink,
                 &mut page,
@@ -330,10 +321,9 @@ fn process_candidate(
     raw: Option<RawRow>,
     encoding: SqliteEncoding,
     source: &SourceKey,
-    source_path: &str,
     duplicate_requests: &BTreeSet<DuplicateRequestIdentity>,
     sink: &mut impl LingmaSourceBackedSinkV0,
-    page: &mut Vec<LexicalDocument>,
+    page: &mut Vec<CoreRecord>,
     hasher: &mut sha2::Sha256,
     physical_ordinal: &mut u64,
     certified_bytes: &mut u64,
@@ -350,7 +340,7 @@ fn process_candidate(
             "Lingma certified byte count exhausted",
         ))?;
     hash_candidate(hasher, candidate, raw.as_ref());
-    let parsed = if candidate.can_hydrate() {
+    let parsed = if candidate.can_decode() {
         raw.and_then(|raw| super::super::decode_raw_row(raw, encoding).ok())
     } else {
         None
@@ -378,7 +368,6 @@ fn process_candidate(
             let mut projected = Vec::with_capacity(2);
             project_row(
                 source,
-                source_path,
                 ParsedRow {
                     ordinal: *physical_ordinal,
                     row,
@@ -396,7 +385,7 @@ fn process_candidate(
             if page.len().saturating_add(projected.len()) > SOURCE_BACKED_PAGE_ROWS {
                 emit_page(sink, page)?;
             }
-            page.extend(projected.into_iter().map(|record| record.document));
+            page.extend(projected);
         }
         None => {
             *rejected_records = rejected_records.saturating_add(1);
@@ -422,10 +411,10 @@ fn duplicate_request_identities(
 
 fn emit_page(
     sink: &mut impl LingmaSourceBackedSinkV0,
-    page: &mut Vec<LexicalDocument>,
+    page: &mut Vec<CoreRecord>,
 ) -> LingmaSourceBackedResultV0<()> {
-    for document in page.drain(..) {
-        sink.emit(document)?;
+    for record in page.drain(..) {
+        sink.emit(record)?;
     }
     Ok(())
 }

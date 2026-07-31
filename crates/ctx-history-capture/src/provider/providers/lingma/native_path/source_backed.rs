@@ -1,19 +1,15 @@
-use ctx_history_core::{ProjectionContractError, SourceResolverContractError};
+use ctx_history_core::{CoreRecordError, ProjectionContractError};
 use thiserror::Error;
 
 use crate::{provider_sources::SqliteSourceAccessError, CaptureError};
 
 mod discovery;
-mod hydration;
 mod identity;
 mod parsing;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use discovery::{LingmaDatabaseSourceV0, LingmaSourceInventoryV0};
-pub(crate) use hydration::LingmaSourceBackedResolverV0;
-#[allow(unused_imports)]
-pub(crate) use identity::LingmaSourceBackedRecordV0;
 #[cfg(test)]
 pub(crate) use parsing::scan_lingma_source_backed_v0;
 #[allow(unused_imports)]
@@ -25,14 +21,13 @@ const INVENTORY_AUTHORITY_NAMESPACE: &str = "lingma.installed-client-profile-ver
 const INVENTORY_REVISION_KIND: &str = "lingma-finite-database-inventory-v0";
 #[cfg(test)]
 const INVENTORY_DISCOVERY_REVISION: &str = "lingma-installed-database-discovery-v0";
-pub(crate) const PARSER_REVISION: &str = "lingma-source-backed-chat-record-v0";
+pub(crate) const PARSER_REVISION: &str = "lingma-source-backed-core-v1";
 const NATIVE_SESSION_NAMESPACE: &str = "lingma.session";
 const NATIVE_REQUEST_NAMESPACE: &str = "lingma.chat-record.request";
 const NATIVE_POSITION_KIND: &str = "lingma.chat-record.scan-ordinal";
 const NATIVE_SUBRECORD_NAMESPACE: &str = "lingma.chat-record.body-kind";
 const LOGICAL_SESSION_KIND: &str = "lingma-session";
 const LOGICAL_EVENT_KIND: &str = "lingma-chat-record-event";
-const LOGICAL_RELATION: &str = "chat_record";
 const USER_PROMPT_COORDINATE: &str = "chat_prompt";
 const ASSISTANT_SUMMARY_COORDINATE: &str = "assistant_summary";
 const ASSISTANT_ERROR_COORDINATE: &str = "assistant_error_result";
@@ -48,7 +43,7 @@ pub(crate) enum LingmaSourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error("Lingma source inventory exceeds {MAX_INVENTORY_DATABASES} databases")]
     InventoryTooLarge,
     #[error("Lingma source inventory contains a duplicate database lineage")]
@@ -60,8 +55,8 @@ pub(crate) enum LingmaSourceBackedErrorV0 {
     InventoryChangedDuringScan,
     #[error("Lingma source-backed count overflow")]
     CountOverflow,
-    #[error("Lingma source-backed projection emitted an empty lexical body")]
-    EmptyLexicalBody,
+    #[error("Lingma source-backed projection emitted an empty selected body")]
+    EmptySelectedBody,
 }
 
 pub(crate) type LingmaSourceBackedResultV0<T> = Result<T, LingmaSourceBackedErrorV0>;

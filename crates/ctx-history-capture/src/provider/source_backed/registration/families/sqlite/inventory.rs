@@ -36,15 +36,11 @@ pub fn register_astrbot_source_backed_route(
         data_root,
         CaptureProvider::AstrBot,
         "astrbot_data_v4_sqlite",
-        AstrBotInventoryProvider {
-            data_root: data_root.to_path_buf(),
-            discovery,
-        },
+        AstrBotInventoryProvider { discovery },
     )
 }
 
 struct AstrBotInventoryProvider {
-    data_root: PathBuf,
     discovery: DiscoveryContext,
 }
 
@@ -83,8 +79,8 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
         let mut sink_failure = None;
-        let certificate = scan_astrbot_snapshot_v0(leaf, snapshot, &mut |document| {
-            if let Err(error) = sink.emit_core_record(document) {
+        let certificate = scan_astrbot_snapshot_v0(leaf, snapshot, &mut |record| {
+            if let Err(error) = sink.emit_core_record(record) {
                 let detail = error.to_string();
                 sink_failure = Some(error);
                 return Err(
@@ -278,15 +274,11 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
         data_root,
         CaptureProvider::Lingma,
         "lingma_sqlite",
-        LingmaInventoryProvider {
-            data_root: data_root.to_path_buf(),
-            inventory_source,
-        },
+        LingmaInventoryProvider { inventory_source },
     )
 }
 
 struct LingmaInventoryProvider {
-    data_root: PathBuf,
     inventory_source: Arc<dyn LingmaInventorySource>,
 }
 
@@ -328,8 +320,8 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
         let mut sink_failure = None;
-        let certificate = scan_lingma_snapshot_v0(leaf, snapshot, &mut |document| {
-            if let Err(error) = sink.emit_core_record(document) {
+        let certificate = scan_lingma_snapshot_v0(leaf, snapshot, &mut |record| {
+            if let Err(error) = sink.emit_core_record(record) {
                 let detail = error.to_string();
                 sink_failure = Some(error);
                 return Err(LingmaSourceBackedErrorV0::Capture(

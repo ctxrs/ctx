@@ -105,7 +105,7 @@ impl LingmaDatabaseSourceV0 {
 
 /// A complete, finite inventory supplied by the installed-client/profile/version discovery lane.
 ///
-/// The catalog lineage is deliberately caller-owned: physical database paths are resolver
+/// The catalog lineage is deliberately caller-owned: physical database paths are acquisition
 /// locations and never enter stable source, session, or event identity.
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceInventoryV0 {
