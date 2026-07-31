@@ -10,14 +10,12 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, EventHydrationRequest, EventIdentityInput,
-    EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    StableEntityId, TypedKey,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -31,7 +29,6 @@ use super::{
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
-        normalization::provider_policy_event_text,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
@@ -169,10 +166,13 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
         leaf: &JsonlFamilyLeaf,
         source_file: Arc<OpenedProviderSourceFile>,
     ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
+        let binding = decode_binding(leaf).map_err(unavailable)?;
+        let identities = identities(&binding).map_err(unavailable)?;
         Ok(Box::new(ClaudeHydrator {
             source: leaf.source().clone(),
-            native_session_key: session_typed_key(&decode_binding(leaf).map_err(unavailable)?.key)
-                .map_err(unavailable)?,
+            source_path: leaf.source_path().to_path_buf(),
+            binding,
+            identities,
             source_file,
         }))
     }
@@ -247,7 +247,9 @@ impl JsonlFamilyProjector for ClaudeProjector {
 
 struct ClaudeHydrator {
     source: SourceKey,
-    native_session_key: TypedKey,
+    source_path: PathBuf,
+    binding: Binding,
+    identities: Identities,
     source_file: Arc<OpenedProviderSourceFile>,
 }
 
@@ -256,8 +258,11 @@ impl JsonlFamilyHydrator for ClaudeHydrator {
         &mut self,
         request: &EventHydrationRequest,
     ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let (byte_offset, byte_length, ordinal) =
-            validate_locator(request.locator(), &self.source, &self.native_session_key)?;
+        let (byte_offset, byte_length, ordinal, expected_event_key) = validate_locator(
+            request.locator(),
+            &self.source,
+            &self.identities.native_session_key,
+        )?;
         let length = usize::try_from(byte_length)
             .map_err(|_| invalid("Claude locator range exceeds platform limits"))?;
         if length == 0 || length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(1) {
@@ -284,25 +289,65 @@ impl JsonlFamilyHydrator for ClaudeHydrator {
         if Sha256::digest(bytes).as_slice() != request.locator().record_digest() {
             return Err(stale("Claude record digest changed"));
         }
-        let value: Value =
-            serde_json::from_slice(bytes).map_err(|_| stale("Claude record JSON changed"))?;
-        let line_number = usize::try_from(ordinal)
-            .ok()
-            .and_then(|ordinal| ordinal.checked_add(1))
+        let byte_end_exclusive = byte_offset
+            .checked_add(byte_length)
+            .ok_or_else(|| invalid("Claude locator range overflows"))?;
+        let line_number = ordinal
+            .checked_add(1)
             .ok_or_else(|| invalid("Claude locator ordinal is invalid"))?;
-        let (text, _) = super::super::complete_content::claude_complete_content_message_record(
-            &value,
+        let physical = ClaudePhysicalLocator {
+            path: self.source_path.clone(),
+            byte_start: byte_offset,
+            byte_end_exclusive,
             line_number,
-        )
-        .ok_or_else(|| stale("Claude record has no exact message display"))?;
-        let retained = provider_policy_event_text(EventType::Message, &text, &Value::Null);
-        let text = if retained.text.trim().is_empty() {
-            "message".to_owned()
-        } else {
-            retained.text
+            record_sha256: Sha256::digest(bytes).into(),
         };
+        let parsed = parse_native_record(bytes, ordinal, &physical).map_err(|_| {
+            unsupported("Claude authoritative record no longer matches the parser revision")
+        })?;
+        if parsed
+            .session_id
+            .as_deref()
+            .filter(|session| !session.trim().is_empty())
+            .is_some_and(|session| session != self.binding.key.root_session_id)
+            || parsed.rows.len() > CLAUDE_MAX_RECORD_ROWS
+        {
+            return Err(invalid(
+                "Claude authoritative record no longer belongs to the locator session",
+            ));
+        }
+        let mut selected = None;
+        for row in parsed.rows {
+            let observed_event_key = native_event_typed_key(&row).map_err(unsupported)?;
+            if observed_event_key == expected_event_key {
+                if selected.is_some() {
+                    return Err(unsupported(
+                        "Claude authoritative record repeats a native event key",
+                    ));
+                }
+                selected = Some(row);
+            }
+        }
+        let selected = selected
+            .ok_or_else(|| invalid("Claude locator event key is not present in the record"))?;
+        if selected.identity.source_record_ordinal != ordinal {
+            return Err(invalid("Claude locator event ordinal is invalid"));
+        }
+        let native_item_key = native_item_key(&selected).map_err(invalid)?;
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &self.source,
+            session_id: self.identities.session_id,
+            logical_item_kind: LOGICAL_EVENT_KIND,
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .map_err(invalid)?;
+        if event_id != request.event_id() {
+            return Err(invalid("Claude locator event identity is invalid"));
+        }
+        let text = lexical_body(&selected);
         Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
+            event_id,
             provider_bytes: text.into_bytes(),
         })
     }
@@ -553,7 +598,7 @@ fn validate_locator(
     locator: &SourceRecordLocator,
     source: &SourceKey,
     native_session_key: &TypedKey,
-) -> std::result::Result<(u64, u64, u64), HydrationFailure> {
+) -> std::result::Result<(u64, u64, u64, TypedKey), HydrationFailure> {
     locator.validate_contract().map_err(invalid)?;
     source
         .validate_exact_descriptor(locator.source())
@@ -568,7 +613,7 @@ fn validate_locator(
         byte_length,
         physical_ordinal,
         native_session_key: observed_session,
-        ..
+        native_event_key: observed_event,
     } = locator.coordinate()
     else {
         return Err(invalid("Claude locator is not a JSONL range"));
@@ -576,7 +621,16 @@ fn validate_locator(
     if observed_session.as_ref() != Some(native_session_key) {
         return Err(invalid("Claude locator session key is invalid"));
     }
-    Ok((*byte_offset, *byte_length, *physical_ordinal))
+    let native_event_key = observed_event
+        .as_ref()
+        .ok_or_else(|| invalid("Claude locator event key is missing"))?
+        .clone();
+    Ok((
+        *byte_offset,
+        *byte_length,
+        *physical_ordinal,
+        native_event_key,
+    ))
 }
 
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
@@ -614,6 +668,13 @@ fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
 fn stale(error: impl std::fmt::Display) -> HydrationFailure {
     HydrationFailure {
         kind: HydrationFailureKind::StaleRecordEvidence,
+        detail: error.to_string(),
+    }
+}
+
+fn unsupported(error: impl std::fmt::Display) -> HydrationFailure {
+    HydrationFailure {
+        kind: HydrationFailureKind::UnsupportedParserRevision,
         detail: error.to_string(),
     }
 }
