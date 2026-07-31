@@ -1,9 +1,8 @@
 use ctx_history_core::{
     core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreContent, CoreContentPolicyStatus, CoreRecord,
-    CoreRecordAnnotation, CoreRecordError, ProjectionContractError, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, CORE_CONTENT_POLICY_REVISION,
-    CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION, IDENTITY_VERSION,
+    CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation, CoreRecordError,
+    NativeRecordCoordinate, ProjectionContractError, SourceKey, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -69,6 +68,15 @@ pub enum IndexError {
         "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
     )]
     CoreRecordContractMismatch { expected: String, actual: String },
+    #[error(
+        "Core record revisions do not match the active generation policy: normalization {normalization}/{expected_normalization}, content {content}/{expected_content}"
+    )]
+    CoreRecordPolicyRevisionMismatch {
+        normalization: u32,
+        expected_normalization: u32,
+        content: u32,
+        expected_content: u32,
+    },
     #[error(
         "source generation policy mismatch: expected {expected}, generation carries {actual}; \
          rebuild the disposable generation"
@@ -198,12 +206,6 @@ pub enum IndexError {
     MissingAnalyzer(&'static str),
     #[error("document source does not have an active replacement")]
     DocumentSourceNotActive,
-    #[error("document {0} does not carry an event identity")]
-    InvalidEventIdentityKind(String),
-    #[error("document {0} does not carry a session identity")]
-    InvalidSessionIdentityKind(String),
-    #[error("document identities do not belong to source {0}")]
-    IdentitySourceMismatch(String),
     #[error("duplicate event identity {0} in one candidate generation")]
     DuplicateEventIdentity(String),
     #[error("session identity {0} is already owned by another source")]
@@ -328,39 +330,51 @@ impl LexicalDocument {
         &self,
         annotation: CoreRecordAnnotation,
     ) -> Result<CoreRecord> {
-        let record = CoreRecord {
-            record_version: CORE_RECORD_VERSION,
-            event_id: self.event_id,
-            session_id: self.session_id,
-            parent_session_id: self.parent_session_id,
-            root_session_id: self.root_session_id,
-            source: self.source.clone(),
-            provider_session_id: self.provider_session_id.clone(),
-            native_event_id: None,
-            event_sequence: self.event_sequence,
-            occurred_at_unix_ms: self.occurred_at_unix_ms,
-            event_type: self.event_type.clone(),
-            role: self.role.clone(),
-            agent_type: self.agent_type.clone(),
-            is_primary: self.is_primary,
-            workspace: self.workspace.clone(),
-            branch: self.branch.clone(),
-            cwd: self.cwd.clone(),
-            parser_revision: "lexical_document_bridge_v1".to_owned(),
-            normalization_revision: CORE_NORMALIZATION_REVISION,
-            content: CoreContent {
-                policy_revision: CORE_CONTENT_POLICY_REVISION,
-                policy_status: CoreContentPolicyStatus::Selected,
-                normalized_body: Some(self.body.clone()),
-                structured_content: annotation.structured_content,
-            },
-            metadata: annotation.metadata,
-            repository_candidate_evidence: annotation.repository_candidate_evidence,
-            repository_bindings: annotation.repository_bindings,
-            repository_abstentions: annotation.repository_abstentions,
-            repository_file_observations: annotation.repository_file_observations,
-            repository_vcs_observations: annotation.repository_vcs_observations,
+        self.validate()?;
+        let mut record = CoreRecord::new_selected(
+            self.event_id,
+            self.session_id,
+            self.root_session_id,
+            self.source.clone(),
+            self.event_sequence,
+            self.event_type.clone(),
+            self.agent_type.clone(),
+            self.is_primary,
+            "lexical_document_bridge_v1",
+            self.body.clone(),
+        )?;
+        record.parent_session_id = self.parent_session_id;
+        record.provider_session_id = self.provider_session_id.clone();
+        record.native_event_id = match self.locator.coordinate() {
+            NativeRecordCoordinate::Jsonl {
+                native_session_key: Some(native_session_key),
+                ..
+            } if self.source.provider() == "custom" => Some(native_session_key.clone()),
+            NativeRecordCoordinate::Jsonl {
+                native_event_key, ..
+            } => native_event_key.clone(),
+            NativeRecordCoordinate::ProviderSqlite { primary_key, .. } => Some(primary_key.clone()),
+            NativeRecordCoordinate::Document { object_key, .. } => Some(object_key.clone()),
+            NativeRecordCoordinate::TreeRecord {
+                record_coordinate, ..
+            }
+            | NativeRecordCoordinate::ProviderNative {
+                coordinate: record_coordinate,
+                ..
+            } => Some(record_coordinate.clone()),
         };
+        record.occurred_at_unix_ms = self.occurred_at_unix_ms;
+        record.role = self.role.clone();
+        record.workspace = self.workspace.clone();
+        record.branch = self.branch.clone();
+        record.cwd = self.cwd.clone();
+        record.content.structured_content = annotation.structured_content;
+        record.metadata = annotation.metadata;
+        record.repository_candidate_evidence = annotation.repository_candidate_evidence;
+        record.repository_bindings = annotation.repository_bindings;
+        record.repository_abstentions = annotation.repository_abstentions;
+        record.repository_file_observations = annotation.repository_file_observations;
+        record.repository_vcs_observations = annotation.repository_vcs_observations;
         record.validate_contract()?;
         Ok(record)
     }

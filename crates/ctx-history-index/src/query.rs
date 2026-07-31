@@ -12,8 +12,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    CoreRecord, NativeRecordCoordinate, SourceKey, SourceRecordLocator, StableEntityId,
-    StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES,
+    MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{
@@ -343,10 +343,11 @@ pub struct EventRecord {
     pub session_id: StableEntityId,
     pub parent_session_id: Option<StableEntityId>,
     pub root_session_id: StableEntityId,
-    pub locator: SourceRecordLocator,
+    pub source: SourceKey,
     pub provider: String,
     pub source_format: String,
     pub provider_session_id: Option<String>,
+    pub native_event_id: Option<TypedKey>,
     pub branch: Option<String>,
     pub source_path: Option<String>,
     pub agent_type: String,
@@ -362,8 +363,8 @@ pub struct EventRecord {
 
 /// One verified event plus its complete generation-owned Core data.
 ///
-/// The wrapper preserves `EventRecord` as a temporary metadata/locator compile
-/// bridge while downstream lanes move to the self-contained record.
+/// The wrapper preserves the compact query metadata alongside the complete
+/// self-contained record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreEventRecord {
     pub event: EventRecord,
@@ -408,8 +409,6 @@ pub struct SessionEventCoordinate {
     pub event_id: Uuid,
     pub event_sequence: u64,
     pub occurred_at_unix_ms: Option<i64>,
-    pub event_type: String,
-    pub role: Option<String>,
 }
 
 pub(super) fn stored_event_record(
@@ -459,15 +458,8 @@ pub(super) fn stored_core_event_record_with_size(
         StableEntityKind::Session,
         "session_identity",
     )?;
-    let locator: SourceRecordLocator = serde_json::from_slice(required_bytes(
-        &document,
-        fields.native_locator,
-        "native_locator",
-    )?)?;
-    locator.validate_contract()?;
     let stored_source = required_string(&document, fields.source_key, "source_key")?;
     if stored_source != source_token(&core_record.source)
-        || !locator.source().exact_descriptor_eq(&core_record.source)
         || event_id != core_record.event_id
         || session_id != core_record.session_id
     {
@@ -536,10 +528,11 @@ pub(super) fn stored_core_event_record_with_size(
                 session_id,
                 parent_session_id,
                 root_session_id,
-                locator,
+                source: core_record.source.clone(),
                 provider,
                 source_format,
                 provider_session_id,
+                native_event_id: core_record.native_event_id.clone(),
                 branch,
                 source_path: optional_string(&document, fields.source_path)?,
                 agent_type,
@@ -704,11 +697,7 @@ fn custom_source_identity(event: &EventRecord) -> Option<(&str, &str)> {
     if event.provider != "custom" {
         return None;
     }
-    let NativeRecordCoordinate::Jsonl {
-        native_session_key: Some(TypedKey::Composite(values)),
-        ..
-    } = event.locator.coordinate()
-    else {
+    let Some(TypedKey::Composite(values)) = event.native_event_id.as_ref() else {
         return None;
     };
     let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =

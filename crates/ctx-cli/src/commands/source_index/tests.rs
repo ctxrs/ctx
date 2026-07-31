@@ -8,14 +8,11 @@ mod tests {
 
     use ctx_history_capture::ingest_codex_source_backed_v0;
     use ctx_history_core::{
-        database_path, derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput,
-        LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-        ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-        SourceRecordLocator, TypedKey,
+        database_path, derive_event_id, derive_session_id, CertifiedSource, CoreRecord,
+        EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+        SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
     };
-    use ctx_history_index::{
-        EventSearchFilters, GenerationWriter, LexicalDocument, WriterOptions,
-    };
+    use ctx_history_index::{EventSearchFilters, GenerationWriter, WriterOptions};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -76,26 +73,16 @@ mod tests {
             subrecord_selector: None,
         })
         .unwrap();
-        let locator = SourceRecordLocator::new(
-            source,
-            NativeRecordCoordinate::ProviderNative {
-                namespace: "fixture".to_owned(),
-                coordinate: TypedKey::U64(sequence),
-            },
-            LocatorRevisionPolicy::ExactSourceRevision,
-            Some([lineage; 32]),
-            [sequence as u8; 32],
-        )
-        .unwrap();
         EventRecord {
             event_id,
             session_id,
             parent_session_id: None,
             root_session_id: session_id,
-            locator,
+            source,
             provider: provider.as_str().to_owned(),
             source_format: source_format.to_owned(),
             provider_session_id: Some(format!("fixture-session-{lineage}")),
+            native_event_id: Some(TypedKey::U64(sequence)),
             branch: None,
             source_path: None,
             agent_type: "primary".to_owned(),
@@ -111,30 +98,31 @@ mod tests {
     }
 
     fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEventRecord {
-        let document = LexicalDocument {
-            event_id: event.event_id,
-            session_id: event.session_id,
-            parent_session_id: event.parent_session_id,
-            root_session_id: event.root_session_id,
-            source: event.locator.source().clone(),
-            locator: event.locator.clone(),
-            provider_session_id: event.provider_session_id.clone(),
-            branch: event.branch.clone(),
-            source_path: event.source_path.clone(),
-            agent_type: event.agent_type.clone(),
-            is_primary: event.is_primary,
-            event_sequence: event.event_sequence,
-            occurred_at_unix_ms: event.occurred_at_unix_ms,
-            event_type: event.event_type.clone(),
-            role: event.role.clone(),
-            body: body.into(),
-            workspace: event.workspace.clone(),
-            cwd: event.cwd.clone(),
-            touched_files: event.touched_files.clone(),
-        };
+        let mut core_record = CoreRecord::new_selected(
+            event.event_id,
+            event.session_id,
+            event.root_session_id,
+            event.source.clone(),
+            event.event_sequence,
+            event.event_type.clone(),
+            event.agent_type.clone(),
+            event.is_primary,
+            "source-index-test-v1",
+            body,
+        )
+        .unwrap();
+        core_record.parent_session_id = event.parent_session_id;
+        core_record.provider_session_id = event.provider_session_id.clone();
+        core_record.native_event_id = event.native_event_id.clone();
+        core_record.occurred_at_unix_ms = event.occurred_at_unix_ms;
+        core_record.role = event.role.clone();
+        core_record.workspace = event.workspace.clone();
+        core_record.branch = event.branch.clone();
+        core_record.cwd = event.cwd.clone();
+        core_record.validate_contract().unwrap();
         CoreEventRecord {
             event: event.clone(),
-            core_record: document.to_core_record().unwrap(),
+            core_record,
         }
     }
 
@@ -204,7 +192,8 @@ mod tests {
     }
 
     fn append_fixture_event(data_root: &Path, event: EventRecord, revision: u8) {
-        let source = event.locator.source().clone();
+        let source = event.source.clone();
+        let core_record = fixture_core_event(&event, "ambiguous provider session fixture").core_record;
         let mut writer = GenerationWriter::open(
             index_root(data_root),
             WriterOptions {
@@ -214,29 +203,7 @@ mod tests {
         )
         .unwrap();
         writer.begin_source(source.clone()).unwrap();
-        writer
-            .add_document(LexicalDocument {
-                event_id: event.event_id,
-                session_id: event.session_id,
-                parent_session_id: event.parent_session_id,
-                root_session_id: event.root_session_id,
-                source: source.clone(),
-                locator: event.locator,
-                provider_session_id: event.provider_session_id,
-                branch: event.branch,
-                source_path: event.source_path,
-                agent_type: event.agent_type,
-                is_primary: event.is_primary,
-                event_sequence: event.event_sequence,
-                occurred_at_unix_ms: event.occurred_at_unix_ms,
-                event_type: event.event_type,
-                role: event.role,
-                body: "ambiguous provider session fixture".to_owned(),
-                workspace: event.workspace,
-                cwd: event.cwd,
-                touched_files: event.touched_files,
-            })
-            .unwrap();
+        writer.add_core_record(core_record).unwrap();
         let observation =
             SourceObservation::new(source, "fixture-revision-v1", vec![revision]).unwrap();
         writer

@@ -621,7 +621,7 @@ pub(crate) fn verify_generation_identities(searcher: &Searcher) -> Result<()> {
                 fields,
             )?;
             register_event_identity(&mut event_identities, event.event_id)?;
-            let owner = source_token(event.locator.source());
+            let owner = source_token(&event.source);
             register_generation_session_identity(
                 &mut session_identities,
                 event.session_id,

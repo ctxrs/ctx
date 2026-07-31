@@ -19,7 +19,6 @@ pub(crate) struct Fields {
     pub(crate) root_session_id: Field,
     pub(crate) root_session_identity: Field,
     pub(crate) source_key: Field,
-    pub(crate) native_locator: Field,
     pub(crate) provider: Field,
     pub(crate) source_format: Field,
     pub(crate) provider_session_id: Field,
@@ -63,7 +62,6 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("root_session_id", STRING | STORED);
     builder.add_bytes_field("root_session_identity", STORED);
     builder.add_text_field("source_key", STRING | STORED);
-    builder.add_bytes_field("native_locator", STORED);
     builder.add_text_field("provider", STRING | STORED);
     builder.add_text_field("source_format", STRING | STORED);
     builder.add_text_field("provider_session_id", STRING | STORED);
@@ -107,7 +105,6 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         root_session_id: required_field(schema, "root_session_id")?,
         root_session_identity: required_field(schema, "root_session_identity")?,
         source_key: required_field(schema, "source_key")?,
-        native_locator: required_field(schema, "native_locator")?,
         provider: required_field(schema, "provider")?,
         source_format: required_field(schema, "source_format")?,
         provider_session_id: required_field(schema, "provider_session_id")?,

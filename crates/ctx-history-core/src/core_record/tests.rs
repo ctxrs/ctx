@@ -70,6 +70,41 @@ fn record() -> CoreRecord {
     }
 }
 
+#[test]
+fn selected_constructor_defaults_the_active_core_contract() {
+    let fixture = record();
+    let constructed = CoreRecord::new_selected(
+        fixture.event_id,
+        fixture.session_id,
+        fixture.root_session_id,
+        fixture.source.clone(),
+        fixture.event_sequence,
+        fixture.event_type.clone(),
+        fixture.agent_type.clone(),
+        fixture.is_primary,
+        "provider-parser-v7",
+        "complete selected body",
+    )
+    .unwrap();
+
+    assert_eq!(constructed.record_version, CORE_RECORD_VERSION);
+    assert_eq!(
+        constructed.normalization_revision,
+        CORE_NORMALIZATION_REVISION
+    );
+    assert_eq!(
+        constructed.content.policy_revision,
+        CORE_CONTENT_POLICY_REVISION
+    );
+    assert_eq!(constructed.parser_revision, "provider-parser-v7");
+    assert_eq!(
+        constructed.content.normalized_body.as_deref(),
+        Some("complete selected body")
+    );
+    assert!(constructed.metadata.is_empty());
+    assert!(constructed.repository_bindings.is_empty());
+}
+
 fn binding() -> RepositoryBinding {
     RepositoryBinding {
         binding_id: "binding-1".to_owned(),

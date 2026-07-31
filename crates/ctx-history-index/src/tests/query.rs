@@ -34,7 +34,7 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
         .unwrap();
     assert_eq!(exact.event_id, first.event_id);
     assert_eq!(exact.session_id, first.session_id);
-    assert_eq!(exact.locator, first.locator);
+    assert!(exact.source.exact_descriptor_eq(&first.source));
     assert_eq!(exact.provider, "codex");
     assert_eq!(exact.source_format, "codex_session_jsonl");
     assert_eq!(exact.provider_session_id.as_deref(), Some("session"));
@@ -44,7 +44,7 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     assert_eq!(exact.role.as_deref(), Some("user"));
     assert_eq!(exact.workspace.as_deref(), Some("ctx"));
     assert_eq!(exact.cwd.as_deref(), Some("/work/ctx"));
-    assert_eq!(exact.touched_files, vec!["src/lib.rs"]);
+    assert!(exact.touched_files.is_empty());
 
     let event_id = first.event_id.to_string();
     let event_prefix = &event_id[..8];
@@ -127,9 +127,6 @@ fn bounded_core_event_batch_is_complete_and_requested_ordered() {
             .collect::<Vec<_>>(),
         vec![first.event_id.as_uuid(), second.event_id.as_uuid()]
     );
-    assert!(coordinates.iter().all(|coordinate| {
-        coordinate.event_type == "message" && coordinate.role.as_deref() == Some("user")
-    }));
     assert_eq!(
         crate::query::stored_core_event_record_materializations(),
         0,
@@ -216,6 +213,83 @@ fn bounded_core_event_batch_is_complete_and_requested_ordered() {
         .unwrap()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn custom_source_filters_use_the_core_native_event_identity() {
+    let temp = tempdir().unwrap();
+    let source = SourceKey::derive(
+        "custom",
+        "ctx_history_jsonl",
+        "catalog",
+        1,
+        SourceAnchor::CatalogLineage([42; 32]),
+    )
+    .unwrap();
+    let mut document = document(&source, 1, "custom identity needle");
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8("fixture-provider").unwrap(),
+        TypedKey::utf8("fixture-source").unwrap(),
+        TypedKey::utf8("fixture-session").unwrap(),
+    ])
+    .unwrap();
+    document.locator = SourceRecordLocator::new(
+        source.clone(),
+        NativeRecordCoordinate::Jsonl {
+            byte_offset: 0,
+            byte_length: 100,
+            physical_ordinal: 1,
+            native_session_key: Some(native_event_id.clone()),
+            native_event_key: Some(TypedKey::U64(1)),
+        },
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
+        [1; 32],
+    )
+    .unwrap();
+    let record = document.to_core_record().unwrap();
+    assert_eq!(record.native_event_id.as_ref(), Some(&native_event_id));
+
+    let event_id = record.event_id;
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let filters = EventSearchFilters {
+        history_source: Some("fixture-provider/fixture-source".to_owned()),
+        provider_key: Some("fixture-provider".to_owned()),
+        source_id: Some("fixture-source".to_owned()),
+        ..EventSearchFilters::default()
+    };
+    let hits = index
+        .search_event_candidates_with_filters("identity", &filters, 10)
+        .unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![event_id]
+    );
+    assert_eq!(
+        hits[0].event.native_event_id.as_ref(),
+        Some(&native_event_id)
+    );
+    assert!(filters.matches_source_identity(&hits[0].event));
+
+    let misses = index
+        .search_event_candidates_with_filters(
+            "identity",
+            &EventSearchFilters {
+                source_id: Some("another-source".to_owned()),
+                ..EventSearchFilters::default()
+            },
+            10,
+        )
+        .unwrap();
+    assert!(misses.is_empty());
 }
 
 #[test]
@@ -472,7 +546,7 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     assert!(first_page
         .items
         .iter()
-        .all(|event| event.locator.source().exact_descriptor_eq(&target)));
+        .all(|event| event.source.exact_descriptor_eq(&target)));
 
     let serialized = serde_json::to_vec(first_page.next_cursor.as_ref().unwrap()).unwrap();
     let cursor: SourceEventCursor = serde_json::from_slice(&serialized).unwrap();
@@ -516,7 +590,7 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     assert_eq!(unique.len(), expected.len());
     assert!(all
         .iter()
-        .all(|event| event.locator.source().exact_descriptor_eq(&target)));
+        .all(|event| event.source.exact_descriptor_eq(&target)));
 
     let other_page = index.source_event_page(&other, None, 10).unwrap();
     let mut expected_other = vec![other_first.event_id, other_second.event_id];
@@ -1127,7 +1201,7 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
         .content
         .normalized_body
         .is_some()));
-    assert_eq!(first_page.items[0].locator.source(), &source);
+    assert!(first_page.items[0].source.exact_descriptor_eq(&source));
     assert_eq!(
         first_page.items[0].root_session_id,
         first_page.items[0].session_id
@@ -1443,7 +1517,7 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
         filtered_session_ids(
             &index,
             EventSearchFilters {
-                workspace: Some("CTX[ROOT]".to_owned()),
+                workspace: Some("RICH".to_owned()),
                 ..EventSearchFilters::default()
             }
         ),
@@ -1500,7 +1574,6 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
                 root_session_id: Some(root_session_id.as_uuid()),
                 provider_session_id: Some("child-thread".to_owned()),
                 branch: Some("feature/query-seam".to_owned()),
-                file: Some("QUERY.RS".to_owned()),
                 ..EventSearchFilters::default()
             }
         ),
@@ -1529,7 +1602,7 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     assert_eq!(child.root_session_id, root_session_id);
     assert_eq!(child.provider_session_id.as_deref(), Some("child-thread"));
     assert_eq!(child.branch.as_deref(), Some("feature/query-seam"));
-    assert_eq!(child.source_path.as_deref(), Some("/history/child.jsonl"));
+    assert!(child.source_path.is_none());
     assert_eq!(child.agent_type, "subagent");
     assert!(!child.is_primary);
 }
@@ -1551,7 +1624,7 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
         .event_by_id(expected.event_id.as_uuid())
         .unwrap()
         .unwrap();
-    assert_eq!(record.locator, expected.locator);
+    assert!(record.source.exact_descriptor_eq(&expected.source));
     let core_record = index
         .core_record_by_id(expected.event_id.as_uuid())
         .unwrap()

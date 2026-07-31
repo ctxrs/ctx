@@ -991,3 +991,46 @@ fn stored_document_identities_use_canonical_fixed_bytes() {
         expected.event_id
     );
 }
+
+#[test]
+fn direct_core_record_is_the_canonical_locator_free_write_path() {
+    let temp = tempdir().unwrap();
+    let source = source("direct-core.jsonl");
+    let document = document(&source, 1, "direct Core body");
+    let expected = document.to_core_record().unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(expected.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let actual = index
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert!(index
+        .event_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap()
+        .source
+        .exact_descriptor_eq(&source));
+}
+
+#[test]
+fn direct_core_record_rejects_noncurrent_policy_revisions() {
+    let temp = tempdir().unwrap();
+    let source = source("direct-core-policy.jsonl");
+    let mut record = document(&source, 1, "direct Core body")
+        .to_core_record()
+        .unwrap();
+    record.normalization_revision += 1;
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source).unwrap();
+
+    assert!(matches!(
+        writer.add_core_record(record),
+        Err(IndexError::CoreRecordPolicyRevisionMismatch { .. })
+    ));
+}
