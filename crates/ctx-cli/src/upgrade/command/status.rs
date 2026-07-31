@@ -70,6 +70,7 @@ pub(super) fn render_status(
             "reason": format!("{error:#}"),
         }),
     };
+    let path = path_diagnostics.as_ref().map(PathDiagnostics::json);
     let pro = crate::pro::lifecycle_status_json(data_root);
     let value = json!({
         "schema_version": 1,
@@ -81,7 +82,7 @@ pub(super) fn render_status(
         },
         "state": state,
         "install": marker,
-        "path": path_diagnostics.as_ref().map(PathDiagnostics::json),
+        "path": path.as_ref(),
         "warnings": path_diagnostics
             .as_ref()
             .map(|diagnostics| diagnostics.warnings.clone())
@@ -99,6 +100,7 @@ pub(super) fn render_status(
         config.auto_upgrade_mode().as_str(),
         &state,
         &marker,
+        path.as_ref(),
         &pro,
     );
     ui.write_stdout(&document)?;
@@ -124,24 +126,33 @@ fn render_upgrade_status_human(
     auto_upgrade: &str,
     state: &Value,
     install: &Value,
+    path: Option<&Value>,
     pro: &Value,
 ) -> Document {
     let managed = install.get("managed").and_then(Value::as_bool) == Some(true);
+    let path_shadow = managed.then(|| path_shadow_paths(path)).flatten();
     let status = state
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let upgrade_error = managed && status == "error";
     let (outcome_state, title) = if !managed {
         (
             OutcomeState::Warning,
             "ctx is not managed by the hosted installer",
+        )
+    } else if upgrade_error {
+        (OutcomeState::Error, "Upgrade needs attention")
+    } else if path_shadow.is_some() {
+        (
+            OutcomeState::Warning,
+            "A different ctx takes precedence on PATH",
         )
     } else {
         match status {
             "up_to_date" | "applied" => (OutcomeState::Success, "ctx is up to date"),
             "available" => (OutcomeState::Neutral, "A ctx update is available"),
             "scheduled" => (OutcomeState::Neutral, "A ctx update is scheduled"),
-            "error" => (OutcomeState::Error, "Upgrade needs attention"),
             "never_checked" => (OutcomeState::Neutral, "ctx has not checked for updates yet"),
             _ => (OutcomeState::Neutral, "ctx upgrade status"),
         }
@@ -187,6 +198,22 @@ fn render_upgrade_status_human(
         }
     }
 
+    if let Some((managed_executable, shadowing_executable)) = path_shadow {
+        let mut path_fields = vec![
+            Field::new("Shell ctx", shadowing_executable),
+            Field::new("Managed ctx", managed_executable),
+            Field::new(
+                "Consequence",
+                "Automatic upgrades are blocked; your shell will keep running the shadowing ctx.",
+            ),
+        ];
+        if upgrade_error {
+            path_fields.push(Field::new("After fixing PATH", "ctx upgrade enable"));
+        }
+        document.push_blank();
+        document.append(section("PATH", fields(context, &path_fields)));
+    }
+
     if pro.get("installed").and_then(Value::as_bool) == Some(true) {
         document.push_blank();
         document.append(section(
@@ -206,13 +233,18 @@ fn render_upgrade_status_human(
         ));
     }
 
-    let action = if managed && status == "available" {
-        Some(("Apply the signed update when you are ready.", "ctx upgrade"))
-    } else if managed && status == "error" {
+    let action = if upgrade_error {
         Some((
             "Inspect the local installation and upgrade state.",
             "ctx doctor",
         ))
+    } else if path_shadow.is_some() {
+        Some((
+            "Put the managed ctx first on PATH, then enable automatic upgrades.",
+            "ctx upgrade enable",
+        ))
+    } else if managed && status == "available" {
+        Some(("Apply the signed update when you are ready.", "ctx upgrade"))
     } else {
         None
     };
@@ -221,6 +253,17 @@ fn render_upgrade_status_human(
         document.append(hint(context, Hint { text }, Some(Action { command })));
     }
     document
+}
+
+fn path_shadow_paths(path: Option<&Value>) -> Option<(&str, &str)> {
+    let path = path?;
+    if path.get("resolver_status").and_then(Value::as_str) != Some("shadowed") {
+        return None;
+    }
+    Some((
+        path.get("current_exe").and_then(Value::as_str)?,
+        path.get("first_ctx").and_then(Value::as_str)?,
+    ))
 }
 
 fn reconcile_scheduled_state(mut state: Value, marker: Option<&InstallMarker>) -> Value {
@@ -296,8 +339,15 @@ mod ui_tests {
             "install_path": "/opt/ctx/bin/ctx"
         });
         let pro = json!({"installed": false});
-        let document =
-            render_upgrade_status_human(&context(80), "1.0.0", "apply", &state, &install, &pro);
+        let document = render_upgrade_status_human(
+            &context(80),
+            "1.0.0",
+            "apply",
+            &state,
+            &install,
+            None,
+            &pro,
+        );
         let rendered = document.render_plain();
         assert!(rendered.starts_with("✓ ctx is up to date\n"));
         assert!(rendered.contains("Automatic upgrades  apply"));
@@ -314,6 +364,7 @@ mod ui_tests {
                 "off",
                 &json!({"status": "error", "error": "replacement verification failed"}),
                 &json!({"managed": true}),
+                None,
                 &json!({"installed": true, "state": "ready"}),
             );
             let error_text = error.render_plain();
@@ -330,12 +381,52 @@ mod ui_tests {
                     "managed": false,
                     "reason": "ctx was not installed by the hosted installer"
                 }),
+                None,
                 &json!({"installed": false}),
             );
             let unmanaged_text = unmanaged.render_plain();
             assert!(unmanaged_text.starts_with("! ctx is not managed"));
             assert!(unmanaged_text.contains("hosted installer"));
             assert_fits(&unmanaged, &context);
+        }
+    }
+
+    #[test]
+    fn path_shadow_status_names_binaries_consequence_and_recovery_across_widths() {
+        let state = json!({"status": "up_to_date"});
+        let install = json!({"managed": true});
+        let path = json!({
+            "resolver_status": "shadowed",
+            "current_exe": "/opt/ctx/bin/ctx",
+            "first_ctx": "/usr/local/bin/ctx",
+        });
+        let pro = json!({"installed": false});
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width);
+            let document = render_upgrade_status_human(
+                &context,
+                "1.0.0",
+                "apply",
+                &state,
+                &install,
+                Some(&path),
+                &pro,
+            );
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(normalized.starts_with("! A different ctx takes precedence on PATH"));
+            assert!(rendered.contains("/usr/local/bin/ctx"), "{rendered}");
+            assert!(rendered.contains("/opt/ctx/bin/ctx"), "{rendered}");
+            assert!(normalized.contains(
+                "Automatic upgrades are blocked; your shell will keep running the shadowing ctx."
+            ));
+            assert_eq!(
+                rendered.matches("ctx upgrade enable").count(),
+                1,
+                "width {width}"
+            );
+            assert_fits(&document, &context);
         }
     }
 }
