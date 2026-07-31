@@ -718,12 +718,16 @@ fn codex_session_tree_route_parallel_cold_scan_matches_single_worker_and_preserv
     assert_eq!(parallel_scan.staged_documents, 8);
     assert_eq!(single_scan.complete_records_scanned, 12);
     assert_eq!(parallel_scan.complete_records_scanned, 12);
+    assert_eq!(single_scan.repository_full_git_certification_probes, 1);
+    assert_eq!(parallel_scan.repository_full_git_certification_probes, 4);
     let mut normalized_single_scan = single_scan;
     let mut normalized_parallel_scan = parallel_scan;
     normalized_single_scan.scanner_workers = 0;
     normalized_parallel_scan.scanner_workers = 0;
     normalized_single_scan.peak_active_scanners = 0;
     normalized_parallel_scan.peak_active_scanners = 0;
+    normalized_single_scan.repository_full_git_certification_probes = 0;
+    normalized_parallel_scan.repository_full_git_certification_probes = 0;
     assert_eq!(normalized_single_scan, normalized_parallel_scan);
     assert_eq!(single.commit.indexed_documents, 8);
     assert_eq!(parallel.commit.indexed_documents, 8);

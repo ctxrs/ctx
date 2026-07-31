@@ -67,8 +67,8 @@ const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
-const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v5";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v2";
+const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v7";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v4";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -231,6 +231,7 @@ pub struct CodexSourceBackedCountersV0 {
     pub scanner_sources_started: u64,
     pub scanner_sources_completed: u64,
     pub peak_active_scanners: u64,
+    pub repository_full_git_certification_probes: u64,
     pub staged_documents: u64,
     pub complete_records_scanned: u64,
     pub retained_records_scanned: u64,

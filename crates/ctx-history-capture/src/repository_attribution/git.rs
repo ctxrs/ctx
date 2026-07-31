@@ -4,14 +4,19 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
     RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryLocalRootAuthorization,
+    RepositoryLocalRootAuthorization, CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN,
+    CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
 };
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -43,6 +48,10 @@ pub(super) enum ProbeFailure {
 pub(super) struct CertifiedCandidate {
     pub(super) binding: RepositoryBinding,
     pub(super) repository_root: PathBuf,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    branch: Option<String>,
+    mutable_evidence_state: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +59,7 @@ pub(super) struct GitCertifier {
     executable: OsString,
     timeout: Duration,
     output_limit: usize,
+    full_certification_probes: Arc<AtomicUsize>,
 }
 
 impl Default for GitCertifier {
@@ -62,6 +72,7 @@ impl Default for GitCertifier {
             executable,
             timeout: GIT_TIMEOUT,
             output_limit: MAX_GIT_OUTPUT_BYTES,
+            full_certification_probes: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -73,18 +84,36 @@ impl GitCertifier {
             executable: executable.into(),
             timeout,
             output_limit: MAX_GIT_OUTPUT_BYTES,
+            full_certification_probes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
+    #[cfg(test)]
     pub(super) fn certify(
         &self,
         path: &Path,
         kind: CandidateKind,
         evidence_kind: RepositoryEvidenceKind,
     ) -> Result<CertifiedCandidate, ProbeFailure> {
-        self.certify_with_between_probe(path, kind, evidence_kind, || {})
+        self.certify_at(
+            path,
+            kind,
+            evidence_kind,
+            ctx_history_core::CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+        )
     }
 
+    pub(super) fn certify_at(
+        &self,
+        path: &Path,
+        kind: CandidateKind,
+        evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
+    ) -> Result<CertifiedCandidate, ProbeFailure> {
+        self.certify_with_between_probe_at(path, kind, evidence_kind, observed_at_unix_ms, || {})
+    }
+
+    #[cfg(test)]
     pub(super) fn certify_with_between_probe(
         &self,
         path: &Path,
@@ -92,6 +121,25 @@ impl GitCertifier {
         evidence_kind: RepositoryEvidenceKind,
         between_probe: impl FnOnce(),
     ) -> Result<CertifiedCandidate, ProbeFailure> {
+        self.certify_with_between_probe_at(
+            path,
+            kind,
+            evidence_kind,
+            ctx_history_core::CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+            between_probe,
+        )
+    }
+
+    fn certify_with_between_probe_at(
+        &self,
+        path: &Path,
+        kind: CandidateKind,
+        evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
+        between_probe: impl FnOnce(),
+    ) -> Result<CertifiedCandidate, ProbeFailure> {
+        self.full_certification_probes
+            .fetch_add(1, Ordering::Relaxed);
         let probe_directory = validate_candidate_route(path, kind)?;
         let opening = self.inspect_once(&probe_directory)?;
         between_probe();
@@ -99,11 +147,15 @@ impl GitCertifier {
         if opening != closing {
             return Err(ProbeFailure::ConcurrentDrift);
         }
-        opening.into_certificate(evidence_kind)
+        opening.into_certificate(evidence_kind, observed_at_unix_ms)
+    }
+
+    pub(super) fn full_certification_probe_count(&self) -> usize {
+        self.full_certification_probes.load(Ordering::Relaxed)
     }
 
     fn inspect_once(&self, directory: &Path) -> Result<GitSnapshot, ProbeFailure> {
-        let route_fingerprint = route_fingerprint(directory)?;
+        route_fingerprint(directory)?;
         let geometry = self.run_git(
             directory,
             &[
@@ -144,28 +196,31 @@ impl GitCertifier {
         let branch = parse_optional_line(&branch_output)?;
         let remotes_output = self.run_git(
             directory,
-            &["config", "--local", "--get-regexp", "^remote\\..*\\.url$"],
+            &[
+                "config",
+                "--no-includes",
+                "--local",
+                "--get-regexp",
+                "^remote\\..*\\.url$",
+            ],
             true,
         )?;
         let aliases = parse_aliases(&remotes_output)?;
+        let mutable_evidence_state =
+            repository_mutable_evidence_state(&git_dir, &common_dir, branch.as_deref())?;
 
-        let mut fingerprint = Sha256::new();
-        fingerprint.update(route_fingerprint);
-        fingerprint.update(path_fingerprint(&root)?);
-        fingerprint.update(path_fingerprint(&git_dir)?);
-        fingerprint.update(path_fingerprint(&common_dir)?);
-        fingerprint.update(&geometry);
-        fingerprint.update(&head_output);
-        fingerprint.update(&branch_output);
-        fingerprint.update(&remotes_output);
+        let locator_fingerprint =
+            repository_locator_fingerprint(&root, &git_dir, &common_dir, object_format)?;
         Ok(GitSnapshot {
             root,
+            git_dir,
             common_dir,
             object_format,
             head,
             branch,
             aliases,
-            locator_fingerprint: fingerprint.finalize().into(),
+            locator_fingerprint,
+            mutable_evidence_state,
         })
     }
 
@@ -248,18 +303,21 @@ impl GitCertifier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitSnapshot {
     root: PathBuf,
+    git_dir: PathBuf,
     common_dir: PathBuf,
     object_format: GitObjectFormat,
     head: Option<GitObjectId>,
     branch: Option<String>,
     aliases: Vec<RepositoryAlias>,
     locator_fingerprint: [u8; 32],
+    mutable_evidence_state: [u8; 32],
 }
 
 impl GitSnapshot {
     fn into_certificate(
         self,
         evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
     ) -> Result<CertifiedCandidate, ProbeFailure> {
         let checkout_fingerprint = path_identity_fingerprint(&self.common_dir)?;
         let worktree_fingerprint = path_identity_fingerprint(&self.root)?;
@@ -301,11 +359,6 @@ impl GitSnapshot {
                 worktree_id.as_bytes(),
             ])
         );
-        let observed_at_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-            .unwrap_or(0);
         let binding = RepositoryBinding {
             binding_id,
             logical_repository_id,
@@ -315,6 +368,7 @@ impl GitSnapshot {
             git_object_format: Some(self.object_format),
             local_root_authorization: Some(RepositoryLocalRootAuthorization {
                 local_root: self.root.to_string_lossy().into_owned(),
+                locator_fingerprint_revision: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
                 locator_fingerprint: self.locator_fingerprint,
                 observed_at_unix_ms,
             }),
@@ -327,8 +381,215 @@ impl GitSnapshot {
         Ok(CertifiedCandidate {
             binding,
             repository_root: self.root,
+            git_dir: self.git_dir,
+            common_dir: self.common_dir,
+            branch: self.branch,
+            mutable_evidence_state: self.mutable_evidence_state,
         })
     }
+}
+
+impl CertifiedCandidate {
+    pub(super) fn lexical_root_contains(&self, path: &Path) -> bool {
+        path.starts_with(&self.repository_root)
+    }
+
+    pub(super) fn try_reuse(
+        &self,
+        path: &Path,
+        kind: CandidateKind,
+        evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
+    ) -> Result<Option<Self>, ProbeFailure> {
+        let probe_directory = validate_candidate_route(path, kind)?;
+        if !probe_directory.starts_with(&self.repository_root)
+            || has_nested_repository_boundary(&probe_directory, &self.repository_root)?
+        {
+            return Ok(None);
+        }
+        let Some(authorization) = self.binding.local_root_authorization.as_ref() else {
+            return Ok(None);
+        };
+        let object_format = self.binding.git_object_format.ok_or(ProbeFailure::Unsafe(
+            "cached_repository_has_no_object_format",
+        ))?;
+        let current = repository_locator_fingerprint(
+            &self.repository_root,
+            &self.git_dir,
+            &self.common_dir,
+            object_format,
+        )?;
+        if current != authorization.locator_fingerprint {
+            return Ok(None);
+        }
+        if repository_mutable_evidence_state(
+            &self.git_dir,
+            &self.common_dir,
+            self.branch.as_deref(),
+        )? != self.mutable_evidence_state
+        {
+            return Ok(None);
+        }
+        let closing_probe = validate_candidate_route(path, kind)?;
+        let closing = repository_locator_fingerprint(
+            &self.repository_root,
+            &self.git_dir,
+            &self.common_dir,
+            object_format,
+        )?;
+        if closing_probe != probe_directory || closing != current {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        let mut reused = self.clone();
+        reused.binding.evidence = vec![RepositoryEvidence {
+            kind: evidence_kind,
+            confidence: RepositoryEvidenceConfidence::High,
+        }];
+        if let Some(authorization) = reused.binding.local_root_authorization.as_mut() {
+            authorization.observed_at_unix_ms = observed_at_unix_ms;
+        }
+        Ok(Some(reused))
+    }
+}
+
+fn has_nested_repository_boundary(candidate: &Path, root: &Path) -> Result<bool, ProbeFailure> {
+    let mut current = candidate;
+    while current != root {
+        match fs::symlink_metadata(current.join(".git")) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ProbeFailure::Unsafe("nested_git_boundary_metadata_failed")),
+        }
+        let mut bare_markers = 0;
+        for entry in ["HEAD", "objects", "refs"] {
+            match fs::symlink_metadata(current.join(entry)) {
+                Ok(_) => bare_markers += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err(ProbeFailure::Unsafe("nested_git_boundary_metadata_failed"));
+                }
+            }
+        }
+        if bare_markers == 3 {
+            return Ok(true);
+        }
+        current = current.parent().ok_or(ProbeFailure::Unsafe(
+            "cached_candidate_escaped_repository_root",
+        ))?;
+    }
+    Ok(false)
+}
+
+/// Cheap, non-authoritative state used only to decide whether a prior negative
+/// probe may be reused. Any route or Git-geometry change invalidates the hit.
+pub(super) fn negative_route_geometry_state(path: &Path, kind: CandidateKind) -> Option<[u8; 32]> {
+    if !path.is_absolute() || path.components().count() > MAX_PARENT_COMPONENTS {
+        return None;
+    }
+    let geometry_path = match kind {
+        CandidateKind::Directory => path,
+        CandidateKind::File => path.parent()?,
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.negative-route-geometry.v1\0");
+    digest.update([match kind {
+        CandidateKind::Directory => 1,
+        CandidateKind::File => 2,
+    }]);
+    digest.update(path.as_os_str().as_encoded_bytes());
+    let mut components = geometry_path.ancestors().collect::<Vec<_>>();
+    components.reverse();
+    for component in components {
+        let metadata = match fs::symlink_metadata(component) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                digest.update([0]);
+                continue;
+            }
+            Err(_) => return None,
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return None;
+        }
+        update_negative_route_component(&mut digest, component)?;
+        for entry in [
+            ".git",
+            "HEAD",
+            "config",
+            "objects",
+            "refs",
+            "commondir",
+            "gitdir",
+        ] {
+            update_negative_optional_entry(&mut digest, &component.join(entry))?;
+        }
+        let dot_git = component.join(".git");
+        if fs::symlink_metadata(&dot_git)
+            .ok()
+            .is_some_and(|metadata| metadata.is_dir())
+        {
+            for entry in ["HEAD", "config", "objects", "refs", "commondir", "gitdir"] {
+                update_negative_optional_entry(&mut digest, &dot_git.join(entry))?;
+            }
+        }
+    }
+    Some(digest.finalize().into())
+}
+
+fn update_negative_optional_entry(digest: &mut Sha256, path: &Path) -> Option<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => update_negative_entry(digest, path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            digest.update([0]);
+            Some(())
+        }
+        Err(_) => None,
+    }
+}
+
+fn update_negative_route_component(digest: &mut Sha256, path: &Path) -> Option<()> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    digest.update([1]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        digest.update(metadata.dev().to_be_bytes());
+        digest.update(metadata.ino().to_be_bytes());
+        digest.update(metadata.mode().to_be_bytes());
+    }
+    #[cfg(not(unix))]
+    {
+        return None;
+    }
+    Some(())
+}
+
+fn update_negative_entry(digest: &mut Sha256, path: &Path) -> Option<()> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    digest.update([1]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        digest.update(metadata.dev().to_be_bytes());
+        digest.update(metadata.ino().to_be_bytes());
+        digest.update(metadata.mode().to_be_bytes());
+        digest.update(metadata.len().to_be_bytes());
+        digest.update(metadata.mtime().to_be_bytes());
+        digest.update(metadata.mtime_nsec().to_be_bytes());
+        digest.update(metadata.ctime().to_be_bytes());
+        digest.update(metadata.ctime_nsec().to_be_bytes());
+    }
+    #[cfg(not(unix))]
+    {
+        return None;
+    }
+    Some(())
 }
 
 fn validate_candidate_route(path: &Path, kind: CandidateKind) -> Result<PathBuf, ProbeFailure> {
@@ -415,34 +676,123 @@ fn route_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFailure> {
     Ok(digest.finalize().into())
 }
 
-fn path_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFailure> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| ProbeFailure::Unsafe("repository_metadata_failed"))?;
-    if metadata.file_type().is_symlink() {
-        return Err(ProbeFailure::Unsafe("repository_path_is_symlink"));
-    }
+fn repository_mutable_evidence_state(
+    git_dir: &Path,
+    common_dir: &Path,
+    branch: Option<&str>,
+) -> Result<[u8; 32], ProbeFailure> {
     let mut digest = Sha256::new();
-    digest.update(path.as_os_str().as_encoded_bytes());
-    digest.update(metadata.len().to_be_bytes());
+    digest.update(b"ctx.repository.mutable-binding-evidence.v1\0");
+    for (label, path) in [
+        ("git_head", git_dir.join("HEAD")),
+        ("git_commondir", git_dir.join("commondir")),
+        ("git_gitdir", git_dir.join("gitdir")),
+        ("worktree_config", git_dir.join("config.worktree")),
+        ("common_config", common_dir.join("config")),
+        ("packed_refs", common_dir.join("packed-refs")),
+    ] {
+        update_mutable_evidence_entry(&mut digest, label.as_bytes(), &path)?;
+    }
+    if let Some(branch) = branch {
+        if !branch.starts_with("refs/")
+            || branch
+                .split('/')
+                .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        {
+            return Err(ProbeFailure::Unsafe("git_branch_is_not_canonical"));
+        }
+        update_mutable_evidence_entry(&mut digest, b"symbolic_branch", &common_dir.join(branch))?;
+    }
+    Ok(digest.finalize().into())
+}
+
+fn update_mutable_evidence_entry(
+    digest: &mut Sha256,
+    label: &[u8],
+    path: &Path,
+) -> Result<(), ProbeFailure> {
+    digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(label);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(ProbeFailure::Unsafe("mutable_git_evidence_is_symlink"))
+        }
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_GIT_OUTPUT_BYTES as u64 => {
+            let value = fs::read(path)
+                .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_read_failed"))?;
+            digest.update([1]);
+            digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(value);
+            Ok(())
+        }
+        Ok(metadata) if metadata.is_file() => {
+            Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"))
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            digest.update([2]);
+            digest.update(path_identity_fingerprint(path)?);
+            Ok(())
+        }
+        Ok(_) => Err(ProbeFailure::Unsafe("mutable_git_evidence_is_not_file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            digest.update([0]);
+            Ok(())
+        }
+        Err(_) => Err(ProbeFailure::Failed("mutable_git_evidence_metadata_failed")),
+    }
+}
+
+/// Revision 1 local-root authorization fingerprint.
+///
+/// SHA-256 input is `CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN`, big-endian
+/// u16 version 1, then `certified_root`, `git_dir`, and `common_dir` encoded as
+/// `[tag=1][u64 label length][label][u64 dev][u64 ino]`, followed by object
+/// format encoded as `[tag=4][u64 value length][sha1|sha256]`. Paths and
+/// mutable Git state are excluded.
+fn repository_locator_fingerprint(
+    root: &Path,
+    git_dir: &Path,
+    common_dir: &Path,
+    object_format: GitObjectFormat,
+) -> Result<[u8; 32], ProbeFailure> {
+    #[cfg(not(unix))]
+    {
+        let _ = (root, git_dir, common_dir, object_format);
+        Err(ProbeFailure::PlatformUnsupported)
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        digest.update(metadata.dev().to_be_bytes());
-        digest.update(metadata.ino().to_be_bytes());
-        digest.update(metadata.mode().to_be_bytes());
-        digest.update(metadata.mtime().to_be_bytes());
-        digest.update(metadata.mtime_nsec().to_be_bytes());
+
+        let mut digest = Sha256::new();
+        digest.update(CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN);
+        digest.update(1_u16.to_be_bytes());
+        for (label, path) in [
+            (b"certified_root".as_slice(), root),
+            (b"git_dir".as_slice(), git_dir),
+            (b"common_dir".as_slice(), common_dir),
+        ] {
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
+            if metadata.file_type().is_symlink() {
+                return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
+            }
+            digest.update([1]);
+            digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(label);
+            digest.update(metadata.dev().to_be_bytes());
+            digest.update(metadata.ino().to_be_bytes());
+        }
+        let object_format = object_format_name(object_format);
+        digest.update([4]);
+        digest.update(
+            u64::try_from(object_format.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        digest.update(object_format);
+        Ok(digest.finalize().into())
     }
-    #[cfg(not(unix))]
-    {
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map_or(0_u128, |duration| duration.as_nanos());
-        digest.update(modified.to_be_bytes());
-    }
-    Ok(digest.finalize().into())
 }
 
 fn path_identity_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFailure> {

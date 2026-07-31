@@ -328,7 +328,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert!(!wire.contains("command"));
     assert!(!wire.contains("arguments_preview"));
     let decoded_wire = serde_json::from_str::<Value>(&wire).unwrap();
-    assert_eq!(decoded_wire["version"], 5);
+    assert_eq!(decoded_wire["version"], 7);
     assert_eq!(
         decoded_wire["pending_tool_authorities"]
             .as_array()

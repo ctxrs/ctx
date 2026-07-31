@@ -8,7 +8,7 @@ mod rows;
 mod source;
 mod source_backed;
 
-pub(crate) use checkpoint::CodexNativeCheckpoint;
+pub(crate) use checkpoint::{CodexNativeCheckpoint, MAX_CODEX_TOOL_CONTEXTS};
 pub(crate) use prompt_history::{
     observe_codex_prompt_history_source_backed_explicit_v0,
     plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,

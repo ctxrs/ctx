@@ -121,6 +121,7 @@ fn binding() -> RepositoryBinding {
         git_object_format: Some(GitObjectFormat::Sha1),
         local_root_authorization: Some(RepositoryLocalRootAuthorization {
             local_root: "/work/ctx".to_owned(),
+            locator_fingerprint_revision: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
             locator_fingerprint: [7; 32],
             observed_at_unix_ms: 1_700_000_000_000,
         }),
@@ -307,6 +308,7 @@ fn logical_repository_binding_can_abstain_from_local_checkout_identity() {
     record.repository_bindings[0].local_root_authorization =
         Some(RepositoryLocalRootAuthorization {
             local_root: "/uncertified/checkout".to_owned(),
+            locator_fingerprint_revision: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
             locator_fingerprint: [9; 32],
             observed_at_unix_ms: 1_700_000_000_000,
         });
@@ -345,10 +347,15 @@ fn object_observation_requires_binding_object_format() {
 fn repository_abstention_preserves_evidence_kind() {
     let mut record = record();
     record.repository_candidate_evidence = RepositoryCandidateEvidence {
+        repository_observation_revision: CORE_REPOSITORY_OBSERVATION_REVISION,
+        bounded_shell_subset_revision: CORE_BOUNDED_SHELL_SUBSET_REVISION,
+        outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
         session_cwd: Some("/control/workspace".to_owned()),
         declared_tool_workdir: Some("/code/repo".to_owned()),
         derived_effective_cwd: Some("/code/repo/crates".to_owned()),
         command_specific_repository_path: Some("/code/other".to_owned()),
+        outcome_operation_repository_path: Some("/code/repo".to_owned()),
+        outcome_output_repository_path: Some("/code/repo".to_owned()),
     };
     record.repository_abstentions.push(RepositoryAbstention {
         evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
@@ -399,6 +406,10 @@ fn repository_spike_abstention_codes_have_stable_wire_names() {
             "command_too_large",
         ),
         (
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "candidate_limit_exceeded",
+        ),
+        (
             RepositoryAbstentionReason::CandidateMissingBeforeCertification,
             "candidate_missing_before_certification",
         ),
@@ -420,6 +431,26 @@ fn repository_spike_abstention_codes_have_stable_wire_names() {
             "git_probe_failed",
         ),
         (
+            RepositoryAbstentionReason::ProviderOutputUnjoined,
+            "provider_output_unjoined",
+        ),
+        (
+            RepositoryAbstentionReason::LinkageCapacityExceeded,
+            "linkage_capacity_exceeded",
+        ),
+        (
+            RepositoryAbstentionReason::OutcomeResultInadmissible,
+            "outcome_result_inadmissible",
+        ),
+        (
+            RepositoryAbstentionReason::HistoryRewriteUnlinked,
+            "history_rewrite_unlinked",
+        ),
+        (
+            RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+            "outcome_repository_unbound",
+        ),
+        (
             RepositoryAbstentionReason::ConcurrentDrift,
             "concurrent_drift",
         ),
@@ -434,5 +465,164 @@ fn repository_spike_abstention_codes_have_stable_wire_names() {
             serde_json::to_string(&reason).unwrap(),
             format!("\"{expected}\"")
         );
+    }
+}
+
+fn oid(hex: char) -> GitObjectId {
+    GitObjectId {
+        format: GitObjectFormat::Sha1,
+        hex: hex.to_string().repeat(40),
+    }
+}
+
+fn outcome(kind: RepositoryOutcomeKind) -> RepositoryOutcomeObservation {
+    RepositoryOutcomeObservation {
+        kind,
+        produced_object_ids: vec![oid('a')],
+        replacement_lineage: Vec::new(),
+        pull_request: None,
+        observed_at_unix_ms: 1_700_000_000_000,
+        linkage: RepositoryOutcomeLinkage {
+            provider: "codex".to_owned(),
+            origin_call_id: "call-origin".to_owned(),
+            result_call_id: "call-result".to_owned(),
+            origin_event_sequence: 7,
+            continuation_call_id_sha256: vec![[3; 32]],
+            result_record_sha256: [4; 32],
+        },
+        outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    }
+}
+
+#[test]
+fn repository_outcome_requires_one_scoped_binding_and_exact_shape() {
+    let mut record = record();
+    record.repository_bindings.push(binding());
+    record
+        .repository_vcs_observations
+        .push(RepositoryVcsObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            kind: RepositoryVcsObservationKind::Outcome(Box::new(outcome(
+                RepositoryOutcomeKind::Commit,
+            ))),
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+            relative_path: None,
+        });
+    record.validate_contract().unwrap();
+
+    record.repository_vcs_observations[0].repository_binding_id = "missing".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::UnknownRepositoryBinding(binding)) if binding == "missing"
+    ));
+}
+
+#[test]
+fn replacement_lineage_and_pull_request_shapes_are_explicit() {
+    let mut commit = outcome(RepositoryOutcomeKind::Commit);
+    commit
+        .replacement_lineage
+        .push(RepositoryObjectReplacement {
+            replaced: oid('b'),
+            replacement: oid('a'),
+        });
+    commit.validate_contract().unwrap();
+    commit.replacement_lineage[0].replacement = oid('c');
+    assert!(matches!(
+        commit.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+
+    let mut branching = outcome(RepositoryOutcomeKind::Commit);
+    branching.produced_object_ids.push(oid('c'));
+    branching.replacement_lineage = vec![
+        RepositoryObjectReplacement {
+            replaced: oid('b'),
+            replacement: oid('a'),
+        },
+        RepositoryObjectReplacement {
+            replaced: oid('b'),
+            replacement: oid('c'),
+        },
+    ];
+    assert!(matches!(
+        branching.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+
+    let mut cycle = outcome(RepositoryOutcomeKind::Commit);
+    cycle.produced_object_ids.push(oid('b'));
+    cycle.replacement_lineage = vec![
+        RepositoryObjectReplacement {
+            replaced: oid('a'),
+            replacement: oid('b'),
+        },
+        RepositoryObjectReplacement {
+            replaced: oid('b'),
+            replacement: oid('a'),
+        },
+    ];
+    assert!(matches!(
+        cycle.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+
+    let mut duplicate_linkage = outcome(RepositoryOutcomeKind::Commit);
+    duplicate_linkage
+        .linkage
+        .continuation_call_id_sha256
+        .push([3; 32]);
+    assert!(matches!(
+        duplicate_linkage.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+
+    let pull_request = RepositoryPullRequestIdentity {
+        forge_repository: RepositoryAlias {
+            kind: RepositoryAliasKind::Forge,
+            host: "github.com".to_owned(),
+            namespace: vec!["ctxrs".to_owned()],
+            name: "ctx".to_owned(),
+            remote_name: None,
+        },
+        number: 224,
+        provider_id: Some("PR_kwDOexample".to_owned()),
+    };
+    let mut created = outcome(RepositoryOutcomeKind::PullRequestCreated);
+    created.produced_object_ids.clear();
+    created.pull_request = Some(pull_request.clone());
+    created.validate_contract().unwrap();
+
+    let mut merged = created;
+    merged.kind = RepositoryOutcomeKind::PullRequestMerged;
+    merged.produced_object_ids.push(oid('d'));
+    merged.validate_contract().unwrap();
+}
+
+#[test]
+fn every_repository_revision_changes_the_core_contract_fingerprint() {
+    let current = CoreContractRevisions::current();
+    let expected = core_record_contract_fingerprint_for(current);
+    for changed in [
+        CoreContractRevisions {
+            repository_observation: current.repository_observation + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            bounded_shell_subset: current.bounded_shell_subset + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            repository_outcome_capture: current.repository_outcome_capture + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            repository_locator_fingerprint: current.repository_locator_fingerprint + 1,
+            ..current
+        },
+    ] {
+        assert_ne!(core_record_contract_fingerprint_for(changed), expected);
     }
 }

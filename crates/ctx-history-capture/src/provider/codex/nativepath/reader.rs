@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use super::source::{CodexCheckpointGeneration, CodexSourceIdentity};
 use super::{
     checkpoint::{
-        CodexNativeCheckpoint, CodexPendingToolAuthority, MAX_CODEX_TOOL_CALL_ID_BYTES,
-        MAX_CODEX_TOOL_CONTEXTS,
+        CodexNativeCheckpoint, CodexPendingToolAuthority, MAX_CODEX_CONTINUATION_CELL_ID_BYTES,
+        MAX_CODEX_TOOL_CALL_ID_BYTES, MAX_CODEX_TOOL_CONTEXTS,
     },
     record::{
         classify_codex_record, parse_decoded_record, parse_session_meta, prefilter_codex_record,
@@ -218,6 +218,7 @@ pub(crate) struct CodexNativeScanner {
     owner: Option<CodexSessionRow>,
     tool_contexts: BTreeMap<String, CodexToolCallContext>,
     tool_authorities: BTreeMap<String, CodexPendingToolAuthority>,
+    continuations: BTreeMap<String, String>,
     complete_hasher: Sha256,
     full_hasher: Sha256,
     record_buffer: Vec<u8>,
@@ -264,11 +265,15 @@ impl CodexRecordProjection {
 // to match the 24-byte removal variant would add a per-record heap allocation.
 #[allow(clippy::large_enum_variant)]
 enum CodexContextMutation {
-    Remove(String),
+    Remove(Vec<String>),
+    RegisterContinuation {
+        cell_id: String,
+        origin_call_id: String,
+    },
     SourceBackedRow {
         row: CodexSourceBackedRowV0,
         insert_context: Option<(String, CodexToolCallContext, CodexPendingToolAuthority)>,
-        remove_context: Option<String>,
+        remove_contexts: Vec<String>,
     },
 }
 

@@ -156,6 +156,7 @@ struct ColdSourceCompleteV0 {
     staged_documents: u64,
     scan: super::CodexSourceScan,
     worker_busy: Duration,
+    full_git_certification_probes: u64,
 }
 
 // Completion is emitted once per source. Boxing its 1,032-byte owned scan solely
@@ -407,7 +408,9 @@ fn run_cold_scan_lane_v0(
     cold_options: ColdParallelOptionsV0,
     #[cfg(test)] scanner_rendezvous: Option<&std::sync::Barrier>,
 ) -> CodexSourceBackedResultV0<()> {
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     for job in jobs {
+        let probes_before = repository_attributor.full_certification_probe_count();
         if cancellation.load(AtomicOrdering::Acquire) {
             return Ok(());
         }
@@ -442,9 +445,6 @@ fn run_cold_scan_lane_v0(
         }
         let mut page_index = 0_u64;
         let mut staged_documents = 0_u64;
-        let mut repository_attributor =
-            crate::repository_attribution::RepositoryAttributor::default();
-
         loop {
             if cancellation.load(AtomicOrdering::Acquire) {
                 return Ok(());
@@ -514,6 +514,12 @@ fn run_cold_scan_lane_v0(
                 staged_documents,
                 scan,
                 worker_busy,
+                full_git_certification_probes: u64::try_from(
+                    repository_attributor
+                        .full_certification_probe_count()
+                        .saturating_sub(probes_before),
+                )
+                .unwrap_or(u64::MAX),
             }),
             cancellation,
             lane_index,
@@ -701,6 +707,9 @@ fn consume_cold_lanes_v0(
                     .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
             }
             ColdLaneMessageV0::Complete(complete) => {
+                counters.repository_full_git_certification_probes = counters
+                    .repository_full_git_certification_probes
+                    .saturating_add(complete.full_git_certification_probes);
                 let mode =
                     lane_state
                         .mode
