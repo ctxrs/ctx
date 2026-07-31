@@ -15,6 +15,8 @@ mod reader;
 mod schema;
 mod staging;
 
+pub use durable_directory::durable_atomic_replace_file;
+
 pub(crate) use contracts::{
     CommitPayload, COMMIT_PAYLOAD_VERSION, INDEX_MEMORY_MIN_PER_THREAD, MANIFEST_DIRECTORY,
     MAX_DOCUMENT_METADATA_BYTES,

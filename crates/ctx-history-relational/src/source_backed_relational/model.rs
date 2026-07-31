@@ -34,6 +34,16 @@ pub enum RelationalProjectionError {
     #[error("Core relational projection is missing stable view {0}")]
     MissingStableView(String),
     #[error(
+        "Core relational WAL checkpoint remained busy ({busy} busy, {log_frames} log frames, {checkpointed_frames} checkpointed frames)"
+    )]
+    WalCheckpointBusy {
+        busy: i64,
+        log_frames: i64,
+        checkpointed_frames: i64,
+    },
+    #[error("Core relational seal requested journal mode delete, SQLite selected {actual}")]
+    UnexpectedJournalMode { actual: String },
+    #[error(
         "Core SQL projection is missing at {projection_path} while a committed Core generation exists at {generation_path}; rebuild the relational projection from that generation"
     )]
     MissingSourceBackedSqlProjection {

@@ -28,10 +28,16 @@ impl SourceBackedRelationalProjection {
         let metadata = self.metadata()?;
         if metadata.status == RelationalProjectionStatus::Ready
             && metadata.active_core_generation_id.as_deref() == Some(&generation.generation_id)
+            && metadata.active_manifest_version == Some(generation.manifest_version)
             && metadata.active_materializer_revision == Some(RELATIONAL_MATERIALIZER_REVISION)
             && metadata.active_core_record_version == Some(generation.core_record_version)
             && metadata.active_core_record_contract_fingerprint.as_deref()
                 == Some(&generation.core_record_contract_fingerprint)
+            && metadata.active_lexical_schema_version == Some(generation.lexical_schema_version)
+            && metadata.active_policy_schema_hash.as_deref() == Some(&generation.policy_schema_hash)
+            && metadata.target_core_generation_id.is_none()
+            && usize::try_from(metadata.source_count) == Ok(generation.sources.len())
+            && metadata.event_count == generation.indexed_documents
         {
             return Ok(RelationalProjectionPlan::NoOp(receipt_from_metadata(
                 &generation.generation_id,
