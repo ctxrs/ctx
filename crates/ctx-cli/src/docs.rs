@@ -10,7 +10,8 @@ use crate::{
     output::JsonOutputFormat,
     ui::{
         canonical_human_output_bytes, empty_state, fields, hint, outcome, section, table, Action,
-        Document, EmptyState, Field, Hint, Outcome, OutcomeState, RenderContext, Table, Ui,
+        Document, EmptyState, Field, Hint, Line, Outcome, OutcomeState, RenderContext, Span, Table,
+        Token, Ui,
     },
     Cli,
 };
@@ -328,7 +329,7 @@ pub fn run(
         Some(DocsCommand::Show(args)) => {
             telemetry.operation = Some(DocsOperation::Show);
             telemetry.writes_output = args.out.is_some();
-            show_doc(args, telemetry)
+            show_doc(args, telemetry, ui)
         }
         Some(DocsCommand::Man(args)) => {
             telemetry.operation = Some(if args.print.is_some() {
@@ -585,11 +586,15 @@ fn docs_shell_quote_arg(value: &str) -> String {
     }
 }
 
-fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<usize> {
-    let topic = TOPICS
-        .iter()
-        .find(|topic| topic.id == args.id)
-        .ok_or_else(|| unknown_doc_topic_error(&args.id))?;
+fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry, ui: &mut Ui) -> Result<usize> {
+    let Some(topic) = TOPICS.iter().find(|topic| topic.id == args.id) else {
+        if args.format == DocsFormat::Json {
+            return Err(unknown_doc_topic_error(&args.id));
+        }
+        let document = render_unknown_doc_topic(ui.stderr_context(), &args.id);
+        ui.write_stderr(&document)?;
+        return Err(crate::dispatch::rendered_cli_error());
+    };
     telemetry.topic = DocTopicId::from_known_id(topic.id);
     telemetry.result_count = Some(count_bucket(1));
     telemetry.zero_result = Some(false);
@@ -615,6 +620,48 @@ fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<usize> 
         println!("{body}");
         Ok(body.len().saturating_add(1))
     }
+}
+
+fn render_unknown_doc_topic(context: &RenderContext, id: &str) -> Document {
+    let title = format!("Unknown ctx docs topic: {id}");
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Error,
+            title: &title,
+            detail: None,
+        },
+    );
+
+    let suggestions = suggested_doc_topics(id);
+    if !suggestions.is_empty() {
+        let mut topics = Document::new();
+        for topic in suggestions {
+            topics.push_line(
+                Line::new()
+                    .with(Span::text("  "))
+                    .with(Span::new(topic, Token::Reference)),
+            );
+        }
+        document.push_blank();
+        document.append(section("Nearest topics", topics));
+    }
+
+    let search = format!(
+        "ctx docs search {}",
+        docs_shell_quote_arg(first_docs_search_term(id))
+    );
+    let mut actions = Document::new();
+    for command in ["ctx docs list", search.as_str()] {
+        actions.push_line(
+            Line::new()
+                .with(Span::text("  "))
+                .with(Span::new(command, Token::Command)),
+        );
+    }
+    document.push_blank();
+    document.append(section("Next", actions));
+    document
 }
 
 fn man_docs(args: DocsManArgs, ui: &mut Ui) -> Result<usize> {
@@ -831,5 +878,37 @@ mod ui_tests {
             strip_ansi(&document.render(&context)),
             document.render_plain()
         );
+    }
+
+    #[test]
+    fn unknown_topic_is_a_structured_diagnostic_without_literal_newline_escapes() {
+        let context = context(80, ColorMode::Always);
+        let document = render_unknown_doc_topic(&context, "cli");
+        let plain = document.render_plain();
+        assert!(
+            plain.starts_with("✗ Unknown ctx docs topic: cli\n"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Nearest topics\n  cli-reference\n"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Next\n  ctx docs list\n  ctx docs search cli\n"),
+            "{plain}"
+        );
+        assert!(!plain.contains("\\n"), "{plain}");
+
+        let styled = document.render(&context);
+        assert!(styled.as_bytes().contains(&0x1b), "{styled:?}");
+        assert_eq!(strip_ansi(&styled), plain);
+    }
+
+    #[test]
+    fn unknown_topic_neutralizes_user_control_characters() {
+        let context = context(80, ColorMode::Never);
+        let rendered = render_unknown_doc_topic(&context, "cli\u{1b}[31m").render_plain();
+        assert!(rendered.contains("cli\\x1b[31m"), "{rendered}");
+        assert!(!rendered.as_bytes().contains(&0x1b), "{rendered:?}");
     }
 }
