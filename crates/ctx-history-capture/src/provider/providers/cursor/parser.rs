@@ -35,7 +35,15 @@ pub(super) enum CursorSafePart {
         role: EventRole,
         call_id: Option<String>,
         tool_name: Option<String>,
+        command: Option<String>,
+        declared_workdir: Option<String>,
         input_paths: Vec<String>,
+        ambiguous_native_fields: bool,
+    },
+    ToolResult {
+        role: EventRole,
+        call_id: Option<String>,
+        ambiguous_linkage: bool,
     },
 }
 
@@ -105,10 +113,12 @@ fn decode_sanitized_record(
             parts: Vec::new(),
         });
     }
-    let has_retained_blocks = classification
-        .block_kinds
-        .iter()
-        .any(|kind| matches!(kind, CursorBlockKind::Text | CursorBlockKind::ToolUse));
+    let has_retained_blocks = classification.block_kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            CursorBlockKind::Text | CursorBlockKind::ToolUse | CursorBlockKind::ToolResult
+        )
+    });
     let mut parts = if has_retained_blocks {
         let mut deserializer = serde_json::Deserializer::from_slice(bytes);
         let parts = CursorRetainedSeed { classification }.deserialize(&mut deserializer)?;
@@ -335,6 +345,11 @@ impl<'de> DeserializeSeed<'de> for CursorBlockRetainedSeed<'_> {
             CursorBlockKind::ToolUse => deserializer.deserialize_map(CursorToolUseBlockVisitor {
                 classification: self.classification,
             }),
+            CursorBlockKind::ToolResult => {
+                deserializer.deserialize_map(CursorToolResultBlockVisitor {
+                    classification: self.classification,
+                })
+            }
             CursorBlockKind::Excluded => {
                 IgnoredAny::deserialize(deserializer)?;
                 Ok(None)
@@ -465,7 +480,7 @@ pub(crate) fn cursor_complete_content_message_record(
     for (kind, block) in classification.block_kinds.iter().zip(content) {
         match kind {
             CursorBlockKind::Excluded => continue,
-            CursorBlockKind::ToolUse => {
+            CursorBlockKind::ToolUse | CursorBlockKind::ToolResult => {
                 projected_ordinal = projected_ordinal.checked_add(1)?;
             }
             CursorBlockKind::Text => {
@@ -512,21 +527,31 @@ impl<'de> Visitor<'de> for CursorToolUseBlockVisitor<'_> {
     {
         let mut call_id = None;
         let mut tool_name = None;
-        let mut input_paths = Vec::new();
+        let mut call_id_seen = false;
+        let mut tool_name_seen = false;
+        let mut ambiguous_native_fields = false;
+        let mut input = CursorToolInput::default();
         while let Some(field) = map.next_key::<String>()? {
             match field.as_str() {
                 "id" => {
-                    call_id = Some(map.next_value_seed(BoundedStringSeed {
+                    let value = map.next_value_seed(ExactBoundedStringSeed {
                         max_chars: MAX_CURSOR_ATOM_CHARS,
-                    })?);
+                    })?;
+                    ambiguous_native_fields |= call_id_seen || value.is_none();
+                    call_id_seen = true;
+                    call_id = value;
                 }
                 "name" => {
-                    tool_name = Some(map.next_value_seed(BoundedStringSeed {
+                    let value = map.next_value_seed(ExactBoundedStringSeed {
                         max_chars: MAX_CURSOR_ATOM_CHARS,
-                    })?);
+                    })?;
+                    ambiguous_native_fields |= tool_name_seen || value.is_none();
+                    tool_name_seen = true;
+                    tool_name = value;
                 }
                 "input" => {
-                    input_paths = map.next_value_seed(CursorToolInputSeed)?;
+                    let decoded = map.next_value_seed(CursorToolInputSeed)?;
+                    ambiguous_native_fields |= input.merge(decoded);
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -540,15 +565,88 @@ impl<'de> Visitor<'de> for CursorToolUseBlockVisitor<'_> {
             },
             call_id,
             tool_name,
-            input_paths,
+            command: input.command,
+            declared_workdir: input.declared_workdir,
+            input_paths: input.paths,
+            ambiguous_native_fields,
         }))
+    }
+}
+
+struct CursorToolResultBlockVisitor<'a> {
+    classification: &'a CursorLineClassification,
+}
+
+impl<'de> Visitor<'de> for CursorToolResultBlockVisitor<'_> {
+    type Value = Option<CursorSafePart>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Cursor tool_result content block")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut call_id = None;
+        let mut call_id_seen = false;
+        let mut ambiguous_linkage = false;
+        while let Some(field) = map.next_key::<String>()? {
+            if field == "tool_use_id" {
+                let value = map.next_value_seed(ExactBoundedStringSeed {
+                    max_chars: MAX_CURSOR_ATOM_CHARS,
+                })?;
+                ambiguous_linkage |= call_id_seen || value.is_none();
+                call_id_seen = true;
+                call_id = value;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(Some(CursorSafePart::ToolResult {
+            role: match cursor_role(self.classification.role.as_deref()) {
+                EventRole::Unknown | EventRole::User => EventRole::Tool,
+                role => role,
+            },
+            call_id,
+            ambiguous_linkage,
+        }))
+    }
+}
+
+#[derive(Debug, Default)]
+struct CursorToolInput {
+    command: Option<String>,
+    declared_workdir: Option<String>,
+    paths: Vec<String>,
+    command_seen: bool,
+    workdir_seen: bool,
+    invalid_field: bool,
+}
+
+impl CursorToolInput {
+    fn merge(&mut self, incoming: Self) -> bool {
+        let mut ambiguous = self.invalid_field || incoming.invalid_field;
+        if incoming.command_seen {
+            ambiguous |= self.command_seen || incoming.command.is_none();
+            self.command_seen = true;
+            self.command = incoming.command;
+        }
+        if incoming.workdir_seen {
+            ambiguous |= self.workdir_seen || incoming.declared_workdir.is_none();
+            self.workdir_seen = true;
+            self.declared_workdir = incoming.declared_workdir;
+        }
+        self.paths.extend(incoming.paths);
+        self.invalid_field |= incoming.invalid_field;
+        ambiguous
     }
 }
 
 struct CursorToolInputSeed;
 
 impl<'de> DeserializeSeed<'de> for CursorToolInputSeed {
-    type Value = Vec<String>;
+    type Value = CursorToolInput;
 
     fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
     where
@@ -561,7 +659,7 @@ impl<'de> DeserializeSeed<'de> for CursorToolInputSeed {
 struct CursorToolInputVisitor;
 
 impl<'de> Visitor<'de> for CursorToolInputVisitor {
-    type Value = Vec<String>;
+    type Value = CursorToolInput;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a Cursor tool input object")
@@ -571,39 +669,60 @@ impl<'de> Visitor<'de> for CursorToolInputVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut paths = Vec::new();
+        let mut input = CursorToolInput::default();
         while let Some(field) = map.next_key::<String>()? {
             match field.as_str() {
-                "path" | "file_path" | "filePath" if paths.len() < MAX_CURSOR_INPUT_PATHS => {
-                    paths.push(map.next_value_seed(BoundedStringSeed {
+                "command" => {
+                    let value = map.next_value_seed(ExactBoundedStringSeed {
                         max_chars: MAX_CURSOR_PATH_CHARS,
-                    })?);
+                    })?;
+                    input.invalid_field |= input.command_seen || value.is_none();
+                    input.command_seen = true;
+                    input.command = value;
                 }
-                "paths" if paths.len() < MAX_CURSOR_INPUT_PATHS => {
+                "workdir" => {
+                    let value = map.next_value_seed(ExactBoundedStringSeed {
+                        max_chars: MAX_CURSOR_PATH_CHARS,
+                    })?;
+                    input.invalid_field |= input.workdir_seen || value.is_none();
+                    input.workdir_seen = true;
+                    input.declared_workdir = value;
+                }
+                "path" | "file_path" | "filePath" if input.paths.len() < MAX_CURSOR_INPUT_PATHS => {
+                    match map.next_value_seed(ExactBoundedStringSeed {
+                        max_chars: MAX_CURSOR_PATH_CHARS,
+                    })? {
+                        Some(path) => input.paths.push(path),
+                        None => input.invalid_field = true,
+                    }
+                }
+                "paths" if input.paths.len() < MAX_CURSOR_INPUT_PATHS => {
                     let mut decoded = map.next_value_seed(CursorPathsSeed)?;
-                    let remaining = MAX_CURSOR_INPUT_PATHS.saturating_sub(paths.len());
-                    paths.extend(decoded.drain(..decoded.len().min(remaining)));
+                    let remaining = MAX_CURSOR_INPUT_PATHS.saturating_sub(input.paths.len());
+                    input
+                        .paths
+                        .extend(decoded.drain(..decoded.len().min(remaining)));
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
             }
         }
-        Ok(paths)
+        Ok(input)
     }
 
     fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(Vec::new())
+        Ok(CursorToolInput::default())
     }
 
     fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(Vec::new())
+        Ok(CursorToolInput::default())
     }
 }
 
@@ -635,13 +754,15 @@ impl<'de> Visitor<'de> for CursorPathsVisitor {
     {
         let mut paths = Vec::new();
         while paths.len() < MAX_CURSOR_INPUT_PATHS {
-            let Some(path) = sequence.next_element_seed(BoundedStringSeed {
+            let Some(path) = sequence.next_element_seed(ExactBoundedStringSeed {
                 max_chars: MAX_CURSOR_PATH_CHARS,
             })?
             else {
                 return Ok(paths);
             };
-            paths.push(path);
+            if let Some(path) = path {
+                paths.push(path);
+            }
         }
         while sequence.next_element::<IgnoredAny>()?.is_some() {}
         Ok(paths)
@@ -650,6 +771,22 @@ impl<'de> Visitor<'de> for CursorPathsVisitor {
 
 struct BoundedStringSeed {
     max_chars: usize,
+}
+
+struct ExactBoundedStringSeed {
+    max_chars: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for ExactBoundedStringSeed {
+    type Value = Option<String>;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok((value.chars().count() <= self.max_chars).then_some(value))
+    }
 }
 
 impl<'de> DeserializeSeed<'de> for BoundedStringSeed {

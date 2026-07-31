@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{EventRole, EventType, RepositoryAbstentionReason};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -21,6 +21,7 @@ use super::parser::{
     MAX_GEMINI_FILE_TOUCHES_PER_EVENT, MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT,
     MAX_GEMINI_NATIVE_PAGE_BYTES, MAX_GEMINI_NATIVE_PAGE_RECORDS,
 };
+use super::source_backed::project_gemini_test_events;
 use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
 
 fn fixture_root(temp: &TempDir) -> PathBuf {

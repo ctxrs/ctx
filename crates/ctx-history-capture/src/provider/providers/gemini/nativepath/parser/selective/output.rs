@@ -29,9 +29,17 @@ impl GeminiRawJson<'_> {
                 })
             }
             Some(_) => {
+                let start = self.offset;
                 self.skip_value(depth)?;
+                let encoded = &self.bytes[start..self.offset];
+                let mut hasher = Sha256::new();
+                hasher.update(RESULT_UNSUPPORTED_HASH_DOMAIN);
+                hasher.update(encoded);
                 Ok(GeminiRawOutput {
-                    content: GeminiSelectedContent::Unsupported,
+                    content: GeminiSelectedContent::Unsupported {
+                        encoded_bytes: encoded.len(),
+                        sha256: hasher.finalize().into(),
+                    },
                     ..GeminiRawOutput::default()
                 })
             }
@@ -205,8 +213,16 @@ impl GeminiRawJson<'_> {
                 Ok(GeminiSelectedContent::Null)
             }
             _ => {
+                let start = self.offset;
                 self.skip_value(depth)?;
-                Ok(GeminiSelectedContent::Unsupported)
+                let encoded = &self.bytes[start..self.offset];
+                let mut hasher = Sha256::new();
+                hasher.update(RESULT_UNSUPPORTED_HASH_DOMAIN);
+                hasher.update(encoded);
+                Ok(GeminiSelectedContent::Unsupported {
+                    encoded_bytes: encoded.len(),
+                    sha256: hasher.finalize().into(),
+                })
             }
         }
     }
@@ -388,6 +404,7 @@ impl GeminiRawJson<'_> {
 struct GeminiRawResultCall {
     id: Option<String>,
     name: Option<String>,
+    args: GeminiRepositoryArgs,
     result: Option<GeminiRawOutput>,
     outcome: GeminiOutputOutcomeDto,
 }
@@ -478,9 +495,15 @@ pub(super) fn parse_result_record_selectively(
     let record_redacted = outcome.is_redacted();
     if let Some(result) = top_result {
         output_count = output_count.saturating_add(1);
-        if let Some(output) =
-            finish_probed_output(None, None, false, &outcome, result, capture_full_content)
-        {
+        if let Some(output) = finish_probed_output(
+            None,
+            None,
+            GeminiRepositoryArgs::default(),
+            false,
+            &outcome,
+            result,
+            capture_full_content,
+        ) {
             outputs.push(output);
         } else {
             invalid_selected_shape = true;
@@ -499,6 +522,7 @@ pub(super) fn parse_result_record_selectively(
         if let Some(output) = finish_probed_output(
             nonempty(call.id),
             nonempty(call.name),
+            call.args,
             record_redacted,
             &call.outcome,
             result,
@@ -528,6 +552,7 @@ pub(super) fn parse_result_record_selectively(
 pub(super) fn finish_probed_output(
     call_id: Option<String>,
     tool_name: Option<String>,
+    repository_args: GeminiRepositoryArgs,
     record_redacted: bool,
     outer_outcome: &GeminiOutputOutcomeDto,
     result: GeminiRawOutput,
@@ -544,7 +569,16 @@ pub(super) fn finish_probed_output(
             ),
             GeminiSelectedContent::Absent => (None, 0, false, b"absent".as_slice(), None),
             GeminiSelectedContent::Null => (None, 0, false, b"null".as_slice(), None),
-            GeminiSelectedContent::Unsupported => return None,
+            GeminiSelectedContent::Unsupported {
+                encoded_bytes,
+                sha256,
+            } => (
+                None,
+                encoded_bytes,
+                true,
+                b"unsupported".as_slice(),
+                Some(sha256),
+            ),
         };
     let outcome = outer_outcome.combined_metadata(&result.outcome);
     let fallback_identity_sha256 = result_fallback_identity_sha256(
@@ -563,6 +597,10 @@ pub(super) fn finish_probed_output(
     Some(ProbedGeminiOutput {
         call_id,
         tool_name,
+        command: repository_args.command,
+        declared_workdir: repository_args.declared_workdir,
+        file_paths: repository_args.file_paths,
+        ambiguous_native_fields: repository_args.ambiguous_native_fields,
         outcome,
         redacted: record_redacted || outer_outcome.redacted_with(&result.outcome),
         released_diagnostic_preview,
@@ -641,9 +679,9 @@ impl GeminiRawJson<'_> {
         self.whitespace();
         match self.peek() {
             Some(b'"') => self
-                .string(usize::MAX)?
+                .string(MAX_GEMINI_REPOSITORY_STRING_CHARS)?
                 .exact()
-                .ok_or_else(|| "Gemini result metadata string overflowed".to_owned())
+                .ok_or_else(|| "Gemini result metadata string exceeded the bound".to_owned())
                 .map(Some),
             Some(b'n') => {
                 self.consume_literal(b"null")?;
@@ -654,6 +692,97 @@ impl GeminiRawJson<'_> {
                 self.offset
             )),
         }
+    }
+
+    fn repository_args(
+        &mut self,
+        depth: usize,
+    ) -> std::result::Result<GeminiRepositoryArgs, String> {
+        self.whitespace();
+        if self.peek() != Some(b'{') {
+            self.skip_value(depth)?;
+            return Ok(GeminiRepositoryArgs {
+                ambiguous_native_fields: true,
+                ..GeminiRepositoryArgs::default()
+            });
+        }
+        self.take(b'{')?;
+        self.whitespace();
+        let mut args = GeminiRepositoryArgs::default();
+        let mut command_seen = false;
+        let mut workdir_seen = false;
+        if self.peek() == Some(b'}') {
+            self.take(b'}')?;
+            return Ok(args);
+        }
+        loop {
+            let key = self.key()?;
+            self.whitespace();
+            self.take(b':')?;
+            self.whitespace();
+            match key.as_deref() {
+                Some("command") => {
+                    let value = self.repository_string(depth)?;
+                    args.ambiguous_native_fields |= command_seen || value.is_none();
+                    if command_seen {
+                        args.command = None;
+                    } else {
+                        args.command = value;
+                    }
+                    command_seen = true;
+                }
+                Some("dir_path") => {
+                    let value = self.repository_string(depth)?;
+                    args.ambiguous_native_fields |= workdir_seen || value.is_none();
+                    if workdir_seen {
+                        args.declared_workdir = None;
+                    } else {
+                        args.declared_workdir = value;
+                    }
+                    workdir_seen = true;
+                }
+                Some("path" | "file_path" | "filePath") => {
+                    let value = self.repository_string(depth)?;
+                    if let Some(path) = value {
+                        if args.file_paths.len() < MAX_GEMINI_REPOSITORY_PATHS {
+                            args.file_paths.push(path);
+                        } else {
+                            args.ambiguous_native_fields = true;
+                        }
+                    } else {
+                        args.ambiguous_native_fields = true;
+                    }
+                }
+                _ => self.skip_value(depth)?,
+            }
+            self.whitespace();
+            match self.peek() {
+                Some(b',') => {
+                    self.take(b',')?;
+                    self.whitespace();
+                }
+                Some(b'}') => {
+                    self.take(b'}')?;
+                    break;
+                }
+                _ => {
+                    return Err(format!(
+                        "invalid Gemini tool args near byte {}",
+                        self.offset
+                    ));
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    fn repository_string(&mut self, depth: usize) -> std::result::Result<Option<String>, String> {
+        self.whitespace();
+        if self.peek() == Some(b'"') {
+            return Ok(self.string(MAX_GEMINI_REPOSITORY_STRING_CHARS)?.exact());
+        }
+        self.skip_value(depth)?;
+        Ok(None)
     }
 
     fn result_calls(
@@ -707,9 +836,14 @@ impl GeminiRawJson<'_> {
         let mut call = GeminiRawResultCall {
             id: None,
             name: None,
+            args: GeminiRepositoryArgs::default(),
             result: None,
             outcome: GeminiOutputOutcomeDto::default(),
         };
+        let mut id_seen = false;
+        let mut name_seen = false;
+        let mut args_seen = false;
+        let mut result_seen = false;
         if self.peek() == Some(b'}') {
             self.take(b'}')?;
             return Ok(Some(call));
@@ -720,9 +854,43 @@ impl GeminiRawJson<'_> {
             self.take(b':')?;
             self.whitespace();
             match key.as_deref() {
-                Some("id") => call.id = self.optional_string()?,
-                Some("name") => call.name = self.optional_string()?,
-                Some("result") => call.result = Some(self.output_value(depth.saturating_add(1))?),
+                Some("id") => {
+                    let value = self.optional_string()?;
+                    call.args.ambiguous_native_fields |= id_seen || value.is_none();
+                    if id_seen {
+                        call.id = None;
+                    } else {
+                        call.id = value;
+                    }
+                    id_seen = true;
+                }
+                Some("name") => {
+                    let value = self.optional_string()?;
+                    call.args.ambiguous_native_fields |= name_seen || value.is_none();
+                    if name_seen {
+                        call.name = None;
+                    } else {
+                        call.name = value;
+                    }
+                    name_seen = true;
+                }
+                Some("args") => {
+                    let mut args = self.repository_args(depth.saturating_add(1))?;
+                    args.ambiguous_native_fields |= args_seen || call.args.ambiguous_native_fields;
+                    if args_seen {
+                        args.command = None;
+                        args.declared_workdir = None;
+                        args.file_paths.clear();
+                    }
+                    args_seen = true;
+                    call.args = args;
+                }
+                Some("result") => {
+                    let result = self.output_value(depth.saturating_add(1))?;
+                    call.args.ambiguous_native_fields |= result_seen;
+                    result_seen = true;
+                    call.result = Some(result);
+                }
                 Some(key) => {
                     if !self.outcome_field(key, &mut call.outcome, depth)? {
                         self.skip_value(depth)?;
