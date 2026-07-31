@@ -196,6 +196,59 @@ fn repository_contract_rejects_unscoped_and_mismatched_observations() {
 }
 
 #[test]
+fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_access() {
+    let mut prior = record();
+    prior.repository_bindings.push(binding());
+    prior
+        .repository_file_observations
+        .push(RepositoryFileObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            relative_path: "src/lib.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Modified,
+            prior_relative_path: None,
+        });
+    let mut current = record();
+    current.repository_abstentions.push(RepositoryAbstention {
+        evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+        reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
+        detail: Some("candidate_missing_before_certification".to_owned()),
+        association_policy_revision: 1,
+    });
+
+    assert!(current.needs_prior_repository_certificate());
+    assert!(current.reuse_prior_repository_certificate(&prior));
+    assert_eq!(current.repository_bindings.len(), 1);
+    assert!(current.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
+    assert_eq!(current.repository_file_observations.len(), 1);
+    assert!(current.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::Unavailable
+            && abstention.detail.as_deref()
+                == Some("prior_certificate_reused_without_local_authorization")
+    }));
+    current.validate_contract().unwrap();
+
+    let mut wrong_source = record();
+    wrong_source.source = SourceKey::derive(
+        "codex",
+        "different_codex_format",
+        "session",
+        1,
+        SourceAnchor::provider_native("session-file", TypedKey::utf8("core-record-test").unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    wrong_source.repository_abstentions = vec![RepositoryAbstention {
+        evidence_kind: RepositoryEvidenceKind::SessionCwd,
+        reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
+        detail: None,
+        association_policy_revision: 1,
+    }];
+    assert!(!wrong_source.reuse_prior_repository_certificate(&prior));
+}
+
+#[test]
 fn logical_repository_binding_can_abstain_from_local_checkout_identity() {
     let mut record = record();
     let mut moved = binding();

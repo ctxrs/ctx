@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{EventRole, EventType, FileChangeKind, RepositoryFileObservationKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -15,6 +15,8 @@ use crate::provider::codex::events::{
     CodexNativeEvent, CodexToolCallContext,
 };
 use crate::{
+    provider::codex::repository::{repository_tool_evidence, CodexRepositoryToolEvidence},
+    repository_attribution::UnscopedFileObservation,
     CaptureError, OutputOutcome, OutputOutcomeMetadata, Result as CaptureResult,
     CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
@@ -58,6 +60,8 @@ pub(crate) struct CodexSourceBackedRowV0 {
     pub(crate) role: Option<EventRole>,
     pub(crate) lexical_body: String,
     pub(crate) touched_paths: Vec<String>,
+    pub(crate) repository_tool: Option<CodexRepositoryToolEvidence>,
+    pub(crate) repository_files: Vec<UnscopedFileObservation>,
 }
 
 impl CodexSourceBackedRowV0 {
@@ -70,11 +74,28 @@ impl CodexSourceBackedRowV0 {
             .touched_paths
             .iter()
             .try_fold(0_usize, |total, path| total.checked_add(path.capacity()))?;
-        let allocation_count = 2_usize.checked_add(self.touched_paths.len())?;
+        let repository_bytes = self
+            .repository_tool
+            .as_ref()
+            .and_then(|evidence| serde_json::to_vec(&evidence.structured_content).ok())
+            .map_or(0, |encoded| encoded.len());
+        let repository_file_bytes =
+            self.repository_files
+                .iter()
+                .try_fold(0_usize, |total, observation| {
+                    total
+                        .checked_add(observation.path.capacity())?
+                        .checked_add(observation.prior_path.as_ref().map_or(0, String::capacity))
+                })?;
+        let allocation_count = 3_usize
+            .checked_add(self.touched_paths.len())?
+            .checked_add(self.repository_files.len())?;
         size_of::<Self>()
             .checked_add(self.lexical_body.capacity())?
             .checked_add(path_slots)?
             .checked_add(path_bytes)?
+            .checked_add(repository_bytes)?
+            .checked_add(repository_file_bytes)?
             .checked_add(allocation_count.checked_mul(OWNED_ALLOCATION_OVERHEAD_BYTES)?)
     }
 }
@@ -164,6 +185,8 @@ pub(super) fn build_source_backed_event_row(
             role: semantic.role,
             lexical_body: semantic.lexical_body,
             touched_paths: Vec::new(),
+            repository_tool: repository_tool_evidence(&retained.payload),
+            repository_files: Vec::new(),
         },
         tool_context: semantic.tool_context,
     }))
@@ -225,7 +248,20 @@ pub(super) fn build_source_backed_sparse_output_row(
         role: Some(EventRole::Tool),
         lexical_body,
         touched_paths: Vec::new(),
+        repository_tool: None,
+        repository_files: Vec::new(),
     }))
+}
+
+pub(super) fn repository_file_kind(kind: Option<FileChangeKind>) -> RepositoryFileObservationKind {
+    match kind {
+        Some(FileChangeKind::Created) => RepositoryFileObservationKind::Created,
+        Some(FileChangeKind::Read) => RepositoryFileObservationKind::Read,
+        Some(FileChangeKind::Modified) => RepositoryFileObservationKind::Modified,
+        Some(FileChangeKind::Deleted) => RepositoryFileObservationKind::Deleted,
+        Some(FileChangeKind::Renamed) => RepositoryFileObservationKind::Renamed,
+        _ => RepositoryFileObservationKind::Unknown,
+    }
 }
 
 fn source_record_evidence(

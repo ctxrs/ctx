@@ -1,11 +1,57 @@
 use std::collections::HashMap;
 
-use ctx_history_core::{SourceKey, StableEntityId};
+use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
 use sha2::{Digest, Sha256};
 use tantivy::{schema::IndexRecordOption, Searcher, TantivyDocument, Term};
 use uuid::Uuid;
 
 use crate::{Fields, IndexError, Result};
+
+pub(crate) fn prior_core_record(
+    searcher: &Searcher,
+    fields: Fields,
+    identity: StableEntityId,
+    current_source: &SourceKey,
+) -> Result<Option<CoreRecord>> {
+    use tantivy::{collector::TopDocs, query::TermQuery, schema::Value as TantivyValue};
+
+    let term = Term::from_field_text(fields.event_id, &identity.as_uuid().to_string());
+    if searcher.doc_freq(&term)? == 0 {
+        return Ok(None);
+    }
+    let query = TermQuery::new(term, IndexRecordOption::Basic);
+    let hits = searcher.search(&query, &TopDocs::with_limit(2).order_by_score())?;
+    let mut prior = None;
+    for (_, address) in hits {
+        let document: TantivyDocument = searcher.doc(address)?;
+        let existing_source = document
+            .get_first(fields.source_key)
+            .and_then(|value| value.as_str())
+            .ok_or(IndexError::EmptyDocumentField {
+                field: "source_key",
+            })?;
+        if existing_source != source_token(current_source) {
+            continue;
+        }
+        if prior.is_some() {
+            return Err(IndexError::DuplicateEventIdentity(
+                identity.as_uuid().to_string(),
+            ));
+        }
+        let bytes = document
+            .get_first(fields.core_record)
+            .and_then(|value| value.as_bytes())
+            .ok_or(IndexError::EmptyDocumentField {
+                field: "core_record",
+            })?;
+        let decoded = CoreRecord::decode_stored(bytes)?;
+        if decoded.event_id != identity || !decoded.source.exact_descriptor_eq(current_source) {
+            return Err(IndexError::InvalidStoredDocumentField("core_record"));
+        }
+        prior = Some(decoded);
+    }
+    Ok(prior)
+}
 
 pub(crate) fn source_token(source: &SourceKey) -> String {
     hex(&source.identity().digest())

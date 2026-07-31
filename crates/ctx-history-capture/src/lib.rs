@@ -74,6 +74,7 @@ pub mod complete_content;
 
 pub(crate) mod native_source;
 mod pro_output;
+pub(crate) mod repository_attribution;
 pub use pro_output::{
     OutputAssociations, OutputCommandContext, OutputNativeCoordinate, OutputObservationKind,
     OutputOutcome, OutputOutcomeMetadata, OutputRepositoryContext, OutputSourceLocator,
