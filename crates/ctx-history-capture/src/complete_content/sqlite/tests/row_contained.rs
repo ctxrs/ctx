@@ -55,10 +55,10 @@ fn kiro_source_backed_row_hydrates_each_typed_event_and_rejects_rewrite() {
             .iter()
             .map(|document| document.body.chars().count())
             .collect::<Vec<_>>(),
-        vec![PROVIDER_MAX_TEXT_CHARS, PROVIDER_MAX_TEXT_CHARS]
+        vec![user_body.chars().count(), assistant_body.chars().count()]
     );
-    assert!(user_body.starts_with(&scan.documents[0].body));
-    assert!(assistant_body.starts_with(&scan.documents[1].body));
+    assert_eq!(scan.documents[0].body, user_body);
+    assert_eq!(scan.documents[1].body, assistant_body);
     assert!(scan.documents.iter().all(|document| matches!(
         document.locator.coordinate(),
         NativeRecordCoordinate::ProviderSqlite {
