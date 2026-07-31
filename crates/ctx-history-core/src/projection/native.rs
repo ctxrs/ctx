@@ -50,6 +50,12 @@ impl TypedKey {
     pub fn from_f64(value: f64) -> Self {
         Self::F64Bits(value.to_bits())
     }
+
+    pub fn validate_contract(&self) -> ProjectionContractResult<()> {
+        let mut encoded = Vec::new();
+        encode_typed_key(&mut encoded, self)?;
+        validate_bytes("typed_key", &encoded, MAX_TYPED_KEY_BYTES)
+    }
 }
 
 /// Hydration/citation evidence. A locator is intentionally not identity.

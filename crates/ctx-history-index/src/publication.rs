@@ -8,7 +8,10 @@ use std::{
     },
 };
 
-use ctx_history_core::{CertifiedSource, SourceKey, StableEntityId, IDENTITY_VERSION};
+use ctx_history_core::{
+    core_record_contract_fingerprint, CertifiedSource, SourceKey, StableEntityId,
+    CORE_RECORD_VERSION, IDENTITY_VERSION,
+};
 use tantivy::{
     collector::Count, directory::Directory, schema::IndexRecordOption, DocAddress, Executor, Index,
     IndexMeta, ReloadPolicy, Searcher, Term,
@@ -62,11 +65,20 @@ pub(crate) fn load_manifest_for_metas(
     if manifest.identity_version != IDENTITY_VERSION
         || manifest.lexical_schema_version != LEXICAL_SCHEMA_VERSION
         || manifest.lexical_analyzer_version != LEXICAL_ANALYZER_VERSION
+        || manifest.core_record_version != CORE_RECORD_VERSION
     {
         return Err(IndexError::GenerationContractMismatch {
             identity: manifest.identity_version,
             schema: manifest.lexical_schema_version,
             analyzer: manifest.lexical_analyzer_version,
+            core_record: manifest.core_record_version,
+        });
+    }
+    let expected_core_fingerprint = core_record_contract_fingerprint();
+    if manifest.core_record_contract_fingerprint != expected_core_fingerprint {
+        return Err(IndexError::CoreRecordContractMismatch {
+            expected: expected_core_fingerprint,
+            actual: manifest.core_record_contract_fingerprint,
         });
     }
     let expected_policy_hash = current_source_generation_policy_hash()?;

@@ -37,6 +37,7 @@ pub(crate) struct Fields {
     pub(crate) cwd: Field,
     pub(crate) touched_file: Field,
     pub(crate) touched_file_filter: Field,
+    pub(crate) core_record: Field,
 }
 
 pub(crate) fn validate_schema(schema: &Schema) -> Result<()> {
@@ -85,6 +86,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("cwd", STRING | STORED);
     builder.add_text_field("touched_file", STRING | STORED);
     builder.add_text_field("touched_file_filter", STRING);
+    builder.add_bytes_field("core_record", STORED);
     builder.build()
 }
 
@@ -121,6 +123,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         cwd: required_field(schema, "cwd")?,
         touched_file: required_field(schema, "touched_file")?,
         touched_file_filter: required_field(schema, "touched_file_filter")?,
+        core_record: required_field(schema, "core_record")?,
     })
 }
 

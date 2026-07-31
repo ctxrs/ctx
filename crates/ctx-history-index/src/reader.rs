@@ -55,6 +55,9 @@ impl VerifiedIndex {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         if exhaustive {
+            if !searcher.index().validate_checksum()?.is_empty() {
+                return Err(IndexError::ChecksumMismatch);
+            }
             verify_searcher(&searcher, &manifest)?;
         } else {
             verify_searcher_structure(&searcher, &manifest)?;

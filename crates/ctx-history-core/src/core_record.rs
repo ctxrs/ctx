@@ -1,0 +1,858 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::{SourceKey, StableEntityId, StableEntityKind, TypedKey};
+
+pub const CORE_RECORD_VERSION: u32 = 1;
+pub const CORE_NORMALIZATION_REVISION: u32 = 1;
+pub const CORE_CONTENT_POLICY_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 1;
+
+/// Maximum complete policy-selected content admitted to one Core record.
+pub const MAX_CORE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+/// JSON escaping can expand content beyond its decoded size. This is a decode
+/// and storage bound, not a preview or truncation policy.
+pub const MAX_ENCODED_CORE_RECORD_BYTES: usize = 64 * 1024 * 1024;
+
+const MAX_TEXT_METADATA_BYTES: usize = 64 * 1024;
+const MAX_STRUCTURED_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_REPOSITORY_ITEMS: usize = 256;
+const MAX_REPOSITORY_OBSERVATIONS: usize = 4_096;
+const MAX_REPOSITORY_ALIASES: usize = 64;
+const MAX_REPOSITORY_EVIDENCE: usize = 64;
+const MAX_REPOSITORY_NAMESPACE_PARTS: usize = 32;
+const MAX_REPOSITORY_RELATIVE_PATH_BYTES: usize = 16 * 1024;
+const MAX_GIT_REF_BYTES: usize = 4 * 1024;
+
+pub type CoreRecordResult<T> = Result<T, CoreRecordError>;
+
+/// Fingerprint of the versioned shared Core/repository contract.
+///
+/// Any logical shape or validation change must bump at least one bound
+/// revision below, which changes both this value and generation identity.
+pub fn core_record_contract_fingerprint() -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.core-record-contract\0");
+    digest.update(CORE_RECORD_VERSION.to_be_bytes());
+    digest.update(CORE_NORMALIZATION_REVISION.to_be_bytes());
+    digest.update(CORE_CONTENT_POLICY_REVISION.to_be_bytes());
+    digest.update(CORE_REPOSITORY_CONTRACT_REVISION.to_be_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(Debug, Error)]
+pub enum CoreRecordError {
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("unsupported Core record version {0}")]
+    UnsupportedVersion(u32),
+    #[error("Core record field {field} is empty")]
+    EmptyField { field: &'static str },
+    #[error("Core record field {field} is too large: {actual} bytes, maximum {maximum}")]
+    FieldTooLarge {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("Core record collection {field} has too many items: {actual}, maximum {maximum}")]
+    TooManyItems {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("Core record contains an invalid stable identity relationship")]
+    InvalidIdentityRelationship,
+    #[error("Core record content does not match its policy status")]
+    InvalidContentPolicyState,
+    #[error("Core record metadata must be a bounded JSON value")]
+    InvalidMetadata,
+    #[error("Core record repository identity {field} is duplicated: {value}")]
+    DuplicateRepositoryIdentity { field: &'static str, value: String },
+    #[error("Core record repository observation names unknown binding {0}")]
+    UnknownRepositoryBinding(String),
+    #[error("repository path is not canonical repository-relative data: {0}")]
+    InvalidRepositoryRelativePath(String),
+    #[error("repository alias contains credential-bearing or non-canonical host data")]
+    InvalidRepositoryAlias,
+    #[error("Git object ID does not match its declared object format")]
+    InvalidGitObjectId,
+}
+
+/// Complete normalized content retained under one explicit product policy.
+///
+/// Presentation previews are derived from this value and are never durable
+/// fields in Core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreContent {
+    pub policy_revision: u32,
+    pub policy_status: CoreContentPolicyStatus,
+    pub normalized_body: Option<String>,
+    pub structured_content: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreContentPolicyStatus {
+    Selected,
+    Redacted { reason: String },
+    Omitted { reason: String },
+}
+
+/// One complete, generation-owned normalized history event.
+///
+/// Provider read-time locators are intentionally absent. `source` identifies
+/// ownership and parser lineage; it is not an address for reading content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreRecord {
+    pub record_version: u32,
+    pub event_id: StableEntityId,
+    pub session_id: StableEntityId,
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: StableEntityId,
+    pub source: SourceKey,
+    pub provider_session_id: Option<String>,
+    pub native_event_id: Option<TypedKey>,
+    pub event_sequence: u64,
+    pub occurred_at_unix_ms: Option<i64>,
+    pub event_type: String,
+    pub role: Option<String>,
+    pub agent_type: String,
+    pub is_primary: bool,
+    pub workspace: Option<String>,
+    pub branch: Option<String>,
+    pub cwd: Option<String>,
+    pub parser_revision: String,
+    pub normalization_revision: u32,
+    pub content: CoreContent,
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    pub repository_candidate_evidence: RepositoryCandidateEvidence,
+    pub repository_bindings: Vec<RepositoryBinding>,
+    pub repository_abstentions: Vec<RepositoryAbstention>,
+    pub repository_file_observations: Vec<RepositoryFileObservation>,
+    pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
+}
+
+impl CoreRecord {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        if self.record_version != CORE_RECORD_VERSION {
+            return Err(CoreRecordError::UnsupportedVersion(self.record_version));
+        }
+        self.source
+            .validate_contract()
+            .map_err(|_| CoreRecordError::InvalidIdentityRelationship)?;
+        validate_owned_identity(self.event_id, StableEntityKind::Event, &self.source)?;
+        validate_owned_identity(self.session_id, StableEntityKind::Session, &self.source)?;
+        validate_related_session_identity(self.root_session_id)?;
+        if let Some(parent) = self.parent_session_id {
+            validate_related_session_identity(parent)?;
+        }
+        validate_optional_text(
+            "provider_session_id",
+            self.provider_session_id.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        if let Some(native_event_id) = &self.native_event_id {
+            native_event_id
+                .validate_contract()
+                .map_err(|_| CoreRecordError::InvalidIdentityRelationship)?;
+        }
+        validate_text("event_type", &self.event_type, MAX_TEXT_METADATA_BYTES)?;
+        validate_optional_text("role", self.role.as_deref(), MAX_TEXT_METADATA_BYTES)?;
+        validate_text("agent_type", &self.agent_type, MAX_TEXT_METADATA_BYTES)?;
+        validate_optional_text(
+            "workspace",
+            self.workspace.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_optional_text("branch", self.branch.as_deref(), MAX_TEXT_METADATA_BYTES)?;
+        validate_optional_text("cwd", self.cwd.as_deref(), MAX_TEXT_METADATA_BYTES)?;
+        validate_text(
+            "parser_revision",
+            &self.parser_revision,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        if self.normalization_revision == 0 || self.content.policy_revision == 0 {
+            return Err(CoreRecordError::InvalidContentPolicyState);
+        }
+        self.content.validate_contract()?;
+        validate_json_map(&self.metadata)?;
+        self.repository_candidate_evidence.validate_contract()?;
+        self.validate_repositories()
+    }
+
+    pub fn encode_stored(&self) -> CoreRecordResult<Vec<u8>> {
+        self.validate_contract()?;
+        let encoded = serde_json::to_vec(self)?;
+        validate_size(
+            "encoded_core_record",
+            encoded.len(),
+            MAX_ENCODED_CORE_RECORD_BYTES,
+        )?;
+        Ok(encoded)
+    }
+
+    pub fn decode_stored(encoded: &[u8]) -> CoreRecordResult<Self> {
+        validate_size(
+            "encoded_core_record",
+            encoded.len(),
+            MAX_ENCODED_CORE_RECORD_BYTES,
+        )?;
+        let record: Self = serde_json::from_slice(encoded)?;
+        record.validate_contract()?;
+        Ok(record)
+    }
+
+    fn validate_repositories(&self) -> CoreRecordResult<()> {
+        validate_count(
+            "repository_bindings",
+            self.repository_bindings.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        validate_count(
+            "repository_abstentions",
+            self.repository_abstentions.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        validate_count(
+            "repository_file_observations",
+            self.repository_file_observations.len(),
+            MAX_REPOSITORY_OBSERVATIONS,
+        )?;
+        validate_count(
+            "repository_vcs_observations",
+            self.repository_vcs_observations.len(),
+            MAX_REPOSITORY_OBSERVATIONS,
+        )?;
+
+        let mut binding_ids = HashSet::new();
+        let mut repository_formats = HashMap::new();
+        for binding in &self.repository_bindings {
+            binding.validate_contract()?;
+            if !binding_ids.insert(binding.binding_id.as_str()) {
+                return Err(CoreRecordError::DuplicateRepositoryIdentity {
+                    field: "repository_binding_id",
+                    value: binding.binding_id.clone(),
+                });
+            }
+            repository_formats.insert(binding.binding_id.as_str(), binding.git_object_format);
+        }
+        for abstention in &self.repository_abstentions {
+            abstention.validate_contract()?;
+        }
+        for observation in &self.repository_file_observations {
+            observation.validate_contract()?;
+            if !binding_ids.contains(observation.repository_binding_id.as_str()) {
+                return Err(CoreRecordError::UnknownRepositoryBinding(
+                    observation.repository_binding_id.clone(),
+                ));
+            }
+        }
+        for observation in &self.repository_vcs_observations {
+            observation.validate_contract()?;
+            let Some(format) = repository_formats
+                .get(observation.repository_binding_id.as_str())
+                .copied()
+            else {
+                return Err(CoreRecordError::UnknownRepositoryBinding(
+                    observation.repository_binding_id.clone(),
+                ));
+            };
+            let object_ids = observation
+                .object_id
+                .iter()
+                .chain(observation.parent_object_ids.iter());
+            for object_id in object_ids {
+                if format.is_none_or(|format| object_id.format != format) {
+                    return Err(CoreRecordError::InvalidGitObjectId);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CoreContent {
+    pub fn meaningful_text(&self) -> &str {
+        self.normalized_body.as_deref().unwrap_or("")
+    }
+
+    fn validate_contract(&self) -> CoreRecordResult<()> {
+        if self.policy_revision == 0 {
+            return Err(CoreRecordError::InvalidContentPolicyState);
+        }
+        let body_bytes = self.normalized_body.as_ref().map_or(0, String::len);
+        validate_size("normalized_body", body_bytes, MAX_CORE_CONTENT_BYTES)?;
+        let structured_bytes = self
+            .structured_content
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()?
+            .map_or(0, |encoded| encoded.len());
+        validate_size(
+            "structured_content",
+            structured_bytes,
+            MAX_STRUCTURED_CONTENT_BYTES,
+        )?;
+        let complete_content_bytes =
+            body_bytes
+                .checked_add(structured_bytes)
+                .ok_or(CoreRecordError::FieldTooLarge {
+                    field: "complete_content",
+                    actual: usize::MAX,
+                    maximum: MAX_CORE_CONTENT_BYTES,
+                })?;
+        validate_size(
+            "complete_content",
+            complete_content_bytes,
+            MAX_CORE_CONTENT_BYTES,
+        )?;
+        match &self.policy_status {
+            CoreContentPolicyStatus::Selected => {
+                if self.normalized_body.is_none() && self.structured_content.is_none()
+                    || self.meaningful_text().is_empty()
+                {
+                    return Err(CoreRecordError::InvalidContentPolicyState);
+                }
+            }
+            CoreContentPolicyStatus::Redacted { reason } => {
+                validate_text("redaction_reason", reason, MAX_TEXT_METADATA_BYTES)?;
+                if self.normalized_body.is_none() && self.structured_content.is_none()
+                    || self.meaningful_text().is_empty()
+                {
+                    return Err(CoreRecordError::InvalidContentPolicyState);
+                }
+            }
+            CoreContentPolicyStatus::Omitted { reason } => {
+                validate_text("omission_reason", reason, MAX_TEXT_METADATA_BYTES)?;
+                if self.normalized_body.is_some() || self.structured_content.is_some() {
+                    return Err(CoreRecordError::InvalidContentPolicyState);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitObjectFormat {
+    Sha1,
+    Sha256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryBinding {
+    pub binding_id: String,
+    pub logical_repository_id: String,
+    pub checkout_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub aliases: Vec<RepositoryAlias>,
+    pub git_object_format: Option<GitObjectFormat>,
+    pub local_root_authorization: Option<RepositoryLocalRootAuthorization>,
+    pub evidence: Vec<RepositoryEvidence>,
+    pub association_policy_revision: u32,
+}
+
+impl RepositoryBinding {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_text("binding_id", &self.binding_id, MAX_TEXT_METADATA_BYTES)?;
+        validate_text(
+            "logical_repository_id",
+            &self.logical_repository_id,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_optional_text(
+            "checkout_id",
+            self.checkout_id.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_optional_text(
+            "worktree_id",
+            self.worktree_id.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        if self.worktree_id.is_some() && self.checkout_id.is_none() {
+            return Err(CoreRecordError::InvalidIdentityRelationship);
+        }
+        validate_count(
+            "repository_aliases",
+            self.aliases.len(),
+            MAX_REPOSITORY_ALIASES,
+        )?;
+        validate_count(
+            "repository_evidence",
+            self.evidence.len(),
+            MAX_REPOSITORY_EVIDENCE,
+        )?;
+        if self.evidence.is_empty() || self.association_policy_revision == 0 {
+            return Err(CoreRecordError::EmptyField {
+                field: "repository_evidence",
+            });
+        }
+        let mut aliases = HashSet::new();
+        for alias in &self.aliases {
+            alias.validate_contract()?;
+            if !aliases.insert(alias) {
+                return Err(CoreRecordError::DuplicateRepositoryIdentity {
+                    field: "repository_alias",
+                    value: format!("{}:{}", alias.host, alias.name),
+                });
+            }
+        }
+        if let Some(local_root) = &self.local_root_authorization {
+            if self.checkout_id.is_none() || self.worktree_id.is_none() {
+                return Err(CoreRecordError::InvalidIdentityRelationship);
+            }
+            local_root.validate_contract()?;
+        }
+        Ok(())
+    }
+}
+
+/// Credential-free logical forge or configured-remote identity.
+///
+/// The structured shape intentionally has no URL, userinfo, token, or
+/// credential-bearing field.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryAlias {
+    pub kind: RepositoryAliasKind,
+    pub host: String,
+    pub namespace: Vec<String>,
+    pub name: String,
+    pub remote_name: Option<String>,
+}
+
+impl RepositoryAlias {
+    fn validate_contract(&self) -> CoreRecordResult<()> {
+        if self.host.is_empty()
+            || self.host.len() > MAX_TEXT_METADATA_BYTES
+            || self
+                .host
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || matches!(byte, b'@' | b'/' | b'\\'))
+        {
+            return Err(CoreRecordError::InvalidRepositoryAlias);
+        }
+        validate_count(
+            "repository_alias_namespace",
+            self.namespace.len(),
+            MAX_REPOSITORY_NAMESPACE_PARTS,
+        )?;
+        if self.namespace.is_empty() {
+            return Err(CoreRecordError::InvalidRepositoryAlias);
+        }
+        for component in self.namespace.iter().chain(std::iter::once(&self.name)) {
+            validate_repository_alias_component(component)?;
+        }
+        validate_optional_text(
+            "repository_remote_name",
+            self.remote_name.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAliasKind {
+    Forge,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryLocalRootAuthorization {
+    pub local_root: String,
+    pub locator_fingerprint: [u8; 32],
+    pub observed_at_unix_ms: i64,
+}
+
+impl RepositoryLocalRootAuthorization {
+    fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_text(
+            "repository_local_root",
+            &self.local_root,
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )?;
+        let bytes = self.local_root.as_bytes();
+        let is_posix_absolute = self.local_root.starts_with('/');
+        let is_windows_drive_absolute = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        let is_windows_unc = self.local_root.starts_with("\\\\");
+        if !is_posix_absolute && !is_windows_drive_absolute && !is_windows_unc {
+            return Err(CoreRecordError::InvalidIdentityRelationship);
+        }
+        if self.locator_fingerprint == [0; 32] {
+            return Err(CoreRecordError::EmptyField {
+                field: "repository_locator_fingerprint",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryEvidence {
+    pub kind: RepositoryEvidenceKind,
+    pub confidence: RepositoryEvidenceConfidence,
+}
+
+/// Structured activity that justified a repository candidate or binding.
+/// Declared tool workdirs and effective shell cwd observations are distinct;
+/// P0 deliberately assigns no command-parsing or cwd-resolution semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryEvidenceKind {
+    ProviderNativeProject,
+    DeclaredToolWorkdir,
+    DerivedEffectiveCwd,
+    CommandSpecificRepositoryPath,
+    FileActivity,
+    VcsActivity,
+    SessionCwd,
+}
+
+/// Independent structured repository candidate evidence retained before
+/// bounded certification. These values are not repository authority.
+///
+/// In particular, declared workdir, derived effective cwd, and a
+/// command-specific repository path must never be collapsed into one cwd.
+/// P0 defines only the storage contract and does not parse or resolve commands.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCandidateEvidence {
+    pub session_cwd: Option<String>,
+    pub declared_tool_workdir: Option<String>,
+    pub derived_effective_cwd: Option<String>,
+    pub command_specific_repository_path: Option<String>,
+}
+
+impl RepositoryCandidateEvidence {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_optional_text(
+            "repository_session_cwd",
+            self.session_cwd.as_deref(),
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )?;
+        validate_optional_text(
+            "repository_declared_tool_workdir",
+            self.declared_tool_workdir.as_deref(),
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )?;
+        validate_optional_text(
+            "repository_derived_effective_cwd",
+            self.derived_effective_cwd.as_deref(),
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )?;
+        validate_optional_text(
+            "repository_command_specific_path",
+            self.command_specific_repository_path.as_deref(),
+            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryEvidenceConfidence {
+    Explicit,
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryAbstention {
+    pub evidence_kind: RepositoryEvidenceKind,
+    pub reason: RepositoryAbstentionReason,
+    pub detail: Option<String>,
+    pub association_policy_revision: u32,
+}
+
+impl RepositoryAbstention {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_optional_text(
+            "repository_abstention_detail",
+            self.detail.as_deref(),
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        if self.association_policy_revision == 0 {
+            return Err(CoreRecordError::EmptyField {
+                field: "association_policy_revision",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAbstentionReason {
+    NoCandidate,
+    Unavailable,
+    Ambiguous,
+    Unsafe,
+    Unsupported,
+    ConflictingIdentity,
+    DynamicPath,
+    UnknownWrapper,
+    ProfileDependent,
+    UnsupportedShell,
+    CommandTooLarge,
+    CandidateMissingBeforeCertification,
+    UnsafePath,
+    UnscopedFileActivity,
+    AmbiguousCandidates,
+    AmbiguousRemote,
+    GitProbeFailed,
+    ConcurrentDrift,
+    PlatformUnsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryFileObservation {
+    pub repository_binding_id: String,
+    pub relative_path: String,
+    pub kind: RepositoryFileObservationKind,
+    pub prior_relative_path: Option<String>,
+}
+
+impl RepositoryFileObservation {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_text(
+            "repository_binding_id",
+            &self.repository_binding_id,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_repository_relative_path(&self.relative_path)?;
+        if let Some(prior) = &self.prior_relative_path {
+            validate_repository_relative_path(prior)?;
+        }
+        if matches!(self.kind, RepositoryFileObservationKind::Renamed)
+            != self.prior_relative_path.is_some()
+        {
+            return Err(CoreRecordError::InvalidRepositoryRelativePath(
+                self.relative_path.clone(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryFileObservationKind {
+    Read,
+    Created,
+    Modified,
+    Deleted,
+    Renamed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryVcsObservation {
+    pub repository_binding_id: String,
+    pub kind: RepositoryVcsObservationKind,
+    pub object_id: Option<GitObjectId>,
+    pub parent_object_ids: Vec<GitObjectId>,
+    pub reference: Option<String>,
+    pub relative_path: Option<String>,
+}
+
+impl RepositoryVcsObservation {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_text(
+            "repository_binding_id",
+            &self.repository_binding_id,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_count(
+            "parent_object_ids",
+            self.parent_object_ids.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        if let Some(object_id) = &self.object_id {
+            object_id.validate_contract()?;
+        }
+        for object_id in &self.parent_object_ids {
+            object_id.validate_contract()?;
+        }
+        validate_optional_text(
+            "repository_vcs_reference",
+            self.reference.as_deref(),
+            MAX_GIT_REF_BYTES,
+        )?;
+        if let Some(path) = &self.relative_path {
+            validate_repository_relative_path(path)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryVcsObservationKind {
+    Head,
+    Commit,
+    Branch,
+    Worktree,
+    Change,
+    Reference,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitObjectId {
+    pub format: GitObjectFormat,
+    pub hex: String,
+}
+
+impl GitObjectId {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        let expected = match self.format {
+            GitObjectFormat::Sha1 => 40,
+            GitObjectFormat::Sha256 => 64,
+        };
+        if self.hex.len() != expected
+            || !self
+                .hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CoreRecordError::InvalidGitObjectId);
+        }
+        Ok(())
+    }
+}
+
+fn validate_owned_identity(
+    identity: StableEntityId,
+    expected_kind: StableEntityKind,
+    source: &SourceKey,
+) -> CoreRecordResult<()> {
+    identity
+        .validate_contract()
+        .map_err(|_| CoreRecordError::InvalidIdentityRelationship)?;
+    if identity.entity_kind() != expected_kind
+        || identity.source_digest() != source.identity().digest()
+        || identity.source_descriptor_digest() != source.exact_descriptor_digest()
+    {
+        return Err(CoreRecordError::InvalidIdentityRelationship);
+    }
+    Ok(())
+}
+
+fn validate_related_session_identity(identity: StableEntityId) -> CoreRecordResult<()> {
+    identity
+        .validate_contract()
+        .map_err(|_| CoreRecordError::InvalidIdentityRelationship)?;
+    if identity.entity_kind() != StableEntityKind::Session {
+        return Err(CoreRecordError::InvalidIdentityRelationship);
+    }
+    Ok(())
+}
+
+fn validate_json_map(metadata: &BTreeMap<String, serde_json::Value>) -> CoreRecordResult<()> {
+    for key in metadata.keys() {
+        validate_text("metadata_key", key, MAX_TEXT_METADATA_BYTES)?;
+    }
+    let encoded = serde_json::to_vec(metadata)?;
+    validate_size("metadata", encoded.len(), MAX_METADATA_BYTES)
+        .map_err(|_| CoreRecordError::InvalidMetadata)
+}
+
+fn validate_repository_alias_component(value: &str) -> CoreRecordResult<()> {
+    if value.is_empty()
+        || value.len() > MAX_TEXT_METADATA_BYTES
+        || matches!(value, "." | "..")
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\' | b'@' | b':'))
+    {
+        return Err(CoreRecordError::InvalidRepositoryAlias);
+    }
+    Ok(())
+}
+
+fn validate_repository_relative_path(path: &str) -> CoreRecordResult<()> {
+    if path.is_empty()
+        || path.len() > MAX_REPOSITORY_RELATIVE_PATH_BYTES
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+        || path
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        || path.as_bytes().get(1).is_some_and(|second| *second == b':')
+    {
+        return Err(CoreRecordError::InvalidRepositoryRelativePath(
+            path.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_text(field: &'static str, value: &str, maximum: usize) -> CoreRecordResult<()> {
+    if value.is_empty() {
+        return Err(CoreRecordError::EmptyField { field });
+    }
+    validate_size(field, value.len(), maximum)
+}
+
+fn validate_optional_text(
+    field: &'static str,
+    value: Option<&str>,
+    maximum: usize,
+) -> CoreRecordResult<()> {
+    if let Some(value) = value {
+        validate_text(field, value, maximum)?;
+    }
+    Ok(())
+}
+
+fn validate_size(field: &'static str, actual: usize, maximum: usize) -> CoreRecordResult<()> {
+    if actual > maximum {
+        return Err(CoreRecordError::FieldTooLarge {
+            field,
+            actual,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
+fn validate_count(field: &'static str, actual: usize, maximum: usize) -> CoreRecordResult<()> {
+    if actual > maximum {
+        return Err(CoreRecordError::TooManyItems {
+            field,
+            actual,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

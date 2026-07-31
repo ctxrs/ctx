@@ -1,8 +1,12 @@
 use ctx_history_core::{
-    CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, ProjectionContractError,
-    SourceKey, SourceRecordLocator, SourceResolverContractError, StableEntityId, IDENTITY_VERSION,
+    core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, CoreContent, CoreContentPolicyStatus, CoreRecord, CoreRecordError,
+    ProjectionContractError, RepositoryCandidateEvidence, SourceKey, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, CORE_CONTENT_POLICY_REVISION,
+    CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -14,7 +18,7 @@ use crate::{
     sha256_hex, source_sort_key,
 };
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 3;
+pub const GENERATION_MANIFEST_VERSION: u32 = 4;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
@@ -44,6 +48,8 @@ pub enum IndexError {
     #[error(transparent)]
     SourceResolverContract(#[from] SourceResolverContractError),
     #[error(transparent)]
+    CoreRecord(#[from] CoreRecordError),
+    #[error(transparent)]
     Tantivy(#[from] tantivy::TantivyError),
     #[error("the lexical index has no ctx generation payload")]
     MissingCommitPayload,
@@ -52,13 +58,18 @@ pub enum IndexError {
     #[error("unsupported generation manifest version {0}")]
     UnsupportedManifest(u32),
     #[error(
-        "generation contract mismatch: identity {identity}, schema {schema}, analyzer {analyzer}"
+        "generation contract mismatch: identity {identity}, schema {schema}, analyzer {analyzer}, Core record {core_record}"
     )]
     GenerationContractMismatch {
         identity: u16,
         schema: u32,
         analyzer: u32,
+        core_record: u32,
     },
+    #[error(
+        "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
+    )]
+    CoreRecordContractMismatch { expected: String, actual: String },
     #[error(
         "source generation policy mismatch: expected {expected}, generation carries {actual}; \
          rebuild the disposable generation"
@@ -130,6 +141,8 @@ pub enum IndexError {
     },
     #[error("stored lexical document field {0} is missing, malformed, or inconsistent")]
     InvalidStoredDocumentField(&'static str),
+    #[error("lexical index checksum verification failed for one or more active files")]
+    ChecksumMismatch,
     #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]
     InvalidIdPrefix,
     #[error("query filter {field} is empty")]
@@ -282,7 +295,8 @@ pub struct LexicalDocument {
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
     pub role: Option<String>,
-    /// Full policy-selected meaningful text. It is indexed but never stored.
+    /// Full policy-selected meaningful text. P0 indexes it and explicitly
+    /// retains it as the normalized body in the stored Core bridge.
     pub body: String,
     pub workspace: Option<String>,
     pub cwd: Option<String>,
@@ -294,6 +308,47 @@ impl LexicalDocument {
     /// relationships before a document enters temporary or Tantivy staging.
     pub fn validate_contract(&self) -> Result<()> {
         self.validate().map(|_| ())
+    }
+
+    /// Explicit P0 bridge from the current provider-neutral lexical claim to
+    /// the complete Core contract. Provider adapters can replace this with
+    /// direct `CoreRecord` production without changing stored/query semantics.
+    pub fn to_core_record(&self) -> Result<CoreRecord> {
+        let record = CoreRecord {
+            record_version: CORE_RECORD_VERSION,
+            event_id: self.event_id,
+            session_id: self.session_id,
+            parent_session_id: self.parent_session_id,
+            root_session_id: self.root_session_id,
+            source: self.source.clone(),
+            provider_session_id: self.provider_session_id.clone(),
+            native_event_id: None,
+            event_sequence: self.event_sequence,
+            occurred_at_unix_ms: self.occurred_at_unix_ms,
+            event_type: self.event_type.clone(),
+            role: self.role.clone(),
+            agent_type: self.agent_type.clone(),
+            is_primary: self.is_primary,
+            workspace: self.workspace.clone(),
+            branch: self.branch.clone(),
+            cwd: self.cwd.clone(),
+            parser_revision: "lexical_document_bridge_v1".to_owned(),
+            normalization_revision: CORE_NORMALIZATION_REVISION,
+            content: CoreContent {
+                policy_revision: CORE_CONTENT_POLICY_REVISION,
+                policy_status: CoreContentPolicyStatus::Selected,
+                normalized_body: Some(self.body.clone()),
+                structured_content: None,
+            },
+            metadata: BTreeMap::new(),
+            repository_candidate_evidence: RepositoryCandidateEvidence::default(),
+            repository_bindings: Vec::new(),
+            repository_abstentions: Vec::new(),
+            repository_file_observations: Vec::new(),
+            repository_vcs_observations: Vec::new(),
+        };
+        record.validate_contract()?;
+        Ok(record)
     }
 
     pub(crate) fn validate(&self) -> Result<Vec<u8>> {
@@ -402,6 +457,8 @@ impl GenerationRemoval {
 pub struct GenerationManifest {
     pub manifest_version: u32,
     pub identity_version: u16,
+    pub core_record_version: u32,
+    pub core_record_contract_fingerprint: String,
     pub lexical_schema_version: u32,
     pub lexical_analyzer_version: u32,
     pub policy_schema_hash: String,
@@ -453,6 +510,8 @@ impl GenerationManifest {
         let manifest = Self {
             manifest_version: GENERATION_MANIFEST_VERSION,
             identity_version: IDENTITY_VERSION,
+            core_record_version: CORE_RECORD_VERSION,
+            core_record_contract_fingerprint: core_record_contract_fingerprint(),
             lexical_schema_version: LEXICAL_SCHEMA_VERSION,
             lexical_analyzer_version: LEXICAL_ANALYZER_VERSION,
             policy_schema_hash: current_source_generation_policy_hash()?,

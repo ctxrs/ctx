@@ -1,4 +1,4 @@
-use ctx_history_core::{SourceRecordLocator, StableEntityId, StableEntityKind};
+use ctx_history_core::{CoreRecord, SourceRecordLocator, StableEntityId, StableEntityKind};
 use tantivy::{
     schema::document::{
         DeserializeError, DocumentDeserialize, DocumentDeserializer, ValueDeserialize,
@@ -35,6 +35,7 @@ const VERIFY_SOURCE_KEY: u32 = 12;
 const VERIFY_NATIVE_LOCATOR: u32 = 13;
 const VERIFY_PROVIDER: u32 = 14;
 const VERIFY_SOURCE_FORMAT: u32 = 15;
+const VERIFY_CORE_RECORD: u32 = 31;
 
 enum VerificationStoredValue {
     Text(String),
@@ -58,6 +59,7 @@ struct VerificationStoredDocument {
     native_locator: Option<VerificationStoredValue>,
     provider: Option<VerificationStoredValue>,
     source_format: Option<VerificationStoredValue>,
+    core_record: Option<VerificationStoredValue>,
 }
 
 impl VerificationStoredDocument {
@@ -77,6 +79,7 @@ impl VerificationStoredDocument {
             VERIFY_NATIVE_LOCATOR => Some(&mut self.native_locator),
             VERIFY_PROVIDER => Some(&mut self.provider),
             VERIFY_SOURCE_FORMAT => Some(&mut self.source_format),
+            VERIFY_CORE_RECORD => Some(&mut self.core_record),
             _ => None,
         }
     }
@@ -192,6 +195,7 @@ pub(crate) fn validate_verification_projection(fields: Fields) -> Result<()> {
         (fields.native_locator, VERIFY_NATIVE_LOCATOR),
         (fields.provider, VERIFY_PROVIDER),
         (fields.source_format, VERIFY_SOURCE_FORMAT),
+        (fields.core_record, VERIFY_CORE_RECORD),
     ];
     if field_ids
         .into_iter()
@@ -231,23 +235,27 @@ pub(crate) fn stored_verification_record(
         document.root_session_id,
         "root_session_identity",
     )?;
+    let core_record =
+        CoreRecord::decode_stored(&projected_bytes(document.core_record, "core_record")?)?;
     let locator_bytes = projected_bytes(document.native_locator, "native_locator")?;
     let locator: SourceRecordLocator = serde_json::from_slice(&locator_bytes)?;
     locator.validate_contract()?;
     let stored_source = projected_text(document.source_key, "source_key")?;
-    let source_owner = source_token(locator.source());
+    let source_owner = source_token(&core_record.source);
     if stored_source != source_owner
-        || event_id.source_digest() != locator.source().identity().digest()
-        || session_id.source_digest() != locator.source().identity().digest()
-        || event_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
-        || session_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
+        || !locator.source().exact_descriptor_eq(&core_record.source)
+        || event_id != core_record.event_id
+        || session_id != core_record.session_id
+        || parent_session_id != core_record.parent_session_id
+        || root_session_id != core_record.root_session_id
     {
-        return Err(IndexError::InvalidStoredDocumentField("native_locator"));
+        return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }
 
     let provider = projected_text(document.provider, "provider")?;
     let source_format = projected_text(document.source_format, "source_format")?;
-    if provider != locator.source().provider() || source_format != locator.source().source_format()
+    if provider != core_record.source.provider()
+        || source_format != core_record.source.source_format()
     {
         return Err(IndexError::InvalidStoredDocumentField("provider"));
     }

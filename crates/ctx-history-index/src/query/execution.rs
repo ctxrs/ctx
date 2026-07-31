@@ -12,6 +12,18 @@ impl VerifiedIndex {
         cursor: Option<&SourceEventCursor>,
         limit: usize,
     ) -> Result<SourceEventPage> {
+        self.core_source_event_page(source, cursor, limit)
+            .map(Into::into)
+    }
+
+    /// Enumerates complete Core records for one exact source in strict full
+    /// `StableEntityId` order without per-record follow-up lookups.
+    pub fn core_source_event_page(
+        &self,
+        source: &SourceKey,
+        cursor: Option<&SourceEventCursor>,
+        limit: usize,
+    ) -> Result<CoreSourceEventPage> {
         if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&limit) {
             return Err(IndexError::InvalidSourceEventPageSize {
                 requested: limit,
@@ -35,7 +47,7 @@ impl VerifiedIndex {
                 SourceEventCursor::new(self.generation_id.clone(), source.clone(), event.event_id)
             })
         };
-        Ok(SourceEventPage {
+        Ok(CoreSourceEventPage {
             generation_id: self.generation_id.clone(),
             source: source.clone(),
             items,
@@ -55,6 +67,16 @@ impl VerifiedIndex {
         cursor: Option<&SemanticEventCursor>,
         limit: usize,
     ) -> Result<SemanticEventPage> {
+        self.core_semantic_event_page(cursor, limit).map(Into::into)
+    }
+
+    /// Returns complete Core semantic candidates in strict full
+    /// `StableEntityId` order without per-record follow-up lookups.
+    pub fn core_semantic_event_page(
+        &self,
+        cursor: Option<&SemanticEventCursor>,
+        limit: usize,
+    ) -> Result<CoreSemanticEventPage> {
         if !(1..=MAX_SEMANTIC_EVENT_PAGE_ITEMS).contains(&limit) {
             return Err(IndexError::InvalidSemanticEventPageSize {
                 requested: limit,
@@ -79,7 +101,7 @@ impl VerifiedIndex {
                 .last()
                 .map(|event| SemanticEventCursor::new(self.generation_id.clone(), event.event_id))
         };
-        Ok(SemanticEventPage {
+        Ok(CoreSemanticEventPage {
             generation_id: self.generation_id.clone(),
             eligibility,
             eligible_total,
@@ -321,6 +343,30 @@ impl VerifiedIndex {
         Ok(events.into_iter().next())
     }
 
+    /// Returns one verified event together with its complete stored Core data.
+    pub fn core_event_by_id(&self, event_id: Uuid) -> Result<Option<CoreEventRecord>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let query = TermQuery::new(
+            Term::from_field_text(fields.event_id, &event_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let address = self
+            .searcher
+            .search(&query, &DocSetCollector)?
+            .into_iter()
+            .next();
+        address
+            .map(|address| stored_core_event_record(&self.searcher, address, fields))
+            .transpose()
+    }
+
+    /// Returns the complete stored Core data for one compact event ID.
+    pub fn core_record_by_id(&self, event_id: Uuid) -> Result<Option<CoreRecord>> {
+        Ok(self
+            .core_event_by_id(event_id)?
+            .map(|record| record.core_record))
+    }
+
     /// Returns at most two UUID-prefix matches, enough to distinguish a unique
     /// lookup from an ambiguous one.
     pub fn events_by_id_prefix(&self, prefix: &str) -> Result<Vec<EventRecord>> {
@@ -401,14 +447,23 @@ impl VerifiedIndex {
     }
 
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<EventRecord>> {
+        Ok(self
+            .core_events_for_session(session_id)?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+
+    /// Returns every event in one session with complete stored Core data.
+    pub fn core_events_for_session(&self, session_id: Uuid) -> Result<Vec<CoreEventRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let query = TermQuery::new(
             Term::from_field_text(fields.session_id, &session_id.to_string()),
             IndexRecordOption::Basic,
         );
-        let mut events = self.event_records_for_query(&query, fields)?;
-        sort_events_for_session(&mut events);
-        Ok(events)
+        let mut records = self.core_event_records_for_query(&query, fields)?;
+        sort_core_events_for_session(&mut records);
+        Ok(records)
     }
 
     /// Returns one session only when its event cardinality is within a caller
@@ -422,6 +477,18 @@ impl VerifiedIndex {
         session_id: Uuid,
         maximum_events: usize,
     ) -> Result<Option<Vec<EventRecord>>> {
+        Ok(self
+            .core_events_for_session_if_bounded(session_id, maximum_events)?
+            .map(|records| records.into_iter().map(|record| record.event).collect()))
+    }
+
+    /// Returns complete Core events only when session cardinality is within a
+    /// caller budget, without materializing documents for a declined session.
+    pub fn core_events_for_session_if_bounded(
+        &self,
+        session_id: Uuid,
+        maximum_events: usize,
+    ) -> Result<Option<Vec<CoreEventRecord>>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let query = TermQuery::new(
             Term::from_field_text(fields.session_id, &session_id.to_string()),
@@ -431,9 +498,9 @@ impl VerifiedIndex {
         if count > maximum_events {
             return Ok(None);
         }
-        let mut events = self.event_records_for_query(&query, fields)?;
-        sort_events_for_session(&mut events);
-        Ok(Some(events))
+        let mut records = self.core_event_records_for_query(&query, fields)?;
+        sort_core_events_for_session(&mut records);
+        Ok(Some(records))
     }
 
     fn body_query_terms(&self, natural_text: &str, fields: Fields) -> Result<Vec<Term>> {
@@ -465,6 +532,19 @@ impl VerifiedIndex {
             events.push(self.event_record(address, fields)?);
         }
         Ok(events)
+    }
+
+    fn core_event_records_for_query(
+        &self,
+        query: &dyn Query,
+        fields: Fields,
+    ) -> Result<Vec<CoreEventRecord>> {
+        let addresses = self.searcher.search(query, &DocSetCollector)?;
+        let mut records = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            records.push(self.core_event_record(address, fields)?);
+        }
+        Ok(records)
     }
 
     fn validate_semantic_event_cursor(
@@ -534,7 +614,7 @@ impl VerifiedIndex {
         source: &SourceKey,
         after: Option<StableEntityId>,
         capacity: usize,
-    ) -> Result<Vec<EventRecord>> {
+    ) -> Result<Vec<CoreEventRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let source_term = Term::from_field_text(fields.source_key, &source_token(source));
         let after_identity = after.map(StableEntityId::encode_canonical).transpose()?;
@@ -552,19 +632,19 @@ impl VerifiedIndex {
             while doc_id != TERMINATED {
                 if !segment.is_deleted(doc_id) {
                     let address = DocAddress::new(segment_ord as u32, doc_id);
-                    let event = self.event_record(address, fields)?;
-                    if !event.locator.source().exact_descriptor_eq(source) {
+                    let record = self.core_event_record(address, fields)?;
+                    if !record.core_record.source.exact_descriptor_eq(source) {
                         return Err(IndexError::InvalidStoredDocumentField(
                             EVENT_IDENTITY_DIGEST_FIELD,
                         ));
                     }
-                    let identity = event.event_id.encode_canonical()?;
+                    let identity = record.event_id.encode_canonical()?;
                     if after_identity
                         .as_ref()
                         .is_none_or(|after| identity > *after)
                     {
-                        let digest_term = hex(&event.event_id.digest());
-                        candidates.push(EventIdentityCandidate::new(event, digest_term)?);
+                        let digest_term = hex(&record.event_id.digest());
+                        candidates.push(CoreEventIdentityCandidate::new(record, digest_term)?);
                         if candidates.len() > capacity {
                             candidates.pop();
                         }
@@ -578,7 +658,7 @@ impl VerifiedIndex {
         candidates.sort_by_key(|candidate| candidate.identity);
         Ok(candidates
             .into_iter()
-            .map(|candidate| candidate.event)
+            .map(|candidate| candidate.record)
             .collect())
     }
 
@@ -587,7 +667,7 @@ impl VerifiedIndex {
         after: Option<StableEntityId>,
         eligibility: SemanticEligibility,
         capacity: usize,
-    ) -> Result<Vec<EventRecord>> {
+    ) -> Result<Vec<CoreEventRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let after_digest = after.map(|identity| hex(&identity.digest()));
         let mut candidates = BinaryHeap::with_capacity(capacity);
@@ -603,7 +683,7 @@ impl VerifiedIndex {
                 if candidates.len() == capacity
                     && candidates
                         .peek()
-                        .is_some_and(|largest: &EventIdentityCandidate| {
+                        .is_some_and(|largest: &CoreEventIdentityCandidate| {
                             stream.key() > largest.digest_term.as_bytes()
                         })
                 {
@@ -615,15 +695,15 @@ impl VerifiedIndex {
                 while doc_id != TERMINATED {
                     if !segment.is_deleted(doc_id) {
                         let address = DocAddress::new(segment_ord as u32, doc_id);
-                        let event = self.event_record(address, fields)?;
-                        let digest_term = hex(&event.event_id.digest());
+                        let record = self.core_event_record(address, fields)?;
+                        let digest_term = hex(&record.event_id.digest());
                         if digest_term.as_bytes() != stream.key() {
                             return Err(IndexError::InvalidStoredDocumentField(
                                 EVENT_IDENTITY_DIGEST_FIELD,
                             ));
                         }
-                        if eligibility.includes(&event) {
-                            candidates.push(EventIdentityCandidate::new(event, digest_term)?);
+                        if eligibility.includes(&record.event) {
+                            candidates.push(CoreEventIdentityCandidate::new(record, digest_term)?);
                             if candidates.len() > capacity {
                                 candidates.pop();
                             }
@@ -638,7 +718,7 @@ impl VerifiedIndex {
         candidates.sort_by_key(|candidate| candidate.identity);
         Ok(candidates
             .into_iter()
-            .map(|candidate| candidate.event)
+            .map(|candidate| candidate.record)
             .collect())
     }
 
@@ -651,7 +731,7 @@ impl VerifiedIndex {
         let user_term = Term::from_field_text(fields.role, "user");
         let mut count = 0_u64;
 
-        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+        for segment in self.searcher.segment_readers() {
             let Some(mut messages) = segment
                 .inverted_index(fields.event_type)?
                 .read_postings(&message_term, IndexRecordOption::Basic)?
@@ -681,11 +761,8 @@ impl VerifiedIndex {
                 if segment.is_deleted(doc_id) {
                     continue;
                 }
-                let event =
-                    self.event_record(DocAddress::new(segment_ord as u32, doc_id), fields)?;
-                if eligibility.includes(&event) {
-                    count = count.checked_add(1).ok_or(IndexError::CountOverflow)?;
-                }
+                debug_assert_eq!(eligibility, SemanticEligibility::CURRENT);
+                count = count.checked_add(1).ok_or(IndexError::CountOverflow)?;
             }
         }
         Ok(count)
@@ -693,5 +770,9 @@ impl VerifiedIndex {
 
     fn event_record(&self, address: DocAddress, fields: Fields) -> Result<EventRecord> {
         stored_event_record(&self.searcher, address, fields)
+    }
+
+    fn core_event_record(&self, address: DocAddress, fields: Fields) -> Result<CoreEventRecord> {
+        stored_core_event_record(&self.searcher, address, fields)
     }
 }
