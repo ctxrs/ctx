@@ -6,7 +6,8 @@ use std::{
 
 use ctx_history_core::{
     BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
-    LocatorRevisionPolicy,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
+    TypedKey,
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
@@ -293,6 +294,213 @@ fn shared_family_claude_noop_replacement_lineage_and_hydration_oracle() {
         subagent_event.root_session_id,
         subagent_event.parent_session_id.unwrap()
     );
+}
+
+#[test]
+fn shared_family_claude_hydrates_every_projected_compound_row_by_native_key() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join(".claude/projects");
+    let path = session_path(&projects, "-project", "session-1");
+    write_lines(
+        &path,
+        &[
+            message("session-1", "message-1", "message body"),
+            json!({
+                "sessionId": "session-1",
+                "type": "system",
+                "uuid": "notice-1",
+                "summary": "notice body"
+            }),
+            json!({
+                "sessionId": "session-1",
+                "type": "summary",
+                "uuid": "summary-1",
+                "summary": "summary body"
+            }),
+            json!({
+                "sessionId": "session-1",
+                "type": "assistant",
+                "uuid": "tool-only-1",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-pure",
+                        "name": "Read",
+                        "input": {"file_path": "src/lib.rs"}
+                    }]
+                }
+            }),
+            json!({
+                "sessionId": "session-1",
+                "type": "assistant",
+                "uuid": "compound-1",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "compound body"},
+                        {
+                            "type": "tool_use",
+                            "id": "call-compound",
+                            "name": "Edit",
+                            "input": {"file_path": "src/main.rs"}
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "sessionId": "session-1",
+                "type": "user",
+                "uuid": "failed-output-1",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-failed",
+                        "is_error": true,
+                        "content": "provider output is not retained"
+                    }]
+                }
+            }),
+            json!({
+                "sessionId": "session-1",
+                "type": "user",
+                "uuid": "timeout-output-1",
+                "toolUseResult": {"status": "timeout"},
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-timeout",
+                        "status": "timeout",
+                        "content": "provider output is not retained"
+                    }]
+                }
+            }),
+        ],
+    );
+    let registry = registry(&projects);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(cold.sources.len(), 1);
+    assert_eq!(cold.sources[0].counts().indexed_documents, 8);
+
+    let source = cold.sources[0].observation().source();
+    let mut events = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(source, None, 12)
+        .unwrap()
+        .items;
+    events.sort_by_key(|event| event.event_sequence);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "message",
+            "notice",
+            "summary",
+            "tool_call",
+            "message",
+            "tool_call",
+            "tool_output",
+            "tool_output",
+        ]
+    );
+    let requests = events
+        .iter()
+        .rev()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap()
+        .into_records();
+    assert_eq!(
+        hydrated
+            .iter()
+            .map(|record| String::from_utf8(record.provider_bytes.clone()).unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "tool output timeout call-timeout",
+            "tool output failure call-failed",
+            "tool call Edit call-compound src/main.rs",
+            "compound body",
+            "tool call Read call-pure src/lib.rs",
+            "summary body",
+            "notice",
+            "message body",
+        ]
+    );
+
+    let first = &events[0];
+    let second = &events[1];
+    let mismatched_identity =
+        EventHydrationRequest::new(second.event_id, first.locator.clone()).unwrap();
+    let failure = registry
+        .resolver_registry()
+        .hydrate_event(&mismatched_identity)
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+
+    let NativeRecordCoordinate::Jsonl {
+        byte_offset,
+        byte_length,
+        physical_ordinal,
+        native_session_key,
+        ..
+    } = first.locator.coordinate()
+    else {
+        panic!("Claude locator must remain JSONL")
+    };
+    let mutated_locator = SourceRecordLocator::new(
+        first.locator.source().clone(),
+        NativeRecordCoordinate::Jsonl {
+            byte_offset: *byte_offset,
+            byte_length: *byte_length,
+            physical_ordinal: *physical_ordinal,
+            native_session_key: native_session_key.clone(),
+            native_event_key: Some(TypedKey::utf8("mutated-event").unwrap()),
+        },
+        first.locator.revision_policy(),
+        first.locator.certified_source_revision_digest().copied(),
+        *first.locator.record_digest(),
+    )
+    .unwrap();
+    let failure = registry
+        .resolver_registry()
+        .hydrate_event(&EventHydrationRequest::new(first.event_id, mutated_locator).unwrap())
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+}
+
+#[test]
+fn shared_family_claude_same_length_rewrite_is_stale_record_evidence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join(".claude/projects");
+    let path = session_path(&projects, "-project", "session-1");
+    write_lines(&path, &[message("session-1", "message-1", "original body")]);
+    let registry = registry(&projects);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let event = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(cold.sources[0].observation().source(), None, 1)
+        .unwrap()
+        .items
+        .remove(0);
+    let before = fs::read_to_string(&path).unwrap();
+    let after = before.replace("original body", "rewritten bod");
+    assert_eq!(before.len(), after.len());
+    fs::write(&path, after).unwrap();
+
+    let failure = registry
+        .resolver_registry()
+        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator).unwrap())
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[cfg(unix)]
