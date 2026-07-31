@@ -201,33 +201,24 @@ pub(super) fn retained_projection(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lexical_document(
+pub(super) fn core_record(
     source: &SourceKey,
     family: OpenCodeNativeSchemaFamily,
-    source_path: &Path,
+    _source_path: &Path,
     session: &SourceSession,
     event: SourceEventRow,
     retained: OpenCodeRetainedJson,
     next_sequence: &mut u64,
-) -> OpenCodeSourceBackedResult<LexicalDocument> {
+) -> OpenCodeSourceBackedResult<CoreRecord> {
     event
         .source_data
         .exact_text()
         .ok_or(OpenCodeSourceBackedError::MissingExactText)?;
-    let record_digest = source_event_row_digest(&event);
     let normalized_time = retained
         .body
         .pointer("/time/created")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(event.time_created);
-    let semantic_digest = source_backed_event_digest(
-        family,
-        &event.native_identity,
-        &event.native_order,
-        normalized_time,
-        event.time_updated,
-        &retained,
-    )?;
     let native_record_identity = source_backed_native_record_identity(
         family,
         &event.message_identity,
@@ -254,21 +245,7 @@ pub(super) fn lexical_document(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let row_version = TypedKey::composite(vec![
-        TypedKey::I64(event.time_updated),
-        TypedKey::utf8(semantic_digest)?,
-    ])?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: family.event_table().to_owned(),
-            primary_key: TypedKey::utf8(event.native_identity.clone())?,
-            row_version: Some(row_version),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
+    let native_event_id = TypedKey::utf8(event.native_identity.clone())?;
 
     let kind =
         source_backed_retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
@@ -281,33 +258,43 @@ pub(super) fn lexical_document(
     };
     let (file_touches, _) = source_backed_retained_file_touches(kind, &retained.body);
     // Keep provider-authentic role/type evidence in the retained projection and
-    // expose only the canonical role vocabulary through lexical metadata.
+    // expose only the canonical role vocabulary through Core metadata.
     let role = provider_role(Some(&retained.role));
     let event_sequence = *next_sequence;
     *next_sequence = checked_add(*next_sequence, 1)?;
-    Ok(LexicalDocument {
+    let native_file_touches = (!file_touches.is_empty()).then(|| {
+        serde_json::json!(file_touches
+            .iter()
+            .map(|touch| &touch.path)
+            .collect::<Vec<_>>())
+    });
+    let is_primary = session.parent_native_identity.is_none();
+    let agent_type = if is_primary { "primary" } else { "subagent" };
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: session.session_id,
-        parent_session_id: session.parent_session_id,
-        root_session_id: session.root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(session.native_identity.clone()),
-        branch: session.branch.clone(),
-        source_path: Some(source_path.to_string_lossy().into_owned()),
-        agent_type: if session.parent_native_identity.is_some() {
-            "subagent".to_owned()
-        } else {
-            "primary".to_owned()
-        },
-        is_primary: session.parent_native_identity.is_none(),
+        session.session_id,
+        session.root_session_id,
+        source.clone(),
         event_sequence,
-        occurred_at_unix_ms: Some(normalized_time),
-        event_type: event_kind_label(kind).to_owned(),
-        role: Some(role.as_str().to_owned()),
+        event_kind_label(kind),
+        agent_type,
+        is_primary,
+        PARSER_REVISION,
         body,
-        workspace: None,
-        cwd: session.directory.clone(),
-        touched_files: file_touches.into_iter().map(|touch| touch.path).collect(),
-    })
+    )?;
+    record.parent_session_id = session.parent_session_id;
+    record.provider_session_id = Some(session.native_identity.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(normalized_time);
+    record.role = Some(role.as_str().to_owned());
+    record.branch = session.branch.clone();
+    record.cwd = session.directory.clone();
+    if let Some(native_file_touches) = native_file_touches {
+        record.metadata.insert(
+            "provider_native_file_touches".to_owned(),
+            native_file_touches,
+        );
+    }
+    record.validate_contract()?;
+    Ok(record)
 }

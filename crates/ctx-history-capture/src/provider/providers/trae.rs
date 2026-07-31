@@ -11,10 +11,7 @@ pub(crate) mod nativepath;
 mod workspace;
 
 #[cfg(test)]
-pub(crate) use nativepath::{
-    hydrate_trae_source_backed_locator_v0, scan_trae_source_backed_explicit_v0,
-    TraeSourceBackedErrorV0,
-};
+pub(crate) use nativepath::{scan_trae_source_backed_explicit_v0, TraeSourceBackedErrorV0};
 
 pub(crate) const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
 pub(crate) const TRAE_CN_INPUT_HISTORY_KEY: &str = "icube-ai-agent-storage-input-history";

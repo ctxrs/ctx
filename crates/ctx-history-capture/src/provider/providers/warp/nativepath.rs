@@ -1,4 +1,4 @@
-//! Source-backed Warp parsing and exact task-message hydration.
+//! Source-backed Warp parsing and complete-content task-message lookup.
 
 use rusqlite::Connection;
 

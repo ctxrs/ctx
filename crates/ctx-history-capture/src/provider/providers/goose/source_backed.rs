@@ -11,13 +11,10 @@ use std::cell::Cell;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, EventIdentityInput, EventType, HydrationFailure, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -56,10 +53,8 @@ use crate::{
 };
 
 mod fingerprint;
-mod hydration;
 
 use fingerprint::GooseLogicalFingerprint;
-pub(crate) use hydration::GooseSourceBackedResolverV0;
 
 const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
 const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
@@ -89,7 +84,6 @@ pub(super) struct GooseSourceBackedWork {
     pub(super) peak_retained_digest_rows: u64,
     pub(super) provider_projections: u64,
     pub(super) projection_queries: u64,
-    pub(super) hydration_queries: u64,
 }
 
 #[cfg(test)]
@@ -117,13 +111,6 @@ fn update_goose_source_backed_work(update: impl FnOnce(&mut GooseSourceBackedWor
     });
 }
 
-#[cfg(test)]
-pub(super) fn record_goose_hydration_query() {
-    update_goose_source_backed_work(|work| {
-        work.hydration_queries = work.hydration_queries.saturating_add(1);
-    });
-}
-
 #[derive(Debug, Error)]
 pub(crate) enum GooseSourceBackedErrorV0 {
     #[error(transparent)]
@@ -131,21 +118,19 @@ pub(crate) enum GooseSourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("Goose source-backed count overflow")]
     CountOverflow,
-    #[error("Goose source-backed projection emitted an empty lexical body")]
-    EmptyLexicalBody,
+    #[error("Goose source-backed projection emitted empty normalized content")]
+    EmptyNormalizedContent,
     #[error("Goose source-backed selection has too many explicit retained routes")]
     TooManyRetainedRoutes,
     #[error("Goose source-backed selection contains a duplicate database route")]
     DuplicateDatabaseRoute,
-    #[error("Goose source-backed locator is invalid")]
-    InvalidLocator,
 }
 
 pub(crate) type GooseSourceBackedResultV0<T> = Result<T, GooseSourceBackedErrorV0>;
@@ -221,22 +206,14 @@ impl GooseSourceBackedSelectionV0 {
 
 pub(crate) struct GooseSourceBackedAdapterV0 {
     selection: GooseSourceBackedSelectionV0,
-    resolver: GooseSourceBackedResolverV0,
     source: SourceKey,
 }
 
 impl GooseSourceBackedAdapterV0 {
-    pub(crate) fn open(
-        selection: GooseSourceBackedSelectionV0,
-        resolver: GooseSourceBackedResolverV0,
-    ) -> GooseSourceBackedResultV0<Self> {
-        if selection != resolver.selection {
-            return Err(GooseSourceBackedErrorV0::InvalidLocator);
-        }
+    pub(crate) fn open(selection: GooseSourceBackedSelectionV0) -> GooseSourceBackedResultV0<Self> {
         Ok(Self {
-            source: resolver.source.clone(),
+            source: goose_source_key()?,
             selection,
-            resolver,
         })
     }
 }
@@ -341,13 +318,6 @@ impl ReplacementDocumentTree for GooseSourceBackedAdapterV0 {
             }
         }
         Ok(tree.tree_fingerprint)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        self.resolver.hydrate_batch(request)
     }
 }
 
@@ -662,14 +632,8 @@ fn scan_goose_logical_snapshot(
                     "Goose retained event omitted its accepted session owner",
                 ))?;
             let event_sequence = goose_event_sequence(&mut next_event_sequence)?;
-            sink.emit_document(goose_lexical_document(
-                source,
-                selected,
-                session,
-                event,
-                event_sequence,
-            )?)
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            sink.emit_core_record(goose_core_record(source, session, event, event_sequence)?)
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
             retained_records = checked_add(retained_records, 1)?;
         }
     }
@@ -733,13 +697,12 @@ fn goose_session_id(
     })?)
 }
 
-fn goose_lexical_document(
+fn goose_core_record(
     source: &SourceKey,
-    selected_route: &GooseSourceRouteV0,
     session: &GooseSessionProjection,
     event: GooseNativeEvent,
     event_sequence: u64,
-) -> GooseSourceBackedResultV0<LexicalDocument> {
+) -> GooseSourceBackedResultV0<CoreRecord> {
     let native_item_key = NativeItemKey::native_id(
         GOOSE_NATIVE_EVENT_NAMESPACE,
         TypedKey::utf8(event.native_identity.clone())?,
@@ -751,24 +714,9 @@ fn goose_lexical_document(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let record_digest = event
-        .logical_row_digest
-        .ok_or(CaptureError::SystemInvariant(
-            "Goose retained event omitted logical-row evidence",
-        ))?;
     let (relation, primary_key) = goose_message_locator(event.native_order);
     debug_assert_eq!(relation, GOOSE_LOGICAL_RELATION);
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: relation.to_owned(),
-            primary_key: TypedKey::bytes(primary_key)?,
-            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
+    let native_event_id = TypedKey::bytes(primary_key)?;
     let normalized_event_type = event_type(&event);
     let normalized_role = provider_role(Some(&event.role));
     let body = if event.searchable_text.is_empty() {
@@ -777,7 +725,7 @@ fn goose_lexical_document(
         event.searchable_text
     };
     if body.is_empty() {
-        return Err(GooseSourceBackedErrorV0::EmptyLexicalBody);
+        return Err(GooseSourceBackedErrorV0::EmptyNormalizedContent);
     }
     let occurred_at_unix_ms = event.created_timestamp.map_or_else(
         || {
@@ -792,39 +740,33 @@ fn goose_lexical_document(
             )
         },
     );
-    let event_type = normalized_event_type.as_str().to_owned();
-    let role = Some(normalized_role.as_str().to_owned());
-    let touched_files = event
-        .file_touches
-        .into_iter()
-        .map(|touch| touch.path)
-        .collect();
-    Ok(LexicalDocument {
+    let native_file_touches =
+        (!event.file_touches.is_empty()).then(|| serde_json::json!(&event.file_touches));
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: session.session_id,
-        parent_session_id: None,
-        root_session_id: session.session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(event.session_identity),
-        branch: None,
-        source_path: Some(
-            selected_route
-                .selected_database()
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
+        session.session_id,
+        session.session_id,
+        source.clone(),
         event_sequence,
-        occurred_at_unix_ms,
-        event_type,
-        role,
+        normalized_event_type.as_str(),
+        AgentType::Primary.as_str(),
+        true,
+        GOOSE_PARSER_REVISION,
         body,
-        workspace: None,
-        cwd: session.cwd.clone(),
-        touched_files,
-    })
+    )?;
+    record.provider_session_id = Some(event.session_identity);
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = occurred_at_unix_ms;
+    record.role = Some(normalized_role.as_str().to_owned());
+    record.cwd = session.cwd.clone();
+    if let Some(native_file_touches) = native_file_touches {
+        record.metadata.insert(
+            "provider_native_file_touches".to_owned(),
+            native_file_touches,
+        );
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn goose_event_sequence(next: &mut u64) -> GooseSourceBackedResultV0<u64> {

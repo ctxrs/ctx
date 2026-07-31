@@ -1,7 +1,7 @@
 //! Provider-local source-backed Hermes adapter.
 //!
 //! This module deliberately stops at discovery, bounded native projection,
-//! source certification, and exact native-row hydration. Publication,
+//! source certification, and complete direct Core projection. Publication,
 //! replacement/deletion lifecycle, and projection fanout remain shared
 //! responsibilities.
 
@@ -11,13 +11,10 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceRecordLocator, SourceResolverContractError, StableEntityId,
-    TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -39,7 +36,7 @@ use crate::{
 };
 
 use super::{
-    hermes_layout_record_digest, hermes_native_event, hermes_record_digest,
+    hermes_layout_record_digest, hermes_native_event,
     layout::{HermesMessageRow, HermesSchema, HermesSessionRow},
     sqlite::{HermesNativeRecord, HermesNativeRow, HermesPhase, HermesRowReader},
     HERMES_CAPTURE_REVISION, HERMES_POLICY_REVISION,
@@ -55,7 +52,6 @@ const SQLITE_SOURCE_INVALID_REASON: &str =
     "Hermes SQLite source must have an authorized parent and database leaf";
 const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
 const HERMES_SESSION_RELATION: &str = "sessions";
-const HERMES_MESSAGE_RELATION: &str = "messages";
 const HERMES_SESSION_METADATA_MAX_CHARS: usize = 8 * 1024;
 const HERMES_PARENT_CHAIN_MAX_DEPTH: usize = 256;
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-snapshot-v1\0";
@@ -64,15 +60,9 @@ const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v
 const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejection-v1\0";
 
 mod contracts;
-mod hydration;
 mod replacement;
 
 pub(crate) use contracts::*;
-#[cfg(test)]
-pub(crate) use hydration::hydrate_hermes_source_backed_message;
-pub(crate) use hydration::HermesLocatorResolver;
-#[cfg(test)]
-pub(crate) use replacement::{reset_route_work_counters, route_work_counters};
 
 #[derive(Debug)]
 #[cfg(test)]
@@ -467,15 +457,7 @@ fn project_native_row(
                     ));
                 }
             };
-            match project_message(
-                source,
-                source_path,
-                ordinal,
-                row,
-                prepared,
-                logical_digest,
-                context,
-            ) {
+            match project_message(source, ordinal, row, prepared, context) {
                 Ok(document) => Ok(HermesSourceBackedRecord::Event(document)),
                 Err(error) => Ok(rejected(phase, rowid, ordinal, error.to_string())),
             }
@@ -499,11 +481,11 @@ fn rejected(
 }
 
 fn project_session(
-    source: &SourceKey,
+    _source: &SourceKey,
     source_path: &str,
     row: HermesSessionRow,
     context: HermesSessionContext,
-    record_digest: [u8; 32],
+    _record_digest: [u8; 32],
 ) -> HermesSourceBackedResult<HermesSourceBackedSession> {
     let started_at =
         provider_required_timestamp_seconds(row.started_at, "Hermes session started_at")?;
@@ -511,17 +493,6 @@ fn project_session(
         .ended_at
         .map(|value| provider_required_timestamp_seconds(value, "Hermes session ended_at"))
         .transpose()?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: HERMES_SESSION_RELATION.to_owned(),
-            primary_key: TypedKey::utf8(&row.id)?,
-            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
     Ok(HermesSourceBackedSession {
         session_id: context.session_id,
         parent_session_id: context.parent_session_id,
@@ -536,19 +507,16 @@ fn project_session(
         ended_at_unix_ms: ended_at.map(|value| value.timestamp_millis()),
         workspace: context.workspace,
         cwd: context.cwd,
-        locator,
     })
 }
 
 fn project_message(
     source: &SourceKey,
-    source_path: &str,
     ordinal: u64,
     row: HermesMessageRow,
     prepared: Option<super::HermesPreparedCoreMessage>,
-    record_digest: [u8; 32],
     session: HermesSessionContext,
-) -> HermesSourceBackedResult<LexicalDocument> {
+) -> HermesSourceBackedResult<CoreRecord> {
     let native = match prepared {
         Some(prepared) => prepared.native,
         None => hermes_native_event(&row, ordinal)?,
@@ -565,41 +533,47 @@ fn project_message(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: HERMES_MESSAGE_RELATION.to_owned(),
-            primary_key: TypedKey::composite(vec![
-                TypedKey::utf8(&row.session_id)?,
-                TypedKey::I64(row.id),
-            ])?,
-            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
-    Ok(LexicalDocument {
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8(&row.session_id)?,
+        TypedKey::I64(row.id),
+    ])?;
+    let native_tool = (row.tool_name.is_some()
+        || row.tool_call_id.is_some()
+        || row.tool_calls.is_some())
+    .then(|| {
+        serde_json::json!({
+            "name": row.tool_name,
+            "call_id": row.tool_call_id,
+            "calls": row.tool_calls,
+        })
+    });
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: session.session_id,
-        parent_session_id: session.parent_session_id,
-        root_session_id: session.root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(row.session_id),
-        branch: session.branch,
-        source_path: Some(source_path.to_owned()),
-        agent_type: session.agent_type,
-        is_primary: session.is_primary,
-        event_sequence: native.provider_event_index,
-        occurred_at_unix_ms: Some(native.occurred_at.timestamp_millis()),
-        event_type: native.event_type.as_str().to_owned(),
-        role: native.role.map(|role| role.as_str().to_owned()),
+        session.session_id,
+        session.root_session_id,
+        source.clone(),
+        native.provider_event_index,
+        native.event_type.as_str(),
+        session.agent_type,
+        session.is_primary,
+        HERMES_SOURCE_PARSER_REVISION,
         body,
-        workspace: session.workspace,
-        cwd: session.cwd,
-        touched_files: Vec::new(),
-    })
+    )?;
+    record.parent_session_id = session.parent_session_id;
+    record.provider_session_id = Some(row.session_id);
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(native.occurred_at.timestamp_millis());
+    record.role = native.role.map(|role| role.as_str().to_owned());
+    record.branch = session.branch;
+    record.workspace = session.workspace;
+    record.cwd = session.cwd;
+    if let Some(native_tool) = native_tool {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_tool": native_tool,
+        }));
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn hermes_session_id(

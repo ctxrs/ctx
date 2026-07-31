@@ -1,7 +1,7 @@
-//! Provider-local source-backed extraction and exact hydration for Deep Agents.
+//! Provider-local source-backed extraction and direct Core projection for Deep Agents.
 //!
 //! This module deliberately stops at the provider boundary. It emits bounded
-//! lexical documents and a certified SQLite snapshot, but does not choose
+//! complete Core records and a certified SQLite snapshot, but does not choose
 //! publication, replacement, deletion, or retry policy.
 
 mod replacement;
@@ -14,21 +14,16 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    StableEntityId, SubrecordSelector, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::super::{
-    complete_content::{
-        deepagents_write_record_digest, resolve_deepagents_contents,
-        validate_deepagents_content_schema, DeepAgentsContentAddress,
-    },
+    complete_content::deepagents_write_record_digest,
     message::{
         core_eligible, deepagents_event_type, deepagents_messages_from_blob, DeepAgentsMessage,
     },
@@ -60,11 +55,9 @@ const DEEPAGENTS_NATIVE_WRITE_NAMESPACE: &str = "deepagents.write";
 const DEEPAGENTS_MESSAGE_OFFSET_KIND: &str = "deepagents.write-message-offset";
 const DEEPAGENTS_LOGICAL_SESSION_KIND: &str = "deepagents-thread";
 const DEEPAGENTS_LOGICAL_EVENT_KIND: &str = "deepagents-message";
-const DEEPAGENTS_LOGICAL_RELATION: &str = "writes.messages";
 const DEEPAGENTS_PAGE_MAX_DOCUMENTS: usize = 64;
 const DEEPAGENTS_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-deepagents-source-backed-v0\0";
 const DEEPAGENTS_REJECTED_RECORD_DOMAIN: &[u8] = b"ctx-deepagents-rejected-record-v0\0";
-const DEEPAGENTS_HYDRATION_NATIVE_KEY_BATCH: usize = 256;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Deep Agents SQLite source must have an authorized parent and database leaf";
 
@@ -77,21 +70,13 @@ pub(crate) enum DeepAgentsSourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("Deep Agents source-backed scanner must be exhausted before certification")]
     ScannerNotExhausted,
     #[error("Deep Agents source-backed count overflow")]
     CountOverflow,
-    #[error("locator is not a Deep Agents write-message coordinate")]
-    InvalidLocator,
-    #[error("Deep Agents SQLite snapshot evidence no longer matches")]
-    StaleSourceEvidence,
-    #[error("Deep Agents write-message record evidence no longer matches")]
-    StaleRecordEvidence,
-    #[error("Deep Agents write-message row or subrecord no longer exists")]
-    MissingRecord,
 }
 
 pub(crate) type DeepAgentsSourceBackedResultV0<T> = Result<T, DeepAgentsSourceBackedErrorV0>;
@@ -310,10 +295,8 @@ impl DeepAgentsSourceBackedScannerV0 {
             .unwrap_or_else(|| Box::new(|| Err(SqliteSourceAccessError::SnapshotNotActive)))
     }
 
-    /// Returns at most 64 lexical records directly from the pinned snapshot.
-    pub(crate) fn next_page(
-        &mut self,
-    ) -> DeepAgentsSourceBackedResultV0<Option<Vec<LexicalDocument>>> {
+    /// Returns at most 64 complete Core records directly from the pinned snapshot.
+    pub(crate) fn next_page(&mut self) -> DeepAgentsSourceBackedResultV0<Option<Vec<CoreRecord>>> {
         if self.exhausted {
             return Ok(None);
         }
@@ -344,17 +327,15 @@ impl DeepAgentsSourceBackedScannerV0 {
                     .first_event_sequence
                     .checked_add(offset_sequence)
                     .ok_or(DeepAgentsSourceBackedErrorV0::CountOverflow)?;
-                page.push(deepagents_lexical_document(
+                page.push(deepagents_core_record(
                     &self.source,
                     &pending.key,
-                    pending.record_digest,
                     pending.session_id,
                     event_sequence,
                     offset,
                     pending.occurred_at,
                     pending.cwd.as_deref(),
                     pending.branch.as_deref(),
-                    &self.source_path,
                     message,
                 )?);
                 self.counts.indexed_documents = checked_add(self.counts.indexed_documents, 1)?;
@@ -485,7 +466,9 @@ impl DeepAgentsSourceBackedScannerV0 {
                 value_type.as_deref(),
                 &value,
             ))
-            .ok_or(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)?;
+            .ok_or(CaptureError::SystemInvariant(
+                "Deep Agents logical record digest is not canonical SHA-256",
+            ))?;
             self.content_digest.update(record_digest);
             let decoded = match deepagents_messages_from_blob(value_type.as_deref(), &value) {
                 Ok(decoded) => decoded,
@@ -580,101 +563,6 @@ impl DeepAgentsSourceBackedScannerV0 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeepAgentsHydratedMessageV0 {
-    pub(crate) text: String,
-    pub(crate) record_digest: [u8; 32],
-}
-
-/// One-invocation resolver for exact Deep Agents row/subrecord locators.
-#[derive(Debug, Clone)]
-pub(crate) struct DeepAgentsLocatorResolverV0 {
-    selection: DeepAgentsDatabaseSelectionV0,
-}
-
-impl DeepAgentsLocatorResolverV0 {
-    // Retain the home-route resolver to enforce the same no-fallback selection
-    // policy at the hydration boundary.
-    #[cfg(test)]
-    pub(crate) fn from_home(data_root: &Path, home: &Path) -> Self {
-        Self {
-            selection: DeepAgentsDatabaseSelectionV0::from_home(data_root, home),
-        }
-    }
-
-    pub(crate) fn explicit(data_root: &Path, path: impl Into<PathBuf>) -> Self {
-        Self {
-            selection: DeepAgentsDatabaseSelectionV0::explicit(data_root, path),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn hydrate(
-        &self,
-        locator: &SourceRecordLocator,
-    ) -> DeepAgentsSourceBackedResultV0<DeepAgentsHydratedMessageV0> {
-        self.hydrate_locators(&[locator])?
-            .pop()
-            .ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)
-    }
-
-    pub(crate) fn hydrate_locators(
-        &self,
-        locators: &[&SourceRecordLocator],
-    ) -> DeepAgentsSourceBackedResultV0<Vec<DeepAgentsHydratedMessageV0>> {
-        let expected_source = deepagents_source_key()?;
-        let mut addresses = Vec::with_capacity(locators.len());
-        for locator in locators {
-            locator.validate_contract()?;
-            if !expected_source.exact_descriptor_eq(locator.source())
-                || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-                || locator.certified_source_revision_digest().is_some()
-            {
-                return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-            }
-            let (address, row_version) = decode_deepagents_locator(locator)?;
-            if &row_version != locator.record_digest() {
-                return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-            }
-            addresses.push((address, row_version));
-        }
-
-        let (source_root, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.selection.data_root, self.selection.path())?;
-        let evidence = sqlite_snapshot.evidence().clone();
-        let conn = sqlite_snapshot.connection()?;
-        validate_deepagents_content_schema(conn)?;
-        let mut hydrated = Vec::with_capacity(addresses.len());
-        for chunk in addresses.chunks(DEEPAGENTS_HYDRATION_NATIVE_KEY_BATCH) {
-            let chunk_addresses = chunk
-                .iter()
-                .map(|(address, _)| address.clone())
-                .collect::<Vec<_>>();
-            for ((_, row_version), resolved) in chunk
-                .iter()
-                .zip(resolve_deepagents_contents(conn, &chunk_addresses)?)
-            {
-                let resolved = resolved.ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)?;
-                let record_digest = digest_bytes(&resolved.record_digest)
-                    .ok_or(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)?;
-                if &record_digest != row_version {
-                    return Err(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence);
-                }
-                hydrated.push(DeepAgentsHydratedMessageV0 {
-                    text: resolved.text,
-                    record_digest,
-                });
-            }
-        }
-        let closing_evidence = sqlite_snapshot.finish()?;
-        if closing_evidence != evidence {
-            return Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence);
-        }
-        source_root.revalidate()?;
-        Ok(hydrated)
-    }
-}
-
 fn open_root_authorized_snapshot(
     data_root: &Path,
     path: &Path,
@@ -760,19 +648,17 @@ fn deepagents_session_id(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn deepagents_lexical_document(
+fn deepagents_core_record(
     source: &SourceKey,
     key: &DeepAgentsWriteKey,
-    record_digest: [u8; 32],
     session_id: StableEntityId,
     event_sequence: u64,
     message_offset: usize,
     occurred_at: DateTime<Utc>,
     cwd: Option<&str>,
     branch: Option<&str>,
-    source_path: &str,
     message: &DeepAgentsMessage,
-) -> DeepAgentsSourceBackedResultV0<LexicalDocument> {
+) -> DeepAgentsSourceBackedResultV0<CoreRecord> {
     let write_key = vec![
         TypedKey::utf8(&key.checkpoint_id)?,
         TypedKey::utf8(&key.task_id)?,
@@ -811,82 +697,42 @@ fn deepagents_lexical_document(
                 .map_err(|_| DeepAgentsSourceBackedErrorV0::CountOverflow)?,
         ),
     ])?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: DEEPAGENTS_LOGICAL_RELATION.to_owned(),
-            primary_key,
-            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )?;
     let body = message.text.clone();
     let event_type = deepagents_event_type(message);
-    Ok(LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(key.thread_id.clone()),
-        branch: branch.map(str::to_owned),
-        source_path: Some(source_path.to_owned()),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
+        session_id,
+        source.clone(),
         event_sequence,
-        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        event_type: event_type.as_str().to_owned(),
-        role: Some(message.role.as_str().to_owned()),
+        event_type.as_str(),
+        AgentType::Primary.as_str(),
+        true,
+        DEEPAGENTS_SOURCE_PARSER_REVISION,
         body,
-        workspace: None,
-        cwd: cwd.map(str::to_owned),
-        touched_files: Vec::new(),
-    })
-}
-
-fn decode_deepagents_locator(
-    locator: &SourceRecordLocator,
-) -> DeepAgentsSourceBackedResultV0<(DeepAgentsContentAddress, [u8; 32])> {
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-    };
-    if logical_relation != DEEPAGENTS_LOGICAL_RELATION {
-        return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-    }
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-    };
-    let [TypedKey::Utf8(thread_id), TypedKey::Utf8(checkpoint_id), TypedKey::Utf8(task_id), TypedKey::I64(write_idx), TypedKey::U64(message_offset)] =
-        parts.as_slice()
-    else {
-        return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-    };
-    let Some(TypedKey::Bytes(row_version)) = row_version else {
-        return Err(DeepAgentsSourceBackedErrorV0::InvalidLocator);
-    };
-    let row_version: [u8; 32] = row_version
-        .as_slice()
-        .try_into()
-        .map_err(|_| DeepAgentsSourceBackedErrorV0::InvalidLocator)?;
-    Ok((
-        DeepAgentsContentAddress {
-            thread_id: thread_id.clone(),
-            checkpoint_id: checkpoint_id.clone(),
-            task_id: task_id.clone(),
-            write_idx: *write_idx,
-            message_offset: u32::try_from(*message_offset)
-                .map_err(|_| DeepAgentsSourceBackedErrorV0::InvalidLocator)?,
-        },
-        row_version,
-    ))
+    )?;
+    record.provider_session_id = Some(key.thread_id.clone());
+    record.native_event_id = Some(primary_key);
+    record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
+    record.role = Some(message.role.as_str().to_owned());
+    record.branch = branch.map(str::to_owned);
+    record.cwd = cwd.map(str::to_owned);
+    record.content.structured_content = Some(serde_json::json!({
+        "provider_native_message": {
+            "message_type": message.message_type,
+            "message_class": message.message_class,
+            "message_id": message.message_id,
+            "tool_call_id": message.tool_call_id,
+            "status": message.status,
+            "exit_code": message.exit_code,
+            "duration_ms": message.duration_ms,
+            "timed_out": message.timed_out,
+            "is_error": message.is_error,
+            "success": message.success,
+        }
+    }));
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn digest_bytes(digest: &crate::complete_content::CompleteContentBodyDigest) -> Option<[u8; 32]> {

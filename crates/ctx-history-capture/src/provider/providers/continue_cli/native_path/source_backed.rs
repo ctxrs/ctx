@@ -1,8 +1,5 @@
 //! Thin Continue adapter for the shared replacement-document lifecycle.
 
-#[path = "source_backed/hydration.rs"]
-mod hydration;
-
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -12,17 +9,14 @@ use std::sync::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, EventIdentityInput, EventType, HydrationFailure, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, ProjectionContractError,
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::Serialize;
 use thiserror::Error;
 
-use self::hydration::hydrate_continue_group_with_observer;
 use super::{
     normalize::{
         ContinuePreparedPage, ContinuePreparedSource, CONTINUE_NATIVE_MAX_PAGE_BYTES,
@@ -34,19 +28,16 @@ use super::{
     ContinueNativePathError,
 };
 use crate::{
-    provider::{
-        providers::continue_cli::continue_history_item_text,
-        source_backed::{
-            document_leaf_execution_policy,
-            family::document::{
-                register_replacement_document_tree_route, ChangedDocumentSink,
-                CompleteDocumentTree, DocumentLeafExecutionPolicy, DocumentLeafFingerprint,
-                DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
-            },
-            route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
-            SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
-            SourceBackedRouteSelection,
+    provider::source_backed::{
+        document_leaf_execution_policy,
+        family::document::{
+            register_replacement_document_tree_route, ChangedDocumentSink, CompleteDocumentTree,
+            DocumentLeafExecutionPolicy, DocumentLeafFingerprint, DocumentSourceTerminal,
+            ObservedDocumentLeaf, ReplacementDocumentTree,
         },
+        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        SourceBackedRouteSelection,
     },
     ProviderSource, CONTINUE_CLI_SOURCE_FORMAT,
 };
@@ -70,7 +61,7 @@ pub(crate) enum ContinueSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("Continue source-backed page stream changed its active session")]
@@ -87,18 +78,8 @@ pub(crate) enum ContinueSourceBackedError {
     CountOverflow,
     #[error("Continue source revision evidence is malformed")]
     InvalidRevisionEvidence,
-    #[error("locator is not a Continue whole-document history item")]
-    InvalidLocator,
-    #[error("Continue locator source revision was not found below the selected sessions root")]
-    LocatorSourceRevisionNotFound,
-    #[error("Continue locator source revision is ambiguous below the selected sessions root")]
-    AmbiguousLocatorSource,
-    #[error("Continue locator history item is missing")]
-    LocatorRecordMissing,
-    #[error("Continue locator record digest no longer matches provider bytes")]
-    LocatorDigestMismatch,
-    #[error("Continue exact resolver rejected its certified source: {0}")]
-    ExactResolver(String),
+    #[error("Continue direct Core projection failed: {0}")]
+    ProjectionFailure(String),
 }
 
 pub(crate) type ContinueSourceBackedResult<T> = Result<T, ContinueSourceBackedError>;
@@ -219,13 +200,6 @@ impl ReplacementDocumentTree for ContinueSourceBackedReader {
                 )
             })
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        hydrate_continue_group_with_observer(&self.root, request, || {})
-    }
 }
 
 fn scan_continue_document(
@@ -258,7 +232,7 @@ fn project_changed_stream(
     let mut active = None;
     let mut terminal = None;
     while let Some(page) = stream.next_page().map_err(|failure| {
-        ContinueSourceBackedError::ExactResolver(failure.message.into_string())
+        ContinueSourceBackedError::ProjectionFailure(failure.message.into_string())
     })? {
         if terminal.is_some() {
             return Err(ContinueSourceBackedError::CountMismatch);
@@ -282,7 +256,7 @@ fn project_changed_page(
         }
         let started = start_source(*prepared)?;
         sink.begin_source(started.source.clone())
-            .map_err(|error| ContinueSourceBackedError::ExactResolver(error.to_string()))?;
+            .map_err(|error| ContinueSourceBackedError::ProjectionFailure(error.to_string()))?;
         *active = Some(started);
     }
     let current = active
@@ -301,8 +275,8 @@ fn project_changed_page(
             .checked_add(1)
             .ok_or(ContinueSourceBackedError::CountOverflow)?;
         let document = project_event(current, event)?;
-        sink.emit_document(document)
-            .map_err(|error| ContinueSourceBackedError::ExactResolver(error.to_string()))?;
+        sink.emit_core_record(document)
+            .map_err(|error| ContinueSourceBackedError::ProjectionFailure(error.to_string()))?;
         current.emitted_documents = current
             .emitted_documents
             .checked_add(1)
@@ -360,7 +334,7 @@ fn start_source(prepared: ContinuePreparedSource) -> ContinueSourceBackedResult<
 fn project_event(
     active: &ActiveSource,
     event: ContinueEventRow,
-) -> ContinueSourceBackedResult<LexicalDocument> {
+) -> ContinueSourceBackedResult<CoreRecord> {
     let native_item_id = event.native_item_id.as_deref().filter(|value| {
         !value.trim().is_empty() && value.len() <= 384 && !value.chars().any(char::is_control)
     });
@@ -383,16 +357,10 @@ fn project_event(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let locator = SourceRecordLocator::new(
-        active.source.clone(),
-        NativeRecordCoordinate::Document {
-            object_key: TypedKey::utf8(&active.prepared.session.identity.0)?,
-            json_pointer: Some(format!("/history/{}", event.identity.history_ordinal)),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(active.source_revision_digest),
-        event.source_record_digest,
-    )?;
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8(&active.prepared.session.identity.0)?,
+        TypedKey::U64(event.identity.history_ordinal),
+    ])?;
     let body = continue_lexical_body(&event);
     if body.is_empty() {
         return Err(ContinueSourceBackedError::CountMismatch);
@@ -407,50 +375,46 @@ fn project_event(
         .workspace_directory
         .as_deref()
         .map(|value| bounded_chars(value, MAX_CONTINUE_LEXICAL_METADATA_CHARS));
-    Ok(LexicalDocument {
+    let event_type = match event.kind {
+        ContinueEventKind::Message => EventType::Message.as_str(),
+        ContinueEventKind::ToolCall => EventType::ToolCall.as_str(),
+    };
+    let role = match event.role {
+        ContinueEventRole::User => "user",
+        ContinueEventRole::Assistant => "assistant",
+        ContinueEventRole::System => "system",
+        ContinueEventRole::Tool => "tool",
+        ContinueEventRole::Unknown => "unknown",
+    };
+    let native_file_touches = (!event.file_touches.is_empty())
+        .then(|| serde_json::to_value(&event.file_touches))
+        .transpose()?;
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: active.session_id,
-        parent_session_id: None,
-        root_session_id: active.session_id,
-        source: active.source.clone(),
-        locator,
-        provider_session_id: Some(active.prepared.session.identity.0.clone()),
-        branch: None,
-        source_path: Some(
-            active
-                .prepared
-                .observation
-                .canonical_path()
-                .display()
-                .to_string(),
-        ),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: event.identity.history_ordinal,
-        occurred_at_unix_ms,
-        event_type: match event.kind {
-            ContinueEventKind::Message => EventType::Message.as_str().to_owned(),
-            ContinueEventKind::ToolCall => EventType::ToolCall.as_str().to_owned(),
-        },
-        role: Some(
-            match event.role {
-                ContinueEventRole::User => "user",
-                ContinueEventRole::Assistant => "assistant",
-                ContinueEventRole::System => "system",
-                ContinueEventRole::Tool => "tool",
-                ContinueEventRole::Unknown => "unknown",
-            }
-            .to_owned(),
-        ),
+        active.session_id,
+        active.session_id,
+        active.source.clone(),
+        event.identity.history_ordinal,
+        event_type,
+        AgentType::Primary.as_str(),
+        true,
+        CONTINUE_SOURCE_BACKED_PARSER_REVISION,
         body,
-        workspace: workspace.clone(),
-        cwd: workspace,
-        touched_files: event
-            .file_touches
-            .iter()
-            .map(|touch| touch.path.clone())
-            .collect(),
-    })
+    )?;
+    record.provider_session_id = Some(active.prepared.session.identity.0.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = occurred_at_unix_ms;
+    record.role = Some(role.to_owned());
+    record.workspace = workspace.clone();
+    record.cwd = workspace;
+    if let Some(native_file_touches) = native_file_touches {
+        record.metadata.insert(
+            "provider_native_file_touches".to_owned(),
+            native_file_touches,
+        );
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn finish_source(
@@ -580,54 +544,6 @@ fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(value.get(offset..offset + 2)?, 16).ok()?;
     }
     Some(output)
-}
-
-fn validate_continue_locator(
-    locator: &SourceRecordLocator,
-) -> ContinueSourceBackedResult<(String, u64, [u8; 32])> {
-    if !owns_continue_source(locator.source())
-        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-    {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    }
-    let SourceAnchor::ProviderNative { namespace, key } = locator.source().anchor() else {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Utf8(native_session_id) = key else {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    };
-    if namespace != CONTINUE_SOURCE_ANCHOR_NAMESPACE {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    }
-    let NativeRecordCoordinate::Document {
-        object_key,
-        json_pointer,
-    } = locator.coordinate()
-    else {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    };
-    if object_key != &TypedKey::Utf8(native_session_id.clone()) {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    }
-    let pointer = json_pointer
-        .as_deref()
-        .and_then(|pointer| pointer.strip_prefix("/history/"))
-        .ok_or(ContinueSourceBackedError::InvalidLocator)?;
-    let history_ordinal = pointer
-        .parse::<u64>()
-        .map_err(|_| ContinueSourceBackedError::InvalidLocator)?;
-    if pointer != history_ordinal.to_string() {
-        return Err(ContinueSourceBackedError::InvalidLocator);
-    }
-    let certified_revision = locator
-        .certified_source_revision_digest()
-        .copied()
-        .ok_or(ContinueSourceBackedError::InvalidLocator)?;
-    Ok((
-        native_session_id.clone(),
-        history_ordinal,
-        certified_revision,
-    ))
 }
 
 #[cfg(test)]

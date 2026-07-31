@@ -1,8 +1,5 @@
 //! One-pass replacement-only source-backed ingestion for Auggie documents.
 
-#[path = "source_backed/hydration.rs"]
-mod hydration;
-
 use std::{
     collections::HashSet,
     io,
@@ -17,19 +14,14 @@ use std::sync::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, EventIdentityInput, HydrationFailure, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use self::hydration::hydrate_auggie_group_with_observer;
-#[cfg(test)]
-use self::hydration::hydrate_auggie_source_backed;
 use super::{
     model::{
         ParsedAuggieEvent, ParsedAuggieSession, ParsedAuggieSource, AUGGIE_MAX_DISCOVERED_FILES,
@@ -74,21 +66,13 @@ pub(crate) enum AuggieSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("Auggie source contains duplicate stable event identity {0}")]
     DuplicateEventIdentity(StableEntityId),
-    #[error("Auggie source-backed event has no meaningful lexical text")]
-    MissingLexicalText,
-    #[error("locator is not an Auggie structured-session document record")]
-    InvalidLocator,
-    #[error("Auggie locator source revision no longer matches provider bytes")]
-    SourceRevisionChanged,
-    #[error("Auggie locator document digest no longer matches provider bytes")]
-    LocatorDigestMismatch,
-    #[error("Auggie locator JSON pointer no longer resolves to its native message")]
-    LocatorRecordMissing,
+    #[error("Auggie source-backed event has no meaningful normalized content")]
+    MissingNormalizedContent,
 }
 
 pub(crate) type AuggieSourceBackedResult<T> = Result<T, AuggieSourceBackedError>;
@@ -202,12 +186,6 @@ impl AuggieSourceBackedInventory {
             None
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AuggieHydratedSourceRecord {
-    pub(crate) provider_bytes: Vec<u8>,
-    pub(crate) decoded_display_text: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -638,13 +616,6 @@ impl ReplacementDocumentTree for AuggieDocumentTreeAdapter {
     fn revalidate_complete(&self, tree: &AuggieDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
         revalidate_auggie_tree(tree).map_err(route_error)
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        hydrate_auggie_group_with_observer(&self.root, request, || {})
-    }
 }
 
 fn scan_changed_auggie_document(
@@ -680,15 +651,14 @@ fn scan_changed_auggie_document(
     let mut event_ids = HashSet::with_capacity(events.len());
     let mut indexed_documents = 0_u64;
     for event in events {
-        let document =
-            auggie_lexical_document(&source, session_id, &session, content_digest, event)
-                .map_err(route_error)?;
+        let document = auggie_core_record(&source, session_id, &session, content_digest, event)
+            .map_err(route_error)?;
         if !event_ids.insert(document.event_id) {
             return Err(route_error(
                 AuggieSourceBackedError::DuplicateEventIdentity(document.event_id),
             ));
         }
-        sink.emit_document(document)?;
+        sink.emit_core_record(document)?;
         indexed_documents = indexed_documents
             .checked_add(1)
             .ok_or_else(|| route_error("too many Auggie messages"))?;
@@ -750,13 +720,13 @@ fn auggie_session_id(
     })?)
 }
 
-fn auggie_lexical_document(
+fn auggie_core_record(
     source: &SourceKey,
     session_id: StableEntityId,
     session: &ParsedAuggieSession,
     content_digest: [u8; 32],
     parsed: ParsedAuggieEvent,
-) -> AuggieSourceBackedResult<LexicalDocument> {
+) -> AuggieSourceBackedResult<CoreRecord> {
     let parent_session_id = session
         .parent_provider_session_id
         .as_deref()
@@ -801,40 +771,30 @@ fn auggie_lexical_document(
         TypedKey::U64(chat_index),
         TypedKey::utf8(parsed.message_kind)?,
     ])?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Document {
-            object_key,
-            json_pointer: Some(parsed.json_pointer),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(content_digest),
-        content_digest,
-    )?;
     let body = (!parsed.text.is_empty())
         .then_some(parsed.text)
-        .ok_or(AuggieSourceBackedError::MissingLexicalText)?;
-    Ok(LexicalDocument {
+        .ok_or(AuggieSourceBackedError::MissingNormalizedContent)?;
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id,
         root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(session.provider_session_id.clone()),
-        branch: None,
-        source_path: Some(session.raw_source_path.clone()),
-        agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: parsed.provider_event_index,
-        occurred_at_unix_ms: Some(parsed.occurred_at.timestamp_millis()),
-        event_type: parsed.event_type.as_str().to_owned(),
-        role: Some(parsed.role.as_str().to_owned()),
+        source.clone(),
+        parsed.provider_event_index,
+        parsed.event_type.as_str(),
+        ctx_history_core::AgentType::Primary.as_str(),
+        true,
+        AUGGIE_PARSER_REVISION,
         body,
-        workspace: session.cwd.clone(),
-        cwd: session.cwd.clone(),
-        touched_files: Vec::new(),
-    })
+    )?;
+    record.parent_session_id = parent_session_id;
+    record.provider_session_id = Some(session.provider_session_id.clone());
+    record.native_event_id = Some(object_key);
+    record.occurred_at_unix_ms = Some(parsed.occurred_at.timestamp_millis());
+    record.role = Some(parsed.role.as_str().to_owned());
+    record.workspace = session.cwd.clone();
+    record.cwd = session.cwd.clone();
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn related_auggie_session_id(native_session_id: &str) -> AuggieSourceBackedResult<StableEntityId> {

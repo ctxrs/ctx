@@ -1,7 +1,7 @@
 //! Thin Cline/Roo adapter for the shared replacement-document lifecycle.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -12,15 +12,11 @@ use std::sync::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
-    SubrecordSelector, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+    StableEntityId, SubrecordSelector, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -53,9 +49,6 @@ mod support;
 
 use support::*;
 
-#[cfg(test)]
-use super::source_backed_tests::TaskJsonScanActivity;
-
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
 const SOURCE_SCHEMA_VARIANT: &str = "task-directory-v1";
 const SOURCE_REVISION_KIND: &str = "task-directory-compound-v1";
@@ -76,7 +69,7 @@ pub(crate) enum TaskJsonSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Locator(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error("{provider} selected no authoritative task root")]
     MissingRoot { provider: &'static str },
     #[error("{provider} selected more than one authoritative task root")]
@@ -115,26 +108,15 @@ pub(crate) enum TaskJsonSourceBackedError {
 
 pub(crate) type TaskJsonSourceBackedResult<T> = Result<T, TaskJsonSourceBackedError>;
 
-#[derive(Clone)]
-pub(crate) struct TaskJsonSourceBackedResolver {
-    dialect: TaskJsonNativeDialect,
-    selected: Box<[ProviderSource]>,
-    #[cfg(test)]
-    fixture_operations: Option<Arc<TaskJsonFixtureOperations>>,
-}
-
 pub(crate) struct TaskJsonDocumentTreeAdapter {
     dialect: TaskJsonNativeDialect,
     selected: Box<[ProviderSource]>,
-    resolver: TaskJsonSourceBackedResolver,
     #[cfg(test)]
     fixture_operations: Option<Arc<TaskJsonFixtureOperations>>,
     #[cfg(test)]
     terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(test)]
     leaf_workers: Option<usize>,
-    #[cfg(test)]
-    scan_activity: Option<Arc<TaskJsonScanActivity>>,
 }
 
 /// Immutable task identity carried with one independently scannable leaf.
@@ -219,44 +201,18 @@ pub(crate) fn roo_task_json_source_backed_adapter(
     TaskJsonDocumentTreeAdapter::new(TaskJsonNativeDialect::ROO, selected)
 }
 
-pub(crate) fn cline_task_json_source_backed_resolver(
-    selected: &[ProviderSource],
-) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedResolver> {
-    Ok(TaskJsonSourceBackedResolver::new(
-        TaskJsonNativeDialect::CLINE,
-        selected,
-    ))
-}
-
-pub(crate) fn roo_task_json_source_backed_resolver(
-    selected: &[ProviderSource],
-) -> TaskJsonSourceBackedResult<TaskJsonSourceBackedResolver> {
-    Ok(TaskJsonSourceBackedResolver::new(
-        TaskJsonNativeDialect::ROO,
-        selected,
-    ))
-}
-
 impl TaskJsonDocumentTreeAdapter {
     fn new(dialect: TaskJsonNativeDialect, selected: &[ProviderSource]) -> Self {
         Self {
             dialect,
             selected: selected.to_vec().into_boxed_slice(),
-            resolver: TaskJsonSourceBackedResolver::new(dialect, selected),
             #[cfg(test)]
             fixture_operations: None,
             #[cfg(test)]
             terminal_revalidation_hook: None,
             #[cfg(test)]
             leaf_workers: None,
-            #[cfg(test)]
-            scan_activity: None,
         }
-    }
-
-    pub(crate) fn with_resolver(mut self, resolver: TaskJsonSourceBackedResolver) -> Self {
-        self.resolver = resolver;
-        self
     }
 
     #[cfg(test)]
@@ -280,12 +236,6 @@ impl TaskJsonDocumentTreeAdapter {
     #[cfg(test)]
     pub(super) fn with_leaf_workers(mut self, leaf_workers: usize) -> Self {
         self.leaf_workers = Some(leaf_workers);
-        self
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_scan_activity(mut self, activity: Arc<TaskJsonScanActivity>) -> Self {
-        self.scan_activity = Some(activity);
         self
     }
 }
@@ -332,8 +282,6 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
         #[cfg(test)]
-        let _scan_activity = self.scan_activity.as_ref().map(TaskJsonScanActivity::begin);
-        #[cfg(test)]
         if let Some(operations) = self.fixture_operations.as_ref() {
             operations
                 .ordinal_membership_probes
@@ -346,7 +294,7 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
         }
         sink.begin_source(leaf.source.clone())?;
         scan_task(self.dialect, &authority.discovery, current, |document| {
-            sink.emit_document(document)
+            sink.emit_core_record(document)
         })
     }
 
@@ -359,154 +307,6 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
             hook();
         }
         revalidate_document_tree(self.dialect, tree)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        self.resolver.hydrate_group(request)
-    }
-}
-
-impl TaskJsonSourceBackedResolver {
-    fn new(dialect: TaskJsonNativeDialect, selected: &[ProviderSource]) -> Self {
-        Self {
-            dialect,
-            selected: selected.to_vec().into_boxed_slice(),
-            #[cfg(test)]
-            fixture_operations: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_fixture_operations(
-        mut self,
-        operations: Arc<TaskJsonFixtureOperations>,
-    ) -> Self {
-        self.fixture_operations = Some(operations);
-        self
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let first = request.events().first().ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                "task hydration group is empty",
-            )
-        })?;
-        let root = selected_root(self.dialect, &self.selected).map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        let discovery = discover_document_tree(self.dialect, &root)
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?
-            .authority
-            .discovery;
-        let mut matched = None;
-        for task in discovery.task_routes() {
-            let source = task_source_key(self.dialect, task)
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-            if source.exact_descriptor_eq(first.locator().source())
-                && matched.replace((task, source)).is_some()
-            {
-                return Err(hydration_failure(
-                    HydrationFailureKind::InvalidLocator,
-                    "task source identity matched more than one retained leaf",
-                ));
-            }
-        }
-        let (task, source) = matched.ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::ConfirmedDeleted,
-                "task source is absent from the selected authoritative root",
-            )
-        })?;
-        let observation = task_observation(&source, task)
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-        let revision_digest = digest_revision(&observation);
-        let mut positions = HashMap::with_capacity(request.len());
-        for (position, event) in request.events().iter().enumerate() {
-            event
-                .validate_contract()
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-            source
-                .validate_exact_descriptor(event.locator().source())
-                .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-            if event.locator().revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-                || event.locator().certified_source_revision_digest() != Some(&revision_digest)
-            {
-                return Err(hydration_failure(
-                    HydrationFailureKind::StaleSourceEvidence,
-                    "task source revision no longer matches the exact locator",
-                ));
-            }
-            positions.insert(event.event_id(), position);
-        }
-
-        let mut records = vec![None; request.len()];
-        #[cfg(test)]
-        if let Some(operations) = self.fixture_operations.as_ref() {
-            operations.hydration_scans.fetch_add(1, Ordering::Relaxed);
-        }
-        scan_task(self.dialect, &discovery, task, |document| {
-            let Some(position) = positions.get(&document.event_id).copied() else {
-                return Ok(());
-            };
-            let expected = &request.events()[position];
-            if expected.locator() == &document.locator {
-                records[position] = Some(HydratedProviderRecord {
-                    event_id: document.event_id,
-                    provider_bytes: document.body.into_bytes(),
-                });
-            }
-            Ok(())
-        })
-        .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
-
-        let records = records
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    "task locator no longer projects a retained lexical event",
-                )
-            })?;
-        BatchHydrationResult::new(records)
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))
-    }
-}
-
-impl ContentSourceResolver for TaskJsonSourceBackedResolver {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        let batch = BatchHydrationRequest::new(vec![request.clone()])
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-        self.hydrate_group(&batch)?
-            .into_records()
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    "task event disappeared during exact hydration",
-                )
-            })
-    }
-
-    fn hydrate_session(
-        &self,
-        request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        self.hydrate_group(request.batch())
-            .map(BatchHydrationResult::into_records)
     }
 }
 
@@ -658,7 +458,7 @@ fn scan_task(
     dialect: TaskJsonNativeDialect,
     authority: &ClineDiscovery,
     task: &ClineLiveTaskObservation,
-    mut emit: impl FnMut(LexicalDocument) -> SourceBackedRouteResult<()>,
+    mut emit: impl FnMut(CoreRecord) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
     let source = task_source_key(dialect, task).map_err(task_route_error)?;
     let observation = task_observation(&source, task).map_err(task_route_error)?;
@@ -729,7 +529,7 @@ fn scan_task(
 pub(super) fn collect_task_json_test_documents(
     provider: CaptureProvider,
     root: &Path,
-) -> SourceBackedRouteResult<Vec<LexicalDocument>> {
+) -> SourceBackedRouteResult<Vec<CoreRecord>> {
     let dialect = match provider {
         CaptureProvider::Cline => TaskJsonNativeDialect::CLINE,
         CaptureProvider::RooCode => TaskJsonNativeDialect::ROO,
@@ -756,7 +556,7 @@ fn project_native_page(
     dialect: TaskJsonNativeDialect,
     task: &mut TaskAccumulator,
     page: ClineCertifiedPage,
-) -> TaskJsonSourceBackedResult<Vec<LexicalDocument>> {
+) -> TaskJsonSourceBackedResult<Vec<CoreRecord>> {
     if !task_owns_component(&task.opening, &page.source.canonical_path) {
         return Err(TaskJsonSourceBackedError::UnownedPage {
             provider: dialect.display_name,
@@ -856,21 +656,23 @@ fn task_owns_component(task: &ClineLiveTaskObservation, path: &Path) -> bool {
     .any(|component| task.component(component).path == path)
 }
 
-fn estimated_documents_bytes(documents: &[LexicalDocument]) -> usize {
+fn estimated_documents_bytes(documents: &[CoreRecord]) -> usize {
     documents.iter().fold(0_usize, |total, document| {
         total
-            .saturating_add(document.body.len())
+            .saturating_add(
+                document
+                    .content
+                    .normalized_body
+                    .as_ref()
+                    .map_or(0, String::len),
+            )
             .saturating_add(document.event_type.len())
             .saturating_add(document.role.as_ref().map_or(0, String::len))
             .saturating_add(document.provider_session_id.as_ref().map_or(0, String::len))
             .saturating_add(document.workspace.as_ref().map_or(0, String::len))
             .saturating_add(document.cwd.as_ref().map_or(0, String::len))
             .saturating_add(
-                document
-                    .touched_files
-                    .iter()
-                    .map(String::len)
-                    .sum::<usize>(),
+                serde_json::to_vec(&document.metadata).map_or(usize::MAX, |bytes| bytes.len()),
             )
     })
 }
@@ -884,7 +686,7 @@ fn project_event(
     provider_session_id: &str,
     workspace: Option<&str>,
     event: ClineEventRow,
-) -> TaskJsonSourceBackedResult<LexicalDocument> {
+) -> TaskJsonSourceBackedResult<CoreRecord> {
     let evidence = event
         .source_record
         .ok_or(TaskJsonSourceBackedError::MissingRecordEvidence {
@@ -907,46 +709,40 @@ fn project_event(
         native_item_key: &native_item_key,
         subrecord_selector: subrecord.as_ref(),
     })?;
-    let relative_file = event.native_order.component.source_component().file_name();
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::TreeRecord {
-            relative_file_key: TypedKey::utf8(relative_file)?,
-            record_coordinate: TypedKey::composite(vec![
-                TypedKey::U64(evidence.native_index),
-                typed_native_item_key(&event.identity.item)?,
-                TypedKey::U64(u64::from(event.identity.sub_index)),
-            ])?,
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
-        evidence.record_digest,
-    )?;
-    Ok(LexicalDocument {
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::U64(evidence.native_index),
+        typed_native_item_key(&event.identity.item)?,
+        TypedKey::U64(u64::from(event.identity.sub_index)),
+    ])?;
+    let event_sequence = event_sequence(dialect, &event)?;
+    let native_file_touches =
+        (!event.file_touches.is_empty()).then(|| serde_json::json!(&event.file_touches));
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(provider_session_id.to_owned()),
-        branch: None,
-        source_path: Some(relative_file.to_owned()),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: event_sequence(dialect, &event)?,
-        occurred_at_unix_ms: event.occurred_at_millis,
-        event_type: event_kind(event.kind).to_owned(),
-        role: Some(event_role(event.role).to_owned()),
-        body: lexical_event_body(&event),
-        workspace: workspace.map(str::to_owned),
-        cwd: workspace.map(str::to_owned),
-        touched_files: event
-            .file_touches
-            .iter()
-            .map(|touch| touch.path.to_string())
-            .collect(),
-    })
+        session_id,
+        source.clone(),
+        event_sequence,
+        event_kind(event.kind),
+        AgentType::Primary.as_str(),
+        true,
+        PARSER_REVISION,
+        lexical_event_body(&event),
+    )?;
+    record.provider_session_id = Some(provider_session_id.to_owned());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = event.occurred_at_millis;
+    record.role = Some(event_role(event.role).to_owned());
+    record.workspace = workspace.map(str::to_owned);
+    record.cwd = workspace.map(str::to_owned);
+    if let Some(native_file_touches) = native_file_touches {
+        record.metadata.insert(
+            "provider_native_file_touches".to_owned(),
+            native_file_touches,
+        );
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn task_terminal(

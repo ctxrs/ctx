@@ -64,7 +64,7 @@ pub(crate) struct ContinueCallRelationship {
     pub(crate) status: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ContinueFileTouch {
     pub(crate) path: String,
     pub(crate) old_path: Option<String>,

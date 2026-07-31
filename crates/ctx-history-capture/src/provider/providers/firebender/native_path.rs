@@ -23,8 +23,6 @@ mod source_backed;
 mod tests;
 
 pub(crate) use source_backed::register_source_backed_route;
-#[cfg(test)]
-use source_backed::FirebenderSourceBackedError;
 
 const FIREBENDER_NATIVE_PARSER_REVISION: u32 = 1;
 const FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES: usize = NATIVE_INGESTION_PAGE_MAX_BYTES;

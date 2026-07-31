@@ -4,10 +4,7 @@ use serde_json::Value;
 
 use crate::provider::normalization::provider_value_text;
 
-mod message_text;
 pub(crate) mod native_path;
-
-pub(crate) use message_text::continue_history_item_text;
 
 pub(crate) fn continue_session_json_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("json")

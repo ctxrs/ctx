@@ -31,7 +31,6 @@ use super::{NANOCLAW_CAPTURE_REVISION, NANOCLAW_POLICY_REVISION};
 
 mod helpers;
 
-pub(super) use helpers::NanoClawSelectedProject;
 use helpers::*;
 
 const NANOCLAW_INVENTORY_PAGE_ENTRIES: usize = 64;

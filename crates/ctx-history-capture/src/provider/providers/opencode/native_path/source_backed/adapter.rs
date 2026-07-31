@@ -4,10 +4,7 @@ use std::{
     sync::Mutex,
 };
 
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, CaptureProvider, ContentSourceResolver,
-    HydrationFailure, SourceKey,
-};
+use ctx_history_core::{CaptureProvider, SourceKey};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -130,7 +127,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(source) => sink.begin_source(source).map_err(Into::into),
                 OpenCodeScanOutput::Document(document) => {
-                    sink.emit_document(document).map_err(Into::into)
+                    sink.emit_core_record(document).map_err(Into::into)
                 }
             },
         )
@@ -211,15 +208,6 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
                 Ok(*tree_fingerprint)
             }
         }
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        self.registration
-            .exact_resolver(self.data_root.clone(), self.path.clone())
-            .hydrate_batch(request)
     }
 }
 

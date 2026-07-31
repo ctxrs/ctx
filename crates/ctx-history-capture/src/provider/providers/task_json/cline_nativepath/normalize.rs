@@ -115,7 +115,7 @@ pub(crate) struct ClineSparseOutputDiagnostic {
     pub(crate) call_id: Option<Box<str>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ClineFileTouch {
     pub(crate) path: Box<str>,
     pub(crate) old_path: Option<Box<str>>,

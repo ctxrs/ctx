@@ -4,16 +4,12 @@ use std::{
     sync::Mutex,
 };
 
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, CertifiedSource, HydrationFailure,
-    ScannedSourceCounts, SourceKey,
-};
-use ctx_history_index::LexicalDocument;
+use ctx_history_core::{CertifiedSource, CoreRecord, ScannedSourceCounts, SourceKey};
 use rusqlite::{params_from_iter, Connection};
 use sha2::{Digest, Sha256};
 
 use super::{
-    canonical_row_bytes, firebender_document, firebender_session_id, firebender_source_key,
+    canonical_row_bytes, firebender_core_record, firebender_session_id, firebender_source_key,
     firebender_workspace, increment, FirebenderSourceBackedError, FirebenderSourceBackedResult,
 };
 use crate::{
@@ -42,13 +38,12 @@ use super::super::{
 };
 pub(super) use super::direct_snapshot::{open_database_leaf, OpenDatabaseLeaf};
 use super::direct_snapshot::{MissingLeafFence, OpenedSnapshot};
-use super::hydration::FirebenderExactResolver;
 
 const DIRECT_PAGE_DOCUMENTS: usize = 64;
 const CONTENT_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-logical-content-v2\0";
 const LOGICAL_FINGERPRINT_DOMAIN: &[u8] = b"ctx-firebender-logical-fingerprint-v1\0";
 const OVERSIZE_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-oversize-row-v1\0";
-const DIRECT_PARSER_REVISION: &str = "firebender-source-backed-v2";
+pub(super) const DIRECT_PARSER_REVISION: &str = "firebender-source-backed-v2";
 
 #[derive(Debug)]
 pub(crate) struct FirebenderDirectScan {
@@ -183,7 +178,7 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
         sink.begin_source(leaf.clone())?;
         let scan = scan_opened_snapshot(&snapshot, &database_path, leaf.clone(), &mut |page| {
             page.into_iter()
-                .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
+                .try_for_each(|document| sink.emit_core_record(document).map_err(Into::into))
         })
         .map_err(firebender_scan_error)?;
         validate_scan_receipt(&scan)?;
@@ -234,14 +229,6 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
             FirebenderTreeAuthority::Missing(_) => {}
         }
         Ok(tree.tree_fingerprint)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        FirebenderExactResolver::new(self.data_root.clone(), self.path.clone())
-            .hydrate_batch(request)
     }
 }
 
@@ -380,7 +367,7 @@ fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult
 fn scan_source(
     data_root: &Path,
     explicit_path: &Path,
-    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
+    emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<Option<FirebenderDirectScan>> {
     let identity = firebender_path_identity(explicit_path)?;
     let source = firebender_source_key(&identity.route_identity)?;
@@ -403,7 +390,7 @@ fn scan_opened_snapshot(
     snapshot: &OpenedSnapshot,
     database_path: &Path,
     source: SourceKey,
-    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
+    emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<FirebenderDirectScan> {
     let connection = snapshot.connection()?;
     validate_schema(connection, database_path)?;
@@ -493,7 +480,7 @@ fn scan_rows(
     database_path: &Path,
     source: SourceKey,
     include_deleted_filter: bool,
-    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
+    emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<WorkingScan> {
     let source_path = database_path.display().to_string();
     let workspace = firebender_workspace(database_path);
@@ -533,15 +520,13 @@ fn scan_rows(
                     let row_digest = firebender_raw_row_digest(&row.logical_values());
                     for (message_index, message) in row.messages.iter().enumerate() {
                         increment(&mut counts.complete_records, 1)?;
-                        let Some(document) = firebender_document(
+                        let Some(document) = firebender_core_record(
                             &source,
                             session_id,
-                            &source_path,
                             workspace.as_deref(),
                             &row,
                             message_index,
                             message,
-                            row_digest,
                         )?
                         else {
                             increment(&mut counts.ignored_records, 1)?;
@@ -809,7 +794,7 @@ fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
 #[cfg(test)]
 pub(crate) fn scan_for_test(
     explicit_path: &Path,
-    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
+    emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<FirebenderDirectScan> {
     scan_source(crate::test_provider_sqlite_data_root(), explicit_path, emit)?.ok_or_else(|| {
         FirebenderSourceBackedError::Capture(CaptureError::InvalidPayload(

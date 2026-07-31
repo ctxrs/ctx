@@ -6,10 +6,9 @@ use std::{
 };
 
 use super::{
-    hydration::hydration_failure_from_error, kiro_source_key, observe_kiro_logical_snapshot,
-    require_legacy_sqlite_format, scan_kiro_snapshot, KiroLocatorResolverV0,
-    KiroSourceBackedErrorV0, KiroSourceBackedScan, KIRO_SOURCE_BACKED_PARSER_REVISION,
-    SOURCE_BACKED_PAGE_ROWS,
+    kiro_source_key, observe_kiro_logical_snapshot, require_legacy_sqlite_format,
+    scan_kiro_snapshot, KiroSourceBackedErrorV0, KiroSourceBackedScan,
+    KIRO_SOURCE_BACKED_PARSER_REVISION, SOURCE_BACKED_PAGE_ROWS,
 };
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
@@ -28,9 +27,7 @@ use crate::{
     },
     CaptureError, ProviderSource, KIRO_SQLITE_SOURCE_FORMAT,
 };
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, HydrationFailure, SourceKey,
-};
+use ctx_history_core::SourceKey;
 
 use super::super::{absolute_kiro_path, KiroSqliteDatabase};
 
@@ -119,7 +116,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
             authority.opening_evidence.clone(),
             &mut |page| {
                 page.into_iter()
-                    .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
+                    .try_for_each(|document| sink.emit_core_record(document).map_err(Into::into))
             },
         )
         .map_err(kiro_scan_error)?;
@@ -170,15 +167,6 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
             KiroTreeAuthority::Missing(_) => {}
         }
         Ok(tree.tree_fingerprint)
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        KiroLocatorResolverV0::discover(&self.data_root, &self.path, KIRO_SQLITE_SOURCE_FORMAT)
-            .map_err(hydration_failure_from_error)?
-            .hydrate_batch(request)
     }
 }
 

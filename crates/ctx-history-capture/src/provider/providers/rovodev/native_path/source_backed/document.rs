@@ -635,8 +635,8 @@ pub(super) fn scan_rovodev_document(
                             counts.rejected_records = checked_add(counts.rejected_records, 1)
                                 .map_err(rovodev_route_error)?;
                         }
-                        sink.emit_document(
-                            lexical_document(
+                        sink.emit_core_record(
+                            core_record(
                                 source,
                                 &bound,
                                 &snapshot,
@@ -694,7 +694,7 @@ fn checked_add(left: u64, right: u64) -> RovoDevSourceBackedResult<u64> {
         .ok_or(RovoDevSourceBackedError::CountMismatch)
 }
 
-fn lexical_document(
+fn core_record(
     source: &RovoDevOpenedSource,
     bound: &RovoDevBoundDocument,
     snapshot: &RovoDevSnapshot,
@@ -702,7 +702,7 @@ fn lexical_document(
     raw_message: &serde_json::Value,
     index: usize,
     event: ProjectedMessage,
-) -> RovoDevSourceBackedResult<LexicalDocument> {
+) -> RovoDevSourceBackedResult<CoreRecord> {
     let native_item_key = native_item_key(bound, snapshot, raw_message, index)?;
     let event_id = derive_event_id(EventIdentityInput {
         source: &bound.source_key,
@@ -714,58 +714,75 @@ fn lexical_document(
     let message_index =
         u64::try_from(index).map_err(|_| RovoDevSourceBackedError::CoordinateOverflow)?;
     let native_record_id = provider_message_id(raw_message, message_index);
-    let locator = SourceRecordLocator::new(
-        bound.source_key.clone(),
-        NativeRecordCoordinate::TreeRecord {
-            relative_file_key: TypedKey::utf8(RELATIVE_CONTEXT_FILE)?,
-            record_coordinate: TypedKey::composite(vec![
-                TypedKey::utf8(MESSAGE_OBJECT_KIND)?,
-                TypedKey::U64(message_index),
-                TypedKey::utf8(&native_record_id)?,
-            ])?,
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(snapshot.source_sha256),
-        snapshot.context_sha256,
-    )?;
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8(MESSAGE_OBJECT_KIND)?,
+        TypedKey::U64(message_index),
+        TypedKey::utf8(&native_record_id)?,
+    ])?;
     let body = lexical_body(raw_message, event.event_type);
-    Ok(LexicalDocument {
+    let branch = provider_string_field(
+        &document.metadata,
+        &[
+            "branch",
+            "git_branch",
+            "gitBranch",
+            "vcs_branch",
+            "vcsBranch",
+        ],
+    )
+    .or_else(|| document.context_branch.clone());
+    let native_file_touches =
+        (!event.touched_files.is_empty()).then(|| serde_json::json!(event.touched_files));
+    let native_tool = matches!(
+        event.event_type,
+        EventType::ToolCall | EventType::ToolOutput | EventType::CommandOutput
+    )
+    .then(|| {
+        serde_json::json!({
+            "name": recursive_string_field(raw_message, &["tool_name", "toolName", "name", "tool"]),
+            "call_id": recursive_string_field(raw_message, &["tool_call_id", "toolCallId", "call_id", "callId"]),
+            "arguments": raw_message.get("arguments").or_else(|| raw_message.get("input")),
+        })
+    });
+    let is_primary = document.parent_provider_session_id.is_none();
+    let agent_type = if is_primary {
+        AgentType::Primary
+    } else {
+        AgentType::Subagent
+    };
+    let mut record = CoreRecord::new_selected(
         event_id,
-        session_id: bound.session_id,
-        parent_session_id: bound.parent_session_id,
-        root_session_id: bound.root_session_id,
-        source: bound.source_key.clone(),
-        locator,
-        provider_session_id: Some(bound.provider_session_id.clone()),
-        branch: provider_string_field(
-            &document.metadata,
-            &[
-                "branch",
-                "git_branch",
-                "gitBranch",
-                "vcs_branch",
-                "vcsBranch",
-            ],
-        )
-        .or_else(|| document.context_branch.clone()),
-        source_path: Some(source.source.context_path.display().to_string()),
-        agent_type: if document.parent_provider_session_id.is_some() {
-            AgentType::Subagent
-        } else {
-            AgentType::Primary
-        }
-        .as_str()
-        .to_owned(),
-        is_primary: document.parent_provider_session_id.is_none(),
-        event_sequence: message_index,
-        occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: event.role.map(|role| role.as_str().to_owned()),
+        bound.session_id,
+        bound.root_session_id,
+        bound.source_key.clone(),
+        message_index,
+        event.event_type.as_str(),
+        agent_type.as_str(),
+        is_primary,
+        PARSER_REVISION,
         body,
-        workspace: document.cwd.clone(),
-        cwd: document.cwd.clone(),
-        touched_files: event.touched_files,
-    })
+    )?;
+    record.parent_session_id = bound.parent_session_id;
+    record.provider_session_id = Some(bound.provider_session_id.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
+    record.role = event.role.map(|role| role.as_str().to_owned());
+    record.branch = branch;
+    record.workspace = document.cwd.clone();
+    record.cwd = document.cwd.clone();
+    if let Some(native_file_touches) = native_file_touches {
+        record.metadata.insert(
+            "provider_native_file_touches".to_owned(),
+            native_file_touches,
+        );
+    }
+    if let Some(native_tool) = native_tool {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_tool": native_tool,
+        }));
+    }
+    record.validate_contract()?;
+    Ok(record)
 }
 
 fn native_item_key(
@@ -805,190 +822,4 @@ fn lexical_body(raw_message: &serde_json::Value, event_type: EventType) -> Strin
     } else {
         text
     }
-}
-
-pub(super) fn hydrate_rovodev_group(
-    root: &Path,
-    context: &ProviderAdapterContext,
-    request: &BatchHydrationRequest,
-) -> Result<BatchHydrationResult, HydrationFailure> {
-    let expected_source = request
-        .events()
-        .first()
-        .map(|event| event.locator().source().clone())
-        .ok_or_else(|| invalid_locator("Rovo Dev hydration group is empty"))?;
-    if request.events().iter().any(|event| {
-        event.locator().validate_contract().is_err()
-            || !event
-                .locator()
-                .source()
-                .exact_descriptor_eq(&expected_source)
-    }) {
-        return Err(invalid_locator(
-            "Rovo Dev hydration group has invalid or mixed-source locators",
-        ));
-    }
-
-    let tree = match discover_rovodev_source_backed(root, RovoDevWorkCounters::default())
-        .map_err(temporarily_unavailable)?
-    {
-        RovoDevSourceBackedDisposition::Complete(tree) => tree,
-        RovoDevSourceBackedDisposition::Unavailable => {
-            return Err(temporarily_unavailable(
-                "Rovo Dev selected sessions root is temporarily unavailable",
-            ));
-        }
-    };
-    let candidates = tree
-        .authority
-        .candidate_source_indices(&expected_source)
-        .map_err(temporarily_unavailable)?;
-    let mut selected = None;
-    for source_index in candidates {
-        let leaf = tree
-            .leaves
-            .get(source_index)
-            .ok_or_else(|| stale_evidence("Rovo Dev source index is inconsistent"))?;
-        let snapshot =
-            open_leaf(&tree.authority, &leaf.provider_leaf, context).map_err(stale_evidence)?;
-        let source = tree
-            .authority
-            .source(&leaf.provider_leaf)
-            .map_err(stale_evidence)?;
-        let header = document_header_from_snapshot(source, &snapshot).map_err(stale_evidence)?;
-        if !header.source_key.exact_descriptor_eq(&expected_source) {
-            continue;
-        }
-        if selected.is_some() {
-            return Err(stale_evidence(
-                "more than one Rovo Dev leaf owns the exact source",
-            ));
-        }
-        selected = Some((source, header.source_key, snapshot));
-    }
-    let (source, source_key, snapshot) =
-        selected.ok_or_else(|| missing_record("the exact Rovo Dev source is absent"))?;
-    let mut records = Vec::with_capacity(request.events().len());
-    for event in request.events() {
-        let provider_bytes = hydrate_from_snapshot(&source_key, &snapshot, event.locator())?;
-        records.push(HydratedProviderRecord {
-            event_id: event.event_id(),
-            provider_bytes,
-        });
-    }
-    source.revalidate_current().map_err(stale_evidence)?;
-    tree.authority
-        .revalidate_opening()
-        .map_err(stale_evidence)?;
-    let result = BatchHydrationResult::new(records).map_err(invalid_locator)?;
-    result.validate_for_request(request)?;
-    Ok(result)
-}
-
-fn hydrate_from_snapshot(
-    source_key: &SourceKey,
-    snapshot: &RovoDevSnapshot,
-    locator: &SourceRecordLocator,
-) -> Result<Vec<u8>, HydrationFailure> {
-    if locator.source().provider() != CaptureProvider::RovoDev.as_str()
-        || locator.source().source_format() != ROVODEV_SOURCE_FORMAT
-        || locator.source().schema_variant() != SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-    {
-        return Err(invalid_locator(
-            "locator is not an exact Rovo Dev session-tree record",
-        ));
-    }
-    if !source_key.exact_descriptor_eq(locator.source())
-        || locator.certified_source_revision_digest() != Some(&snapshot.source_sha256)
-        || locator.record_digest() != &snapshot.context_sha256
-    {
-        return Err(stale_evidence(
-            "Rovo Dev locator source revision no longer matches provider bytes",
-        ));
-    }
-    let (message_index, expected_native_id) =
-        decode_tree_coordinate(locator.coordinate()).map_err(invalid_locator)?;
-    let document = snapshot
-        .document
-        .as_ref()
-        .map_err(|_| stale_evidence("Rovo Dev source no longer contains a valid document"))?;
-    let message = document
-        .messages
-        .get(message_index)
-        .ok_or_else(|| missing_record("Rovo Dev message coordinate is absent"))?;
-    let observed_native_id = provider_message_id(
-        message,
-        u64::try_from(message_index)
-            .map_err(|_| invalid_locator("Rovo Dev message coordinate exceeds platform limits"))?,
-    );
-    if observed_native_id != expected_native_id {
-        return Err(stale_evidence(
-            "Rovo Dev locator native message identity changed",
-        ));
-    }
-    let role_text = message
-        .get("role")
-        .or_else(|| message.get("kind"))
-        .or_else(|| message.get("type"))
-        .and_then(serde_json::Value::as_str);
-    let decoded_display_text = lexical_body(message, rovodev_event_type(message, role_text));
-    Ok(decoded_display_text.into_bytes())
-}
-
-fn decode_tree_coordinate(
-    coordinate: &NativeRecordCoordinate,
-) -> RovoDevSourceBackedResult<(usize, String)> {
-    let NativeRecordCoordinate::TreeRecord {
-        relative_file_key,
-        record_coordinate,
-    } = coordinate
-    else {
-        return Err(RovoDevSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Utf8(relative_file) = relative_file_key else {
-        return Err(RovoDevSourceBackedError::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = record_coordinate else {
-        return Err(RovoDevSourceBackedError::InvalidLocator);
-    };
-    let [TypedKey::Utf8(object_kind), TypedKey::U64(message_index), TypedKey::Utf8(native_id)] =
-        parts.as_slice()
-    else {
-        return Err(RovoDevSourceBackedError::InvalidLocator);
-    };
-    if relative_file != RELATIVE_CONTEXT_FILE
-        || object_kind != MESSAGE_OBJECT_KIND
-        || native_id.is_empty()
-    {
-        return Err(RovoDevSourceBackedError::InvalidLocator);
-    }
-    Ok((
-        usize::try_from(*message_index)
-            .map_err(|_| RovoDevSourceBackedError::CoordinateOverflow)?,
-        native_id.clone(),
-    ))
-}
-
-fn invalid_locator(detail: impl std::fmt::Display) -> HydrationFailure {
-    crate::provider::source_backed::hydration_failure(HydrationFailureKind::InvalidLocator, detail)
-}
-
-fn missing_record(detail: impl std::fmt::Display) -> HydrationFailure {
-    crate::provider::source_backed::hydration_failure(HydrationFailureKind::MissingRecord, detail)
-}
-
-fn stale_evidence(detail: impl std::fmt::Display) -> HydrationFailure {
-    crate::provider::source_backed::hydration_failure(
-        HydrationFailureKind::StaleRecordEvidence,
-        detail,
-    )
-}
-
-fn temporarily_unavailable(detail: impl std::fmt::Display) -> HydrationFailure {
-    crate::provider::source_backed::hydration_failure(
-        HydrationFailureKind::TemporarilyUnavailable,
-        detail,
-    )
 }
