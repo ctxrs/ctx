@@ -325,7 +325,7 @@ fn a_partial_unreferenced_manifest_does_not_poison_retry() {
     let receipt = writer.commit(|_| true).unwrap();
     assert_eq!(receipt.generation_id, generation_id);
     assert!(VerifiedIndex::open(temp.path()).is_ok());
-    assert!(fs::read_dir(path.parent().unwrap())
+    assert!(!fs::read_dir(path.parent().unwrap())
         .unwrap()
         .filter_map(std::result::Result::ok)
         .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));

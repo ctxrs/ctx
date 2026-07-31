@@ -45,8 +45,8 @@ pub use policy::{
 pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
     classify_publication_failure, load_manifest_for_metas, meta_generation, payload_generation_id,
-    reconcile_commit_error, searcher_generation, sync_directory, verify_searcher,
-    verify_searcher_structure, write_manifest,
+    reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
+    verify_searcher, verify_searcher_structure, write_manifest,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
@@ -248,6 +248,8 @@ impl GenerationWriter {
         // path remains completely idle for a healthy exact replay.
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
+        let visible_generation_id = payload_generation_id(&base_metas)?;
+        reclaim_unreferenced_manifests(&root, visible_generation_id.as_deref())?;
         reclaim_orphaned_managed_files(&mut index, &base_metas)?;
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {

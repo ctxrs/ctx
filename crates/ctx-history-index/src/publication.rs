@@ -241,6 +241,52 @@ pub(crate) fn write_manifest(
     Ok(())
 }
 
+/// Removes manifests that cannot be named by the currently visible Tantivy
+/// commit.
+///
+/// This runs under Tantivy's writer lock before a new publication starts. The
+/// visible manifest is retained, and the next successful commit naturally
+/// leaves it behind as one grace generation. A following writer open removes
+/// that grace generation only after proving the then-visible base.
+pub(crate) fn reclaim_unreferenced_manifests(
+    root: &Path,
+    visible_generation_id: Option<&str>,
+) -> Result<()> {
+    let directory = root.join(MANIFEST_DIRECTORY);
+    fs::create_dir_all(&directory)?;
+    let mut removed = false;
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let immutable_generation = file_name
+            .strip_suffix(".json")
+            .filter(|generation_id| is_generation_id(generation_id));
+        let corrupt_quarantine = file_name
+            .strip_prefix('.')
+            .and_then(|name| name.split_once(".corrupt-"))
+            .is_some_and(|(generation_id, suffix)| {
+                is_generation_id(generation_id) && !suffix.is_empty()
+            });
+        let should_remove = immutable_generation
+            .is_some_and(|generation_id| Some(generation_id) != visible_generation_id)
+            || corrupt_quarantine;
+        if should_remove {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        sync_directory(&directory)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_searcher_structure(
     searcher: &Searcher,
     manifest: &GenerationManifest,
