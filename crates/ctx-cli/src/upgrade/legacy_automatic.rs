@@ -211,22 +211,12 @@ mod unix {
                         finish_replacement_daemon_handoff(&data_root, &handoff_id)?;
                         return Ok(());
                     }
-                    ManagedInstallMarker::Valid(marker) if marker.version == LEGACY_VERSION => {
-                        complete_replacement_daemon_handoff(
-                            &data_root,
-                            &target,
-                            &handoff_id,
-                            None,
-                        )?;
-                        finish_replacement_daemon_handoff(&data_root, &handoff_id)?;
-                        return Ok(());
-                    }
                     _ => {}
                 }
             }
             if Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "legacy automatic ctx replacement did not publish a verified old or new managed image"
+                    "legacy automatic ctx replacement did not publish a verified new managed image; the stopped v0.25 daemon will not be relaunched"
                 ));
             }
             std::thread::sleep(Duration::from_millis(25));

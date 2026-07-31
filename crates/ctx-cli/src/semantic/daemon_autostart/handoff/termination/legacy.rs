@@ -170,130 +170,9 @@ fn verify_legacy_daemon_command(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn process_arguments(pid: u32) -> Result<Vec<std::ffi::OsString>> {
     let bytes = fs::read(format!("/proc/{pid}/cmdline"))
         .with_context(|| format!("read legacy ctx daemon process arguments for {pid}"))?;
-    nul_separated_arguments(&bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn process_arguments(pid: u32) -> Result<Vec<std::ffi::OsString>> {
-    let pid = libc::c_int::try_from(pid).map_err(|_| anyhow!("invalid daemon process identity"))?;
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    let mut size = 0;
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &raw mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .context("measure legacy ctx daemon process arguments");
-    }
-    if size < std::mem::size_of::<libc::c_int>() || size > 1024 * 1024 {
-        return Err(anyhow!(
-            "legacy ctx daemon process arguments have an invalid size"
-        ));
-    }
-    let mut bytes = vec![0_u8; size];
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            bytes.as_mut_ptr().cast(),
-            &raw mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .context("read legacy ctx daemon process arguments");
-    }
-    bytes.truncate(size);
-    let (argc, bytes) = bytes.split_at(std::mem::size_of::<libc::c_int>());
-    let argc = libc::c_int::from_ne_bytes(
-        argc.try_into()
-            .map_err(|_| anyhow!("legacy ctx daemon process argc is incomplete"))?,
-    );
-    let argc = usize::try_from(argc)
-        .ok()
-        .filter(|argc| *argc > 0)
-        .ok_or_else(|| anyhow!("legacy ctx daemon process argc is invalid"))?;
-    let executable_end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .ok_or_else(|| anyhow!("legacy ctx daemon process path is incomplete"))?;
-    let arguments = nul_separated_arguments(&bytes[executable_end + 1..])?;
-    if arguments.len() < argc {
-        return Err(anyhow!(
-            "legacy ctx daemon process argument vector is incomplete"
-        ));
-    }
-    Ok(arguments.into_iter().take(argc).collect())
-}
-
-#[cfg(target_os = "freebsd")]
-fn process_arguments(pid: u32) -> Result<Vec<std::ffi::OsString>> {
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_ARGS,
-        libc::c_int::try_from(pid).map_err(|_| anyhow!("invalid daemon process identity"))?,
-    ];
-    let mut size = 0;
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            std::ptr::null_mut(),
-            &raw mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .context("measure legacy ctx daemon process arguments");
-    }
-    if size == 0 || size > 1024 * 1024 {
-        return Err(anyhow!(
-            "legacy ctx daemon process arguments have an invalid size"
-        ));
-    }
-    let mut bytes = vec![0_u8; size];
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            bytes.as_mut_ptr().cast(),
-            &raw mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .context("read legacy ctx daemon process arguments");
-    }
-    bytes.truncate(size);
-    nul_separated_arguments(&bytes)
-}
-
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))
-))]
-fn process_arguments(pid: u32) -> Result<Vec<std::ffi::OsString>> {
-    let bytes = fs::read(format!("/proc/{pid}/cmdline")).with_context(|| {
-        format!("this platform cannot read legacy ctx daemon process arguments for {pid}")
-    })?;
     nul_separated_arguments(&bytes)
 }
 
@@ -313,7 +192,6 @@ fn nul_separated_arguments(bytes: &[u8]) -> Result<Vec<std::ffi::OsString>> {
     Ok(arguments)
 }
 
-#[cfg(target_os = "linux")]
 fn verify_linux_advisory_lock_owner(pid: u32, guard_path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
 

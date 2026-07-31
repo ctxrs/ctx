@@ -1080,6 +1080,10 @@ mod unix {
             .parse::<u32>()
             .unwrap();
         assert!(!process_is_running(stale_lock_pid));
+        assert!(
+            running_daemon_pid(&data_root(&temp), Some(old_pid)).is_none(),
+            "the interrupted fix-forward helper relaunched v0.25"
+        );
 
         let retried = run_v025_upgrade(&temp, &target, false);
         assert!(retried.status.success(), "{retried:?}");
