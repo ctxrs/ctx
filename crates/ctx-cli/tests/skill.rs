@@ -445,9 +445,14 @@ fn skill_install_default_fallback_preserves_custom_copy_without_failing() {
         .args(["integrations", "install", "skills"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "preserved existing Universal .agents skill; use --force to replace",
-        ));
+        .stdout(predicate::str::contains("preserved existing").not())
+        .stderr(
+            predicate::str::contains("Universal .agents Agent Skill was not changed").and(
+                predicate::str::contains(
+                    "ctx integrations install skills --agent universal --force",
+                ),
+            ),
+        );
     assert_eq!(
         fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
         "local custom instructions\n"
@@ -465,6 +470,19 @@ fn skill_install_preserves_modified_copy_unless_forced() {
         .join("ctx-agent-history-search");
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(skill_dir.join("SKILL.md"), "local custom instructions\n").unwrap();
+
+    ctx(&temp)
+        .args(["integrations", "install", "skills", "--agent", "universal"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("preserved existing").not())
+        .stderr(
+            predicate::str::contains("Universal .agents Agent Skill was not changed")
+                .and(predicate::str::contains(
+                    "ctx integrations install skills --agent universal --force",
+                ))
+                .and(predicate::str::contains("failed to install skill").not()),
+        );
 
     let output = ctx(&temp)
         .args([
@@ -487,6 +505,10 @@ fn skill_install_preserves_modified_copy_unless_forced() {
         .as_str()
         .unwrap()
         .contains("preserved existing Universal .agents skill; use --force to replace"));
+    assert_eq!(
+        output.stderr,
+        b"Error: failed to install skill for 1 target(s)\n"
+    );
     assert_eq!(
         fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
         "local custom instructions\n"

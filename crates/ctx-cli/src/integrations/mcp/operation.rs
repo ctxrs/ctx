@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 use crate::{
     analytics::{count_bucket, IntegrationResult, IntegrationTelemetry},
     ui::{
-        empty_state, fields, outcome, section, Action, Document, EmptyState, Field, Outcome,
-        OutcomeState, RenderContext, Ui,
+        diagnostic, empty_state, fields, outcome, section, Action, Diagnostic, DiagnosticLevel,
+        Document, EmptyState, Field, Outcome, OutcomeState, RenderContext, Ui,
     },
 };
 
@@ -113,8 +113,14 @@ pub(super) fn run_install(
     } else {
         let document = render_install_results(ui.stdout_context(), &results);
         ui.write_stdout(&document)?;
+        if let Some(diagnostics) = render_install_failures(ui.stderr_context(), &results) {
+            ui.write_stderr(&diagnostics)?;
+        }
     }
     if failed > 0 {
+        if !args.format.is_json() {
+            return Err(crate::dispatch::rendered_cli_error());
+        }
         return Err(anyhow!(
             "failed to install MCP integration for {failed} target(s)"
         ));
@@ -430,6 +436,47 @@ fn render_install_results(context: &RenderContext, results: &[McpInstallResult])
     document
 }
 
+fn render_install_failures(
+    context: &RenderContext,
+    results: &[McpInstallResult],
+) -> Option<Document> {
+    let mut document = Document::new();
+    for result in results.iter().filter(|result| !result.success) {
+        let summary = format!(
+            "{} MCP configuration was not changed",
+            result.target.agent.display_name()
+        );
+        let command = force_install_command(&result.target);
+        if !document.is_empty() {
+            document.push_blank();
+        }
+        document.append(diagnostic(
+            context,
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: &summary,
+                detail: result.error.as_deref(),
+                fields: &[],
+                action: (result.status == ConfigStatus::Conflict)
+                    .then_some(Action { command: &command }),
+            },
+        ));
+    }
+    (!document.is_empty()).then_some(document)
+}
+
+fn force_install_command(target: &McpTarget) -> String {
+    let project = if target.scope.as_str() == "project" {
+        " --project"
+    } else {
+        ""
+    };
+    format!(
+        "ctx integrations install mcp --agent {}{project} --force",
+        target.agent.id()
+    )
+}
+
 fn render_status_results(context: &RenderContext, results: &[McpStatusResult]) -> Document {
     if results.is_empty() {
         return empty_state(
@@ -485,10 +532,6 @@ fn mcp_install_target_detail(result: &McpInstallResult) -> String {
         detail.push_str(" -> ");
         detail.push_str(&path.display().to_string());
     }
-    if let Some(error) = &result.error {
-        detail.push_str(" - ");
-        detail.push_str(error);
-    }
     detail
 }
 
@@ -514,7 +557,7 @@ mod tests {
     use std::{fs, io::Write as _};
 
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
+    use crate::ui::{ColorMode, StreamKind, TestContext, Token};
 
     fn render_context(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
@@ -524,6 +567,17 @@ mod tests {
         let mut stream = anstream::StripStream::new(Vec::new());
         stream.write_all(rendered.as_bytes()).unwrap();
         String::from_utf8(stream.into_inner()).unwrap()
+    }
+
+    fn semantic_command(document: &Document) -> String {
+        document
+            .lines()
+            .iter()
+            .flat_map(|line| line.spans())
+            .filter(|span| span.token() == Token::Command)
+            .map(|span| span.content())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     #[test]
@@ -593,6 +647,62 @@ mod tests {
         let styled = document.render(&color);
         assert!(styled.as_bytes().contains(&0x1b), "{styled:?}");
         assert_eq!(strip_ansi(&styled), document.render_plain());
+    }
+
+    #[test]
+    fn mcp_conflict_names_the_selected_agent_in_the_force_action() {
+        let path_context = McpPathContext::for_tests("/home/test".into(), "/repo/test".into());
+
+        for (agent, project, expected_agent) in [
+            (McpAgentArg::Cursor, false, "cursor"),
+            (McpAgentArg::Codex, true, "codex"),
+        ] {
+            let result = McpInstallResult {
+                target: agent.target(project, &path_context),
+                success: false,
+                previous_status: ConfigStatus::Conflict,
+                status: ConfigStatus::Conflict,
+                already_installed: false,
+                modified: false,
+                error: Some(
+                    "existing ctx MCP server has different command or args; rerun with --force to overwrite"
+                        .to_owned(),
+                ),
+            };
+            let expected_project = if project { " --project" } else { "" };
+            let expected = format!(
+                "ctx integrations install mcp --agent {expected_agent}{expected_project} --force"
+            );
+
+            for width in [32, 48, 80, 120] {
+                let plain_context = RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never),
+                );
+                let styled_context = RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Always),
+                );
+                let plain_document =
+                    render_install_failures(&plain_context, std::slice::from_ref(&result)).unwrap();
+                let styled_document =
+                    render_install_failures(&styled_context, std::slice::from_ref(&result))
+                        .unwrap();
+
+                assert_eq!(semantic_command(&plain_document), expected);
+                let normalized = plain_document
+                    .render_plain()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(normalized.contains(&format!(
+                    "{} MCP configuration was not changed",
+                    agent.display_name()
+                )));
+                assert_eq!(
+                    strip_ansi(&styled_document.render(&styled_context)),
+                    plain_document.render_plain()
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
