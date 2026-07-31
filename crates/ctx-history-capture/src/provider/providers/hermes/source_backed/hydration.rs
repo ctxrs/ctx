@@ -16,6 +16,12 @@ pub(crate) struct HermesLocatorResolver {
     data_root: PathBuf,
     path: PathBuf,
     source: SourceKey,
+    #[cfg(test)]
+    snapshot_opens: std::cell::Cell<u64>,
+    #[cfg(test)]
+    native_key_batches: std::cell::Cell<u64>,
+    #[cfg(test)]
+    native_rows_read: std::cell::Cell<u64>,
 }
 
 impl HermesLocatorResolver {
@@ -28,7 +34,22 @@ impl HermesLocatorResolver {
             data_root: data_root.into(),
             path: path.into(),
             source,
+            #[cfg(test)]
+            snapshot_opens: std::cell::Cell::new(0),
+            #[cfg(test)]
+            native_key_batches: std::cell::Cell::new(0),
+            #[cfg(test)]
+            native_rows_read: std::cell::Cell::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn counters(&self) -> (u64, u64, u64) {
+        (
+            self.snapshot_opens.get(),
+            self.native_key_batches.get(),
+            self.native_rows_read.get(),
+        )
     }
 
     #[cfg(test)]
@@ -56,40 +77,56 @@ impl HermesLocatorResolver {
             }
             coordinates.push(decode_message_coordinate(locator)?);
         }
-        let (source_root, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.data_root, &self.path)?;
+        let (_, sqlite_snapshot) = open_root_authorized_snapshot(&self.data_root, &self.path)?;
+        #[cfg(test)]
+        self.snapshot_opens
+            .set(self.snapshot_opens.get().saturating_add(1));
         let opening_evidence = sqlite_snapshot.evidence().clone();
         let conn = sqlite_snapshot.connection()?;
         let operation = (|| {
             let schema = HermesSchema::detect(conn)?;
             let mut hydrated = Vec::with_capacity(locators.len());
             for chunk in coordinates.chunks(HERMES_HYDRATION_NATIVE_KEY_BATCH) {
+                #[cfg(test)]
+                self.native_key_batches
+                    .set(self.native_key_batches.get().saturating_add(1));
+                let rows = load_message_batch(conn, &schema, chunk)?;
+                #[cfg(test)]
+                self.native_rows_read.set(
+                    self.native_rows_read
+                        .get()
+                        .saturating_add(rows.len() as u64),
+                );
                 for (provider_session_id, message_id, row_version) in chunk {
-                    let rowid =
-                        find_message_rowid(conn, &schema, provider_session_id, *message_id)?
-                            .ok_or(HermesSourceBackedError::MissingRecord)?;
-                    let values = match load_hermes_message_values(conn, rowid) {
-                        Ok(values) => values,
-                        Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {
-                            return Err(HermesSourceBackedError::MissingRecord);
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
-                    let (actual_session_id, provider_event_hash, normalized_payload_hash, text) =
-                        hermes_complete_message_with_normalized_hash(conn, &values)?;
-                    if actual_session_id != *provider_session_id
-                        || provider_event_hash != format!("message:{message_id}")
-                    {
+                    let values = rows
+                        .get(&(provider_session_id.clone(), *message_id))
+                        .ok_or(HermesSourceBackedError::MissingRecord)?;
+                    let hermes_values = values
+                        .iter()
+                        .map(super::super::hermes_sqlite_value)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let row = super::super::layout::decode_hermes_message(&schema, &hermes_values)?;
+                    if row.session_id != *provider_session_id || row.id != *message_id {
                         return Err(HermesSourceBackedError::StaleRecordEvidence);
                     }
-                    let record_digest = decode_sha256(hermes_record_digest(&values).as_str())?;
+                    let content = super::super::hermes_decode_content(row.content.as_deref());
+                    let text = crate::provider::normalization::provider_value_text(&content)
+                        .unwrap_or_else(|| {
+                            row.tool_name
+                                .as_ref()
+                                .map(|name| format!("tool: {name}"))
+                                .unwrap_or_else(|| format!("Hermes {}", row.role))
+                        });
+                    let normalized_payload_hash = super::super::hermes_message_revision(&row)?;
+                    let provider_event_hash = format!("message:{message_id}");
+                    let record_digest = decode_sha256(hermes_record_digest(values).as_str())?;
                     if &record_digest != row_version {
                         return Err(HermesSourceBackedError::StaleRecordEvidence);
                     }
                     hydrated.push(HermesHydratedMessage {
                         provider_bytes: text.as_bytes().to_vec(),
                         text,
-                        provider_session_id: actual_session_id,
+                        provider_session_id: row.session_id,
                         provider_event_hash,
                         normalized_payload_hash,
                     });
@@ -103,7 +140,6 @@ impl HermesLocatorResolver {
         if closing_evidence != opening_evidence {
             return Err(HermesSourceBackedError::StaleSourceEvidence);
         }
-        source_root.revalidate()?;
         Ok(hydrated)
     }
 }
@@ -117,34 +153,62 @@ pub(crate) fn hydrate_hermes_source_backed_message(
     HermesLocatorResolver::new(data_root, path, locator.source().clone()).hydrate(locator)
 }
 
-fn find_message_rowid(
+fn load_message_batch(
     conn: &rusqlite::Connection,
     schema: &HermesSchema,
-    provider_session_id: &str,
-    message_id: i64,
-) -> HermesSourceBackedResult<Option<i64>> {
+    coordinates: &[(String, i64, [u8; 32])],
+) -> HermesSourceBackedResult<BTreeMap<(String, i64), Vec<crate::native_source::NativeSqliteValue>>>
+{
+    if coordinates.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let visibility = schema.message_visibility();
     let visibility = if visibility.is_empty() {
         String::new()
     } else {
         format!(" and {visibility}")
     };
+    let predicates = coordinates
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let session = index * 2 + 1;
+            let message = session + 1;
+            format!("(m.session_id = ?{session} collate binary and m.id = ?{message})")
+        })
+        .collect::<Vec<_>>()
+        .join(" or ");
     let sql = format!(
-        "select m.rowid from messages m \
-         where m.session_id = ?1 collate binary and m.id = ?2{visibility} limit 2"
+        "select {} from messages m
+         where ({predicates}){visibility}
+         order by m.session_id collate binary, m.id, m.rowid",
+        schema.messages().projection()
     );
-    let mut statement = conn.prepare(&sql).map_err(CaptureError::from)?;
-    let mut rows = statement
-        .query(rusqlite::params![provider_session_id, message_id])
-        .map_err(CaptureError::from)?;
-    let Some(first) = rows.next().map_err(CaptureError::from)? else {
-        return Ok(None);
-    };
-    let rowid = first.get(0).map_err(CaptureError::from)?;
-    if rows.next().map_err(CaptureError::from)?.is_some() {
-        return Err(HermesSourceBackedError::StaleRecordEvidence);
+    let mut parameters = Vec::with_capacity(coordinates.len() * 2);
+    for (provider_session_id, message_id, _) in coordinates {
+        parameters.push(rusqlite::types::Value::Text(provider_session_id.clone()));
+        parameters.push(rusqlite::types::Value::Integer(*message_id));
     }
-    Ok(Some(rowid))
+    let mut statement = conn.prepare(&sql).map_err(CaptureError::from)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(parameters), |row| {
+            schema.messages().capture_values(row, 0)
+        })
+        .map_err(CaptureError::from)?;
+    let mut loaded = BTreeMap::new();
+    for values in rows {
+        let values = values.map_err(CaptureError::from)?;
+        let row = super::super::layout::decode_hermes_message(schema, &values)?;
+        let key = (row.session_id, row.id);
+        let values = values
+            .into_iter()
+            .map(super::super::native_source_value)
+            .collect();
+        if loaded.insert(key, values).is_some() {
+            return Err(HermesSourceBackedError::StaleRecordEvidence);
+        }
+    }
+    Ok(loaded)
 }
 
 fn decode_message_coordinate(

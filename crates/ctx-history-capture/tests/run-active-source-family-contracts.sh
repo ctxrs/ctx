@@ -86,7 +86,6 @@ run_runner_regressions() {
 if [[ "${CTX_ACTIVE_SOURCE_FAMILY_RUNNER_REGRESSION:-0}" != 1 ]]; then
   run_runner_regressions "$0"
 fi
-
 actual="${TEST_TMPDIR}/active-source-family-contract-tests.actual"
 expected="${TEST_TMPDIR}/active-source-family-contract-tests.expected"
 LC_ALL=C "${test_binary}" --list |

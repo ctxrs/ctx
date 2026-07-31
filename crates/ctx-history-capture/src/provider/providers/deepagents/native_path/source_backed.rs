@@ -7,6 +7,7 @@
 mod replacement;
 
 use std::{
+    collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
 };
@@ -25,16 +26,16 @@ use thiserror::Error;
 
 use super::super::{
     complete_content::{
-        deepagents_write_record_digest, resolve_deepagents_content,
+        deepagents_write_record_digest, resolve_deepagents_contents,
         validate_deepagents_content_schema, DeepAgentsContentAddress,
     },
     message::{
         core_eligible, deepagents_event_type, deepagents_messages_from_blob, DeepAgentsMessage,
     },
     source::{
-        deepagents_checkpoint_time, deepagents_hydrate_write, deepagents_next_write_candidate,
-        deepagents_thread_summary, deepagents_validate_schema, DeepAgentsThreadSummary,
-        DeepAgentsWriteCandidate, DeepAgentsWriteKey,
+        deepagents_checkpoint_contexts, deepagents_logical_fingerprint, deepagents_validate_schema,
+        deepagents_write_candidate_page, DeepAgentsThreadSummary, DeepAgentsWriteCandidate,
+        DeepAgentsWriteKey,
     },
 };
 use crate::{
@@ -223,9 +224,13 @@ pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
     source: SourceKey,
     schema_evidence: Vec<u8>,
+    logical_fingerprint: [u8; 32],
     context: ProviderAdapterContext,
     source_path: String,
     after_rowid: Option<i64>,
+    pending_candidates: VecDeque<DeepAgentsWriteCandidate>,
+    checkpoint_times: BTreeMap<(String, String), DateTime<Utc>>,
+    thread_summaries: BTreeMap<String, DeepAgentsThreadSummary>,
     pending: Option<PendingWriteV0>,
     current_thread: Option<DeepAgentsThreadSummary>,
     next_event_sequence: u64,
@@ -249,6 +254,7 @@ impl DeepAgentsSourceBackedScannerV0 {
         let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
         let source = deepagents_source_key()?;
         let schema_evidence = deepagents_schema_evidence(&selection, &schema_fingerprint)?;
+        let logical_fingerprint = deepagents_logical_fingerprint(conn, &schema_evidence)?;
         let mut content_digest = Sha256::new();
         content_digest.update(DEEPAGENTS_SOURCE_DIGEST_DOMAIN);
         content_digest.update(source.exact_descriptor_digest());
@@ -269,9 +275,13 @@ impl DeepAgentsSourceBackedScannerV0 {
             sqlite_snapshot: Some(sqlite_snapshot),
             source,
             schema_evidence,
+            logical_fingerprint,
             context,
             source_path,
             after_rowid: None,
+            pending_candidates: VecDeque::new(),
+            checkpoint_times: BTreeMap::new(),
+            thread_summaries: BTreeMap::new(),
             pending: None,
             current_thread: None,
             next_event_sequence: 1,
@@ -285,6 +295,19 @@ impl DeepAgentsSourceBackedScannerV0 {
 
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
+    }
+
+    pub(crate) fn logical_fingerprint(&self) -> [u8; 32] {
+        self.logical_fingerprint
+    }
+
+    pub(crate) fn terminal_revalidator(
+        &self,
+    ) -> Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static> {
+        self.sqlite_snapshot
+            .as_ref()
+            .map(SqliteSourceReadSnapshot::terminal_revalidator)
+            .unwrap_or_else(|| Box::new(|| Err(SqliteSourceAccessError::SnapshotNotActive)))
     }
 
     /// Returns at most 64 lexical records directly from the pinned snapshot.
@@ -390,6 +413,26 @@ impl DeepAgentsSourceBackedScannerV0 {
         })
     }
 
+    pub(crate) fn seal_unscanned(
+        mut self,
+    ) -> DeepAgentsSourceBackedResultV0<DeepAgentsSourceTerminalFence> {
+        let sqlite_snapshot = self
+            .sqlite_snapshot
+            .take()
+            .ok_or(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted)?;
+        let closing_evidence = sqlite_snapshot.finish()?;
+        if closing_evidence != self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        self.source_root
+            .take()
+            .ok_or(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted)?
+            .revalidate()?;
+        Ok(DeepAgentsSourceTerminalFence {
+            evidence: closing_evidence,
+        })
+    }
+
     fn connection(&self) -> DeepAgentsSourceBackedResultV0<&rusqlite::Connection> {
         self.sqlite_snapshot
             .as_ref()
@@ -400,9 +443,19 @@ impl DeepAgentsSourceBackedScannerV0 {
 
     fn prepare_next_write(&mut self) -> DeepAgentsSourceBackedResultV0<bool> {
         loop {
-            let Some(candidate) =
-                deepagents_next_write_candidate(self.connection()?, self.after_rowid)?
-            else {
+            if self.pending_candidates.is_empty() {
+                let candidates =
+                    deepagents_write_candidate_page(self.connection()?, self.after_rowid, 64)?;
+                if candidates.is_empty() {
+                    return Ok(false);
+                }
+                let contexts =
+                    deepagents_checkpoint_contexts(self.connection()?, &self.context, &candidates)?;
+                self.checkpoint_times = contexts.checkpoint_times;
+                self.thread_summaries = contexts.threads;
+                self.pending_candidates.extend(candidates);
+            }
+            let Some(candidate) = self.pending_candidates.pop_front() else {
                 return Ok(false);
             };
             self.after_rowid = Some(candidate.rowid);
@@ -413,19 +466,19 @@ impl DeepAgentsSourceBackedScannerV0 {
                 continue;
             };
             self.refresh_thread(&key.thread_id)?;
-            let Some(occurred_at) = deepagents_checkpoint_time(
-                self.connection()?,
-                &self.context,
-                &key.thread_id,
-                &key.checkpoint_id,
-            )?
+            let Some(occurred_at) = self
+                .checkpoint_times
+                .get(&(key.thread_id.clone(), key.checkpoint_id.clone()))
+                .copied()
             else {
                 self.observe_rejected_candidate(&candidate);
                 self.add_rejected_records(1)?;
                 continue;
             };
-            let (value_type, value) =
-                deepagents_hydrate_write(self.connection()?, candidate.rowid)?;
+            let value_type = candidate.value_type;
+            let value = candidate.value.ok_or_else(|| {
+                DeepAgentsSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture)
+            })?;
             self.decoded_rows = checked_add(self.decoded_rows, 1)?;
             let record_digest = digest_bytes(&deepagents_write_record_digest(
                 &key,
@@ -491,8 +544,7 @@ impl DeepAgentsSourceBackedScannerV0 {
         {
             return Ok(());
         }
-        self.current_thread =
-            deepagents_thread_summary(self.connection()?, &self.context, thread_id, None)?;
+        self.current_thread = self.thread_summaries.get(thread_id).cloned();
         self.next_event_sequence = 1;
         Ok(())
     }
@@ -594,9 +646,15 @@ impl DeepAgentsLocatorResolverV0 {
         validate_deepagents_content_schema(conn)?;
         let mut hydrated = Vec::with_capacity(addresses.len());
         for chunk in addresses.chunks(DEEPAGENTS_HYDRATION_NATIVE_KEY_BATCH) {
-            for (address, row_version) in chunk {
-                let resolved = resolve_deepagents_content(conn, address)?
-                    .ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)?;
+            let chunk_addresses = chunk
+                .iter()
+                .map(|(address, _)| address.clone())
+                .collect::<Vec<_>>();
+            for ((_, row_version), resolved) in chunk
+                .iter()
+                .zip(resolve_deepagents_contents(conn, &chunk_addresses)?)
+            {
+                let resolved = resolved.ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)?;
                 let record_digest = digest_bytes(&resolved.record_digest)
                     .ok_or(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)?;
                 if &record_digest != row_version {

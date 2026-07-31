@@ -13,8 +13,10 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use crate::{
-    provider_sources::SqliteSourceAccessError, test_support_paths::tempdir, DiscoveryContext,
-    DiscoveryPlatform, DiscoveryPlatformDirs,
+    provider::providers::astrbot::source::{astrbot_query_counters, reset_astrbot_query_counters},
+    provider_sources::SqliteSourceAccessError,
+    test_support_paths::tempdir,
+    DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs,
 };
 
 use super::{
@@ -192,6 +194,144 @@ fn scan_documents(source: &AstrBotSourceBackedSourceV0) -> Vec<LexicalDocument> 
     )
     .unwrap();
     documents
+}
+
+#[test]
+fn astrbot_scan_and_hydration_queries_are_bounded_by_row_sets() {
+    const ROW_COUNT: i64 = 257;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("data_v4.db");
+    create_database(&path, "session-1", "prompt-1");
+    let connection = Connection::open(&path).unwrap();
+    for rowid in 2..=ROW_COUNT {
+        connection
+            .execute(
+                "insert into conversations (
+                     id, inner_conversation_id, conversation_id, platform_id, user_id,
+                     content, title, persona_id, token_usage, created_at, updated_at
+                 ) values (?1, ?2, ?3, 'webchat', 'user', ?4, 'title', 'persona',
+                           null, ?5, ?5)",
+                params![
+                    rowid,
+                    format!("session-{rowid}"),
+                    format!("conversation-{rowid}"),
+                    json!([{
+                        "id": format!("message-{rowid}"),
+                        "role": "user",
+                        "content": format!("prompt-{rowid}"),
+                    }])
+                    .to_string(),
+                    1_780_000_000_000_i64 + rowid,
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let source = selected_source(&path);
+
+    reset_astrbot_query_counters();
+    let documents = scan_documents(&source);
+    assert_eq!(documents.len(), usize::try_from(ROW_COUNT).unwrap());
+    assert_eq!(
+        documents
+            .iter()
+            .map(|document| document.body.as_str())
+            .collect::<Vec<_>>(),
+        (1..=ROW_COUNT)
+            .map(|rowid| format!("prompt-{rowid}"))
+            .collect::<Vec<_>>()
+    );
+    for (index, document) in documents.iter().enumerate() {
+        let expected_rowid = i64::try_from(index).unwrap() + 1;
+        assert!(matches!(
+            document.locator.coordinate(),
+            NativeRecordCoordinate::ProviderSqlite {
+                logical_relation,
+                primary_key: TypedKey::Composite(parts),
+                ..
+            } if logical_relation == CONVERSATION_MESSAGE_RELATION
+                && parts.as_slice()
+                    == [TypedKey::I64(expected_rowid), TypedKey::U64(0)]
+        ));
+    }
+    assert_eq!(
+        astrbot_query_counters(),
+        crate::provider::providers::astrbot::source::AstrBotQueryCounters {
+            candidate_set_reads: 7,
+            hydration_set_reads: 5,
+            hydrated_rows: 257,
+        }
+    );
+
+    reset_astrbot_query_counters();
+    let replay = scan_documents(&source);
+    assert_eq!(
+        replay
+            .iter()
+            .map(|document| (
+                document.event_id,
+                document.locator.coordinate().clone(),
+                document.body.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        documents
+            .iter()
+            .map(|document| (
+                document.event_id,
+                document.locator.coordinate().clone(),
+                document.body.clone(),
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        astrbot_query_counters(),
+        crate::provider::providers::astrbot::source::AstrBotQueryCounters {
+            candidate_set_reads: 7,
+            hydration_set_reads: 5,
+            hydrated_rows: 257,
+        }
+    );
+
+    let requested = documents
+        .iter()
+        .rev()
+        .map(event_request)
+        .collect::<Vec<_>>();
+    reset_astrbot_query_counters();
+    let hydrated = resolver_for(&source)
+        .hydrate_batch_request(&BatchHydrationRequest::new(requested.clone()).unwrap())
+        .unwrap();
+    assert_eq!(
+        hydrated
+            .records()
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        requested
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        hydrated
+            .records()
+            .iter()
+            .map(|record| String::from_utf8(record.provider_bytes.clone()).unwrap())
+            .collect::<Vec<_>>(),
+        (1..=ROW_COUNT)
+            .rev()
+            .map(|rowid| format!("prompt-{rowid}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        astrbot_query_counters(),
+        crate::provider::providers::astrbot::source::AstrBotQueryCounters {
+            candidate_set_reads: 0,
+            hydration_set_reads: 2,
+            hydrated_rows: 257,
+        }
+    );
 }
 
 fn event_request(document: &LexicalDocument) -> EventHydrationRequest {

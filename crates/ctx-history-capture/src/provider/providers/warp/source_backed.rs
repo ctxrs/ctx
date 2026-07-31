@@ -1,10 +1,13 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ffi::OsString,
     io,
     path::{Path, PathBuf},
     sync::Mutex,
 };
+
+#[cfg(test)]
+use std::cell::Cell;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
@@ -15,22 +18,21 @@ use ctx_history_core::{
     SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use rusqlite::{limits::Limit, params_from_iter, Connection};
+use rusqlite::{limits::Limit, Connection};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+mod hydration;
 
 use super::{
     nativepath::{
         scan_warp_source_backed_connection, WarpNativeEvent, WarpNativeMessageIdentity,
         WarpNativePage, WarpNativeSession, WarpNativeSink, WarpNativeSourceBackedScan,
     },
-    schema::WarpSqliteSchema,
-    warp_message_content_at,
+    schema::{warp_quote_identifier, WarpSqliteSchema},
 };
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
-    complete_content::sqlite::sqlite_logical_record_digest,
-    native_source::NativeSqliteValue,
     provider::source_backed::{
         family::document::{
             ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
@@ -41,12 +43,12 @@ use crate::{
     },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteLogicalSnapshot, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-        SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
     CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
     WARP_SQLITE_SOURCE_FORMAT,
 };
+use hydration::hydrate_warp_group;
 
 const WARP_SOURCE_ANCHOR_NAMESPACE: &str = "warp.selected-surface";
 const WARP_NATIVE_SESSION_NAMESPACE: &str = "warp.conversation";
@@ -58,7 +60,57 @@ const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v1"
 const WARP_TASK_MESSAGE_RELATION: &str = "agent_tasks.task-message.v2";
 const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
 const WARP_MISSING_TREE_DOMAIN: &[u8] = b"ctx.warp.missing-logical-tree.v1\0";
-const HYDRATION_NATIVE_KEY_BATCH: usize = 256;
+const WARP_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.warp.logical-leaf.v1\0";
+const WARP_ORDERING_KEY_MAX_BYTES: usize = 240 * 1024;
+const WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES: u64 = 64 * 5;
+const WARP_NATIVE_SQLITE_CONVERSATION_ROW_OVERHEAD_BYTES: u64 = 64 * 4;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct WarpSourceBackedWork {
+    pub(super) snapshot_opens: u64,
+    pub(super) source_bytes_copied: u64,
+    pub(super) terminal_fences: u64,
+    pub(super) terminal_revalidations: u64,
+    pub(super) active_snapshots: u64,
+    pub(super) max_active_snapshots: u64,
+    pub(super) logical_observation_queries: u64,
+    pub(super) provider_projections: u64,
+    pub(super) projection_queries: u64,
+    pub(super) hydration_queries: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static WARP_SOURCE_BACKED_WORK: Cell<WarpSourceBackedWork> =
+        Cell::new(WarpSourceBackedWork::default());
+}
+
+#[cfg(test)]
+pub(super) fn reset_warp_source_backed_work() {
+    WARP_SOURCE_BACKED_WORK.set(WarpSourceBackedWork::default());
+}
+
+#[cfg(test)]
+pub(super) fn warp_source_backed_work() -> WarpSourceBackedWork {
+    WARP_SOURCE_BACKED_WORK.get()
+}
+
+#[cfg(test)]
+fn update_warp_source_backed_work(update: impl FnOnce(&mut WarpSourceBackedWork)) {
+    WARP_SOURCE_BACKED_WORK.set({
+        let mut work = WARP_SOURCE_BACKED_WORK.get();
+        update(&mut work);
+        work
+    });
+}
+
+#[cfg(test)]
+pub(super) fn record_warp_projection_query() {
+    update_warp_source_backed_work(|work| {
+        work.projection_queries = work.projection_queries.saturating_add(1);
+    });
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum WarpSourceBackedErrorV0 {
@@ -165,8 +217,8 @@ pub(crate) struct WarpReplacementTreeAdapter {
 
 pub(crate) struct WarpPresentAuthority {
     retained: RetainedWarpDirectory,
-    physical_evidence: SqliteSourceEvidence,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
+    terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 pub(crate) enum WarpTreeAuthority {
@@ -200,19 +252,22 @@ impl ReplacementDocumentTree for WarpReplacementTreeAdapter {
                 WarpTreeAuthority::Missing(retained),
             ));
         };
-        let physical_evidence = snapshot.evidence().clone();
-        let fingerprint = *physical_evidence.revision();
+        let fingerprint = observe_warp_logical_fingerprint(
+            snapshot.connection().map_err(route_error)?,
+            &self.source,
+        )
+        .map_err(route_error)?;
+        let terminal_revalidate = snapshot.terminal_revalidator();
         Ok(CompleteDocumentTree::new(
             fingerprint,
-            vec![ObservedDocumentLeaf::with_durable_replay(
+            vec![ObservedDocumentLeaf::new(
                 DocumentLeafFingerprint::new(fingerprint),
                 (),
-                false,
             )],
             WarpTreeAuthority::Present(Box::new(WarpPresentAuthority {
                 retained,
-                physical_evidence,
                 snapshot: Mutex::new(Some(snapshot)),
+                terminal_revalidate: Box::new(move || terminal_revalidate().is_ok()),
             })),
         ))
     }
@@ -310,11 +365,15 @@ fn finish_warp_authority(
     authority: &WarpPresentAuthority,
     snapshot: SqliteSourceReadSnapshot,
 ) -> SourceBackedRouteResult<()> {
-    let evidence = snapshot.finish().map_err(route_error)?;
+    snapshot.finish().map_err(route_error)?;
     authority.retained.revalidate()?;
-    if evidence != authority.physical_evidence {
-        return Err(source_changed("Warp database changed during its snapshot"));
+    if !(authority.terminal_revalidate)() {
+        return Err(source_changed(
+            "Warp retained terminal fence changed before publication",
+        ));
     }
+    #[cfg(test)]
+    authority.retained.record_snapshot_work();
     Ok(())
 }
 
@@ -377,6 +436,188 @@ impl RetainedWarpDirectory {
         self.directory.revalidate().map_err(route_error)?;
         self.root.revalidate().map_err(route_error)
     }
+
+    #[cfg(test)]
+    fn record_snapshot_work(&self) {
+        let counters = self.sqlite.snapshot_counters();
+        update_warp_source_backed_work(|work| {
+            work.snapshot_opens = work
+                .snapshot_opens
+                .saturating_add(counters.immutable_snapshot_opens())
+                .saturating_add(counters.copied_snapshot_opens());
+            work.source_bytes_copied = work
+                .source_bytes_copied
+                .saturating_add(counters.source_bytes_copied());
+            work.terminal_fences = work
+                .terminal_fences
+                .saturating_add(counters.terminal_fences());
+            work.terminal_revalidations = work
+                .terminal_revalidations
+                .saturating_add(counters.terminal_revalidations());
+            work.active_snapshots = work
+                .active_snapshots
+                .saturating_add(counters.active_snapshots());
+            work.max_active_snapshots = work
+                .max_active_snapshots
+                .max(counters.max_active_snapshots());
+        });
+    }
+}
+
+fn observe_warp_logical_fingerprint(
+    connection: &Connection,
+    source: &SourceKey,
+) -> WarpSourceBackedResultV0<[u8; 32]> {
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    let schema = WarpSqliteSchema::detect(connection)?;
+    let invalid_rowid: bool = connection.query_row(
+        "select exists(select 1 from agent_conversations where rowid <= 0)
+             or exists(select 1 from agent_tasks where rowid <= 0)",
+        [],
+        |row| row.get(0),
+    )?;
+    #[cfg(test)]
+    update_warp_source_backed_work(|work| {
+        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
+    });
+    if invalid_rowid {
+        return Err(WarpSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Warp source-backed paging requires positive 64-bit source rowids".to_owned(),
+            ),
+        ));
+    }
+    let mut digest = Sha256::new();
+    digest.update(WARP_LOGICAL_LEAF_DOMAIN);
+    digest.update(source.exact_descriptor_digest());
+    hash_bytes(&mut digest, schema.task_keyset_index.as_bytes())?;
+    observe_warp_conversation_rows(connection, &mut digest)?;
+    observe_warp_task_rows(connection, &schema, &mut digest)?;
+    Ok(digest.finalize().into())
+}
+
+fn observe_warp_conversation_rows(
+    connection: &Connection,
+    digest: &mut Sha256,
+) -> WarpSourceBackedResultV0<()> {
+    let maximum = u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    let hydration_limit = maximum
+        .checked_sub(WARP_NATIVE_SQLITE_CONVERSATION_ROW_OVERHEAD_BYTES)
+        .ok_or(WarpSourceBackedErrorV0::CountOverflow)?;
+    let hydration_limit =
+        i64::try_from(hydration_limit).map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    let _guard = crate::provider::sqlite::SqliteLengthPreflightGuard::new(connection);
+    let mut statement = connection.prepare(
+        "select rowid, \
+                typeof(conversation_id), coalesce(octet_length(conversation_id), 0), \
+                typeof(conversation_data), coalesce(octet_length(conversation_data), 0), \
+                typeof(last_modified_at), coalesce(octet_length(last_modified_at), 0), \
+                case when typeof(conversation_id) = 'text' \
+                           and typeof(conversation_data) = 'text' \
+                           and typeof(last_modified_at) = 'text' \
+                           and coalesce(octet_length(conversation_id), 0) \
+                             + coalesce(octet_length(conversation_data), 0) \
+                             + coalesce(octet_length(last_modified_at), 0) <= ?1 \
+                     then conversation_id end, \
+                case when typeof(conversation_id) = 'text' \
+                           and typeof(conversation_data) = 'text' \
+                           and typeof(last_modified_at) = 'text' \
+                           and coalesce(octet_length(conversation_id), 0) \
+                             + coalesce(octet_length(conversation_data), 0) \
+                             + coalesce(octet_length(last_modified_at), 0) <= ?1 \
+                     then conversation_data end, \
+                case when typeof(conversation_id) = 'text' \
+                           and typeof(conversation_data) = 'text' \
+                           and typeof(last_modified_at) = 'text' \
+                           and coalesce(octet_length(conversation_id), 0) \
+                             + coalesce(octet_length(conversation_data), 0) \
+                             + coalesce(octet_length(last_modified_at), 0) <= ?1 \
+                     then last_modified_at end \
+         from agent_conversations where rowid > 0 order by rowid",
+    )?;
+    let mut rows = statement.query([hydration_limit])?;
+    #[cfg(test)]
+    update_warp_source_backed_work(|work| {
+        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
+    });
+    while let Some(row) = rows.next()? {
+        digest.update(b"conversation\0");
+        digest.update(row.get::<_, i64>(0)?.to_be_bytes());
+        for offset in [1, 3, 5] {
+            hash_text(digest, &row.get::<_, String>(offset)?);
+            digest.update(row.get::<_, i64>(offset + 1)?.to_be_bytes());
+        }
+        for offset in [7, 8, 9] {
+            hash_optional_text(digest, row.get::<_, Option<String>>(offset)?.as_deref());
+        }
+    }
+    Ok(())
+}
+
+fn observe_warp_task_rows(
+    connection: &Connection,
+    schema: &WarpSqliteSchema,
+    digest: &mut Sha256,
+) -> WarpSourceBackedResultV0<()> {
+    let index = warp_quote_identifier(&schema.task_keyset_index);
+    let representable = format!(
+        "typeof(t.conversation_id) = 'text' \
+         and typeof(t.task_id) = 'text' \
+         and typeof(t.task) = 'blob' \
+         and typeof(t.last_modified_at) = 'text' \
+         and coalesce(octet_length(t.conversation_id), 0) > 0 \
+         and coalesce(octet_length(t.task_id), 0) > 0 \
+         and coalesce(octet_length(t.task_id), 0) <= {WARP_ORDERING_KEY_MAX_BYTES} \
+         and coalesce(octet_length(t.conversation_id), 0) \
+             + coalesce(octet_length(t.task_id), 0) \
+             + coalesce(octet_length(t.task), 0) \
+             + coalesce(octet_length(t.last_modified_at), 0) \
+             + {WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES} \
+             <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
+    );
+    let _guard = crate::provider::sqlite::SqliteLengthPreflightGuard::new(connection);
+    let mut statement = connection.prepare(&format!(
+        "select t.rowid, \
+                typeof(t.conversation_id), coalesce(octet_length(t.conversation_id), 0), \
+                typeof(t.task_id), coalesce(octet_length(t.task_id), 0), \
+                typeof(t.task), coalesce(octet_length(t.task), 0), \
+                typeof(t.last_modified_at), coalesce(octet_length(t.last_modified_at), 0), \
+                case when {representable} then t.conversation_id end, \
+                case when {representable} then t.task_id end, \
+                case when {representable} then t.task end, \
+                case when {representable} then t.last_modified_at end \
+         from agent_tasks t indexed by {index} \
+         order by t.task_id collate binary"
+    ))?;
+    let mut rows = statement.query([])?;
+    #[cfg(test)]
+    update_warp_source_backed_work(|work| {
+        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
+    });
+    while let Some(row) = rows.next()? {
+        digest.update(b"task\0");
+        digest.update(row.get::<_, i64>(0)?.to_be_bytes());
+        for offset in [1, 3, 5, 7] {
+            hash_text(digest, &row.get::<_, String>(offset)?);
+            digest.update(row.get::<_, i64>(offset + 1)?.to_be_bytes());
+        }
+        hash_optional_text(digest, row.get::<_, Option<String>>(9)?.as_deref());
+        hash_optional_text(digest, row.get::<_, Option<String>>(10)?.as_deref());
+        let task = row.get::<_, Option<Vec<u8>>>(11)?;
+        match task {
+            Some(task) => {
+                digest.update([1]);
+                hash_bytes(digest, &task)?;
+            }
+            None => digest.update([0]),
+        }
+        hash_optional_text(digest, row.get::<_, Option<String>>(12)?.as_deref());
+    }
+    Ok(())
 }
 
 fn scan_warp_logical_snapshot(
@@ -385,6 +626,11 @@ fn scan_warp_logical_snapshot(
     path: &Path,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> WarpSourceBackedResultV0<DocumentSourceTerminal> {
+    #[cfg(test)]
+    update_warp_source_backed_work(|work| {
+        work.provider_projections = work.provider_projections.saturating_add(1);
+        work.projection_queries = work.projection_queries.saturating_add(1);
+    });
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
@@ -603,194 +849,6 @@ fn lexical_document(
     })
 }
 
-fn hydrate_warp_group(
-    selection: &WarpSourceSelectionV0,
-    request: &BatchHydrationRequest,
-) -> Result<BatchHydrationResult, HydrationFailure> {
-    if request.events().is_empty() {
-        return BatchHydrationResult::new(Vec::new())
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error));
-    }
-    let source = warp_source_key(selection).map_err(warp_hydration_error)?;
-    let coordinates = request
-        .events()
-        .iter()
-        .map(|event| {
-            validate_warp_locator(&source, event.locator()).map(|(task_id, message_ordinal)| {
-                WarpHydrationCoordinate {
-                    task_id,
-                    message_ordinal,
-                    record_digest: *event.locator().record_digest(),
-                }
-            })
-        })
-        .collect::<WarpSourceBackedResultV0<Vec<_>>>()
-        .map_err(warp_hydration_error)?;
-    let retained = RetainedWarpDirectory::open(&selection.data_root, selection.path())
-        .map_err(warp_hydration_error)?;
-    let snapshot = retained
-        .open_snapshot()
-        .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))?
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::MissingRecord,
-                "Warp selected database is missing",
-            )
-        })?;
-    let hydrated = (|| {
-        let connection = snapshot
-            .connection()
-            .map_err(warp_snapshot_hydration_error)?;
-        WarpSqliteSchema::detect(connection).map_err(warp_hydration_error)?;
-        let keys = coordinates
-            .iter()
-            .map(|coordinate| coordinate.task_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let rows = load_task_value_batches(connection, &keys).map_err(warp_hydration_error)?;
-        request
-            .events()
-            .iter()
-            .zip(&coordinates)
-            .map(|(event, coordinate)| {
-                let values = rows.get(&coordinate.task_id).ok_or_else(|| {
-                    hydration_failure(
-                        HydrationFailureKind::MissingRecord,
-                        "Warp task row is missing",
-                    )
-                })?;
-                let digest = digest_bytes(sqlite_logical_record_digest(values).as_str())
-                    .map_err(warp_hydration_error)?;
-                if digest != coordinate.record_digest {
-                    return Err(hydration_failure(
-                        HydrationFailureKind::StaleRecordEvidence,
-                        "Warp task row digest changed",
-                    ));
-                }
-                let [
-                    NativeSqliteValue::Text(conversation_id),
-                    NativeSqliteValue::Text(task_id),
-                    NativeSqliteValue::Blob(task),
-                    _,
-                ] = values.as_slice()
-                else {
-                    return Err(hydration_failure(
-                        HydrationFailureKind::StaleRecordEvidence,
-                        "Warp task row changed storage class",
-                    ));
-                };
-                let content = warp_message_content_at(
-                    task,
-                    conversation_id,
-                    task_id,
-                    usize::try_from(coordinate.message_ordinal).map_err(|_| {
-                        hydration_failure(
-                            HydrationFailureKind::InvalidLocator,
-                            "Warp message ordinal exceeds usize",
-                        )
-                    })?,
-                )
-                .map_err(warp_hydration_error)?
-                .ok_or_else(|| {
-                    hydration_failure(
-                        HydrationFailureKind::MissingRecord,
-                        "Warp task message is missing",
-                    )
-                })?;
-                Ok(HydratedProviderRecord {
-                    event_id: event.event_id(),
-                    provider_bytes: content.text.into_bytes(),
-                })
-            })
-            .collect::<Result<Vec<_>, HydrationFailure>>()
-    })();
-    snapshot.finish().map_err(warp_snapshot_hydration_error)?;
-    retained
-        .revalidate()
-        .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
-    let result = BatchHydrationResult::new(hydrated?)
-        .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
-    result.validate_for_request(request)?;
-    Ok(result)
-}
-
-struct WarpHydrationCoordinate {
-    task_id: String,
-    message_ordinal: u64,
-    record_digest: [u8; 32],
-}
-
-fn validate_warp_locator(
-    source: &SourceKey,
-    locator: &SourceRecordLocator,
-) -> WarpSourceBackedResultV0<(String, u64)> {
-    locator.validate_contract()?;
-    if !source.exact_descriptor_eq(locator.source())
-        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    }
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    };
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    };
-    let [TypedKey::Utf8(task_id), TypedKey::U64(message_ordinal)] = parts.as_slice() else {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    };
-    if logical_relation != WARP_TASK_MESSAGE_RELATION
-        || row_version.as_ref() != Some(&TypedKey::Bytes(locator.record_digest().to_vec()))
-    {
-        return Err(WarpSourceBackedErrorV0::InvalidLocator);
-    }
-    Ok((task_id.clone(), *message_ordinal))
-}
-
-fn load_task_value_batches(
-    connection: &Connection,
-    keys: &[String],
-) -> WarpSourceBackedResultV0<BTreeMap<String, Vec<NativeSqliteValue>>> {
-    let mut loaded = BTreeMap::new();
-    for batch in keys.chunks(HYDRATION_NATIVE_KEY_BATCH) {
-        let placeholders = std::iter::repeat_n("?", batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "select cast(conversation_id as text), cast(task_id as text), task, \
-                    cast(last_modified_at as text) \
-             from agent_tasks where task_id in ({placeholders}) order by task_id collate binary"
-        );
-        let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(batch.iter()), |row| {
-            let task_id = row.get::<_, String>(1)?;
-            Ok((
-                task_id.clone(),
-                vec![
-                    NativeSqliteValue::Text(row.get(0)?),
-                    NativeSqliteValue::Text(task_id),
-                    NativeSqliteValue::Blob(row.get(2)?),
-                    NativeSqliteValue::Text(row.get(3)?),
-                ],
-            ))
-        })?;
-        for row in rows {
-            let (task_id, values) = row?;
-            if loaded.insert(task_id, values).is_some() {
-                return Err(WarpSourceBackedErrorV0::StaleTaskRow);
-            }
-        }
-    }
-    Ok(loaded)
-}
-
 fn warp_session_id(
     source: &SourceKey,
     conversation_id: &str,
@@ -876,6 +934,31 @@ fn checked_add(left: u64, right: u64) -> WarpSourceBackedResultV0<u64> {
         .ok_or(WarpSourceBackedErrorV0::CountOverflow)
 }
 
+fn hash_bytes(digest: &mut Sha256, value: &[u8]) -> WarpSourceBackedResultV0<()> {
+    digest.update(
+        u64::try_from(value.len())
+            .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?
+            .to_be_bytes(),
+    );
+    digest.update(value);
+    Ok(())
+}
+
+fn hash_text(digest: &mut Sha256, value: &str) {
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value.as_bytes());
+}
+
+fn hash_optional_text(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            hash_text(digest, value);
+        }
+        None => digest.update([0]),
+    }
+}
+
 fn parse_hex_digest(value: &str) -> WarpSourceBackedResultV0<[u8; 32]> {
     digest_bytes(value)
 }
@@ -910,14 +993,6 @@ fn sqlite_access_error(error: crate::provider_sources::SqliteSourceAccessError) 
         operation: "accessing a retained Warp SQLite source",
         source: io::Error::other(error),
     }
-}
-
-fn warp_snapshot_hydration_error(error: impl std::fmt::Display) -> HydrationFailure {
-    hydration_failure(HydrationFailureKind::StaleSourceEvidence, error)
-}
-
-fn warp_hydration_error(error: impl std::fmt::Display) -> HydrationFailure {
-    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
 }
 
 fn source_backed_capture_error(error: WarpSourceBackedErrorV0) -> CaptureError {

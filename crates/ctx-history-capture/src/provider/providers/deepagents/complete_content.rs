@@ -1,5 +1,7 @@
 //! Provider-owned verified-content coordinates and pure SQLite snapshot recovery.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -233,6 +235,104 @@ pub(crate) fn resolve_deepagents_content(
         text,
         event,
         record_digest: deepagents_write_record_digest(&key, value_type.as_deref(), &value),
+    }))
+}
+
+pub(crate) fn resolve_deepagents_contents(
+    conn: &Connection,
+    addresses: &[DeepAgentsContentAddress],
+) -> Result<Vec<Option<DeepAgentsResolvedContent>>> {
+    const BATCH: usize = 128;
+    type Key = (String, String, String, i64);
+    let mut values = BTreeMap::<Key, (Option<String>, Vec<u8>)>::new();
+    let mut keys = addresses
+        .iter()
+        .map(|address| {
+            (
+                address.thread_id.clone(),
+                address.checkpoint_id.clone(),
+                address.task_id.clone(),
+                address.write_idx,
+            )
+        })
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    for chunk in keys.chunks(BATCH) {
+        let requested = std::iter::repeat_n("(?, ?, ?, ?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "with requested(thread_id, checkpoint_id, task_id, idx) as (values {requested}) \
+             select writes.thread_id, writes.checkpoint_id, writes.task_id, writes.idx, \
+                    writes.type, writes.value \
+             from writes join requested using (thread_id, checkpoint_id, task_id, idx) \
+             where writes.checkpoint_ns = '' and writes.channel = 'messages'"
+        );
+        let mut parameters = Vec::with_capacity(chunk.len() * 4);
+        for (thread_id, checkpoint_id, task_id, idx) in chunk {
+            parameters.push(rusqlite::types::Value::Text(thread_id.clone()));
+            parameters.push(rusqlite::types::Value::Text(checkpoint_id.clone()));
+            parameters.push(rusqlite::types::Value::Text(task_id.clone()));
+            parameters.push(rusqlite::types::Value::Integer(*idx));
+        }
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
+        while let Some(row) = rows.next()? {
+            let key = (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+            let value = (row.get(4)?, row.get(5)?);
+            if values.insert(key, value).is_some() {
+                return Err(CaptureError::InvalidPayload(
+                    "Deep Agents content address matched multiple writes".to_owned(),
+                ));
+            }
+        }
+    }
+    addresses
+        .iter()
+        .map(|address| {
+            let key = (
+                address.thread_id.clone(),
+                address.checkpoint_id.clone(),
+                address.task_id.clone(),
+                address.write_idx,
+            );
+            match values.get(&key) {
+                Some((value_type, value)) => {
+                    resolved_deepagents_content(address, value_type.as_deref(), value)
+                }
+                None => Ok(None),
+            }
+        })
+        .collect()
+}
+
+fn resolved_deepagents_content(
+    address: &DeepAgentsContentAddress,
+    value_type: Option<&str>,
+    value: &[u8],
+) -> Result<Option<DeepAgentsResolvedContent>> {
+    let messages = deepagents_messages_from_blob(value_type, value)?.messages;
+    let offset = usize::try_from(address.message_offset).map_err(|_| {
+        CaptureError::InvalidPayload(
+            "Deep Agents message offset exceeds platform limits".to_owned(),
+        )
+    })?;
+    let Some(message) = messages.get(offset).cloned() else {
+        return Ok(None);
+    };
+    let text = message.text.clone();
+    let key = DeepAgentsWriteKey {
+        thread_id: address.thread_id.clone(),
+        checkpoint_id: address.checkpoint_id.clone(),
+        task_id: address.task_id.clone(),
+        idx: address.write_idx,
+    };
+    let event = resolved_event(address, message, &key);
+    Ok(Some(DeepAgentsResolvedContent {
+        text,
+        event,
+        record_digest: deepagents_write_record_digest(&key, value_type, value),
     }))
 }
 

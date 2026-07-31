@@ -121,7 +121,12 @@ pub(crate) fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let mut ui = Ui::stdio(cli.color);
     if let CommandRoot::Referral(args) = &cli.command {
-        args.validate_invocation()?;
+        pro::human_result(
+            args.validate_invocation(),
+            !args.json_output(),
+            "ctx referral create <codename>",
+            &mut ui,
+        )?;
     }
     let deprecated_controls = DeprecatedControls::detect();
     if command_deprecation_warning_eligible(&cli.command) {

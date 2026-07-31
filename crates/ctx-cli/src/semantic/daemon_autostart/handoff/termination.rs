@@ -1,18 +1,70 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+mod legacy;
+#[cfg(target_os = "linux")]
+use legacy::verify_legacy_v025_identity;
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ResidualDaemonIdentityPolicy {
+    CurrentDigest,
+    LegacyV025,
+}
+
 #[cfg(unix)]
 pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     data_root: &Path,
     expected_executable: &Path,
+) -> Result<()> {
+    terminate_identity_verified_unix_daemon(
+        data_root,
+        expected_executable,
+        ResidualDaemonIdentityPolicy::CurrentDigest,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    data_root: &Path,
+    expected_executable: &Path,
+) -> Result<()> {
+    terminate_identity_verified_unix_daemon(
+        data_root,
+        expected_executable,
+        ResidualDaemonIdentityPolicy::LegacyV025,
+    )
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    _data_root: &Path,
+    _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "legacy automatic daemon replacement requires Linux pidfd identity; fix forward with a manual 1.0 install on this platform"
+    ))
+}
+
+#[cfg(unix)]
+fn terminate_identity_verified_unix_daemon(
+    data_root: &Path,
+    expected_executable: &Path,
+    identity_policy: ResidualDaemonIdentityPolicy,
 ) -> Result<()> {
     let lock_path = daemon_lock_path(data_root);
     let value = read_pid_lock_json(&lock_path)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no readable identity"))?;
     let pid = pid_from_lock_json(&value)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
-    let signal_target = UnixSignalTarget::open(pid)?;
-    verify_residual_daemon_identity(data_root, expected_executable, pid, &value)?;
-    signal_target.signal(data_root, expected_executable, libc::SIGTERM)?;
+    let signal_target = UnixSignalTarget::open(pid, identity_policy)?;
+    verify_residual_daemon_identity(data_root, expected_executable, pid, &value, identity_policy)?;
+    signal_target.signal(
+        data_root,
+        expected_executable,
+        identity_policy,
+        libc::SIGTERM,
+    )?;
     let term_deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
     while daemon_lock_is_active(data_root) && Instant::now() < term_deadline {
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
@@ -21,7 +73,12 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
         return Ok(());
     }
 
-    signal_target.signal(data_root, expected_executable, libc::SIGKILL)?;
+    signal_target.signal(
+        data_root,
+        expected_executable,
+        identity_policy,
+        libc::SIGKILL,
+    )?;
     Ok(())
 }
 
@@ -34,18 +91,28 @@ enum UnixSignalTarget {
 
 #[cfg(unix)]
 impl UnixSignalTarget {
-    fn open(pid: u32) -> Result<Self> {
+    fn open(pid: u32, identity_policy: ResidualDaemonIdentityPolicy) -> Result<Self> {
         #[cfg(target_os = "linux")]
         if let Some(pidfd) = LinuxPidFd::open(pid)? {
             return Ok(Self::PidFd(pidfd));
         }
-        Ok(Self::ReverifiedPid(pid))
+        Self::without_pidfd(pid, identity_policy)
+    }
+
+    fn without_pidfd(pid: u32, identity_policy: ResidualDaemonIdentityPolicy) -> Result<Self> {
+        match identity_policy {
+            ResidualDaemonIdentityPolicy::CurrentDigest => Ok(Self::ReverifiedPid(pid)),
+            ResidualDaemonIdentityPolicy::LegacyV025 => Err(anyhow!(
+                "legacy automatic daemon replacement requires a stable Linux pidfd; fix forward with a manual 1.0 install"
+            )),
+        }
     }
 
     fn signal(
         &self,
         data_root: &Path,
         expected_executable: &Path,
+        identity_policy: ResidualDaemonIdentityPolicy,
         signal: libc::c_int,
     ) -> Result<()> {
         let pid = match self {
@@ -53,7 +120,7 @@ impl UnixSignalTarget {
             Self::PidFd(pidfd) => pidfd.pid,
             Self::ReverifiedPid(pid) => *pid,
         };
-        reverify_residual_daemon_identity(data_root, expected_executable, pid)?;
+        reverify_residual_daemon_identity(data_root, expected_executable, pid, identity_policy)?;
         match self {
             #[cfg(target_os = "linux")]
             Self::PidFd(pidfd) => pidfd.signal(signal),
@@ -126,6 +193,7 @@ fn reverify_residual_daemon_identity(
     data_root: &Path,
     expected_executable: &Path,
     expected_pid: u32,
+    identity_policy: ResidualDaemonIdentityPolicy,
 ) -> Result<()> {
     let current = read_pid_lock_json(&daemon_lock_path(data_root))
         .ok_or_else(|| anyhow!("ctx daemon identity disappeared before termination signal"))?;
@@ -134,7 +202,13 @@ fn reverify_residual_daemon_identity(
             "ctx daemon ownership changed before termination signal; refusing to signal"
         ));
     }
-    verify_residual_daemon_identity(data_root, expected_executable, expected_pid, &current)
+    verify_residual_daemon_identity(
+        data_root,
+        expected_executable,
+        expected_pid,
+        &current,
+        identity_policy,
+    )
 }
 
 #[cfg(unix)]
@@ -143,6 +217,7 @@ fn verify_residual_daemon_identity(
     expected_executable: &Path,
     pid: u32,
     value: &Value,
+    identity_policy: ResidualDaemonIdentityPolicy,
 ) -> Result<()> {
     if pid == process::id() {
         return Err(anyhow!("refusing to terminate the current ctx process"));
@@ -183,6 +258,32 @@ fn verify_residual_daemon_identity(
             "ctx daemon lock executable is not the installed ctx executable"
         ));
     }
+    match identity_policy {
+        ResidualDaemonIdentityPolicy::CurrentDigest => verify_recorded_digest_identity(pid, value),
+        ResidualDaemonIdentityPolicy::LegacyV025 => {
+            #[cfg(target_os = "linux")]
+            {
+                verify_legacy_v025_identity(
+                    data_root,
+                    expected_executable,
+                    recorded_binary,
+                    pid,
+                    value,
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (data_root, expected_executable, recorded_binary, pid, value);
+                Err(anyhow!(
+                    "legacy automatic daemon replacement requires Linux pidfd identity"
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn verify_recorded_digest_identity(pid: u32, value: &Value) -> Result<()> {
     let recorded_sha256 = value
         .get("binary_sha256")
         .and_then(Value::as_str)
@@ -249,6 +350,16 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
             .context("terminate identity-verified residual ctx daemon");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    _data_root: &Path,
+    _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "legacy automatic daemon replacement is not supported on Windows"
+    ))
 }
 
 #[cfg(windows)]
@@ -328,9 +439,37 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     ))
 }
 
+#[cfg(not(any(unix, windows)))]
+pub(super) fn terminate_identity_verified_legacy_daemon(
+    _data_root: &Path,
+    _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "this platform cannot identity-verify legacy daemon termination"
+    ))
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod pidfd_tests {
     use super::*;
+
+    #[test]
+    fn legacy_termination_never_falls_back_to_a_numeric_pid() {
+        let Err(error) =
+            UnixSignalTarget::without_pidfd(42, ResidualDaemonIdentityPolicy::LegacyV025)
+        else {
+            panic!("legacy termination accepted a reusable numeric PID");
+        };
+        assert!(
+            error.to_string().contains("requires a stable Linux pidfd"),
+            "{error:#}"
+        );
+        assert!(matches!(
+            UnixSignalTarget::without_pidfd(42, ResidualDaemonIdentityPolicy::CurrentDigest,)
+                .unwrap(),
+            UnixSignalTarget::ReverifiedPid(42)
+        ));
+    }
 
     #[test]
     fn linux_pidfd_signals_the_opened_process_handle() -> Result<()> {

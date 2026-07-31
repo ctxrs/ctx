@@ -9,7 +9,7 @@ fn owned_source_backed_constructors_have_no_preview_body_or_store_fallback() {
             "nanoclaw",
             include_str!("../../nanoclaw/native_path/source_backed.rs"),
         ),
-        ("native_jsonl", include_str!("source_backed/lifecycle.rs")),
+        ("native_jsonl", include_str!("source_backed.rs")),
         (
             "openclaw",
             include_str!("../../openclaw/native_path/source_backed.rs"),
@@ -89,28 +89,41 @@ fn owned_source_backed_constructors_have_no_preview_body_or_store_fallback() {
 #[test]
 fn direct_jsonl_family_streams_documents_and_owns_physical_work() {
     let module = include_str!("source_backed.rs");
-    let adapter = include_str!("source_backed/adapter.rs");
-    let hydration = include_str!("source_backed/hydration.rs");
-    let lifecycle = include_str!("source_backed/lifecycle.rs");
-    let registration = include_str!("source_backed/registration.rs");
+    let registration = include_str!("../../../source_backed/registration/families/jsonl/direct.rs");
     let projector = include_str!("reader.rs");
     let family = include_str!("../../../source_backed/family/jsonl.rs");
+    let family_route = include_str!("../../../source_backed/family/jsonl/route.rs");
+    let family_hydration = include_str!("../../../source_backed/family/jsonl/route/hydration.rs");
+    let family_leaf = include_str!("../../../source_backed/family/jsonl/route/leaf.rs");
 
-    for production in [module, adapter, hydration, lifecycle, registration] {
-        assert!(production.lines().count() < 1_000);
+    for production in [module, registration, family_route] {
+        assert!(production.lines().count() < 1_200);
         assert!(!production.contains("allow(dead_code)"));
         assert!(!production.contains("DirectJsonlSourcePage"));
         assert!(!production.contains("Vec<LexicalDocument>"));
         assert!(!production.contains("captured_route_driver"));
+        assert!(!production.contains("DirectJsonlCheckpoint"));
+        assert!(!production.contains("DirectJsonlSourceAdapter"));
+        assert!(!production.contains("DirectJsonlRegistrationTestObserver"));
     }
+    assert!(module.contains("impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter"));
+    assert!(!module.contains("mod adapter;"));
+    assert!(!module.contains("mod hydration;"));
+    assert!(!module.contains("mod lifecycle;"));
+    assert!(!module.contains("mod registration;"));
     assert!(!projector.contains("reader_source"));
-    assert!(registration.contains("sink.add_document(document)"));
-    assert!(hydration.contains("open_hydration_catalog"));
-    assert!(registration.contains(".with_batch_hydration"));
-    assert!(hydration.contains("hydrate_resident_records"));
+    assert!(registration.contains("jsonl_family_driver"));
+    assert!(!registration.contains("DirectJsonlSourceAdapter"));
+    assert!(family_leaf.contains("emitter.emit_document(document)"));
+    assert!(family_leaf.contains(".run_parallel_leaf_scans("));
+    assert!(family_leaf.contains("sink.recommended_leaf_workers"));
+    assert!(!family_leaf.contains("thread::scope"));
+    assert!(!family_leaf.contains("thread::spawn"));
+    assert!(family_hydration.contains("hydrate_batch"));
+    assert!(family_route.contains(".with_batch_hydration"));
     assert!(!registration.contains("hydrate_legacy_single"));
-    assert!(!adapter.contains("pub(super) source_file: Arc<OpenedProviderSourceFile>"));
-    assert!(adapter.contains("open_verified"));
+    assert!(!module.contains("pub(super) source_file: Arc<OpenedProviderSourceFile>"));
+    assert!(module.contains("visit_verified_ranges"));
     assert!(family.contains("visit_page"));
     assert!(family.contains("visit_verified_ranges"));
     assert!(family.contains("complete_prefix_sha256"));

@@ -11,7 +11,7 @@ const SOURCE_BACKED_RELATIONAL_STATUS_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SourceBackedRelationalCatchUpState {
+pub(super) enum SourceBackedRelationalCatchUpState {
     Pending,
     Error,
     Completed,
@@ -22,7 +22,7 @@ pub(super) struct SourceBackedRelationalCatchUpStatus {
     schema_version: u16,
     owner: String,
     kind: String,
-    status: SourceBackedRelationalCatchUpState,
+    pub(super) status: SourceBackedRelationalCatchUpState,
     pending: bool,
     retryable: bool,
     pub(super) core_generation_id: String,
@@ -32,8 +32,10 @@ pub(super) struct SourceBackedRelationalCatchUpStatus {
     build_generation: Option<u64>,
     pub(super) attempts: u64,
     last_attempt_at_ms: i64,
-    error_code: Option<String>,
-    last_error: Option<String>,
+    #[serde(default)]
+    last_attempt_duration_us: u64,
+    pub(super) error_code: Option<String>,
+    pub(super) last_error: Option<String>,
 }
 
 impl SourceBackedRelationalCatchUpStatus {
@@ -57,6 +59,7 @@ impl SourceBackedRelationalCatchUpStatus {
             build_generation: frontier.map(|metadata| metadata.build_generation),
             attempts,
             last_attempt_at_ms: ctx_history_core::utc_now().timestamp_millis(),
+            last_attempt_duration_us: 0,
             error_code: None,
             last_error: None,
         }
@@ -90,6 +93,11 @@ impl SourceBackedRelationalCatchUpStatus {
         self.build_generation = Some(receipt.build_generation);
         self.error_code = None;
         self.last_error = None;
+        self
+    }
+
+    pub(super) fn with_duration(mut self, duration_us: u64) -> Self {
+        self.last_attempt_duration_us = duration_us;
         self
     }
 

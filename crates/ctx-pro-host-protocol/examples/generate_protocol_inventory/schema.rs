@@ -58,6 +58,12 @@ pub(super) fn inventory() -> Value {
             "source_manifest_wire_bytes": MAX_SOURCE_MANIFEST_WIRE_BYTES,
             "source_manifest_page_items": MAX_SOURCE_MANIFEST_PAGE_ITEMS,
             "source_manifest_page_wire_bytes": MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES,
+            "source_progress_page_items": MAX_SOURCE_PROGRESS_PAGE_ITEMS,
+            "source_progress_page_wire_bytes": MAX_SOURCE_PROGRESS_PAGE_WIRE_BYTES,
+            "source_materialization_batch_items": MAX_SOURCE_MATERIALIZATION_BATCH_ITEMS,
+            "source_materialization_batch_records": MAX_SOURCE_MATERIALIZATION_BATCH_RECORDS,
+            "source_materialization_batch_content_bytes": MAX_SOURCE_MATERIALIZATION_BATCH_CONTENT_BYTES,
+            "source_materialization_batch_wire_bytes": MAX_SOURCE_MATERIALIZATION_BATCH_WIRE_BYTES,
             "source_control_wire_bytes": MAX_SOURCE_CONTROL_WIRE_BYTES,
             "source_page_wire_bytes": MAX_SOURCE_PAGE_WIRE_BYTES,
             "source_identity_bytes": MAX_SOURCE_IDENTITY_BYTES,
@@ -74,7 +80,8 @@ pub(super) fn inventory() -> Value {
             "confirm_graph_key_deletion", "status",
             "begin_source_manifest_admission",
             "admit_source_manifest_page",
-            "finish_source_manifest_admission", "prepare_source", "materialize_source_page",
+            "finish_source_manifest_admission", "read_source_progress_page",
+            "prepare_source", "materialize_source_pages",
             "delete_source", "finish_admitted_source_manifest", "blame"
         ],
         "helper_message_kinds": [
@@ -82,7 +89,8 @@ pub(super) fn inventory() -> Value {
             "status",
             "source_manifest_admission_began",
             "source_manifest_page_admitted", "source_manifest_admitted",
-            "source_prepared", "source_page_materialized", "source_deleted",
+            "source_progress_page",
+            "source_prepared", "source_pages_materialized", "source_deleted",
             "source_manifest_finished",
             "blame", "error"
         ],
@@ -201,6 +209,8 @@ pub(super) fn inventory() -> Value {
             "FinishSourceManifestAdmissionRequest": fields(&["header"], &[]),
             "FinishAdmittedSourceManifestRequest": fields(
                 &["admission", "expected_progress"], &[]),
+            "ReadSourceProgressPageRequest": fields(
+                &["admission", "materializer_revision", "progress", "page_index"], &[]),
             "PrepareGraphKeyDeletionRequest": fields(&["installation_key_thumbprint"], &[]),
             "ProtocolError": fields(&["class", "message", "retryable"], &[]),
             "PullRequestActivity": fields(&[
@@ -293,6 +303,11 @@ pub(super) fn inventory() -> Value {
                     "materializer_revision", "terminal"
                 ],
                 &["frontier"]),
+            "SourceProgressPage": fields(&[
+                "progress_aggregate_sha256", "page_index", "progress", "page_sha256", "replayed"
+            ], &[]),
+            "SourceProgressReceipt": fields(
+                &["source_count", "page_count", "aggregate_sha256"], &[]),
             "SourceRecord": fields(
                 &["event_id", "session_id", "locator", "relationships", "metadata", "facts"],
                 &["repository"]),
@@ -304,7 +319,8 @@ pub(super) fn inventory() -> Value {
                 &["occurred_at_unix_ms", "role", "workspace", "cwd"]),
             "SourceRemoval": fields(&["deletion", "inventory"], &[]),
             "SourceRepositoryContext": fields(
-                &["repository_id"], &["checkout_id", "worktree_id", "object_format"]),
+                &["repository_id"],
+                &["checkout_id", "worktree_id", "object_format", "worktree_root"]),
             "SourceResultFact": fields(
                 &["outcome", "content"], &["call_id", "exit_code", "duration_ms"]),
             "SourceSessionRelationships": fields(
@@ -317,6 +333,7 @@ pub(super) fn inventory() -> Value {
             "StatusRequest": fields(&[], &[]),
             "StatusResult": fields(
                 &["state", "authority"], &["source_receipt"]),
+            "SourceWorktreeRootLocator": fields(&["absolute_path"], &[]),
             "PrepareSourceRequest": fields(
                 &[
                     "core_generation_id", "source", "certified_revision_sha256",
@@ -326,6 +343,9 @@ pub(super) fn inventory() -> Value {
             "MaterializeSourcePageRequest": fields(
                 &["core_generation_id", "expected_prior", "terminal", "records"],
                 &["next_frontier"]),
+            "MaterializeSourcePagesRequest": fields(&["pages"], &[]),
+            "SourcePagesMaterialized": fields(
+                &["core_generation_id", "pages"], &[]),
             "DeleteSourceRequest": fields(&[
                 "core_generation_id", "removal", "expected_prior"
             ], &[]),
@@ -343,16 +363,18 @@ pub(super) fn inventory() -> Value {
             "authority": "certified_public_source_manifest_and_provider_reread_are_the_sole_body_authority",
             "lifecycle": [
                 "begin_source_manifest_admission", "admit_source_manifest_page",
-                "finish_source_manifest_admission", "prepare_source", "materialize_source_page",
-                "delete_source", "finish_admitted_source_manifest"
+                "finish_source_manifest_admission", "read_source_progress_page",
+                "prepare_source", "materialize_source_pages", "delete_source",
+                "finish_admitted_source_manifest"
             ],
-            "progress": "independent_per_source_epoch_certified_revision_and_frontier_compare_and_swap",
+            "progress": "prior_progress_is_read_in_bounded_pages_and_terminal_activation_status_and_replay_use_an_exact_count_page_count_and_aggregate_digest_receipt",
             "materializer_upgrade": "begin_may_return_prior_revision_progress_which_prepare_rewrite_invalidates",
             "finish": "requires_the_admitted_manifest_receipt_and_expected_terminal_progress",
             "deletion": "requires_certified_source_deletion_paired_with_its_complete_inventory_witness",
             "detector_input": "normalized_transient_message_command_and_result_facts_with_call_outcome_session_and_repository_context",
             "relationships": "root_and_parent_session_ids_may_reference_other_source_lineages",
             "durability": "transient_detector_content_is_request_only_and_not_retained_as_full_body_after_page_handling",
+            "batching": "consecutive_provider_pages_are_coalesced_per_source_then_distinct_sources_are_sorted_and_committed_atomically_with_bounded_aggregate_records_content_and_wire_bytes",
             "failure": "core_is_already_published_and_pro_remains_retryable_from_committed_progress"
         },
         "evidence_citation": {

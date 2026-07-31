@@ -676,7 +676,6 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             vec!["daemon", "run", "--help"],
             vec![
                 "Usage: ctx daemon run",
-                "--once",
                 "--idle-exit-seconds <IDLE_EXIT_SECONDS>",
                 "--loop-interval-seconds <LOOP_INTERVAL_SECONDS>",
                 "--max-chunks <MAX_CHUNKS>",
@@ -719,7 +718,14 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             !help.contains("--max-seconds"),
             "{args:?} help must not expose a daemon runtime cap in\n{help}"
         );
+        assert!(!help.contains("--once"), "{args:?} help:\n{help}");
     }
+
+    ctx(&temp)
+        .args(["daemon", "run", "--once"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '--once'"));
 }
 
 #[test]
@@ -820,11 +826,30 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert!(upgrade_body.contains("Foreground commands and MCP"));
     assert!(upgrade_body.contains("never schedule an upgrade"));
 
-    let missing_topic = failure_stderr(ctx(&temp).args(["docs", "show", "cli"]));
-    assert!(missing_topic.contains("unknown ctx docs topic: cli"));
-    assert!(missing_topic.contains("nearest topics:"));
+    let missing_topic = failure_stderr(ctx(&temp).args(["--color=always", "docs", "show", "cli"]));
+    assert!(missing_topic.contains("Unknown ctx docs topic: cli"));
+    assert!(missing_topic.contains("Nearest topics"));
     assert!(missing_topic.contains("ctx docs list"));
     assert!(missing_topic.contains("ctx docs search cli"));
+    assert!(!missing_topic.contains("\\n"));
+    assert!(missing_topic.as_bytes().contains(&0x1b));
+
+    let missing_topic_json = ctx(&temp)
+        .args(["--color=always", "docs", "show", "cli", "--format=json"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(missing_topic_json.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(missing_topic_json.stderr).unwrap(),
+        concat!(
+            "Error: unknown ctx docs topic: cli\n",
+            "nearest topics: cli-reference slash-command-integrations mcp-integrations\n",
+            "try: ctx docs list\n",
+            "try: ctx docs search cli\n",
+        )
+    );
 
     let man = ctx(&temp)
         .args(["docs", "man", "--print", "ctx"])

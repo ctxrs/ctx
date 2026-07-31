@@ -1,4 +1,4 @@
-//! Thin Cursor adapter for the shared replacement-only JSONL family.
+//! Thin Cursor adapter for the shared certified-append JSONL family.
 
 use std::{collections::BTreeSet, fs, io, path::Path, sync::Arc};
 
@@ -23,28 +23,26 @@ use super::{
 use crate::{
     common::io::OpenedProviderSourceFile,
     provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjector, JsonlFileObservation, JsonlRecordRef,
+        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
+        JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
     },
     CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
 const NATIVE_SESSION_NAMESPACE: &str = "cursor.session";
-const NATIVE_EVENT_POSITION_KIND: &str = "cursor.semantic-ordinal";
+const NATIVE_EVENT_POSITION_KIND: &str = "cursor.physical-ordinal";
 const NATIVE_SUBRECORD_POSITION_KIND: &str = "cursor.part-ordinal";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v1";
-const SOURCE_REVISION_DOMAIN: &[u8] = b"ctx.cursor.shared-jsonl.source-revision.v1\0";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v2-physical-record-evidence";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CursorBinding {
     native_session_id: String,
-    ordinary_file_token: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +67,10 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -111,10 +113,7 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
                 )));
             }
             let source = source_key(&native_session_id)?;
-            let binding = CursorBinding {
-                native_session_id,
-                ordinary_file_token: transcript.ordinary_file_token(),
-            };
+            let binding = CursorBinding { native_session_id };
             leaves.push(JsonlFamilyLeaf::observe(
                 source,
                 transcript.path().to_path_buf(),
@@ -148,8 +147,6 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             source_path,
             native_session_id: binding.native_session_id,
             session_id,
-            source_revision_digest: source_revision_digest(leaf.observation())?,
-            next_semantic_ordinal: 0,
         }))
     }
 
@@ -165,8 +162,6 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             session_id: session_id(leaf.source(), &binding.native_session_id)
                 .map_err(unavailable)?,
             native_session_id: binding.native_session_id,
-            source_revision_digest: source_revision_digest(leaf.observation())
-                .map_err(unavailable)?,
             source_file,
         }))
     }
@@ -177,8 +172,6 @@ struct CursorProjector {
     source_path: String,
     native_session_id: String,
     session_id: StableEntityId,
-    source_revision_digest: [u8; 32],
-    next_semantic_ordinal: u64,
 }
 
 impl JsonlFamilyProjector for CursorProjector {
@@ -190,7 +183,7 @@ impl JsonlFamilyProjector for CursorProjector {
         let evidence = record.evidence();
         let Some(events) = project_cursor_jsonl_record(
             record.bytes(),
-            self.next_semantic_ordinal,
+            evidence.physical_ordinal(),
             evidence.physical_ordinal(),
             evidence.byte_start(),
             evidence.byte_end_exclusive(),
@@ -198,19 +191,12 @@ impl JsonlFamilyProjector for CursorProjector {
         else {
             return Ok(());
         };
-        self.next_semantic_ordinal =
-            self.next_semantic_ordinal
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Cursor semantic ordinal overflowed",
-                ))?;
         for event in events {
             if let Some(document) = lexical_document(
                 &self.source,
                 self.session_id,
                 &self.native_session_id,
                 &self.source_path,
-                self.source_revision_digest,
                 event,
             )? {
                 emit(document)?;
@@ -224,7 +210,6 @@ struct CursorHydrator {
     source: SourceKey,
     session_id: StableEntityId,
     native_session_id: String,
-    source_revision_digest: [u8; 32],
     source_file: Arc<OpenedProviderSourceFile>,
 }
 
@@ -233,12 +218,8 @@ impl JsonlFamilyHydrator for CursorHydrator {
         &mut self,
         request: &EventHydrationRequest,
     ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let coordinate = validate_locator(
-            request.locator(),
-            &self.source,
-            &self.native_session_id,
-            self.source_revision_digest,
-        )?;
+        let coordinate =
+            validate_locator(request.locator(), &self.source, &self.native_session_id)?;
         let byte_length = usize::try_from(coordinate.byte_length)
             .map_err(|_| invalid("Cursor locator byte range exceeds platform limits"))?;
         if byte_length == 0 || byte_length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) {
@@ -246,7 +227,7 @@ impl JsonlFamilyHydrator for CursorHydrator {
         }
         let wire = self
             .source_file
-            .read_exact_range(
+            .read_exact_range_allow_append(
                 coordinate.byte_offset,
                 byte_length,
                 MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
@@ -329,7 +310,6 @@ fn lexical_document(
     session_id: StableEntityId,
     native_session_id: &str,
     source_path: &str,
-    source_revision_digest: [u8; 32],
     event: CursorNativeEvent,
 ) -> Result<Option<LexicalDocument>> {
     if event.event_type != EventType::Message || event.complete_content_ref.is_none() {
@@ -374,8 +354,8 @@ fn lexical_document(
             native_session_key: Some(TypedKey::utf8(native_session_id).map_err(contract)?),
             native_event_key: Some(native_event_key),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         event.record_sha256,
     )
     .map_err(contract)?;
@@ -425,7 +405,6 @@ fn validate_locator(
     locator: &SourceRecordLocator,
     source: &SourceKey,
     native_session_id: &str,
-    source_revision_digest: [u8; 32],
 ) -> std::result::Result<CursorCoordinate, HydrationFailure> {
     locator.validate_contract().map_err(invalid)?;
     if !locator.source().exact_descriptor_eq(source)
@@ -433,8 +412,8 @@ fn validate_locator(
         || source.source_format() != CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT
         || source.schema_variant() != SOURCE_SCHEMA_VARIANT
         || source.provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || locator.certified_source_revision_digest() != Some(&source_revision_digest)
+        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
     {
         return Err(invalid("locator is not an exact Cursor JSONL record"));
     }
@@ -460,6 +439,11 @@ fn validate_locator(
     };
     let part_ordinal =
         u32::try_from(*part_ordinal).map_err(|_| invalid("Cursor locator part is invalid"))?;
+    if semantic_ordinal != physical_ordinal {
+        return Err(invalid(
+            "Cursor locator identity is not bound to its physical record",
+        ));
+    }
     Ok(CursorCoordinate {
         byte_offset: *byte_offset,
         byte_length: *byte_length,
@@ -530,11 +514,9 @@ fn event_id(
 fn validate_binding(
     leaf: &JsonlFamilyLeaf,
     binding: &CursorBinding,
-    source_file: &OpenedProviderSourceFile,
+    _source_file: &OpenedProviderSourceFile,
 ) -> Result<()> {
-    if source_file.ordinary_file_token() != binding.ordinary_file_token
-        || !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source())
-    {
+    if !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source()) {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     Ok(())
@@ -545,15 +527,6 @@ fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<CursorBinding> {
         return Err(contract("Cursor family binding is malformed"));
     };
     Ok(serde_json::from_slice(bytes)?)
-}
-
-fn source_revision_digest(observation: &JsonlFileObservation) -> Result<[u8; 32]> {
-    let encoded = serde_json::to_vec(observation)?;
-    let mut digest = Sha256::new();
-    digest.update(SOURCE_REVISION_DOMAIN);
-    digest.update((encoded.len() as u64).to_be_bytes());
-    digest.update(encoded);
-    Ok(digest.finalize().into())
 }
 
 fn strip_jsonl_terminator(record: &[u8]) -> &[u8] {

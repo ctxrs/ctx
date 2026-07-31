@@ -1,7 +1,7 @@
 use std::{fs, path::Path, time::Duration};
 
 use ctx_history_core::platform_security::{restrict_private_directory, restrict_private_file};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use super::{
     raw_sql::raw_sql_query_connection, schema, sqlite_u32, sqlite_u64, RawSqlOptions, RawSqlResult,
@@ -18,11 +18,17 @@ impl SourceBackedRelationalProjection {
             fs::create_dir_all(parent)?;
             restrict_private_directory(parent)?;
         }
-        let conn = Connection::open(&path)?;
+        let mut conn = Connection::open(&path)?;
         restrict_private_file(&path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        schema::initialize(&conn)?;
+        // Opening the disposable projection is a writer operation because it
+        // creates or verifies the stable compatibility views. Serialize that
+        // complete schema transaction with publication so a foreground import
+        // and the persistent daemon cannot interleave DROP/CREATE statements.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        schema::initialize(&tx)?;
+        tx.commit()?;
         Ok(Self {
             path,
             conn,

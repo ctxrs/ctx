@@ -298,6 +298,7 @@ fn direct_scan_is_one_decode_hash_projection_pass_with_64_document_pages() {
     assert_eq!(page_lengths, vec![64, 64, 2]);
     assert_eq!(documents.len(), 130);
     assert_eq!(scan.work_counters(), (1, 1, 3, 64));
+    assert_eq!(scan.set_read_counters(), (2, 1, 1));
     assert_eq!(scan.certificate().counts().complete_records, 130);
     assert_eq!(scan.certificate().counts().indexed_documents, 130);
     assert!(scan.certificate().frontier().is_none());
@@ -337,8 +338,6 @@ fn direct_route_logical_noop_survives_wal_only_physical_churn() {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     };
-    let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
-
     let writer = Connection::open(&database).unwrap();
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
@@ -348,12 +347,61 @@ fn direct_route_logical_noop_survives_wal_only_physical_churn() {
             [],
         )
         .unwrap();
-    let replay = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    source_backed::reset_route_work_counters();
+    let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert!(cold.sources[0].frontier().is_some());
+    let cold_work = source_backed::route_work_counters();
+    assert_eq!(cold_work.logical_observation_passes, 1);
+    assert_eq!(cold_work.projection_passes, 1);
+    assert_eq!(cold_work.immutable_snapshot_opens, 0);
+    assert_eq!(cold_work.copied_snapshot_opens, 1);
+    assert!(cold_work.source_bytes_copied > 0);
+    assert_eq!(cold_work.terminal_fences, 1);
+    assert_eq!(cold_work.terminal_revalidations, 2);
+
+    writer
+        .execute(
+            "update chat_sessions set metadata_json = metadata_json where id = 'logical-noop'",
+            [],
+        )
+        .unwrap();
+    source_backed::reset_route_work_counters();
+    let replay = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
 
     assert_eq!(replay.sources, cold.sources);
     assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
     assert_eq!(replay.commit.opstamp, cold.commit.opstamp);
     assert!(replay.removals.is_empty());
+    let replay_work = source_backed::route_work_counters();
+    assert_eq!(replay_work.logical_observation_passes, 1);
+    assert_eq!(replay_work.projection_passes, 0);
+    assert_eq!(replay_work.immutable_snapshot_opens, 0);
+    assert_eq!(replay_work.copied_snapshot_opens, 1);
+    assert!(replay_work.source_bytes_copied > 0);
+    assert_eq!(replay_work.terminal_fences, 1);
+    assert_eq!(replay_work.terminal_revalidations, 2);
+
+    writer
+        .execute(
+            "update chat_sessions
+             set messages_json = replace(messages_json, 'logical body', 'replacement body'),
+                 updated_at = 11
+             where id = 'logical-noop'",
+            [],
+        )
+        .unwrap();
+    source_backed::reset_route_work_counters();
+    let replacement = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    assert_ne!(replacement.sources, replay.sources);
+    assert!(replacement.sources[0].frontier().is_some());
+    let replacement_work = source_backed::route_work_counters();
+    assert_eq!(replacement_work.logical_observation_passes, 1);
+    assert_eq!(replacement_work.projection_passes, 1);
+    assert_eq!(replacement_work.immutable_snapshot_opens, 0);
+    assert_eq!(replacement_work.copied_snapshot_opens, 1);
+    assert!(replacement_work.source_bytes_copied > 0);
+    assert_eq!(replacement_work.terminal_fences, 1);
+    assert_eq!(replacement_work.terminal_revalidations, 2);
     drop(writer);
 }
 
@@ -633,7 +681,7 @@ fn exact_single_and_grouped_batch_hydration_use_one_snapshot_and_native_row_read
     let single = source_backed::resolver_for_test(&root);
     let hydrated = single.hydrate_event(&requests[0]).unwrap();
     assert_eq!(hydrated.provider_bytes, b"second zero");
-    assert_eq!(single.counters(), (1, 1));
+    assert_eq!(single.counters(), (1, 1, 1));
 
     let batch = source_backed::resolver_for_test(&root);
     let request = BatchHydrationRequest::new(requests.clone()).unwrap();
@@ -650,7 +698,7 @@ fn exact_single_and_grouped_batch_hydration_use_one_snapshot_and_native_row_read
             b"first one".as_slice()
         ]
     );
-    assert_eq!(batch.counters(), (1, 2));
+    assert_eq!(batch.counters(), (1, 1, 2));
 
     replace_messages(
         &root.join(".idea/firebender/chat_history.db"),

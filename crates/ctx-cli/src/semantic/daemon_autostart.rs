@@ -31,9 +31,10 @@ use super::{
     health_search::{create_private_dir_all, secure_private_file_permissions, semantic_env_flag},
     paths_status::{
         daemon_lock_is_active, daemon_lock_is_owned_by, daemon_lock_is_stale,
-        daemon_lock_matches_executable, daemon_lock_path, daemon_root_path, executable_sha256,
-        observe_pid_advisory_lock, open_or_create_pid_lock_file, pid_from_lock_json,
-        pid_lock_guard_path, process_executable_sha256, process_state, read_daemon_status,
+        daemon_lock_matches_executable, daemon_lock_path, daemon_root_path,
+        daemon_source_backed_refresh_job_path, executable_sha256, observe_pid_advisory_lock,
+        open_or_create_pid_lock_file, pid_from_lock_json, pid_lock_guard_path,
+        process_executable_sha256, process_state, read_daemon_job_status, read_daemon_status,
         read_pid_lock_json, write_daemon_status, write_private_json_file,
         PidAdvisoryLockObservation, ProcessState,
     },
@@ -55,14 +56,15 @@ pub(super) use autostart::handoff_mismatched_daemon_owner;
 pub(crate) use autostart::{
     autostart_daemon_and_wait, daemon_autostart_suppression_reason, maybe_autostart_daemon,
 };
+#[cfg(test)]
+use autostart::{
+    complete_daemon_handoff_observation, daemon_autostart_allowed, daemon_handoff_observation_from,
+    daemon_live_endpoint_observation_from, daemon_owned_source_refresh_is_active,
+    wait_for_daemon_handoff_with,
+};
 use autostart::{
     configured_daemon_autostart_command, daemon_autostart_command, daemon_restart_allowed,
     daemon_restart_trigger, parse_daemon_trigger, request_daemon_autostart, spawn_daemon_child,
-};
-#[cfg(test)]
-use autostart::{
-    daemon_autostart_allowed, daemon_handoff_observation_from,
-    daemon_live_endpoint_observation_from, wait_for_daemon_handoff_with,
 };
 
 pub(crate) use handoff::prepare_daemon_uninstall;

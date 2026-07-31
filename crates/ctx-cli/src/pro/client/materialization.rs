@@ -104,7 +104,11 @@ fn materialize_once(
     telemetry: &mut ProMaterializationTelemetryV1,
 ) -> Result<MaterializeReport> {
     let required = BTreeSet::from([Capability::Status]);
-    let prior_generation = match ProClient::connect(data_root, &required) {
+    // Status is part of the materialization authority decision, so bind it to
+    // the stored installation identity exactly like the public status path.
+    // A capability-only Status connection is intentionally unauthenticated
+    // and helpers must reject it for an initialized graph.
+    let prior_generation = match ProClient::connect_for_status(data_root, &required) {
         Ok(mut client) => {
             telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
             helper_status(&mut client)?
@@ -137,7 +141,7 @@ fn materialize_once(
 
     crate::semantic::wait_for_source_backed_pro_generation(data_root, &core_generation_id)?;
 
-    let mut client = match ProClient::connect(data_root, &required) {
+    let mut client = match ProClient::connect_for_status(data_root, &required) {
         Ok(client) => {
             telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
             client

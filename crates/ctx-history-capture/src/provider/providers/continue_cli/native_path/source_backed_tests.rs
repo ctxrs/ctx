@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{
     provider::source_backed::{
+        family::document::{DocumentLeafExecutionPolicy, ReplacementDocumentTree},
         refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     test_support_paths::tempdir,
@@ -127,6 +128,16 @@ fn writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+#[test]
+fn continue_body_derived_source_identity_keeps_leaf_execution_serial() {
+    let adapter =
+        ContinueSourceBackedReader::explicit(PathBuf::from("unused-continue-policy-path"));
+    assert_eq!(
+        adapter.leaf_execution_policy(),
+        DocumentLeafExecutionPolicy::Serial
+    );
 }
 
 #[test]

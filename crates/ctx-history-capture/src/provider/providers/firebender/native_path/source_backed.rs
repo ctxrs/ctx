@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -8,7 +8,7 @@ use ctx_history_core::{
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params_from_iter, Connection};
 use thiserror::Error;
 
 use super::super::{
@@ -26,11 +26,15 @@ use crate::{
 };
 
 mod direct;
+mod direct_snapshot;
 mod hydration;
 
 pub(crate) use direct::register_source_backed_route;
 #[cfg(test)]
-pub(crate) use direct::{revalidate_missing_after_for_test, scan_for_test};
+pub(crate) use direct::{
+    reset_route_work_counters, revalidate_missing_after_for_test, route_work_counters,
+    scan_for_test,
+};
 #[cfg(test)]
 pub(crate) use hydration::resolver_for_test;
 
@@ -281,64 +285,83 @@ pub(super) fn decode_locator_coordinate(
     Ok((*rowid, session_id.clone(), *updated_at, *message_index))
 }
 
-pub(super) fn load_exact_row(
+pub(super) fn load_exact_rows(
     conn: &Connection,
-    rowid: i64,
-) -> CaptureResult<Option<FirebenderRow>> {
+    rowids: &[i64],
+) -> CaptureResult<BTreeMap<i64, FirebenderRow>> {
+    if rowids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let columns = sqlite_table_columns(conn, "chat_sessions")?;
     let deleted_filter = if columns.contains("deleted_at") {
         " and deleted_at is null"
     } else {
         ""
     };
+    let placeholders = (1..=rowids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
     let length_sql = format!(
-        "select length(cast(id as blob)) + length(cast(name as blob)) + \
-                length(cast(messages_json as blob)) + length(cast(metadata_json as blob)) \
-         from chat_sessions where rowid = ?1{deleted_filter}"
+        "select rowid,
+                length(cast(id as blob)) + length(cast(name as blob)) +
+                length(cast(messages_json as blob)) + length(cast(metadata_json as blob))
+         from chat_sessions
+         where rowid in ({placeholders}){deleted_filter}
+         order by rowid"
     );
     let retained_bytes = {
         let _guard = SqliteLengthPreflightGuard::new(conn);
-        conn.query_row(&length_sql, [rowid], |row| row.get::<_, i64>(0))
-            .optional()?
+        let mut statement = conn.prepare(&length_sql)?;
+        let rows = statement.query_map(params_from_iter(rowids), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?
     };
-    let Some(retained_bytes) = retained_bytes else {
-        return Ok(None);
-    };
-    if retained_bytes < 0
-        || usize::try_from(retained_bytes).map_or(true, |bytes| {
-            bytes > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES
-        })
-    {
-        return Err(CaptureError::InvalidPayload(
-            FirebenderSourceBackedError::HydrationTooLarge.to_string(),
-        ));
+    for retained_bytes in retained_bytes.values() {
+        if *retained_bytes < 0
+            || usize::try_from(*retained_bytes).map_or(true, |bytes| {
+                bytes > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES
+            })
+        {
+            return Err(CaptureError::InvalidPayload(
+                FirebenderSourceBackedError::HydrationTooLarge.to_string(),
+            ));
+        }
     }
     let sql = format!(
-        "select id, name, cast(created_at as integer), cast(updated_at as integer), \
-                messages_json, metadata_json \
-         from chat_sessions where rowid = ?1{deleted_filter}"
+        "select rowid, id, name, cast(created_at as integer), cast(updated_at as integer),
+                messages_json, metadata_json
+         from chat_sessions
+         where rowid in ({placeholders}){deleted_filter}
+         order by rowid"
     );
-    conn.query_row(&sql, params![rowid], |row| {
-        let messages_json: String = row.get(4)?;
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(rowids), |row| {
+        let rowid = row.get::<_, i64>(0)?;
+        let messages_json: String = row.get(5)?;
         let messages =
             serde_json::from_str::<Vec<serde_json::Value>>(&messages_json).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    4,
+                    5,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?;
-        Ok(FirebenderRow {
+        Ok((
             rowid,
-            id: row.get(0)?,
-            name: row.get(1)?,
-            created_at: row.get(2)?,
-            updated_at: row.get(3)?,
-            messages_json,
-            metadata_json: row.get(5)?,
-            messages,
-        })
-    })
-    .optional()
-    .map_err(CaptureError::from)
+            FirebenderRow {
+                rowid,
+                id: row.get(1)?,
+                name: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                messages_json,
+                metadata_json: row.get(6)?,
+                messages,
+            },
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(CaptureError::from)
 }

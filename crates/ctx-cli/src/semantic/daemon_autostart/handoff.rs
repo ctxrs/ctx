@@ -1,6 +1,7 @@
 use super::*;
 
 mod termination;
+use termination::terminate_identity_verified_legacy_daemon;
 pub(super) use termination::terminate_identity_verified_residual_daemon;
 
 pub(in crate::semantic) fn terminate_current_executable_daemon(data_root: &Path) -> Result<()> {
@@ -299,7 +300,7 @@ fn begin_daemon_upgrade_handoff_for_executable(
         release_on_drop: true,
     };
     if !allow_cooperative_grace && daemon_lock_is_active(data_root) {
-        terminate_identity_verified_residual_daemon(data_root, expected_executable)
+        terminate_identity_verified_legacy_daemon(data_root, expected_executable)
             .context("stop identity-verified legacy ctx daemon before automatic upgrade")?;
     }
     let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
@@ -307,8 +308,13 @@ fn begin_daemon_upgrade_handoff_for_executable(
         if Instant::now() >= deadline {
             #[cfg(any(unix, windows))]
             {
-                terminate_identity_verified_residual_daemon(data_root, expected_executable)
-                    .context("stop residual ctx daemon before upgrade")?;
+                if allow_cooperative_grace {
+                    terminate_identity_verified_residual_daemon(data_root, expected_executable)
+                        .context("stop residual ctx daemon before upgrade")?;
+                } else {
+                    terminate_identity_verified_legacy_daemon(data_root, expected_executable)
+                        .context("stop residual legacy ctx daemon before automatic upgrade")?;
+                }
                 break;
             }
             #[cfg(not(any(unix, windows)))]

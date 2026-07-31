@@ -42,7 +42,7 @@ use crate::{
     },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence,
+        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
         SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -50,7 +50,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v2";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v3";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -119,7 +119,6 @@ impl OpenCodeSourceBackedRegistration {
             crate::test_provider_sqlite_data_root(),
             path,
             self.dialect,
-            None,
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(_) => Ok(()),
                 OpenCodeScanOutput::Document(document) => emit(vec![document]),
@@ -192,6 +191,21 @@ type RawSession = (
 struct WorkingScan {
     source: SourceKey,
     logical_snapshot: SqliteLogicalSnapshot,
+}
+
+#[derive(Clone, Debug)]
+struct OpenCodeLogicalObservation {
+    source: SourceKey,
+    schema: OpenCodeNativeSchema,
+    fingerprint: [u8; 32],
+    logical_rows: u64,
+}
+
+#[derive(Debug)]
+struct OpenCodeAuthorizedSnapshot {
+    source_root: ProviderSourceRoot,
+    sqlite_authority: SqliteSourceDirectoryAuthority,
+    sqlite_snapshot: SqliteSourceReadSnapshot,
 }
 
 // Documents intentionally move through this short-lived scanner enum by value.
@@ -273,27 +287,48 @@ impl SqliteSourceValue {
     }
 }
 
+#[cfg(test)]
 fn scan_source(
     data_root: &Path,
     path: &Path,
     dialect: &'static OpenCodeSqliteDialect,
-    expected_physical: Option<&SqliteSourceEvidence>,
     emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, path)?;
-    if expected_physical.is_some_and(|expected| sqlite_snapshot.evidence() != expected) {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
+    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
+    let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
+    let scan = scan_pinned_source(
+        path,
+        dialect,
+        &observation,
+        authorized.sqlite_snapshot,
+        emit,
+    )?;
+    authorized.source_root.revalidate()?;
+    Ok(scan)
+}
+
+fn scan_pinned_source(
+    path: &Path,
+    dialect: &'static OpenCodeSqliteDialect,
+    observation: &OpenCodeLogicalObservation,
+    sqlite_snapshot: SqliteSourceReadSnapshot,
+    emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let working = {
         let connection = sqlite_snapshot.connection()?;
         register_projection_function(connection, dialect)?;
-        let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
-        let source = source_key(dialect, schema.family)?;
-        let sessions = load_sessions(connection, &schema, &source)?;
-        emit(OpenCodeScanOutput::Begin(source.clone()))?;
-        let streamed =
-            stream_logical_rows(connection, &schema, dialect, path, &source, &sessions, emit)?;
-        let schema_evidence = relevant_schema_evidence(&schema);
+        let sessions = load_sessions(connection, &observation.schema, &observation.source)?;
+        emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
+        let streamed = stream_logical_rows(
+            connection,
+            &observation.schema,
+            dialect,
+            path,
+            &observation.source,
+            &sessions,
+            emit,
+        )?;
+        let schema_evidence = relevant_schema_evidence(&observation.schema);
         let logical_snapshot = SqliteLogicalSnapshot::new(
             PARSER_REVISION,
             &schema_evidence,
@@ -301,19 +336,38 @@ fn scan_source(
             streamed.counts,
         );
         WorkingScan {
-            source,
+            source: observation.source.clone(),
             logical_snapshot,
         }
     };
-    let physical_evidence = sqlite_snapshot.finish()?;
-    source_root.revalidate()?;
-    if expected_physical.is_some_and(|expected| physical_evidence != *expected) {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
+    sqlite_snapshot.finish()?;
     let certificate = working.logical_snapshot.certify(working.source.clone())?;
     Ok(OpenCodeSourceBackedScan {
         source: working.source,
         certificate,
+    })
+}
+
+fn observe_logical_source(
+    connection: &Connection,
+    dialect: &'static OpenCodeSqliteDialect,
+) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
+    let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
+    let source = source_key(dialect, schema.family)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ctx-opencode-family-logical-leaf-v1\0");
+    hasher.update(source.exact_descriptor_digest());
+    hash_bytes(&mut hasher, &relevant_schema_evidence(&schema));
+    hash_logical_table(connection, &mut hasher, "session")?;
+    if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
+        hash_logical_table(connection, &mut hasher, "message")?;
+    }
+    let logical_rows = hash_logical_table(connection, &mut hasher, schema.family.event_table())?;
+    Ok(OpenCodeLogicalObservation {
+        source,
+        schema,
+        fingerprint: hasher.finalize().into(),
+        logical_rows,
     })
 }
 
@@ -521,14 +575,33 @@ fn open_root_authorized_snapshot(
     data_root: &Path,
     path: &Path,
 ) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(data_root, path, || {})
+    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
+    Ok((authorized.source_root, authorized.sqlite_snapshot))
 }
 
+fn open_root_authorized_snapshot_retained(
+    data_root: &Path,
+    path: &Path,
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_hook(data_root, path, || {})
+}
+
+#[cfg(test)]
 fn open_root_authorized_snapshot_with_hook(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
 ) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
+    let authorized =
+        open_root_authorized_snapshot_retained_with_hook(data_root, path, after_authorize)?;
+    Ok((authorized.source_root, authorized.sqlite_snapshot))
+}
+
+fn open_root_authorized_snapshot_retained_with_hook(
+    data_root: &Path,
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -557,7 +630,11 @@ fn open_root_authorized_snapshot_with_hook(
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    Ok((source_root, sqlite_snapshot))
+    Ok(OpenCodeAuthorizedSnapshot {
+        source_root,
+        sqlite_authority,
+        sqlite_snapshot,
+    })
 }
 
 fn relevant_schema_evidence(schema: &OpenCodeNativeSchema) -> Vec<u8> {
@@ -571,6 +648,53 @@ fn relevant_schema_evidence(schema: &OpenCodeNativeSchema) -> Vec<u8> {
         hasher.update([u8::from(schema.session_columns.contains(column))]);
     }
     hasher.finalize().to_vec()
+}
+
+fn hash_logical_table(
+    connection: &Connection,
+    hasher: &mut Sha256,
+    table: &str,
+) -> OpenCodeSourceBackedResult<u64> {
+    hash_str(hasher, table);
+    let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+    let mut statement = connection.prepare(&format!("select * from {quoted} order by id"))?;
+    let column_count = statement.column_count();
+    hasher.update((column_count as u64).to_le_bytes());
+    for column in statement.column_names() {
+        hash_str(hasher, column);
+    }
+    let mut rows = statement.query([])?;
+    let mut row_count = 0_u64;
+    while let Some(row) = rows.next()? {
+        row_count = checked_add(row_count, 1)?;
+        for column in 0..column_count {
+            hash_logical_value(hasher, row.get_ref(column)?);
+        }
+    }
+    hasher.update(row_count.to_le_bytes());
+    Ok(row_count)
+}
+
+fn hash_logical_value(hasher: &mut Sha256, value: ValueRef<'_>) {
+    match value {
+        ValueRef::Null => hasher.update([0]),
+        ValueRef::Integer(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_le_bytes());
+        }
+        ValueRef::Real(value) => {
+            hasher.update([2]);
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        ValueRef::Text(value) => {
+            hasher.update([3]);
+            hash_bytes(hasher, value);
+        }
+        ValueRef::Blob(value) => {
+            hasher.update([4]);
+            hash_bytes(hasher, value);
+        }
+    }
 }
 
 fn hash_sessions(hasher: &mut Sha256, sessions: &BTreeMap<String, SourceSession>) {

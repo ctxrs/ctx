@@ -4,7 +4,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
         Arc,
     },
@@ -44,12 +44,14 @@ use super::{
 #[cfg(test)]
 use crate::provider::codex::catalog::discover_codex_session_catalog;
 use crate::{
-    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
+    common::io::{
+        open_provider_source_file, OpenedProviderSourceFile, OpenedProviderSourcePath,
+        ProviderSourceRoot, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
+        PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+        PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+    },
     provider::codex::{
-        catalog::{
-            catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained,
-            rediscover_codex_session_catalog_retained,
-        },
+        catalog::{catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained},
         nativepath::{
             open_codex_source_capability, opened_codex_file_observation,
             revalidate_codex_source_observation,
@@ -71,9 +73,9 @@ const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
 const CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.explicit-session-file";
-const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inventory-v0";
-const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v0";
-const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v0\0";
+const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inventory-v1";
+const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v1";
+const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v1\0";
 const MAX_HYDRATED_CODEX_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
 const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
@@ -214,12 +216,21 @@ pub struct CodexSourceBackedPhaseTimingsV0 {
 pub struct CodexSourceBackedCountersV0 {
     pub catalog_sources: u64,
     pub catalog_source_bytes: u64,
+    pub inventory_walks: u64,
+    pub inventory_source_observations: u64,
+    pub catalog_source_body_reads: u64,
+    pub catalog_session_meta_parses: u64,
     pub cold_sources: u64,
     pub appended_sources: u64,
     pub replaced_sources: u64,
     pub replayed_sources: u64,
     pub deleted_sources: u64,
+    pub writer_exact_replay_sources: u64,
+    pub writer_mutated_sources: u64,
     pub scanner_workers: u64,
+    pub scanner_sources_started: u64,
+    pub scanner_sources_completed: u64,
+    pub peak_active_scanners: u64,
     pub staged_documents: u64,
     pub complete_records_scanned: u64,
     pub retained_records_scanned: u64,
@@ -244,6 +255,19 @@ pub struct CodexSourceBackedCountersV0 {
 }
 
 impl CodexSourceBackedCountersV0 {
+    pub(crate) fn add_catalog_work(&mut self, work: CodexCatalogWorkV0) {
+        self.inventory_walks = self.inventory_walks.saturating_add(work.inventory_walks);
+        self.inventory_source_observations = self
+            .inventory_source_observations
+            .saturating_add(work.source_observations);
+        self.catalog_source_body_reads = self
+            .catalog_source_body_reads
+            .saturating_add(work.source_body_reads);
+        self.catalog_session_meta_parses = self
+            .catalog_session_meta_parses
+            .saturating_add(work.session_meta_parses);
+    }
+
     fn add_scan(&mut self, scan: CodexScanCounters) {
         self.complete_records_scanned = self
             .complete_records_scanned
@@ -319,14 +343,17 @@ mod ingestion;
 
 #[allow(unused_imports)]
 pub(crate) use catalog::CodexExplicitSessionInventoryV0;
-use catalog::{bind_catalog_capabilities, bind_source_keys, rediscover_codex_root_inventory_v0};
+use catalog::{bind_catalog_capabilities, bind_source_keys};
 pub(crate) use catalog::{
-    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
+    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_from_base_v0,
+    discover_codex_session_tree_inventory_from_plans_v0, discover_codex_session_tree_inventory_v0,
     managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
-    writer_base_sources, CodexExplicitSessionSourceBackedInputV0, CodexRootInventoryV0,
+    writer_base_sources, CodexCatalogWorkV0, CodexExplicitSessionSourceBackedInputV0,
     CodexSessionTreeInventoryV0,
 };
 use cold::{cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdParallelOptionsV0};
+#[cfg(test)]
+use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
 use hydration::validate_codex_locator;
 pub use hydration::{hydrate_codex_locator, CodexHydratedRecordV0, CodexLocatorResolverV0};
 pub(crate) use identity::source_observation;

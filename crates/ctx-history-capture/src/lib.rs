@@ -119,6 +119,7 @@ pub use provider::codex::{
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
 };
+pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
     build_automatic_source_backed_registry, build_automatic_source_backed_registry_from_report,
     refresh_source_backed_generation, refresh_source_backed_generation_with_progress,

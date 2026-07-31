@@ -156,7 +156,11 @@ send({
       'core_generation_id':'a' * 64,
       'manifest_aggregate_sha256':'b' * 64,
       'materializer_revision':'fake-source-materializer-v1',
-      'progress':[]
+      'progress':{
+        'source_count':0,
+        'page_count':0,
+        'aggregate_sha256':'a06883447f8d08387e9a0198da74dc5681cc9cbc951a5eac8beb124fb3a772a7'
+      }
     }
   }}
 })
@@ -234,7 +238,11 @@ send({
       'core_generation_id':'__CORE_GENERATION_ID__',
       'manifest_aggregate_sha256':'b' * 64,
       'materializer_revision':'fake-source-materializer-v1',
-      'progress':[]
+      'progress':{
+        'source_count':0,
+        'page_count':0,
+        'aggregate_sha256':'a06883447f8d08387e9a0198da74dc5681cc9cbc951a5eac8beb124fb3a772a7'
+      }
     }
   }}
 })

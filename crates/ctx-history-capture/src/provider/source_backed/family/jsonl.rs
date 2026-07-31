@@ -31,11 +31,13 @@ pub(crate) use revalidation::{
     observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
 };
 pub(crate) use route::{
-    jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory,
-    JsonlFamilyLeaf, JsonlFamilyProjector,
+    jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
+    JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
 };
 #[cfg(test)]
-pub(crate) use route::{jsonl_family_work, reset_jsonl_family_work, JsonlFamilyWork};
+pub(crate) use route::{
+    jsonl_family_projection_bytes, jsonl_family_work, reset_jsonl_family_work, JsonlFamilyWork,
+};
 
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-direct-jsonl-nativepath-prefix-v1\0";
 const PAGE_MAX_RECORDS: usize = 64;
@@ -66,18 +68,6 @@ impl JsonlSourceIdentity {
             source_descriptor_digest,
             source_path: source_path.into(),
         }
-    }
-
-    pub(crate) fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    pub(crate) fn parser_revision(&self) -> &str {
-        &self.parser_revision
-    }
-
-    pub(crate) fn policy_revision(&self) -> &str {
-        &self.policy_revision
     }
 
     pub(crate) fn source_descriptor_digest(&self) -> &[u8; 32] {
@@ -444,40 +434,8 @@ impl JsonlReader {
         self.source_change
     }
 
-    pub(crate) fn observation(&self) -> &JsonlFileObservation {
-        &self.observation
-    }
-
     pub(crate) fn outcome(&self) -> Option<&JsonlScanOutcome> {
         self.outcome.as_ref()
-    }
-
-    pub(crate) fn restart_replacement(
-        &mut self,
-        identity: JsonlSourceIdentity,
-        probe: JsonlProbe,
-    ) -> Result<()> {
-        if self.source_change != JsonlSourceChange::Replace
-            || !probe.observation.admits_frozen_prefix_in(&self.observation)
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        revalidate_frozen_prefix(
-            self.identity.source_path(),
-            self.source_file.as_ref(),
-            &probe.observation,
-            probe.complete_prefix_end,
-            prefix_digest(&probe.prefix_hasher),
-        )?;
-        self.identity = identity;
-        self.prefix_hasher = probe.prefix_hasher;
-        self.complete_prefix_end = probe.complete_prefix_end;
-        self.next_physical_ordinal = probe.next_physical_ordinal;
-        self.skip_scan = false;
-        self.unchanged_checkpoint = None;
-        self.reader
-            .seek(SeekFrom::Start(self.complete_prefix_end))?;
-        Ok(())
     }
 
     pub(crate) fn visit_page<E>(

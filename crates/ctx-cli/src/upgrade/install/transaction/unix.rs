@@ -417,6 +417,7 @@ fn finish_committed_transaction(
 
 fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result<Vec<String>> {
     let mut errors = Vec::new();
+    let durable_binary_backup = backup_path(&transaction.install_path);
     for path in &transaction.paths {
         match (
             path_matches_identity(&path.target, path.staged_identity.as_ref()),
@@ -435,6 +436,12 @@ fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result
     for path in &mut transaction.paths {
         match path_present(&path.backup) {
             Ok(false) => {
+                if path.label == "ctx binary" {
+                    if let Err(error) = remove_owner_regular_file(&durable_binary_backup) {
+                        errors.push(format!("{error:#}"));
+                        continue;
+                    }
+                }
                 path.state = JournalPathState::Cleaned;
                 continue;
             }
@@ -457,11 +464,11 @@ fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result
             .backup_identity
             .as_ref()
             .or(path.original_target_identity.as_ref());
-        let result = if path.label == "ctx binary" {
-            retain_binary_backup(path, &backup_path(&transaction.install_path), expected)
-        } else {
-            remove_owned_path(&path.backup, path.kind, expected)
-        };
+        let result = remove_committed_backup(
+            path,
+            (path.label == "ctx binary").then_some(durable_binary_backup.as_path()),
+            expected,
+        );
         match result {
             Ok(()) => {
                 path.state = JournalPathState::Cleaned;
@@ -477,20 +484,19 @@ fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result
     Ok(errors)
 }
 
-fn retain_binary_backup(
+fn remove_committed_backup(
     path: &JournalPath,
-    durable_backup: &Path,
+    durable_backup: Option<&Path>,
     expected_identity: Option<&JournalPathIdentity>,
 ) -> Result<()> {
-    ensure_owned_identity(&path.backup, expected_identity)?;
-    remove_owner_regular_file(durable_backup)?;
-    fs::rename(&path.backup, durable_backup).with_context(|| {
-        format!(
-            "retain previous ctx binary {} at {}",
-            path.backup.display(),
-            durable_backup.display()
-        )
-    })
+    remove_owned_path(&path.backup, path.kind, expected_identity)?;
+    if let Some(durable_backup) = durable_backup {
+        // A committed release fixes forward. The transaction backup exists
+        // only until publication commits; it is not a supported previous-
+        // version executable after a successful upgrade.
+        remove_owner_regular_file(durable_backup)?;
+    }
+    Ok(())
 }
 
 impl PublishedPath {

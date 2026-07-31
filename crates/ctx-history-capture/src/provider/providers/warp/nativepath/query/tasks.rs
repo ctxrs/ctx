@@ -9,40 +9,40 @@ pub(super) fn scan_tasks(
     counters: &mut WarpNativeCounters,
 ) -> Result<()> {
     let index = warp_quote_identifier(&schema.task_keyset_index);
-    let mut first_candidate = conn.prepare(&format!(
+    let representable = format!(
+        "typeof(t.conversation_id) = 'text' \
+         and typeof(t.task_id) = 'text' \
+         and typeof(t.task) = 'blob' \
+         and typeof(t.last_modified_at) = 'text' \
+         and coalesce(octet_length(t.conversation_id), 0) > 0 \
+         and coalesce(octet_length(t.task_id), 0) > 0 \
+         and coalesce(octet_length(t.task_id), 0) <= {WARP_ORDERING_KEY_MAX_BYTES} \
+         and coalesce(octet_length(t.conversation_id), 0) \
+             + coalesce(octet_length(t.task_id), 0) \
+             + coalesce(octet_length(t.task), 0) \
+             + coalesce(octet_length(t.last_modified_at), 0) \
+             + {WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES} \
+             <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
+    );
+    let mut candidates = conn.prepare(&format!(
         "select t.rowid, \
                 typeof(t.conversation_id), coalesce(octet_length(t.conversation_id), 0), \
                 typeof(t.task_id), coalesce(octet_length(t.task_id), 0), \
                 typeof(t.task), coalesce(octet_length(t.task), 0), \
-                typeof(t.last_modified_at), coalesce(octet_length(t.last_modified_at), 0) \
+                typeof(t.last_modified_at), coalesce(octet_length(t.last_modified_at), 0), \
+                case when {representable} then t.conversation_id end, \
+                case when {representable} then t.task_id end, \
+                case when {representable} then t.task end, \
+                case when {representable} then t.last_modified_at end \
          from agent_tasks t indexed by {index} \
-         order by t.task_id collate binary limit 1"
+         order by t.task_id collate binary"
     ))?;
-    let mut next_candidate = conn.prepare(&format!(
-        "select t.rowid, \
-                typeof(t.conversation_id), coalesce(octet_length(t.conversation_id), 0), \
-                typeof(t.task_id), coalesce(octet_length(t.task_id), 0), \
-                typeof(t.task), coalesce(octet_length(t.task), 0), \
-                typeof(t.last_modified_at), coalesce(octet_length(t.last_modified_at), 0) \
-         from agent_tasks t indexed by {index} \
-         where t.task_id collate binary > ( \
-                   select previous.task_id from agent_tasks previous \
-                   where previous.rowid = ?1 \
-               ) \
-         order by t.task_id collate binary limit 1"
-    ))?;
-    let mut hydration = conn.prepare(
-        "select conversation_id, task_id, task, last_modified_at \
-         from agent_tasks where rowid = ?1",
-    )?;
-    let mut after_rowid = None;
-    loop {
-        let candidate =
-            next_task_candidate(conn, &mut first_candidate, &mut next_candidate, after_rowid)?;
-        let Some(candidate) = candidate else {
-            break;
-        };
-        after_rowid = Some(candidate.rowid);
+    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let mut rows = candidates.query([])?;
+    #[cfg(test)]
+    super::super::super::source_backed::record_warp_projection_query();
+    while let Some(row) = rows.next()? {
+        let candidate = task_candidate_from_row(row)?;
         counters.task_rows = counters.task_rows.saturating_add(1);
         if let Some(rejection) = reject_task_candidate(&candidate)? {
             counters.oversized_task_rows = counters.oversized_task_rows.saturating_add(u64::from(
@@ -55,28 +55,9 @@ pub(super) fn scan_tasks(
             builder.push(unit, native_key, counters)?;
             continue;
         }
-        hydrate_task_candidate(&mut hydration, &candidate, hierarchy, builder, counters)?;
+        hydrate_task_candidate(&candidate, hierarchy, builder, counters)?;
     }
     Ok(())
-}
-
-fn next_task_candidate(
-    conn: &Connection,
-    first: &mut Statement<'_>,
-    next: &mut Statement<'_>,
-    after_rowid: Option<i64>,
-) -> Result<Option<WarpTaskCandidate>> {
-    let _guard = SqliteLengthPreflightGuard::new(conn);
-    match after_rowid {
-        Some(rowid) => next
-            .query_row([rowid], task_candidate_from_row)
-            .optional()
-            .map_err(CaptureError::from),
-        None => first
-            .query_row([], task_candidate_from_row)
-            .optional()
-            .map_err(CaptureError::from),
-    }
 }
 
 fn task_candidate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WarpTaskCandidate> {
@@ -98,6 +79,10 @@ fn task_candidate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WarpTask
             storage_class: row.get(7)?,
             bytes: row.get(8)?,
         },
+        hydrated_conversation_id: row.get(9)?,
+        hydrated_task_id: row.get(10)?,
+        hydrated_task: row.get(11)?,
+        hydrated_last_modified_at: row.get(12)?,
     })
 }
 
@@ -197,23 +182,25 @@ impl WarpTaskCandidate {
 
 #[allow(clippy::too_many_arguments)]
 fn hydrate_task_candidate(
-    hydration: &mut Statement<'_>,
     candidate: &WarpTaskCandidate,
     hierarchy: &BTreeMap<String, WarpHierarchyNode>,
     builder: &mut WarpNativePageEmitter<'_>,
     counters: &mut WarpNativeCounters,
 ) -> Result<()> {
-    let mut rows = hydration.query([candidate.rowid])?;
-    let row = rows.next()?.ok_or_else(|| {
-        CaptureError::InvalidPayload(format!(
-            "Warp task row {} disappeared during immutable scan",
-            candidate.rowid
-        ))
-    })?;
-    let conversation_value = row.get_ref(0)?;
-    let task_id_value = row.get_ref(1)?;
-    let task_value = row.get_ref(2)?;
-    let modified_value = row.get_ref(3)?;
+    let (Some(conversation_id), Some(task_id), Some(task_blob), Some(last_modified_at)) = (
+        candidate.hydrated_conversation_id.as_deref(),
+        candidate.hydrated_task_id.as_deref(),
+        candidate.hydrated_task.as_deref(),
+        candidate.hydrated_last_modified_at.as_deref(),
+    ) else {
+        return Err(CaptureError::SystemInvariant(
+            "Warp task passed preflight without bounded hydrated values",
+        ));
+    };
+    let conversation_value = ValueRef::Text(conversation_id.as_bytes());
+    let task_id_value = ValueRef::Text(task_id.as_bytes());
+    let task_value = ValueRef::Blob(task_blob);
+    let modified_value = ValueRef::Text(last_modified_at.as_bytes());
 
     // This digest is control-plane evidence only. Output result bytes never
     // enter retained event bodies, hashes, previews, or downstream records.
@@ -227,8 +214,8 @@ fn hydrate_task_candidate(
     let complete_content_record_digest = complete_content_record_digest(&source_values)?;
     builder.record_source(b"task\0", evidence_digest)?;
 
-    let task_id = required_text(task_id_value, "task_id")?.to_owned();
-    let conversation_id = required_text(conversation_value, "conversation_id")?.to_owned();
+    let task_id = task_id.to_owned();
+    let conversation_id = conversation_id.to_owned();
     if !hierarchy.contains_key(&conversation_id) {
         let mut unit = WarpNativeUnit::progress();
         unit.push_rejection(WarpNativeRejection {
@@ -239,27 +226,21 @@ fn hydrate_task_candidate(
         builder.push(unit, task_id, counters)?;
         return Ok(());
     }
-    let ValueRef::Blob(task_blob) = task_value else {
-        return Err(CaptureError::SystemInvariant(
-            "Warp task storage changed after metadata preflight",
-        ));
-    };
     counters.protobuf_bytes_scanned = counters
         .protobuf_bytes_scanned
         .saturating_add(u64::try_from(task_blob.len()).unwrap_or(u64::MAX));
     let mut task_prefix_unit = WarpNativeUnit::progress();
-    let task_modified =
-        match required_text(modified_value, "last_modified_at").and_then(parse_warp_timestamp) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                task_prefix_unit.push_rejection(WarpNativeRejection {
-                    kind: WarpNativeRejectionKind::TaskRecord,
-                    native_key: task_id.clone(),
-                    reason: error.to_string(),
-                })?;
-                None
-            }
-        };
+    let task_modified = match parse_warp_timestamp(last_modified_at) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            task_prefix_unit.push_rejection(WarpNativeRejection {
+                kind: WarpNativeRejectionKind::TaskRecord,
+                native_key: task_id.clone(),
+                reason: error.to_string(),
+            })?;
+            None
+        }
+    };
     let decoded = match decode_warp_native_task(task_blob) {
         Ok(decoded) => decoded,
         Err(error) => {

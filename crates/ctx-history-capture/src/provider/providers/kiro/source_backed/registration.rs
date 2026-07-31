@@ -2,12 +2,14 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use super::{
-    hydration::hydration_failure_from_error, kiro_source_key, scan_kiro_source_backed,
-    KiroLocatorResolverV0, KiroSourceBackedErrorV0, KiroSourceBackedScan,
-    KIRO_SOURCE_BACKED_PARSER_REVISION, SOURCE_BACKED_PAGE_ROWS,
+    hydration::hydration_failure_from_error, kiro_source_key, observe_kiro_logical_snapshot,
+    require_legacy_sqlite_format, scan_kiro_snapshot, KiroLocatorResolverV0,
+    KiroSourceBackedErrorV0, KiroSourceBackedScan, KIRO_SOURCE_BACKED_PARSER_REVISION,
+    SOURCE_BACKED_PAGE_ROWS,
 };
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
@@ -21,7 +23,9 @@ use crate::{
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
         SourceBackedRouteSelection,
     },
-    provider_sources::SqliteSourceEvidence,
+    provider_sources::{
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+    },
     CaptureError, ProviderSource, KIRO_SQLITE_SOURCE_FORMAT,
 };
 use ctx_history_core::{
@@ -30,10 +34,17 @@ use ctx_history_core::{
 
 use super::super::{absolute_kiro_path, KiroSqliteDatabase};
 
-#[derive(Debug)]
 enum KiroTreeAuthority {
-    Present(SqliteSourceEvidence),
+    Present(Box<KiroPresentAuthority>),
     Missing(KiroMissingLeafFence),
+}
+
+struct KiroPresentAuthority {
+    opening_evidence: SqliteSourceEvidence,
+    _sqlite_authority: SqliteSourceDirectoryAuthority,
+    database: Mutex<Option<KiroSqliteDatabase>>,
+    terminal_revalidate:
+        Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
 }
 
 #[derive(Debug)]
@@ -59,16 +70,21 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let source = kiro_source_key().map_err(route_error)?;
         match observe_kiro_inventory(&self.data_root, &self.path).map_err(route_error)? {
-            KiroPhysicalInventory::Present(evidence) => {
-                let fingerprint = *evidence.revision();
+            KiroPhysicalInventory::Present(present) => {
+                record_logical_observation();
+                let fingerprint = present.logical_fingerprint;
                 Ok(CompleteDocumentTree::new(
                     fingerprint,
-                    vec![ObservedDocumentLeaf::with_durable_replay(
+                    vec![ObservedDocumentLeaf::new(
                         DocumentLeafFingerprint::new(fingerprint),
                         source,
-                        false,
                     )],
-                    KiroTreeAuthority::Present(evidence),
+                    KiroTreeAuthority::Present(Box::new(KiroPresentAuthority {
+                        opening_evidence: present.database.evidence().clone(),
+                        _sqlite_authority: present.database.sqlite_authority(),
+                        terminal_revalidate: present.database.terminal_revalidator(),
+                        database: Mutex::new(Some(present.database)),
+                    })),
                 ))
             }
             KiroPhysicalInventory::Missing(fence) => {
@@ -88,16 +104,19 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        let KiroTreeAuthority::Present(expected_physical) = authority else {
+        let KiroTreeAuthority::Present(authority) = authority else {
             return Err(internal_error(
                 "Kiro missing inventory unexpectedly contained a document leaf",
             ));
         };
+        let path = absolute_kiro_path(&self.path).map_err(route_error)?;
+        let database = take_database(&authority.database)?;
         sink.begin_source(leaf.clone())?;
-        let scan = scan_kiro_source_backed(
-            &self.data_root,
-            &self.path,
-            KIRO_SQLITE_SOURCE_FORMAT,
+        let scan = scan_kiro_snapshot(
+            database.connection(&path).map_err(route_error)?,
+            &path,
+            leaf.clone(),
+            authority.opening_evidence.clone(),
             &mut |page| {
                 page.into_iter()
                     .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
@@ -105,11 +124,16 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         )
         .map_err(kiro_scan_error)?;
         validate_scan_receipt(&scan)?;
-        if !scan.source.exact_descriptor_eq(leaf) || &scan.terminal_fence != expected_physical {
+        if !scan.source.exact_descriptor_eq(leaf)
+            || scan.terminal_fence != authority.opening_evidence
+        {
             return Err(source_changed(
                 "Kiro SQLite physical inventory changed during logical projection",
             ));
         }
+        database.revalidate(&path).map_err(route_error)?;
+        restore_database(&authority.database, database)?;
+        record_projection();
         Ok(document_terminal(scan))
     }
 
@@ -118,15 +142,26 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
         match &tree.authority {
-            KiroTreeAuthority::Present(expected) => {
+            KiroTreeAuthority::Present(authority) => {
                 let path = absolute_kiro_path(&self.path).map_err(route_error)?;
-                let current = KiroSqliteDatabase::open(&self.data_root, &path)
-                    .and_then(|database| database.finish(&path))
-                    .map_err(route_error)?;
-                if &current != expected {
+                let database = take_database(&authority.database)?;
+                let evidence = database.finish(&path).map_err(route_error)?;
+                if evidence != authority.opening_evidence {
                     return Err(source_changed(
                         "Kiro SQLite physical inventory changed before commit",
                     ));
+                }
+                (authority.terminal_revalidate)().map_err(route_error)?;
+                #[cfg(test)]
+                {
+                    let counters = authority._sqlite_authority.snapshot_counters();
+                    record_snapshot_counters(
+                        counters.immutable_snapshot_opens(),
+                        counters.copied_snapshot_opens(),
+                        counters.source_bytes_copied(),
+                        counters.terminal_fences(),
+                        counters.terminal_revalidations(),
+                    );
                 }
             }
             KiroTreeAuthority::Missing(fence) if !fence.revalidate() => {
@@ -191,8 +226,13 @@ fn validate_scan_receipt(scan: &KiroSourceBackedScan) -> SourceBackedRouteResult
 }
 
 enum KiroPhysicalInventory {
-    Present(SqliteSourceEvidence),
+    Present(Box<KiroPresentInventory>),
     Missing(KiroMissingLeafFence),
+}
+
+struct KiroPresentInventory {
+    logical_fingerprint: [u8; 32],
+    database: KiroSqliteDatabase,
 }
 
 fn observe_kiro_inventory(
@@ -208,13 +248,20 @@ fn observe_kiro_inventory(
     directory.revalidate()?;
     match directory.open_child(leaf) {
         Ok(OpenedProviderSourcePath::File(file)) => {
+            require_legacy_sqlite_format(&path, KIRO_SQLITE_SOURCE_FORMAT)?;
             file.revalidate()?;
             directory.revalidate()?;
             root.revalidate()?;
             drop(file);
             let database = KiroSqliteDatabase::open(data_root, &path)?;
-            let evidence = database.finish(&path)?;
-            Ok(KiroPhysicalInventory::Present(evidence))
+            let logical_fingerprint = observe_kiro_logical_snapshot(database.connection(&path)?)?;
+            database.revalidate(&path)?;
+            Ok(KiroPhysicalInventory::Present(Box::new(
+                KiroPresentInventory {
+                    logical_fingerprint,
+                    database,
+                },
+            )))
         }
         Ok(OpenedProviderSourcePath::Directory(_)) => Err(invalid_database_leaf(&path).into()),
         Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -228,6 +275,92 @@ fn observe_kiro_inventory(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn take_database(
+    slot: &Mutex<Option<KiroSqliteDatabase>>,
+) -> SourceBackedRouteResult<KiroSqliteDatabase> {
+    slot.lock()
+        .map_err(|_| internal_error("Kiro SQLite snapshot lock was poisoned"))?
+        .take()
+        .ok_or_else(|| internal_error("Kiro SQLite snapshot was already consumed"))
+}
+
+fn restore_database(
+    slot: &Mutex<Option<KiroSqliteDatabase>>,
+    database: KiroSqliteDatabase,
+) -> SourceBackedRouteResult<()> {
+    let mut slot = slot
+        .lock()
+        .map_err(|_| internal_error("Kiro SQLite snapshot lock was poisoned"))?;
+    if slot.replace(database).is_some() {
+        return Err(internal_error(
+            "Kiro SQLite snapshot slot was already occupied",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KiroRouteWorkCounters {
+    pub(crate) logical_observation_passes: u64,
+    pub(crate) projection_passes: u64,
+    pub(crate) immutable_snapshot_opens: u64,
+    pub(crate) copied_snapshot_opens: u64,
+    pub(crate) source_bytes_copied: u64,
+    pub(crate) terminal_fences: u64,
+    pub(crate) terminal_revalidations: u64,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static KIRO_ROUTE_WORK: std::cell::RefCell<KiroRouteWorkCounters> =
+        std::cell::RefCell::new(KiroRouteWorkCounters::default());
+}
+
+#[cfg(test)]
+pub(crate) fn reset_route_work_counters() {
+    KIRO_ROUTE_WORK.with(|work| *work.borrow_mut() = KiroRouteWorkCounters::default());
+}
+
+#[cfg(test)]
+pub(crate) fn route_work_counters() -> KiroRouteWorkCounters {
+    KIRO_ROUTE_WORK.with(|work| *work.borrow())
+}
+
+fn record_logical_observation() {
+    #[cfg(test)]
+    KIRO_ROUTE_WORK.with(|work| {
+        let mut work = work.borrow_mut();
+        work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
+    });
+}
+
+fn record_projection() {
+    #[cfg(test)]
+    KIRO_ROUTE_WORK.with(|work| {
+        let mut work = work.borrow_mut();
+        work.projection_passes = work.projection_passes.saturating_add(1);
+    });
+}
+
+#[cfg(test)]
+fn record_snapshot_counters(
+    immutable_snapshot_opens: u64,
+    copied_snapshot_opens: u64,
+    source_bytes_copied: u64,
+    terminal_fences: u64,
+    terminal_revalidations: u64,
+) {
+    KIRO_ROUTE_WORK.with(|work| {
+        let mut work = work.borrow_mut();
+        work.immutable_snapshot_opens = immutable_snapshot_opens;
+        work.copied_snapshot_opens = copied_snapshot_opens;
+        work.source_bytes_copied = source_bytes_copied;
+        work.terminal_fences = terminal_fences;
+        work.terminal_revalidations = terminal_revalidations;
+    });
 }
 
 #[derive(Debug)]

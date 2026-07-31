@@ -43,13 +43,257 @@ if [[ -e ".github/workflows/public-ci.yml" ]]; then
   exit 1
 fi
 
+python3 - "${pipeline}" <<'PY'
+from collections import Counter
+import re
+import sys
+
+
+class ValidationRouteError(Exception):
+    pass
+
+
+def require_route(condition, message):
+    if not condition:
+        raise ValidationRouteError(message)
+
+
+def scalar(block, name, indent=4, required=True):
+    prefix = " " * indent
+    matches = re.findall(
+        rf"^{re.escape(prefix + name)}:[ \t]*(.+?)[ \t]*$",
+        block,
+        flags=re.MULTILINE,
+    )
+    if not matches and not required:
+        return None
+    require_route(len(matches) == 1, f"step must define exactly one {name}")
+    value = matches[0]
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+def command(block):
+    match = re.search(
+        r"^    command: \|\n((?:^      .*(?:\n|$))*)",
+        block,
+        flags=re.MULTILINE,
+    )
+    require_route(match is not None, "validation step must define a block command")
+    return "\n".join(
+        line[6:] for line in match.group(1).splitlines()
+    ).strip()
+
+
+def artifact_paths(block):
+    match = re.search(
+        r"^    artifact_paths:\n((?:^      - .*(?:\n|$))*)",
+        block,
+        flags=re.MULTILINE,
+    )
+    require_route(match is not None, "validation step must retain artifact paths")
+    paths = []
+    for line in match.group(1).splitlines():
+        value = line.removeprefix("      - ").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        paths.append(value)
+    return paths
+
+
+def step_key(block):
+    return scalar(block, "key", required=False)
+
+
+def split_steps(source):
+    lines = source.splitlines(keepends=True)
+    try:
+        steps_line = next(
+            index for index, line in enumerate(lines) if line.rstrip() == "steps:"
+        )
+    except StopIteration as error:
+        raise ValidationRouteError("pipeline must define top-level steps") from error
+    starts = [
+        index
+        for index in range(steps_line + 1, len(lines))
+        if lines[index].startswith("  - ")
+    ]
+    require_route(starts, "pipeline must define top-level steps")
+    starts.append(len(lines))
+    return [
+        "".join(lines[start:end])
+        for start, end in zip(starts, starts[1:])
+    ]
+
+
+def validate_validation_routes(blocks):
+    release_condition = 'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"'
+    specs = {
+        "public-smoke": {
+            "condition": (
+                'build.source != "schedule" && '
+                'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") != "1"'
+            ),
+            "command": "bash scripts/buildkite-public-ci.sh --mode=ci",
+            "concurrency_group": "ctx/public-smoke/default-hosted",
+            "timeout": "60",
+        },
+        "public-nightly": {
+            "condition": (
+                'build.source == "schedule" && '
+                'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") != "1"'
+            ),
+            "command": "bash scripts/buildkite-public-ci.sh --mode=nightly",
+            "concurrency_group": "ctx/public-nightly/default-hosted",
+            "timeout": "120",
+        },
+        "public-release": {
+            "condition": release_condition,
+            "command": "bash scripts/buildkite-public-ci.sh --mode=release",
+            "concurrency_group": "ctx/public-release/default-hosted",
+            "timeout": "120",
+        },
+    }
+    expected_artifacts = [
+        "bazel-testlogs/**/*.log",
+        "bazel-testlogs/**/test.outputs/**/*",
+        "bazel-testlogs/**/*.zip",
+        "target/ctx-artifacts/check/**",
+    ]
+
+    for key, spec in specs.items():
+        matches = [block for block in blocks if step_key(block) == key]
+        require_route(
+            len(matches) == 1,
+            f"pipeline must define exactly one {key} validation route",
+        )
+        block = matches[0]
+        require_route(
+            scalar(block, "if") == spec["condition"],
+            f"{key} has a non-exclusive or unexpected condition",
+        )
+        require_route(
+            command(block) == spec["command"],
+            f"{key} must invoke exactly {spec['command']}",
+        )
+        require_route(
+            scalar(block, "queue", indent=6) == "default",
+            f"{key} must use the Buildkite hosted default queue",
+        )
+        for tag in ("ctx-runner-class", "os", "arch"):
+            require_route(
+                scalar(block, tag, indent=6, required=False) is None,
+                f"{key} must not require self-hosted runner tags",
+            )
+        require_route(
+            scalar(block, "concurrency") == "1"
+            and scalar(block, "concurrency_group")
+            == spec["concurrency_group"],
+            f"{key} must have its dedicated single-job concurrency group",
+        )
+        require_route(
+            scalar(block, "timeout_in_minutes") == spec["timeout"],
+            f"{key} has an unexpected timeout",
+        )
+        require_route(
+            artifact_paths(block) == expected_artifacts,
+            f"{key} must preserve validation diagnostics",
+        )
+
+    invocations = re.findall(
+        r"bash scripts/buildkite-public-ci[.]sh --mode=(ci|nightly|release)\b",
+        "\n".join(blocks),
+    )
+    require_route(
+        Counter(invocations) == Counter({"ci": 1, "nightly": 1, "release": 1}),
+        "pipeline must contain exactly one ci, nightly, and release invocation",
+    )
+
+    release_index = next(
+        index for index, block in enumerate(blocks)
+        if step_key(block) == "public-release"
+    )
+    release_wait_indexes = [
+        index
+        for index, block in enumerate(blocks)
+        if block.startswith("  - wait:")
+        and scalar(block, "if") == release_condition
+    ]
+    require_route(
+        len(release_wait_indexes) == 1,
+        "promotion must define exactly one release-qualified wait",
+    )
+    release_wait_index = release_wait_indexes[0]
+    require_route(
+        release_index < release_wait_index,
+        "promotion wait must follow the public-release prerequisite",
+    )
+    for index, block in enumerate(blocks):
+        if index in (release_index, release_wait_index):
+            continue
+        condition = scalar(block, "if", required=False)
+        if condition and release_condition in condition:
+            require_route(
+                index > release_wait_index,
+                f"artifact promotion step {step_key(block) or index} "
+                "bypasses public-release",
+            )
+
+
+def expect_rejection(name, blocks):
+    try:
+        validate_validation_routes(blocks)
+    except ValidationRouteError as error:
+        print(f"Buildkite route parser self-test ok: {name} rejected ({error})")
+        return
+    raise SystemExit(
+        f"Buildkite route parser self-test failed: {name} was accepted"
+    )
+
+
+pipeline = open(sys.argv[1], encoding="utf-8").read()
+steps = split_steps(pipeline)
+require_route(
+    len(steps) == 19,
+    "pipeline should include public validation and bounded release matrices",
+)
+validate_validation_routes(steps)
+expect_rejection(
+    "missing nightly route",
+    [block for block in steps if step_key(block) != "public-nightly"],
+)
+expect_rejection(
+    "missing release route",
+    [block for block in steps if step_key(block) != "public-release"],
+)
+removed_wait = False
+without_release_wait = []
+for block in steps:
+    is_release_wait = (
+        not removed_wait
+        and block.startswith("  - wait:")
+        and scalar(block, "if", required=False)
+        == 'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"'
+    )
+    if is_release_wait:
+        removed_wait = True
+    else:
+        without_release_wait.append(block)
+expect_rejection("missing release prerequisite wait", without_release_wait)
+print(
+    "Buildkite route parser ok: ci, nightly, and release select exactly "
+    "one validation aggregate"
+)
+PY
+
 if command -v ruby >/dev/null 2>&1; then
   ruby -e '
     require "yaml"
     data = YAML.load_file(ARGV.fetch(0))
     abort "pipeline must have steps" unless data.is_a?(Hash) && data["steps"].is_a?(Array)
     steps = data["steps"]
-    abort "pipeline should include public smoke and bounded release matrices" unless steps.length == 17
+    abort "pipeline should include public validation and bounded release matrices" unless steps.length == 19
     smoke = steps.fetch(0)
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
@@ -88,7 +332,7 @@ if command -v ruby >/dev/null 2>&1; then
       "public-cli-macos-arm64" => "ctx-macos-arm64",
       "public-cli-macos-x64" => "ctx-macos-x64",
     }
-    steps.drop(2).each do |step|
+    steps.drop(4).each do |step|
       next unless step.is_a?(Hash) && artifact_keys.include?(step["key"])
       abort "artifact step #{step["key"]} must be gated" unless step["if"].to_s.include?("CTX_PUBLIC_CLI_ARTIFACT_MATRIX")
       artifact_paths = Array(step["artifact_paths"]).map(&:to_s)
@@ -358,23 +602,11 @@ if command -v ruby >/dev/null 2>&1; then
     abort "Semantic gather must construct and stage the unsigned handoff" unless gather_command.include?("scripts/stage-semantic-release-handoff.sh")
     abort "public Semantic gather must not sign release metadata" if gather_command.match?(/sign|private/i)
   ' "${pipeline}"
-else
-  top_level_steps="$(
-    awk '
-      /^steps:[[:space:]]*$/ { in_steps = 1; next }
-      /^[^[:space:]]/ { in_steps = 0 }
-      in_steps && /^  -[[:space:]]/ { count++ }
-      END { print count + 0 }
-    ' "${pipeline}"
-  )"
-  if [[ "${top_level_steps}" != "17" ]]; then
-    printf 'pipeline should include public smoke and gated artifact/native smoke matrices\n' >&2
-    exit 1
-  fi
 fi
 
 for required in \
   'key: "public-smoke"' \
+  'build.source != "schedule"' \
   'queue: "default"' \
   'bash scripts/buildkite-public-ci.sh --mode=ci' \
   'target/ctx-artifacts/check/**' \

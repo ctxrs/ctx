@@ -163,6 +163,7 @@ pub fn register_shelley_source_backed_route(
         ShelleyInventoryProvider {
             data_root: data_root.to_path_buf(),
             exact_cwd,
+            adapter,
         },
     )
 }
@@ -170,6 +171,7 @@ pub fn register_shelley_source_backed_route(
 struct ShelleyInventoryProvider {
     data_root: PathBuf,
     exact_cwd: PathBuf,
+    adapter: ShelleySourceBackedAdapter,
 }
 
 impl SqliteInventoryProvider for ShelleyInventoryProvider {
@@ -180,19 +182,24 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
     }
 
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
-        let adapter = discover_shelley_source_backed_exact_cwd(&self.data_root, &self.exact_cwd)
-            .map_err(shelley_inventory_route_error)?;
         let mut authority = sha2::Sha256::new();
         authority.update(b"ctx.shelley-exact-cwd-inventory-v1\0");
         authority.update(self.exact_cwd.as_os_str().as_encoded_bytes());
-        let leaves = adapter
-            .into_iter()
-            .map(|leaf| SqliteInventoryCatalogLeaf {
+        let leaf = self.adapter.clone();
+        let leaves = match std::fs::symlink_metadata(leaf.database_path()) {
+            Ok(_) => vec![SqliteInventoryCatalogLeaf {
                 source: leaf.source().clone(),
                 path: leaf.database_path().to_path_buf(),
                 provider_leaf: leaf,
-            })
-            .collect();
+            }],
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    format!("Shelley exact-CWD inventory is unavailable: {error}"),
+                ));
+            }
+        };
         Ok(SqliteInventoryCatalog {
             authority_fingerprint: authority.finalize().into(),
             leaves,
@@ -228,42 +235,12 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
                     "Shelley database is absent from the exact CWD",
                 )
             })?;
-        let records = request
-            .events()
-            .iter()
-            .map(|event| {
-                adapter
-                    .hydrate(event.locator())
-                    .map(|hydrated| HydratedProviderRecord {
-                        event_id: event.event_id(),
-                        provider_bytes: hydrated.text.into_bytes(),
-                    })
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        BatchHydrationResult::new(records).map_err(|error| {
-            hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                format!("invalid Shelley batch hydration result: {error}"),
-            )
-        })
+        let result = adapter
+            .hydrate_batch(request)
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
+        result.validate_for_request(request)?;
+        Ok(result)
     }
-}
-
-fn shelley_inventory_route_error(
-    error: crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedError,
-) -> SourceBackedRouteError {
-    let kind = match &error {
-        crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedError::Capture(
-            CaptureError::Io(source),
-        ) if source.kind() == std::io::ErrorKind::NotFound => {
-            SourceBackedRouteErrorKind::Unavailable
-        }
-        _ => SourceBackedRouteErrorKind::InvalidSource,
-    };
-    SourceBackedRouteError::new(kind, error.to_string())
 }
 
 pub fn register_lingma_source_backed_route(
@@ -470,3 +447,7 @@ fn lingma_adapter_inventory(
 fn lingma_discovery_adapter_error(error: LingmaDiscoveryUnavailable) -> LingmaSourceBackedErrorV0 {
     CaptureError::InvalidPayload(error.to_string()).into()
 }
+
+#[cfg(test)]
+#[path = "inventory/tests.rs"]
+mod tests;

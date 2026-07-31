@@ -144,15 +144,6 @@ pub(crate) fn discover_codex_session_catalog_retained(
     build_retained_codex_session_catalog(root, authority, files)
 }
 
-pub(crate) fn rediscover_codex_session_catalog_retained(
-    root: &Path,
-    authority: &ProviderSourceRoot,
-) -> Result<RetainedCodexSessionCatalog> {
-    authority.revalidate()?;
-    let files = discover_codex_catalog_files_from_root(root, authority)?;
-    build_retained_codex_session_catalog(root, authority.clone(), files)
-}
-
 fn build_retained_codex_session_catalog(
     root: &Path,
     authority: ProviderSourceRoot,

@@ -72,6 +72,7 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) owners: &'writer mut HashMap<[u8; 32], SourceOwner>,
     pub(in super::super) complete_inventories: &'writer mut Vec<CompleteInventoryOwner>,
     pub(in super::super) route_index: usize,
+    pub(in super::super) leaf_worker_budget: usize,
 }
 
 #[derive(Clone)]
@@ -128,6 +129,15 @@ impl SourceBackedGenerationSink<'_> {
         append: CertifiedSourceAppend,
     ) -> SourceBackedCoordinatorResult<()> {
         self.writer.certify_source_append(append)?;
+        Ok(())
+    }
+
+    pub fn retain_source(
+        &mut self,
+        certificate: CertifiedSource,
+    ) -> SourceBackedCoordinatorResult<()> {
+        self.claim(certificate.observation().source())?;
+        self.writer.retain_source(certificate)?;
         Ok(())
     }
 
@@ -210,6 +220,7 @@ type RevalidationCallback =
     dyn for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> bool + Send + Sync;
 type CompleteInventoryRevalidationCallback =
     dyn Fn(&CertifiedSourceInventory) -> bool + Send + Sync;
+type SuccessfulPublicationCallback = dyn Fn() + Send + Sync;
 type HydrationCallback = dyn Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
     + Send
     + Sync;
@@ -225,6 +236,7 @@ pub struct SourceBackedRouteDriver {
     pub(in super::super) revalidate: Arc<RevalidationCallback>,
     pub(in super::super) revalidate_complete_inventory:
         Option<Arc<CompleteInventoryRevalidationCallback>>,
+    pub(in super::super) after_successful_publication: Option<Arc<SuccessfulPublicationCallback>>,
     pub(in super::super) hydrate: Arc<HydrationCallback>,
     pub(in super::super) hydrate_batch: Option<Arc<BatchHydrationCallback>>,
 }
@@ -253,6 +265,7 @@ impl SourceBackedRouteDriver {
             owns_source: Arc::new(owns_source),
             revalidate: Arc::new(revalidate),
             revalidate_complete_inventory: None,
+            after_successful_publication: None,
             hydrate: Arc::new(hydrate),
             hydrate_batch: None,
         }
@@ -263,6 +276,18 @@ impl SourceBackedRouteDriver {
         revalidate: impl Fn(&CertifiedSourceInventory) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.revalidate_complete_inventory = Some(Arc::new(revalidate));
+        self
+    }
+
+    /// Installs best-effort work that may run only after atomic publication.
+    ///
+    /// The callback cannot affect the committed generation and must suppress
+    /// its own cache or observation failures.
+    pub(crate) fn with_successful_publication(
+        mut self,
+        after_publication: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.after_successful_publication = Some(Arc::new(after_publication));
         self
     }
 

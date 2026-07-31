@@ -177,11 +177,54 @@ pub struct SourceSessionRelationships {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SourceWorktreeRootLocator {
+    pub absolute_path: String,
+}
+
+impl SourceWorktreeRootLocator {
+    pub fn new(absolute_path: String) -> Result<Self, ProtocolError> {
+        let locator = Self { absolute_path };
+        locator.validate()?;
+        Ok(locator)
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_path(
+            &self.absolute_path,
+            "source repository worktree-root locator",
+        )?;
+        let bytes = self.absolute_path.as_bytes();
+        let unix_absolute = bytes.first() == Some(&b'/');
+        let windows_drive_absolute = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        let windows_unc_absolute = bytes.starts_with(br"\\") || bytes.starts_with(b"//");
+        if !(unix_absolute || windows_drive_absolute || windows_unc_absolute)
+            || self.absolute_path.chars().any(char::is_control)
+            || self
+                .absolute_path
+                .split(['/', '\\'])
+                .any(|component| matches!(component, "." | ".."))
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "source repository worktree-root locator must be an absolute normalized path",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceRepositoryContext {
     pub repository_id: String,
     pub checkout_id: Option<String>,
     pub worktree_id: Option<String>,
     pub object_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<SourceWorktreeRootLocator>,
 }
 
 impl SourceRepositoryContext {
@@ -189,7 +232,17 @@ impl SourceRepositoryContext {
         validate_identity(&self.repository_id, "source repository ID")?;
         validate_optional_identity(self.checkout_id.as_deref(), "source checkout ID")?;
         validate_optional_identity(self.worktree_id.as_deref(), "source worktree ID")?;
-        validate_optional_identity(self.object_format.as_deref(), "source object format")
+        validate_optional_identity(self.object_format.as_deref(), "source object format")?;
+        if let Some(locator) = &self.worktree_root {
+            if self.worktree_id.is_none() {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "source repository worktree-root locator requires a worktree ID",
+                ));
+            }
+            locator.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -241,7 +294,7 @@ impl SourceRecord {
         Ok(record)
     }
 
-    fn validate_and_count_bytes(&self) -> Result<usize, ProtocolError> {
+    pub fn validate_and_count_bytes(&self) -> Result<usize, ProtocolError> {
         let event = EventHydrationRequest::new(self.event_id, self.locator.clone())
             .map_err(|error| invalid_contract("source record event locator", error))?;
         SessionHydrationRequest::new(self.session_id, vec![event])

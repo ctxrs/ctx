@@ -5,14 +5,22 @@ use std::{
 };
 
 use ctx_history_core::{
-    ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, NativeRecordCoordinate,
-    SessionHydrationRequest, TypedKey,
+    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
+    HydrationFailureKind, NativeRecordCoordinate, SessionHydrationRequest, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
+use ctx_history_index::{LexicalDocument, WriterOptions};
 use serde_json::{json, Value};
 
 use super::source_backed::*;
-use crate::{test_support_paths::tempdir, MAX_PROVIDER_JSONL_LINE_BYTES};
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation, register_custom_history_source_backed_route,
+        SourceBackedProviderRegistry,
+    },
+    test_support_paths::tempdir,
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus, MAX_PROVIDER_JSONL_LINE_BYTES,
+};
 
 fn manifest() -> Value {
     json!({
@@ -71,6 +79,31 @@ fn touch(index: u64, event_index: u64, path: &str) -> Value {
     })
 }
 
+fn edge(edge_id: &str) -> Value {
+    json!({
+        "record_type": "edge",
+        "source_id": "source-a",
+        "from_session_id": "root",
+        "to_session_id": "child",
+        "edge_id": edge_id,
+        "edge_type": "parent_child",
+    })
+}
+
+fn explicit_provider_source(path: &Path) -> ProviderSource {
+    ProviderSource {
+        provider: CaptureProvider::Custom,
+        path: path.to_path_buf(),
+        exists: true,
+        source_format: "ctx_history_jsonl_v1",
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Explicit,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    }
+}
+
 fn write_records(path: &Path, records: &[Value]) -> Vec<Vec<u8>> {
     let lines = records
         .iter()
@@ -104,7 +137,7 @@ fn collect(
 ) {
     let mut documents = Vec::new();
     let mut page_bounds = Vec::new();
-    let outcome = scan_custom_history_source_backed_explicit(input, prior, |page| {
+    let outcome = scan_custom_history_source_backed_explicit(input, prior, |_, page| {
         page_bounds.push(page.documents.len());
         documents.extend(page.documents);
         Ok(())
@@ -115,7 +148,7 @@ fn collect(
 
 fn present(outcome: CustomHistorySourceBackedOutcome) -> CustomHistorySourceBackedReceipt {
     match outcome {
-        CustomHistorySourceBackedOutcome::Present(receipt) => receipt,
+        CustomHistorySourceBackedOutcome::Present(receipt) => *receipt,
         CustomHistorySourceBackedOutcome::Missing { .. } => panic!("expected present source"),
     }
 }
@@ -219,6 +252,54 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     assert_eq!(append_documents[0].body, "appended event");
     assert_eq!(append_documents[0].touched_files, vec!["src/appended.rs"]);
     assert!(revalidate_custom_history_source_backed(&input, &append.certificate).unwrap());
+}
+
+#[test]
+fn append_that_closes_an_old_forward_reference_is_a_replacement() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("forward-reference.jsonl");
+    write_records(
+        &path,
+        &[
+            manifest(),
+            source(),
+            event(0, "forward-event", "late-session", "now retained"),
+        ],
+    );
+    let input = CustomHistorySourceBackedInput::explicit(&path, [17; 32]);
+
+    let (cold_outcome, cold_documents, _) = collect(&input, None);
+    let cold = present(cold_outcome);
+    assert!(cold_documents.is_empty());
+    assert_eq!(cold.certificate.counts().indexed_documents, 0);
+
+    append_record(&path, &session("late-session", None, true));
+    reset_custom_history_source_backed_work();
+    let (closure_outcome, closure_documents, _) = collect(&input, Some(&cold.certificate));
+    let closure = present(closure_outcome);
+    assert!(matches!(
+        closure.disposition,
+        CustomHistorySourceBackedDisposition::Replacement
+    ));
+    assert_eq!(closure_documents.len(), 1);
+    assert_eq!(closure_documents[0].body, "now retained");
+    assert_eq!(
+        custom_history_source_backed_work().retained_events_before_prior_prefix,
+        1
+    );
+
+    append_record(
+        &path,
+        &event(1, "ordinary-append", "late-session", "ordinary append"),
+    );
+    let (append_outcome, append_documents, _) = collect(&input, Some(&closure.certificate));
+    let append = present(append_outcome);
+    assert!(matches!(
+        append.disposition,
+        CustomHistorySourceBackedDisposition::Append
+    ));
+    assert_eq!(append_documents.len(), 1);
+    assert_eq!(append_documents[0].body, "ordinary append");
 }
 
 #[test]
@@ -366,6 +447,332 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
     write_records(&path, &rewritten);
     let stale = resolver.hydrate_event(&requests[0]).unwrap_err();
     assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+}
+
+#[test]
+fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("registered.jsonl");
+    let records = vec![
+        manifest(),
+        source(),
+        session("root", None, true),
+        event(0, "event-a", "root", "alpha exact"),
+        event(1, "event-b", "root", "beta exact"),
+    ];
+    write_records(&path, &records);
+    let input = CustomHistorySourceBackedInput::explicit(&path, [14; 32]);
+    let (_, documents, _) = collect(&input, None);
+    let requests = documents
+        .iter()
+        .map(|document| {
+            EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_custom_history_source_backed_route(
+        &mut registry,
+        explicit_provider_source(&path),
+        [14; 32],
+    )
+    .unwrap();
+    let index_root = temp.path().join("index");
+
+    reset_custom_history_source_backed_work();
+    let cold =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 2);
+    assert_eq!(cold.sources.len(), 1);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 1);
+
+    reset_custom_history_source_backed_work();
+    let exact =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(exact.commit.indexed_documents, 2);
+    assert_eq!(exact.sources, cold.sources);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 0);
+
+    let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
+    reset_custom_history_source_backed_work();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&batch)
+        .unwrap()
+        .into_records();
+    assert_eq!(
+        hydrated
+            .iter()
+            .map(|record| record.provider_bytes.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"alpha exact".as_slice(), b"beta exact".as_slice()]
+    );
+    assert_eq!(
+        custom_history_source_backed_work(),
+        CustomHistorySourceBackedWork {
+            hydration_passes: 1,
+            hydration_source_opens: 1,
+            hydrated_records: 2,
+            ..CustomHistorySourceBackedWork::default()
+        }
+    );
+
+    write_records(
+        &path,
+        &[
+            manifest(),
+            source(),
+            session("root", None, true),
+            event(0, "event-a", "root", "alpha replacement"),
+            event(1, "event-b", "root", "beta exact"),
+        ],
+    );
+    reset_custom_history_source_backed_work();
+    let replacement =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(replacement.commit.indexed_documents, 2);
+    assert_ne!(replacement.sources, exact.sources);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 1);
+    assert_eq!(
+        registry
+            .resolver_registry()
+            .hydrate_event(&requests[0])
+            .unwrap_err()
+            .kind,
+        HydrationFailureKind::StaleRecordEvidence
+    );
+
+    fs::remove_file(&path).unwrap();
+    reset_custom_history_source_backed_work();
+    let deleted =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert!(deleted.sources.is_empty());
+    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 0);
+    assert_eq!(
+        registry
+            .resolver_registry()
+            .hydrate_event(&requests[0])
+            .unwrap_err()
+            .kind,
+        HydrationFailureKind::ConfirmedDeleted
+    );
+}
+
+#[test]
+fn deep_chain_session_catalog_and_event_roots_are_linear() {
+    const SESSIONS: usize = 1_000;
+    const EVENTS: usize = 1_000;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("deep-chain.jsonl");
+    let mut records = Vec::with_capacity(2 + SESSIONS + EVENTS);
+    records.push(manifest());
+    records.push(source());
+    for index in 0..SESSIONS {
+        let session_id = format!("session-{index:04}");
+        let parent = (index != 0).then(|| format!("session-{:04}", index - 1));
+        records.push(session(&session_id, parent.as_deref(), index == 0));
+    }
+    for index in 0..EVENTS {
+        records.push(event(
+            u64::try_from(index).unwrap(),
+            &format!("event-{index:04}"),
+            "session-0999",
+            "deep event",
+        ));
+    }
+    write_records(&path, &records);
+    let input = CustomHistorySourceBackedInput::explicit(&path, [15; 32]);
+
+    reset_custom_history_source_backed_work();
+    let (_, documents, _) = collect(&input, None);
+    assert_eq!(documents.len(), EVENTS);
+    assert!(documents
+        .iter()
+        .all(|document| document.root_session_id == documents[0].root_session_id));
+    let work = custom_history_source_backed_work();
+    assert_eq!(work.projection_parses, 1);
+    assert_eq!(work.source_read_passes, 1);
+    assert_eq!(work.provider_records_parsed, 2 + SESSIONS + EVENTS);
+    assert_eq!(work.session_nodes, SESSIONS);
+    assert_eq!(work.session_dependencies, SESSIONS - 1);
+    assert_eq!(work.session_root_nodes, SESSIONS);
+    assert_eq!(work.event_root_lookups, EVENTS);
+    assert_eq!(work.resident_event_body_bytes, 0);
+}
+
+#[test]
+fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
+    const EVENTS: usize = 512;
+    const BODY_BYTES: usize = 8 * 1024;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("bounded-spool.jsonl");
+    let body = "b".repeat(BODY_BYTES);
+    let mut records = Vec::with_capacity(3 + EVENTS);
+    records.extend([manifest(), source(), session("root", None, true)]);
+    for index in 0..EVENTS {
+        records.push(event(
+            u64::try_from(index).unwrap(),
+            &format!("event-{index:03}"),
+            "root",
+            &body,
+        ));
+    }
+    write_records(&path, &records);
+    let input = CustomHistorySourceBackedInput::explicit(&path, [16; 32]);
+
+    reset_custom_history_source_backed_work();
+    let (_, documents, pages) = collect(&input, None);
+    let work = custom_history_source_backed_work();
+
+    assert_eq!(documents.len(), EVENTS);
+    assert!(documents.iter().all(|document| document.body == body));
+    assert!(pages.len() > 1);
+    assert_eq!(work.projection_parses, 1);
+    assert_eq!(work.source_read_passes, 1);
+    assert_eq!(work.provider_records_parsed, 3 + EVENTS);
+    assert_eq!(work.catalog_records, 3 + EVENTS);
+    assert!(work.catalog_metadata_bytes <= CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES);
+    assert_eq!(
+        work.spooled_event_body_bytes,
+        EVENTS.saturating_mul(BODY_BYTES)
+    );
+    assert_eq!(work.resident_event_body_bytes, 0);
+    assert!(
+        work.peak_resident_event_body_bytes
+            <= CUSTOM_PAGE_MAX_RETAINED_BYTES.saturating_add(BODY_BYTES)
+    );
+    assert!(work.peak_resident_event_body_bytes < work.spooled_event_body_bytes);
+    assert!(work.peak_provider_record_bytes <= MAX_PROVIDER_JSONL_LINE_BYTES);
+}
+
+#[test]
+fn catalog_record_and_metadata_bounds_accept_n_and_reject_n_plus_one() {
+    const RECORDS: usize = 8;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("catalog-bounds.jsonl");
+    let mut records = vec![manifest(), source(), session("root", None, true)];
+    for index in 0..RECORDS - records.len() {
+        records.push(event(
+            u64::try_from(index).unwrap(),
+            &format!("event-{index}"),
+            "root",
+            "bounded",
+        ));
+    }
+    write_records(&path, &records);
+    let input = CustomHistorySourceBackedInput::explicit(&path, [18; 32]);
+
+    reset_custom_history_source_backed_work();
+    let counts = validate_custom_history_catalog_bounds(
+        &input,
+        RECORDS,
+        CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES,
+    )
+    .unwrap();
+    assert_eq!(counts.complete_records, RECORDS as u64);
+    let exact_work = custom_history_source_backed_work();
+    assert_eq!(exact_work.source_read_passes, 1);
+    assert_eq!(exact_work.catalog_records, RECORDS);
+    assert!(exact_work.catalog_metadata_bytes > 0);
+    assert_eq!(exact_work.resident_event_body_bytes, 0);
+
+    reset_custom_history_source_backed_work();
+    validate_custom_history_catalog_bounds(&input, RECORDS, exact_work.catalog_metadata_bytes)
+        .unwrap();
+    assert_eq!(
+        custom_history_source_backed_work().catalog_metadata_bytes,
+        exact_work.catalog_metadata_bytes
+    );
+
+    reset_custom_history_source_backed_work();
+    let metadata_error = validate_custom_history_catalog_bounds(
+        &input,
+        RECORDS,
+        exact_work.catalog_metadata_bytes - 1,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        metadata_error,
+        CustomHistorySourceBackedError::Bounds {
+            limit: CustomHistorySourceBackedBound::CatalogMetadataBytes,
+            maximum,
+            observed,
+        } if maximum == exact_work.catalog_metadata_bytes - 1
+            && observed == exact_work.catalog_metadata_bytes
+    ));
+    assert!(
+        custom_history_source_backed_work().catalog_metadata_bytes
+            < exact_work.catalog_metadata_bytes
+    );
+
+    records.push(event(99, "event-over-bound", "root", "not admitted"));
+    write_records(&path, &records);
+    reset_custom_history_source_backed_work();
+    let record_error = validate_custom_history_catalog_bounds(
+        &input,
+        RECORDS,
+        CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        record_error,
+        CustomHistorySourceBackedError::Bounds {
+            limit: CustomHistorySourceBackedBound::CatalogRecords,
+            maximum: RECORDS,
+            observed,
+        } if observed == RECORDS + 1
+    ));
+    let rejected_work = custom_history_source_backed_work();
+    assert_eq!(rejected_work.source_read_passes, 1);
+    assert_eq!(rejected_work.catalog_records, RECORDS);
+    assert_eq!(rejected_work.provider_records_parsed, RECORDS);
+    assert_eq!(rejected_work.resident_event_body_bytes, 0);
+}
+
+#[test]
+fn oversized_edge_id_fails_typed_bounds_before_catalog_retention() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("edge-bound.jsonl");
+    write_records(
+        &path,
+        &[
+            manifest(),
+            source(),
+            session("root", None, true),
+            session("child", Some("root"), false),
+            edge(&"e".repeat(
+                crate::provider::custom_history_jsonl::CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES + 1,
+            )),
+        ],
+    );
+    let input = CustomHistorySourceBackedInput::explicit(&path, [19; 32]);
+
+    reset_custom_history_source_backed_work();
+    let error = validate_custom_history_catalog_bounds(
+        &input,
+        CUSTOM_HISTORY_CATALOG_MAX_RECORDS,
+        CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CustomHistorySourceBackedError::Bounds {
+            limit: CustomHistorySourceBackedBound::EdgeIdBytes,
+            maximum,
+            observed,
+        } if maximum
+            == crate::provider::custom_history_jsonl::CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES
+            && observed == maximum + 1
+    ));
+    let work = custom_history_source_backed_work();
+    assert_eq!(work.source_read_passes, 1);
+    assert_eq!(work.catalog_records, 5);
+    assert_eq!(work.provider_records_parsed, 5);
+    assert_eq!(work.resident_event_body_bytes, 0);
 }
 
 #[test]
