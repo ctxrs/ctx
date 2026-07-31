@@ -6,7 +6,7 @@
   "scope": "selected_typed_telemetry_contract_inventory",
   "files": {
     "crates/ctx-cli/src/analytics/operation.rs": "f06bd20bc3de99b708a6d3fdf1ff11ad2cfb343f29b0c49925313b64bafe024e",
-    "crates/ctx-cli/src/analytics/daemon.rs": "d9a48d77809b2999cbed51b470419396ca13a42179b5ae577bf220a2426534ae",
+    "crates/ctx-cli/src/analytics/daemon.rs": "6eb120f37ed78927bdda09688f6ff824af3d850114c1fdbe92e3b1c93aa1e9a9",
     "crates/ctx-cli/src/analytics/mcp.rs": "951eb98a057dee7ff67f0746e878752cfa174a57bee74e8a2f5da5d5ac8d8070",
     "crates/ctx-cli/src/analytics/runtime.rs": "b2ab7fb8655d1eafc34e997472f2fdb0a4afa33029a8b92b47f9f752e4d951a6",
     "crates/ctx-cli/src/analytics/pro.rs": "086b5d2e7b227258a522c168f8fdc9c855f0dbd4236a52b14de4d94e85fb2510",
