@@ -49,8 +49,8 @@ use super::{
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
     paths_status::{
-        daemon_lock_is_active, daemon_report, daemon_report_with_disabled_status,
-        daemon_source_backed_refresh_job_path, read_daemon_job_status, read_daemon_status,
+        daemon_core_refresh_job_path, daemon_lock_is_active, daemon_report,
+        daemon_report_with_disabled_status, read_daemon_job_status, read_daemon_status,
         write_daemon_status, DaemonLock,
     },
     query_service::{
@@ -60,7 +60,6 @@ use super::{
         DaemonQueryService,
     },
     runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
-    source_backed_refresh_coordinator::reconcile_verified_source_epoch,
 };
 use crate::ui::Ui;
 
@@ -126,7 +125,6 @@ pub(super) struct DaemonRuntime {
 #[derive(Clone)]
 pub(super) struct DaemonTestJobHooks {
     pub(super) calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
-    pub(super) history_refresh: Option<Value>,
     pub(super) relational_projection: Option<Value>,
     pub(super) semantic_index: Option<Value>,
     pub(super) relational_blocker: Option<std::rc::Rc<dyn Fn()>>,
@@ -174,7 +172,6 @@ pub(super) fn daemon_test_job(job: &'static str) -> Option<Value> {
             }
         }
         match job {
-            "history_refresh" => hooks.history_refresh.clone(),
             "relational_projection" => hooks.relational_projection.clone(),
             "semantic_index" => hooks.semantic_index.clone(),
             _ => None,
@@ -545,11 +542,6 @@ pub(super) fn run_daemon_inner(
     let mut auto_upgrade_handoff = None;
     let wakeup = Arc::new(DaemonWakeup::default());
     let active_result = (|| -> Result<bool> {
-        // A crash can occur after the immutable generation commit and before
-        // old Store-family cleanup. A verified active generation is sufficient
-        // evidence to finish that idempotent cleanup without scheduling a
-        // marker-driven rebuild.
-        reconcile_verified_source_epoch(data_root)?;
         let mut failed = false;
         let mut runtime = DaemonRuntime {
             config: config.clone(),
@@ -905,14 +897,13 @@ pub(super) fn run_daemon_inner(
             );
         }
         let failure_message = failed.then(|| {
-            let source_backed =
-                read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
-            source_backed
+            let core_refresh = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
+            core_refresh
                 .as_ref()
                 .and_then(|job| job.get("last_error"))
                 .and_then(Value::as_str)
                 .filter(|error| !error.is_empty())
-                .map(|error| format!("source-backed refresh failed: {error}"))
+                .map(|error| format!("Core refresh failed: {error}"))
                 .unwrap_or_else(|| "one or more daemon jobs failed".to_owned())
         });
         if data_root.exists() {

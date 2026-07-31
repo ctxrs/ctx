@@ -16,13 +16,13 @@ use super::{ImportTotals, SourceStats};
 #[derive(Debug, Default)]
 pub(crate) struct ProviderRefreshCollector {
     aggregates: Vec<ProviderRefreshAggregate>,
-    source_backed: Option<SourceBackedRefreshAnalyticsFacts>,
+    core_publication: Option<CoreRefreshAnalyticsFacts>,
     refresh_started: Option<Instant>,
     refresh_duration: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SourceBackedRefreshAnalyticsFacts {
+struct CoreRefreshAnalyticsFacts {
     trigger: ProviderRefreshTrigger,
     generation_changed: bool,
 }
@@ -133,12 +133,12 @@ impl ProviderRefreshCollector {
         }
     }
 
-    pub(crate) fn record_source_backed_publication(
+    pub(crate) fn record_core_publication(
         &mut self,
         trigger: ProviderRefreshTrigger,
         generation_changed: bool,
     ) {
-        self.source_backed = Some(SourceBackedRefreshAnalyticsFacts {
+        self.core_publication = Some(CoreRefreshAnalyticsFacts {
             trigger,
             generation_changed,
         });
@@ -257,7 +257,7 @@ impl ProviderRefreshCollector {
                 PublicEventV1::ProviderRefreshCompleted(event)
             })
             .collect::<Vec<_>>();
-        if let Some(facts) = self.source_backed {
+        if let Some(facts) = self.core_publication {
             let mut event = ProviderRefreshCompletedV1::foreground_bucketed(
                 Outcome::Success,
                 duration_bucket(single_provider_fallback_duration),

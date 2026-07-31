@@ -12,16 +12,14 @@ use crate::{
     },
     history_source_plugins::{prepare_source_backed_history_source, select_history_source_plugin},
     progress::{format_bytes, ProgressReporter},
-    semantic::{
-        autostart_daemon_and_wait, converge_source_backed_relational_generation,
-        SourceBackedRefreshMode,
-    },
-    DaemonTriggerCommandArg, ImportArgs,
+    ImportArgs,
 };
 
 use super::{
-    catalog::source_stats, upsert_explicit_source, ImportReport, ImportRunOptions, ImportTotals,
-    ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
+    catalog::source_stats,
+    core_refresh::{wait_for_import_core_refresh, ImportCoreRefreshRequest},
+    upsert_explicit_source, ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollector,
+    ProviderRefreshRuntimeFacts,
 };
 
 pub(crate) struct HistorySourcePluginImportContext<'a> {
@@ -72,23 +70,17 @@ pub(crate) fn run_history_source_plugin_import(
         )
     })?;
     let upsert = upsert_explicit_source(&context.data_root, prepared.provider_source())?;
-    if !context.args.no_daemon {
-        autostart_daemon_and_wait(
-            &context.data_root,
-            context.config,
-            DaemonTriggerCommandArg::Import,
-        )?;
-    }
-    let refresh = SourceBackedRefreshMode::Wait
-        .coordinate_explicit_source_catalog(&context.data_root, &upsert.authority)
-        .context("publish history source plugin through daemon-owned source refresh")?;
+    let refresh = wait_for_import_core_refresh(
+        &context.data_root,
+        context.config,
+        context.args.no_daemon,
+        ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
+    )?;
     let receipt = refresh
         .receipt
         .as_ref()
         .context("history source plugin refresh has no authoritative terminal receipt")?;
     let published_generation = refresh.pin.generation_id().to_owned();
-    converge_source_backed_relational_generation(&context.data_root, &published_generation)
-        .context("converge required relational projection after history source publication")?;
 
     let summary = ProviderImportSummary {
         imported: usize::from(receipt.generation_changed),
@@ -103,10 +95,9 @@ pub(crate) fn run_history_source_plugin_import(
         &stats,
         ProviderRefreshRuntimeFacts::observed_success(started.elapsed(), &summary),
     );
-    context.provider_refreshes.record_source_backed_publication(
-        ProviderRefreshTrigger::Import,
-        receipt.generation_changed,
-    );
+    context
+        .provider_refreshes
+        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
 
     let current = &receipt.current;
     let totals = ImportTotals {

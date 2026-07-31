@@ -8,37 +8,22 @@ pub(super) use render::{
 };
 
 pub(super) fn daemon_jobs_failure_message(
-    history: Option<&Value>,
+    core_refresh: Option<&Value>,
     semantic: Option<&Value>,
 ) -> Option<String> {
-    if let Some(error) = history
+    if let Some(error) = core_refresh
         .and_then(|job| job.get("last_error"))
         .and_then(Value::as_str)
         .filter(|error| !error.is_empty())
     {
-        return Some(format!("history refresh failed: {error}"));
+        return Some(format!("Core refresh failed: {error}"));
     }
-    if let Some(failed_sources) = history
-        .and_then(|job| job.get("totals"))
-        .and_then(|totals| totals.get("failed_sources"))
-        .and_then(Value::as_u64)
-        .filter(|count| *count > 0)
-    {
-        let source = if failed_sources == 1 {
-            "source"
-        } else {
-            "sources"
-        };
-        return Some(format!(
-            "history refresh failed for {failed_sources} {source}; run `ctx import --all --no-daemon` for source-level details"
-        ));
-    }
-    if history
+    if core_refresh
         .and_then(|job| job.get("status"))
         .and_then(Value::as_str)
         == Some("failed")
     {
-        return Some("history refresh failed".to_owned());
+        return Some("Core refresh failed".to_owned());
     }
     if let Some(error) = semantic
         .and_then(|job| job.get("last_error"))
@@ -63,7 +48,7 @@ pub(super) fn daemon_report_failure_message(report: &Value) -> Option<String> {
     }
     let jobs = report.get("jobs");
     daemon_jobs_failure_message(
-        jobs.and_then(|jobs| jobs.get("history_refresh")),
+        jobs.and_then(|jobs| jobs.get("core_refresh")),
         jobs.and_then(|jobs| jobs.get("semantic_index")),
     )
     .or_else(|| {

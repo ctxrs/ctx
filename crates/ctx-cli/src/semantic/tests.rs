@@ -39,14 +39,6 @@ fn write_semantic_enabled_config(data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn daemon_history_completed_test_job() -> Value {
-    json!({
-        "status": "completed",
-        "source_count": 1,
-        "last_run_at_ms": utc_now().timestamp_millis(),
-    })
-}
-
 fn daemon_semantic_indexed_test_job(_data_root: &Path) -> Value {
     daemon_semantic_job_json(
         "budget_exhausted",
@@ -59,12 +51,10 @@ fn daemon_semantic_indexed_test_job(_data_root: &Path) -> Value {
 
 fn install_test_daemon_jobs(
     calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
-    history_refresh: Option<Value>,
     semantic_index: Option<Value>,
 ) -> DaemonTestJobHookGuard {
     install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls,
-        history_refresh,
         relational_projection: None,
         semantic_index,
         relational_blocker: None,
