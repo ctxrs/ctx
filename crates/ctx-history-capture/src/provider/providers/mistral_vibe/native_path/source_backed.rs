@@ -34,7 +34,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "mistral-vibe-message";
 const NATIVE_EVENT_POSITION_KIND: &str = "mistral-vibe-messages-jsonl-ordinal";
 const LOGICAL_SESSION_KIND: &str = "mistral-vibe-session";
 const LOGICAL_EVENT_KIND: &str = "mistral-vibe-event";
-const PARSER_REVISION: &str = "mistral-vibe-source-backed-v1";
+const PARSER_REVISION: &str = "mistral-vibe-source-backed-v2";
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.mistral-vibe.source-revision.v1\0";
 
 #[derive(Debug, Clone, Copy)]

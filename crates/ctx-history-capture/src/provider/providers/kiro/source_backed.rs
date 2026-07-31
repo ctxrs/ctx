@@ -43,7 +43,7 @@ use super::{scan::stream_rows, KiroPhase, KiroTables};
 const KIRO_SOURCE_ANCHOR_NAMESPACE: &str = "kiro.legacy-sqlite";
 const KIRO_SOURCE_ANCHOR_KEY: &str = "default-history";
 const KIRO_SOURCE_SCHEMA_VARIANT: &str = "kiro-legacy-conversations-sqlite-v1";
-const KIRO_SOURCE_BACKED_PARSER_REVISION: &str = "kiro-source-backed-logical-v1";
+const KIRO_SOURCE_BACKED_PARSER_REVISION: &str = "kiro-source-backed-logical-v2";
 const KIRO_NATIVE_SESSION_NAMESPACE: &str = "kiro.conversation";
 const KIRO_NATIVE_EVENT_NAMESPACE: &str = "kiro.history-event";
 const KIRO_LOGICAL_SESSION_KIND: &str = "kiro-conversation";
@@ -507,6 +507,7 @@ impl<'emit> KiroLogicalScan<'emit> {
                     &self.indexed_source_path,
                     entry,
                     native.event,
+                    native.complete_text,
                     record_digest,
                 )?;
                 hash_projected_document(projection_digest, &document);
@@ -619,6 +620,7 @@ fn kiro_lexical_document(
     source_path: &str,
     entry: &Value,
     event: super::super::event::KiroNativeEvent,
+    complete_text: String,
     record_digest: [u8; 32],
 ) -> KiroSourceBackedResultV0<LexicalDocument> {
     let native_item_key = NativeItemKey::native_id(
@@ -648,12 +650,7 @@ fn kiro_lexical_document(
         record_digest,
     )?;
     let touched_files = projected_touched_files(event.event_type, entry)?;
-    let body = event
-        .payload
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let body = complete_text;
     if body.is_empty() {
         return Err(KiroSourceBackedErrorV0::UncertifiableRow {
             relation: row.table,

@@ -203,6 +203,7 @@ pub(super) fn kiro_history_entry_events(
     let user_at = kiro_entry_timestamp(entry, "user", started_at);
     let mut events = Vec::with_capacity(2);
     if let Some(text) = kiro_user_prompt_text(entry) {
+        let complete_text = text.clone();
         events.push(KiroNativeHistoryEvent {
             event: kiro_native_event(
                 row,
@@ -216,9 +217,11 @@ pub(super) fn kiro_history_entry_events(
                 entry,
                 None,
             ),
+            complete_text,
         });
     }
     if let Some(assistant) = kiro_assistant_message(entry) {
+        let complete_text = assistant.text.clone();
         events.push(KiroNativeHistoryEvent {
             event: kiro_native_event(
                 row,
@@ -232,6 +235,7 @@ pub(super) fn kiro_history_entry_events(
                 entry,
                 assistant.tool_uses,
             ),
+            complete_text,
         });
     }
     events
@@ -239,6 +243,7 @@ pub(super) fn kiro_history_entry_events(
 
 pub(super) struct KiroNativeHistoryEvent {
     pub(super) event: KiroNativeEvent,
+    pub(super) complete_text: String,
 }
 
 #[derive(Clone, Copy)]

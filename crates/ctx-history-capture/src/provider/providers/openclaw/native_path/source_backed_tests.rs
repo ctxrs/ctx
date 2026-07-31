@@ -185,6 +185,70 @@ fn shared_family_openclaw_noop_replacement_binding_and_hydration_oracle() {
 }
 
 #[test]
+fn shared_family_openclaw_retains_long_and_structured_message_content() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let transcript = transcript_path(&root);
+    let long_message = format!("{} openclaw-long-tail", "message ".repeat(2_100));
+    let structured = json!({
+        "command": format!("{} openclaw-structured-tail", "argument ".repeat(2_100)),
+        "options": {"recursive": true, "mode": "complete"},
+    });
+    write_fixture(
+        &transcript,
+        &[
+            header("session-1"),
+            message("message-long", "user", &long_message),
+            json!({
+                "type": "message",
+                "id": "message-structured",
+                "timestamp": "2026-07-28T12:00:02Z",
+                "message": {"role": "assistant", "content": structured},
+            }),
+        ],
+    );
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let events = index.source_event_page(source, None, 10).unwrap().items;
+    let long_id = index
+        .search_event_candidates("openclaw-long-tail", 10)
+        .unwrap()[0]
+        .event
+        .event_id;
+    let structured_id = index
+        .search_event_candidates("openclaw-structured-tail", 10)
+        .unwrap()[0]
+        .event
+        .event_id;
+    let requests = [long_id, structured_id]
+        .into_iter()
+        .map(|event_id| {
+            let event = events
+                .iter()
+                .find(|event| event.event_id == event_id)
+                .unwrap();
+            EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap()
+        .into_records();
+
+    assert_eq!(hydrated[0].provider_bytes, long_message.as_bytes());
+    assert!(long_message.len() > 16 * 1024);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&hydrated[1].provider_bytes).unwrap(),
+        structured
+    );
+    assert!(hydrated[1].provider_bytes.len() > 16 * 1024);
+}
+
+#[test]
 fn shared_family_openclaw_complete_deletion_and_missing_root_are_distinct() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("openclaw");

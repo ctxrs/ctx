@@ -254,7 +254,7 @@ fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("vscode-local.db");
     let second_path = temp.path().join("jetbrains-local.db");
-    let long_prompt = format!("vscode prompt {} lingma-full-body-tail", "v".repeat(4_096));
+    let long_prompt = format!("vscode prompt {} lingma-full-body-tail", "v".repeat(20_000));
     let first = create_database(&first_path);
     insert_row(
         &first,
@@ -425,11 +425,11 @@ fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text()
     let path = temp.path().join("local.db");
     let prompt = format!(
         "exact row-local Lingma prompt {} lingma-user-tail",
-        "x".repeat(4_096)
+        "x".repeat(20_000)
     );
     let summary = format!(
         "exact Lingma assistant summary {} lingma-summary-tail",
-        "s".repeat(4_096)
+        "s".repeat(20_000)
     );
     let connection = create_database(&path);
     insert_row(
@@ -453,7 +453,7 @@ fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text()
                   where request_id = 'error-request'",
             [format!(
                 "provider failure {} lingma-error-tail",
-                "e".repeat(4_096)
+                "e".repeat(20_000)
             )],
         )
         .unwrap();

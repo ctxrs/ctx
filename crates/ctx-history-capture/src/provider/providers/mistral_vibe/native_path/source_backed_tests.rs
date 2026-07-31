@@ -8,7 +8,7 @@ use ctx_history_core::{
     BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -182,4 +182,79 @@ fn shared_family_mistral_noop_metadata_churn_and_grouped_hydration_oracle() {
         "replacement-only growth must project the complete file once"
     );
     assert_eq!(growth.sources[0].counts().indexed_documents, 3);
+}
+
+#[test]
+fn shared_family_mistral_retains_long_text_and_complete_tool_arguments() {
+    let (temp, root, messages) = fixture();
+    let long_message = format!("{} mistral-long-tail", "message ".repeat(2_100));
+    let tool_calls = json!([{
+        "id": "call-complete",
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "arguments": {
+                "command": format!("{} mistral-tool-tail", "argument ".repeat(2_100)),
+                "timeout_ms": 30_000,
+            }
+        }
+    }]);
+    let mut file = OpenOptions::new().append(true).open(&messages).unwrap();
+    for record in [
+        json!({
+            "role": "user",
+            "message_id": "message-long",
+            "timestamp": "2026-07-28T12:00:03Z",
+            "content": long_message,
+        }),
+        json!({
+            "role": "assistant",
+            "message_id": "message-tool",
+            "timestamp": "2026-07-28T12:00:04Z",
+            "tool_calls": tool_calls,
+        }),
+    ] {
+        writeln!(file, "{record}").unwrap();
+    }
+    drop(file);
+
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let events = index.source_event_page(source, None, 10).unwrap().items;
+    let message_id = index
+        .search_event_candidates("mistral-long-tail", 10)
+        .unwrap()[0]
+        .event
+        .event_id;
+    let tool_id = index
+        .search_event_candidates("mistral-tool-tail", 10)
+        .unwrap()[0]
+        .event
+        .event_id;
+    let requests = [message_id, tool_id]
+        .into_iter()
+        .map(|event_id| {
+            let event = events
+                .iter()
+                .find(|event| event.event_id == event_id)
+                .unwrap();
+            EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap()
+        .into_records();
+
+    assert_eq!(hydrated[0].provider_bytes, long_message.as_bytes());
+    assert!(long_message.len() > 16 * 1024);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&hydrated[1].provider_bytes).unwrap(),
+        tool_calls
+    );
+    assert!(hydrated[1].provider_bytes.len() > 16 * 1024);
 }

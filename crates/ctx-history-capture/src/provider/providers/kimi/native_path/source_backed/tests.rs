@@ -172,3 +172,75 @@ fn shared_family_kimi_noop_projection_and_grouped_hydration_oracle() {
     );
     assert_eq!(growth.sources[0].counts().indexed_documents, 3);
 }
+
+#[test]
+fn shared_family_kimi_retains_long_text_and_complete_structured_content() {
+    let (temp, root) = fixture();
+    let wire_path = root.join("sessions/work/session-1/agents/main/wire.jsonl");
+    let long_prompt = format!("{} kimi-long-tail", "prompt ".repeat(3_000));
+    let structured = json!({
+        "command": format!("{} kimi-structured-tail", "argument ".repeat(2_100)),
+        "options": {"recursive": true, "mode": "complete"},
+    });
+    let mut wire = fs::OpenOptions::new()
+        .append(true)
+        .open(&wire_path)
+        .unwrap();
+    for record in [
+        json!({
+            "type": "turn.prompt",
+            "time": 1_784_289_600_003_i64,
+            "input": long_prompt,
+        }),
+        json!({
+            "type": "context.append_loop_event",
+            "time": 1_784_289_600_004_i64,
+            "event": {
+                "type": "tool.call",
+                "toolName": "shell",
+                "content": structured,
+            },
+        }),
+    ] {
+        writeln!(wire, "{record}").unwrap();
+    }
+    drop(wire);
+
+    let registry = registry(&root);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let source = cold.sources[0].observation().source();
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let events = index.source_event_page(source, None, 10).unwrap().items;
+    let prompt_id = index.search_event_candidates("kimi-long-tail", 10).unwrap()[0]
+        .event
+        .event_id;
+    let tool_id = index
+        .search_event_candidates("kimi-structured-tail", 10)
+        .unwrap()[0]
+        .event
+        .event_id;
+    let requests = [prompt_id, tool_id]
+        .into_iter()
+        .map(|event_id| {
+            let event = events
+                .iter()
+                .find(|event| event.event_id == event_id)
+                .unwrap();
+            EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
+        .unwrap()
+        .into_records();
+
+    assert_eq!(hydrated[0].provider_bytes, long_prompt.as_bytes());
+    assert!(long_prompt.len() > 16 * 1024);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&hydrated[1].provider_bytes).unwrap(),
+        structured
+    );
+    assert!(hydrated[1].provider_bytes.len() > 16 * 1024);
+}

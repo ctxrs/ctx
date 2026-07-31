@@ -37,14 +37,11 @@ use crate::{
             event_type_supports_structured_file_touches,
             visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         },
-        normalization::{
-            provider_local_preview, provider_output_event_is_failure,
-            provider_result_outcome_evidence,
-        },
+        normalization::{provider_output_event_is_failure, provider_result_outcome_evidence},
         tool_input,
     },
     CaptureError, OutputObservationKind, OutputOutcome, KIMI_CODE_CLI_SOURCE_FORMAT,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_TEXT_CHARS,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::super::{
@@ -66,7 +63,7 @@ const KIMI_NATIVE_EVENT_POSITION_KIND: &str = "kimi-code-cli-wire-ordinal-v1";
 const KIMI_LOGICAL_SESSION_KIND: &str = "agent-session";
 const KIMI_LOGICAL_EVENT_KIND: &str = "wire-event";
 const KIMI_SOURCE_REVISION_KIND: &str = "kimi-code-cli-compound-leaf-sha256-v1";
-const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v1";
+const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v2";
 const KIMI_REVISION_DOMAIN: &[u8] = b"ctx.kimi.source-backed.revision.v1\0";
 const KIMI_ABSENT_AUXILIARY_DIGEST: [u8; 32] = [0; 32];
 const MAX_KIMI_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
