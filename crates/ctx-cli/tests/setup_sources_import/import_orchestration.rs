@@ -151,12 +151,11 @@ fn deprecated_partial_remains_a_noop_without_bypassing_daemon_only_writes() {
         ])
         .assert()
         .failure()
+        .stderr(predicate::str::contains("--partial is deprecated"))
         .stderr(predicate::str::contains(
-            "warning: --partial is deprecated and no longer changes import behavior; tolerant import is now unconditional",
+            "tolerant import is always enabled",
         ))
-        .stderr(predicate::str::contains(
-            "no foreground writer was started",
-        ));
+        .stderr(predicate::str::contains("no foreground writer was started"));
     assert_no_daemon_autostart_mutation(&temp);
 }
 

@@ -37,8 +37,9 @@ mod tests {
         locate::{locate_event_value, locate_session_value, validate_locate_target},
         render::{render_show_document, search_json},
         search::{
-            search_context_observation_with_hydrator, NormalizedSearchQuery, SearchCollection,
-            SearchHit, SearchResultWindow,
+            render_semantic_fallback_warning, search_context_observation_with_hydrator,
+            NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow,
+            SemanticFallbackDiagnostics,
         },
         shared::session_source_json,
         show::{
@@ -1475,5 +1476,30 @@ mod tests {
             .is_err(),
             "a live-width count would incorrectly reject the same logical output"
         );
+    }
+
+    #[test]
+    fn semantic_fallback_warning_is_structured_and_actionable_without_backend_codes() {
+        let fallback = SemanticFallbackDiagnostics {
+            code: "semantic_disabled",
+            detail: "backend_error at /private/model/cache".to_owned(),
+        };
+        for width in [40, 80, 120] {
+            let context = crate::ui::RenderContext::for_test(
+                crate::ui::TestContext::tty(crate::ui::StreamKind::Stderr, width)
+                    .color(crate::ui::ColorMode::Always),
+            );
+            let rendered = render_semantic_fallback_warning(&context, &fallback);
+            let plain = rendered.render_plain();
+            let styled = rendered.render(&context);
+            assert!(plain.contains("Semantic search is unavailable"));
+            assert!(plain.contains("Keyword search was used"));
+            assert!(plain.contains("ctx setup --semantic"));
+            assert!(!plain.contains("semantic_disabled"));
+            assert!(!plain.contains("backend_error"));
+            assert!(!plain.contains("/private/model/cache"));
+            assert!(styled.contains("\u{1b}["));
+            assert!(plain.lines().all(|line| line.chars().count() <= width));
+        }
     }
 }

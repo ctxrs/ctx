@@ -23,7 +23,10 @@ use crate::{
         PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
         SourceBackedSemanticNotReady,
     },
-    ui::{canonical_human_output_bytes, Ui},
+    ui::{
+        canonical_human_output_bytes, diagnostic, Action, Diagnostic, DiagnosticLevel, Document,
+        RenderContext, Ui,
+    },
     RefreshArg, SearchArgs, SearchBackendArg,
 };
 
@@ -114,10 +117,8 @@ pub(crate) fn run_search(
         search_with_hydration_retry(&request, &data_root, semantic_weight, refresh)?;
     if !json_output {
         if let Some(fallback) = collection.semantic_fallback.as_ref() {
-            eprintln!(
-                "warning: semantic retrieval is unavailable ({}); falling back to lexical search",
-                fallback.code
-            );
+            let warning = render_semantic_fallback_warning(ui.stderr_context(), fallback);
+            ui.write_stderr(&warning)?;
         }
     }
     let query_duration = query_started.elapsed();
@@ -170,6 +171,32 @@ pub(crate) fn run_search(
     local_usage.set_search_context_observation(search_context);
     local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
+}
+
+pub(super) fn render_semantic_fallback_warning(
+    context: &RenderContext,
+    fallback: &SemanticFallbackDiagnostics,
+) -> Document {
+    let (detail, action) = match fallback.code {
+        "semantic_disabled" => (
+            "Keyword search was used because semantic search is disabled.",
+            "ctx setup --semantic",
+        ),
+        _ => (
+            "Keyword search was used because semantic retrieval did not complete.",
+            "ctx doctor",
+        ),
+    };
+    diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Warning,
+            summary: "Semantic search is unavailable",
+            detail: Some(detail),
+            fields: &[],
+            action: Some(Action { command: action }),
+        },
+    )
 }
 
 pub(crate) fn mcp_search(

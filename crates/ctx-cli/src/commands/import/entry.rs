@@ -8,7 +8,7 @@ use crate::analytics::{
     ImportFailureType as AnalyticsImportFailureType, ImportOutcome as AnalyticsImportOutcome,
     ImportTelemetry, ProviderRefreshTrigger,
 };
-use crate::ui::Ui;
+use crate::ui::{diagnostic, Diagnostic, DiagnosticLevel, Ui};
 use crate::ImportArgs;
 
 use super::provider_refresh::ProviderRefreshCollector;
@@ -23,12 +23,22 @@ pub(crate) fn run_import(
     config: &crate::config::AppConfig,
     ui: &mut Ui,
 ) -> Result<()> {
-    if args.partial {
-        eprintln!(
-            "warning: --partial is deprecated and no longer changes import behavior; tolerant import is now unconditional"
-        );
-    }
     let json = args.format.is_json();
+    if args.partial && !json {
+        let document = diagnostic(
+            ui.stderr_context(),
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                summary: "--partial is deprecated",
+                detail: Some(
+                    "It no longer changes import behavior because tolerant import is always enabled.",
+                ),
+                fields: &[],
+                action: None,
+            },
+        );
+        ui.write_stderr(&document)?;
+    }
     let progress = args.progress;
     provider_refreshes.start_timing();
     let report = run_import_internal(

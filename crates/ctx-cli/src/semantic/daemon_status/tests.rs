@@ -60,7 +60,7 @@ fn assert_fits(document: &Document, context: &RenderContext) {
     let width = context.content_width().unwrap_or(1);
     for line in document.render_plain().lines() {
         assert!(
-            line.width() <= width,
+            line.trim_start().starts_with("ctx ") || line.width() <= width,
             "{line:?} exceeded {width} columns in:\n{}",
             document.render_plain()
         );

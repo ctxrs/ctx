@@ -9,16 +9,19 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
 
 use ctx_history_relational::{
-    RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
+    RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP,
+    RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
 
 use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
 use crate::local_usage::{CliUsage, ResultObservationAction};
 use crate::output::{compact_json, print_json, SqlFormat};
 use crate::source_sql::SqlCompatibility;
+use crate::transcript::shell_quote_arg;
 use crate::ui::{
-    canonical_human_output_bytes, diagnostic, empty_state, outcome, section, table, Diagnostic,
-    DiagnosticLevel, Document, EmptyState, Field, Outcome, OutcomeState, RenderContext, Table, Ui,
+    canonical_human_output_bytes, diagnostic, empty_state, outcome, section, table, Action,
+    Diagnostic, DiagnosticLevel, Document, EmptyState, Field, Outcome, OutcomeState, RenderContext,
+    Table, Ui,
 };
 use crate::SqlArgs;
 
@@ -84,7 +87,7 @@ pub(crate) fn run_sql(
         .collect::<Vec<_>>();
     let content_bytes = serde_json::to_vec(&rows)?.len();
     let output_bytes = match args.output_format() {
-        SqlFormat::Table => print_sql_table(&result, ui),
+        SqlFormat::Table => print_sql_table(&result, &args, ui),
         SqlFormat::Json => {
             let value = raw_sql_result_json(&result);
             let output_bytes = serde_json::to_string_pretty(&value)?
@@ -144,11 +147,12 @@ pub(crate) fn read_sql_limited(
     Ok(input)
 }
 
-pub(crate) fn print_sql_table(result: &RawSqlResult, ui: &mut Ui) -> Result<usize> {
+pub(crate) fn print_sql_table(result: &RawSqlResult, args: &SqlArgs, ui: &mut Ui) -> Result<usize> {
     let document = render_sql_table(ui.stdout_context(), result);
     let output_bytes = canonical_human_output_bytes(|context| render_sql_table(context, result));
     ui.write_stdout(&document)?;
-    if let Some(warning) = render_sql_truncation(ui.stderr_context(), result) {
+    let action = sql_truncation_action(args, result);
+    if let Some(warning) = render_sql_truncation(ui.stderr_context(), result, action.as_deref()) {
         ui.write_stderr(&warning)?;
     }
     Ok(output_bytes)
@@ -194,7 +198,11 @@ fn render_sql_table(context: &RenderContext, result: &RawSqlResult) -> Document 
     document
 }
 
-fn render_sql_truncation(context: &RenderContext, result: &RawSqlResult) -> Option<Document> {
+fn render_sql_truncation(
+    context: &RenderContext,
+    result: &RawSqlResult,
+    action: Option<&str>,
+) -> Option<Document> {
     if !result.truncated.rows && !result.truncated.values {
         return None;
     }
@@ -222,9 +230,45 @@ fn render_sql_truncation(context: &RenderContext, result: &RawSqlResult) -> Opti
             summary: "SQL results were truncated",
             detail: Some(detail),
             fields: &values,
-            action: None,
+            action: action.map(|command| Action { command }),
         },
     ))
+}
+
+fn sql_truncation_action(args: &SqlArgs, result: &RawSqlResult) -> Option<String> {
+    let mut command = vec!["ctx sql".to_owned()];
+    if result.truncated.rows {
+        let next = result
+            .limits
+            .max_rows
+            .saturating_mul(2)
+            .min(RAW_SQL_MAX_ROWS_CAP);
+        if next > result.limits.max_rows {
+            command.push(format!("--max-rows {next}"));
+        }
+    }
+    if result.truncated.values {
+        let next = result
+            .limits
+            .max_value_bytes
+            .saturating_mul(2)
+            .min(RAW_SQL_MAX_VALUE_BYTES_CAP);
+        if next > result.limits.max_value_bytes {
+            command.push(format!("--max-value-bytes {next}"));
+        }
+    }
+    if command.len() == 1 {
+        return None;
+    }
+    match (&args.sql, &args.file) {
+        (Some(sql), None) => command.push(shell_quote_arg(sql)),
+        (None, Some(path)) => command.push(format!(
+            "--file {}",
+            shell_quote_arg(&path.to_string_lossy())
+        )),
+        _ => return None,
+    }
+    Some(command.join(" "))
 }
 
 pub(crate) fn print_sql_csv(result: &RawSqlResult, no_header: bool) -> Result<usize> {
@@ -512,7 +556,7 @@ mod ui_tests {
         result.truncated.values = true;
         for width in [32, 48, 80, 120] {
             let context = context(width, ColorMode::Never);
-            let document = render_sql_truncation(&context, &result).unwrap();
+            let document = render_sql_truncation(&context, &result, None).unwrap();
             let rendered = document.render_plain();
             assert!(rendered.starts_with("! SQL results were truncated\n"));
             assert!(rendered.contains("Row limit"));
@@ -524,7 +568,7 @@ mod ui_tests {
         }
 
         result.truncated.values = false;
-        let rows_only = render_sql_truncation(&context(80, ColorMode::Never), &result)
+        let rows_only = render_sql_truncation(&context(80, ColorMode::Never), &result, None)
             .unwrap()
             .render_plain();
         assert!(rows_only.contains("a larger --max-rows limit"));
@@ -532,11 +576,44 @@ mod ui_tests {
 
         result.truncated.rows = false;
         result.truncated.values = true;
-        let values_only = render_sql_truncation(&context(80, ColorMode::Never), &result)
+        let values_only = render_sql_truncation(&context(80, ColorMode::Never), &result, None)
             .unwrap()
             .render_plain();
         assert!(values_only.contains("a larger --max-value-bytes limit"));
         assert!(!values_only.contains("--max-rows"));
+    }
+
+    #[test]
+    fn sql_truncation_action_preserves_the_original_input_and_increases_limits() {
+        let mut result = result(vec![vec![text("codex"), text("summary")]]);
+        result.truncated.rows = true;
+        result.truncated.values = true;
+        let args = SqlArgs {
+            sql: Some("SELECT * FROM ctx_events WHERE role = 'assistant'".to_owned()),
+            file: None,
+            format: SqlFormat::Table,
+            max_rows: result.limits.max_rows,
+            max_columns: result.limits.max_columns,
+            max_value_bytes: result.limits.max_value_bytes,
+            max_sql_bytes: result.limits.max_sql_bytes,
+            timeout: Duration::from_millis(result.limits.timeout_ms),
+            no_header: false,
+        };
+        let action = sql_truncation_action(&args, &result).unwrap();
+        assert_eq!(
+            action,
+            "ctx sql --max-rows 200 --max-value-bytes 32768 'SELECT * FROM ctx_events WHERE role = '\\''assistant'\\'''"
+        );
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_sql_truncation(&context, &result, Some(&action)).unwrap();
+            let rendered = document.render_plain();
+            assert!(rendered.contains(&action));
+            assert!(rendered.lines().all(|line| {
+                line.contains(&action) || line.width() <= context.content_width().unwrap_or(1)
+            }));
+        }
     }
 
     #[test]
