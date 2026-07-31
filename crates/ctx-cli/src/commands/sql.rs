@@ -464,7 +464,7 @@ mod ui_tests {
     use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
+    use crate::ui::{ColorMode, StreamKind, TestContext, Token};
 
     fn context(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
@@ -584,12 +584,13 @@ mod ui_tests {
     }
 
     #[test]
-    fn sql_truncation_action_preserves_the_original_input_and_increases_limits() {
+    fn bounded_preview_action_keeps_full_quoted_sql_copyable_across_widths() {
         let mut result = result(vec![vec![text("codex"), text("summary")]]);
         result.truncated.rows = true;
         result.truncated.values = true;
+        let sql = "SELECT 'abcdefgh' AS value UNION ALL SELECT 'ijklmnop'";
         let args = SqlArgs {
-            sql: Some("SELECT * FROM ctx_events WHERE role = 'assistant'".to_owned()),
+            sql: Some(sql.to_owned()),
             file: None,
             format: SqlFormat::Table,
             max_rows: result.limits.max_rows,
@@ -602,17 +603,46 @@ mod ui_tests {
         let action = sql_truncation_action(&args, &result).unwrap();
         assert_eq!(
             action,
-            "ctx sql --max-rows 200 --max-value-bytes 32768 'SELECT * FROM ctx_events WHERE role = '\\''assistant'\\'''"
+            "ctx sql --max-rows 200 --max-value-bytes 32768 'SELECT '\\''abcdefgh'\\'' AS value UNION ALL SELECT '\\''ijklmnop'\\'''"
         );
 
-        for width in [32, 48, 80, 120] {
-            let context = context(width, ColorMode::Never);
-            let document = render_sql_truncation(&context, &result, Some(&action)).unwrap();
-            let rendered = document.render_plain();
-            assert!(rendered.contains(&action));
-            assert!(rendered.lines().all(|line| {
-                line.contains(&action) || line.width() <= context.content_width().unwrap_or(1)
-            }));
+        for width in [32, 48, 80, 100, 120] {
+            for color in [ColorMode::Never, ColorMode::Always] {
+                let context = context(width, color);
+                let document = render_sql_truncation(&context, &result, Some(&action)).unwrap();
+                let command_lines = document
+                    .lines()
+                    .iter()
+                    .filter(|line| {
+                        line.spans()
+                            .iter()
+                            .any(|span| span.token() == Token::Command)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(command_lines.len(), 1, "width {width}");
+
+                let command_spans = command_lines[0]
+                    .spans()
+                    .iter()
+                    .filter(|span| span.token() == Token::Command)
+                    .collect::<Vec<_>>();
+                assert_eq!(command_spans.len(), 1, "width {width}");
+                assert_eq!(command_spans[0].content(), action, "width {width}");
+
+                let command_line = command_lines[0]
+                    .spans()
+                    .iter()
+                    .map(|span| span.content())
+                    .collect::<String>();
+                assert_eq!(command_line, format!("  {action}"), "width {width}");
+
+                let plain = document.render_plain();
+                assert!(plain.contains(&format!("Next\n  {action}\n")), "{plain}");
+                assert!(plain.lines().all(|line| {
+                    line == command_line || line.width() <= context.content_width().unwrap_or(1)
+                }));
+                assert_eq!(strip_ansi(&document.render(&context)), plain);
+            }
         }
     }
 
