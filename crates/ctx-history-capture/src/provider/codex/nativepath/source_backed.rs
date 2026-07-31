@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read, Seek, SeekFrom},
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
@@ -13,30 +12,25 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreRecordAnnotation, EventHydrationRequest, EventIdentityInput,
-    HydratedProviderRecord, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
+    CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId,
+    TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::VerifiedIndex;
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, RevalidationTarget, WriterOptions,
 };
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
     discover_codex_catalog_sources,
     reader::{CodexParseDisposition, CodexScanCounters},
-    record::classify_codex_record,
-    rows::{
-        source_backed_display_text, CodexSourceBackedDocumentEligibility, CodexSourceBackedRowV0,
-    },
+    rows::CodexSourceBackedRowV0,
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow, CodexSourceScan,
@@ -45,17 +39,13 @@ use super::{
 use crate::provider::codex::catalog::discover_codex_session_catalog;
 use crate::{
     common::io::{
-        open_provider_source_file, OpenedProviderSourceFile, OpenedProviderSourcePath,
-        ProviderSourceRoot, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
-        PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
-        PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+        open_provider_source_file, OpenedProviderSourcePath, ProviderSourceRoot,
+        PROVIDER_JSONL_INVENTORY_MAX_DEPTH, PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
+        PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
     },
     provider::codex::{
         catalog::{catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained},
-        nativepath::{
-            open_codex_source_capability, opened_codex_file_observation,
-            revalidate_codex_source_observation,
-        },
+        nativepath::{opened_codex_file_observation, revalidate_codex_source_observation},
     },
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
 };
@@ -68,7 +58,7 @@ const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v7";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v4";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v5";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -76,17 +66,8 @@ const CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.explicit-sessi
 const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inventory-v1";
 const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v1";
 const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v1\0";
-const MAX_HYDRATED_CODEX_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
 const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
-
-#[cfg(test)]
-std::thread_local! {
-    static CODEX_HYDRATION_SOURCE_OPEN_CALLS: std::cell::Cell<u64> =
-        const { std::cell::Cell::new(0) };
-    static CODEX_BATCH_READ_OFFSETS: std::cell::RefCell<Vec<u64>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
 
 #[derive(Debug, Error)]
 pub enum CodexSourceBackedErrorV0 {
@@ -97,7 +78,7 @@ pub enum CodexSourceBackedErrorV0 {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -114,15 +95,13 @@ pub enum CodexSourceBackedErrorV0 {
     MissingCheckpoint,
     #[error("Codex source certificate has an unsupported checkpoint kind or payload")]
     InvalidCheckpoint,
-    #[error("Codex scanner emitted a row without exact source-record evidence")]
-    MissingRecordEvidence,
     #[error("Codex scanner emitted a row without lexical body text")]
     MissingLexicalBody,
     #[error("Codex scanner emitted a row without its native session owner")]
     MissingPageOwner,
     #[error("Codex scanner owner {actual:?} does not match catalog owner {expected:?}")]
     OwnerMismatch { expected: String, actual: String },
-    #[error("Codex scan counters do not reconcile with streamed lexical documents")]
+    #[error("Codex scan counters do not reconcile with streamed Core records")]
     ScanCountMismatch,
     #[error("Codex source count overflow")]
     CountOverflow,
@@ -137,22 +116,6 @@ pub enum CodexSourceBackedErrorV0 {
     InjectedColdWorkerFailure { source_index: usize },
     #[error("Codex source-backed scanner emitted a legacy Core publication row")]
     UnexpectedLegacyRow,
-    #[error("locator is not a Codex NativePath JSONL record")]
-    InvalidCodexLocator,
-    #[error("Codex locator native session {0:?} was not found below the supplied session root")]
-    LocatorSourceNotFound(String),
-    #[error("Codex locator byte range exceeds the bounded NativePath record size")]
-    LocatorRangeTooLarge,
-    #[error("Codex locator byte range ends after the provider source")]
-    LocatorRangeMissing,
-    #[error("Codex locator byte range no longer aligns with a complete provider record")]
-    LocatorRecordBoundaryMismatch,
-    #[error("Codex locator record digest no longer matches provider bytes")]
-    LocatorDigestMismatch,
-    #[error("Codex locator no longer identifies the indexed event")]
-    LocatorEventMismatch,
-    #[error("Codex locator record no longer has meaningful display text")]
-    LocatorRecordNotDisplayable,
     #[error("explicit Codex session source changed its native session identity")]
     ExplicitSourceIdentityChanged,
     #[error("explicit Codex session inventory changed while it was being certified")]
@@ -248,7 +211,6 @@ pub struct CodexSourceBackedCountersV0 {
     pub scanner_legacy_json_serialized_bytes: u64,
     pub scanner_legacy_normalized_payload_hashes: u64,
     pub scanner_legacy_file_touch_rows: u64,
-    pub scanner_legacy_complete_content_locators: u64,
     pub scanner_legacy_duplicate_preview_allocations: u64,
     pub scanner_legacy_page_owner_json_serializations: u64,
     pub scanner_legacy_page_identity_owner_json_serializations: u64,
@@ -314,9 +276,6 @@ impl CodexSourceBackedCountersV0 {
         self.scanner_legacy_file_touch_rows = self
             .scanner_legacy_file_touch_rows
             .saturating_add(scan.legacy_file_touch_rows_created);
-        self.scanner_legacy_complete_content_locators = self
-            .scanner_legacy_complete_content_locators
-            .saturating_add(scan.legacy_complete_content_locators_created);
         self.scanner_legacy_page_owner_json_serializations = self
             .scanner_legacy_page_owner_json_serializations
             .saturating_add(scan.legacy_page_owner_json_serializations);
@@ -338,13 +297,11 @@ pub struct CodexSourceBackedIngestReceiptV0 {
 
 mod catalog;
 mod cold;
-mod hydration;
 mod identity;
 mod ingestion;
 
 #[allow(unused_imports)]
 pub(crate) use catalog::CodexExplicitSessionInventoryV0;
-use catalog::{bind_catalog_capabilities, bind_source_keys};
 pub(crate) use catalog::{
     discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0, discover_codex_session_tree_inventory_v0,
@@ -355,19 +312,11 @@ pub(crate) use catalog::{
 use cold::{cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdParallelOptionsV0};
 #[cfg(test)]
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
-use hydration::validate_codex_locator;
-pub use hydration::{hydrate_codex_locator, CodexHydratedRecordV0, CodexLocatorResolverV0};
 pub(crate) use identity::source_observation;
 use identity::{
-    certify_scan, codex_event_identity, codex_lexical_document, codex_session_identity,
-    codex_source_key, decode_append_proof, validate_owner,
+    certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
+    validate_owner,
 };
-
-#[derive(Debug)]
-struct CodexCoreDocument {
-    document: LexicalDocument,
-    annotation: CoreRecordAnnotation,
-}
 #[cfg(test)]
 use ingestion::ingest_codex_source_backed_inner_v0;
 pub use ingestion::ingest_codex_source_backed_v0;

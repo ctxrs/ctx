@@ -48,6 +48,14 @@ impl CodexNativeScanner {
                 }
                 Ok(CodexRecordProjection::default())
             }
+            CodexRecordClass::TurnContext => {
+                self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
+                match (self.owner.as_mut(), parse_turn_context_cwd(record)) {
+                    (Some(owner), Some(cwd)) => owner.cwd = Some(cwd),
+                    (None, _) | (_, None) => self.reject(false),
+                }
+                Ok(CodexRecordProjection::default())
+            }
             CodexRecordClass::Ignored => {
                 self.counters.ignored_records = self.counters.ignored_records.saturating_add(1);
                 Ok(CodexRecordProjection::default())
@@ -64,25 +72,20 @@ impl CodexNativeScanner {
                     self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 };
-                let mut built = match build_source_backed_event_row(
-                    self.raw_ordinal,
-                    kind,
-                    &retained,
-                    start_byte,
-                    end_byte,
-                    record_digest,
-                )? {
-                    Ok(built) => built,
-                    Err(CodexRetainedNonMaterialized::ValidUnmaterializable) => {
-                        self.counters.ignored_records =
-                            self.counters.ignored_records.saturating_add(1);
-                        return Ok(CodexRecordProjection::default());
-                    }
-                    Err(CodexRetainedNonMaterialized::Malformed) => {
-                        self.reject(false);
-                        return Ok(CodexRecordProjection::default());
-                    }
-                };
+                let mut built =
+                    match build_source_backed_event_row(self.raw_ordinal, kind, &retained)? {
+                        Ok(built) => built,
+                        Err(CodexRetainedNonMaterialized::ValidUnmaterializable) => {
+                            self.counters.ignored_records =
+                                self.counters.ignored_records.saturating_add(1);
+                            return Ok(CodexRecordProjection::default());
+                        }
+                        Err(CodexRetainedNonMaterialized::Malformed) => {
+                            self.reject(false);
+                            return Ok(CodexRecordProjection::default());
+                        }
+                    };
+                built.row.session_cwd.clone_from(&owner.cwd);
                 let touch_outcome = visit_provider_file_touch_drafts_with_limit(
                     &retained.payload,
                     event_type_supports_structured_file_touches(built.row.event_type),
@@ -224,7 +227,7 @@ impl CodexNativeScanner {
                     .as_deref()
                     .is_some_and(crate::repository_attribution::bounded_outcome_evidence_relevant)
         });
-        let decoded = if needs_repository_payload {
+        let decoded = if needs_repository_payload || sparse_core_diagnostic {
             self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
             parse_decoded_record(record, &owner)
         } else {
@@ -297,16 +300,38 @@ impl CodexNativeScanner {
                 ..CodexRecordProjection::default()
             });
         }
+        let normalized_body = if sparse_core_diagnostic {
+            let decoded = decoded.as_ref().ok_or(CaptureError::SystemInvariant(
+                "Codex diagnostic output could not be decoded for direct Core publication",
+            ))?;
+            match source_backed_display_text(probe, &decoded.payload) {
+                CodexSourceBackedDocumentEligibility::Eligible(body) => body,
+                CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
+                    return Err(CaptureError::SystemInvariant(
+                        "Codex diagnostic output lost its selected Core body",
+                    ));
+                }
+                CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
+                    return Err(CaptureError::SystemInvariant(
+                        "Codex diagnostic output has an unsupported Core body shape",
+                    ));
+                }
+            }
+        } else {
+            String::new()
+        };
         let core_row = build_source_backed_sparse_output_row(
             self.raw_ordinal,
-            start_byte,
-            end_byte,
-            record_digest,
             occurred_at,
             result_kind,
             context.as_ref(),
             &structural.outcome,
+            normalized_body,
             repository_result,
+            context
+                .as_ref()
+                .and_then(|context| context.session_cwd.clone())
+                .or_else(|| owner.cwd.clone()),
         )?;
         let context_mutation = match core_row {
             Some(row) => {

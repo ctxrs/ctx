@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value;
 
 fn initialize_repository(path: &Path) {
     use std::process::Command;
@@ -892,9 +893,12 @@ fn source_backed_projection_preserves_semantics_without_legacy_operations() {
         .unwrap()
         .iter()
         .any(|candidate| candidate.event.event_id == events[0].event_id));
-    let hydrated = hydrate_codex_locator(&sessions, &events[0].locator).unwrap();
+    let stored = verified
+        .core_record_by_id(events[0].event_id.as_uuid())
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
+        stored.content.normalized_body.as_deref(),
         Some(long_message.as_str())
     );
 }
@@ -924,23 +928,15 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let mut scanner =
         CodexNativeScanner::new_source_backed_v0(catalog_source.clone(), None).unwrap();
-    let mut documents = Vec::new();
+    let mut records = Vec::new();
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     while let Some(page) = scanner.next_page().unwrap() {
         let CodexNativeOwnedPage::Core(page) = page;
         let owner = page.owner.unwrap();
         for row in page.source_backed_rows {
-            documents.push(
-                codex_lexical_document(
-                    &catalog_source,
-                    &source,
-                    session_id,
-                    &owner,
-                    row,
-                    &mut repository_attributor,
-                )
-                .unwrap()
-                .document,
+            records.push(
+                codex_core_record(&source, session_id, &owner, row, &mut repository_attributor)
+                    .unwrap(),
             );
         }
     }
@@ -955,14 +951,17 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
     assert!(evidence.source.opened.is_none());
     assert!(evidence.revalidate());
 
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].body, full_text);
-    assert!(documents[0].body.ends_with("codex-tail-sentinel"));
-    let hydrated = hydrate_codex_locator(&sessions, &documents[0].locator).unwrap();
+    assert_eq!(records.len(), 1);
     assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some(documents[0].body.as_str())
+        records[0].content.normalized_body.as_deref(),
+        Some(full_text.as_str())
     );
+    assert!(records[0]
+        .content
+        .normalized_body
+        .as_deref()
+        .unwrap()
+        .ends_with("codex-tail-sentinel"));
 }
 
 #[test]
@@ -971,7 +970,6 @@ fn source_backed_codex_adapter_has_no_store_or_preview_body_fallback() {
         include_str!("../../source_backed.rs"),
         include_str!("../catalog.rs"),
         include_str!("../cold.rs"),
-        include_str!("../hydration.rs"),
         include_str!("../identity.rs"),
         include_str!("../ingestion.rs"),
     ]
@@ -985,4 +983,16 @@ fn source_backed_codex_adapter_has_no_store_or_preview_body_fallback() {
     .concat();
     assert!(!adapter.contains(&store_dependency));
     assert!(!rows.contains(&preview_body));
+    for forbidden in [
+        "LexicalDocument",
+        "SourceRecordLocator",
+        "ContentSourceResolver",
+        "HydrationRequest",
+        "hydrate_codex",
+    ] {
+        assert!(
+            !adapter.contains(forbidden),
+            "found forbidden token {forbidden}"
+        );
+    }
 }

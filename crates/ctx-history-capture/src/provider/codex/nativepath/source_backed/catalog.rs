@@ -142,13 +142,6 @@ impl CodexExplicitSessionInventoryV0 {
             sources,
         )?)
     }
-
-    pub(crate) fn resolver(&self) -> CodexSourceBackedResultV0<Option<CodexLocatorResolverV0>> {
-        let Some(plan) = self.source_plan() else {
-            return Ok(None);
-        };
-        Ok(Some(CodexLocatorResolverV0::from_bound_sources([plan])?))
-    }
 }
 
 pub(crate) fn observe_codex_explicit_session_source_backed_v0(

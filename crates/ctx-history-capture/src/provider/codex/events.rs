@@ -12,8 +12,9 @@ mod tool;
 
 use retention::codex_event_role;
 pub(crate) use retention::{
-    codex_command_preview, codex_content_text, codex_is_command_tool, codex_local_preview,
-    codex_tool_arguments_preview, codex_tool_name, CodexExitCodeParser, CodexWallTimeParser,
+    codex_command_preview, codex_command_text, codex_content_text, codex_is_command_tool,
+    codex_local_preview, codex_tool_arguments_preview, codex_tool_arguments_text, codex_tool_name,
+    CodexExitCodeParser, CodexWallTimeParser,
 };
 #[cfg(test)]
 pub(crate) use tool::codex_tool_output_outcome;

@@ -201,23 +201,23 @@ fn decode_hex_nibble(value: u8) -> Option<u8> {
 pub(crate) struct CodexSourceIdentity {
     pub(crate) canonical_source_key: String,
     pub(crate) source_root: String,
-    pub(crate) locator: PathBuf,
+    pub(crate) source_path: PathBuf,
 }
 
 impl CodexSourceIdentity {
     pub(crate) fn new(
         canonical_source_key: impl Into<String>,
         source_root: impl Into<String>,
-        locator: PathBuf,
+        source_path: PathBuf,
     ) -> CaptureResult<Self> {
         let identity = Self {
             canonical_source_key: canonical_source_key.into(),
             source_root: source_root.into(),
-            locator,
+            source_path,
         };
         if identity.canonical_source_key.trim().is_empty()
             || identity.source_root.trim().is_empty()
-            || identity.locator.as_os_str().is_empty()
+            || identity.source_path.as_os_str().is_empty()
         {
             return Err(CaptureError::InvalidPayload(
                 "Codex append proof identity is incomplete".to_owned(),
@@ -227,7 +227,7 @@ impl CodexSourceIdentity {
     }
 
     pub(crate) fn matches_catalog_source(&self, source: &CodexCatalogSource) -> bool {
-        self.source_root == source.source_root && self.locator == source.source_path
+        self.source_root == source.source_root && self.source_path == source.source_path
     }
 }
 

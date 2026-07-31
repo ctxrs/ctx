@@ -38,7 +38,7 @@ fn raw_ordinals_include_headers_outputs_malformed_and_ignored_records() {
         tool_output("call-1", "excluded body"),
         "{malformed json}\n".to_owned(),
         tool_call("call-2"),
-        jsonl(json!({"type": "turn_context", "payload": {"cwd": "/workspace"}})),
+        jsonl(json!({"type": "turn_context", "payload": {"cwd": "/workspace/turn"}})),
         message("assistant", "last retained"),
     ]
     .concat();
@@ -57,6 +57,17 @@ fn raw_ordinals_include_headers_outputs_malformed_and_ignored_records() {
     assert_eq!(scan.counters.native_result_records, 1);
     assert_eq!(scan.counters.malformed_records, 1);
     assert_eq!(scan.counters.rejected_complete_records, 1);
+    assert_eq!(
+        sink.rows
+            .iter()
+            .map(|row| row.session_cwd.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("/workspace"),
+            Some("/workspace"),
+            Some("/workspace/turn")
+        ]
+    );
 }
 
 #[test]
@@ -146,14 +157,13 @@ fn malformed_retained_shapes_remain_rejected_without_hiding_later_records() {
 }
 
 #[test]
-fn source_backed_row_preserves_full_lexical_text_and_exact_record_evidence() {
-    let header = session_meta("locator-owner");
+fn source_backed_row_preserves_full_lexical_text_and_native_identity() {
+    let header = session_meta("direct-core-owner");
     let complete_message = format!("MESSAGE_BEGIN-{}-MESSAGE_END", "m".repeat(20_000));
     let message_record = message("assistant", &complete_message);
-    let message_start = header.len() as u64;
     let contents = [header, message_record.clone()].concat();
     let (_temp, path) = write_source(&contents);
-    let (scan, sink) = scan_collect(discover_one(&path, "locator-owner"), None);
+    let (scan, sink) = scan_collect(discover_one(&path, "direct-core-owner"), None);
 
     assert_eq!(scan.counters.rejected_complete_records, 0);
     assert_eq!(sink.rows.len(), 1);
@@ -161,10 +171,7 @@ fn source_backed_row_preserves_full_lexical_text_and_exact_record_evidence() {
     assert_eq!(row.raw_ordinal, 1);
     assert!(row.lexical_body.contains("MESSAGE_BEGIN"));
     assert!(row.lexical_body.ends_with("MESSAGE_END"));
-    assert_eq!(row.source_record.byte_offset, message_start);
-    assert_eq!(row.source_record.byte_length, message_record.len() as u64);
-    let expected_digest: [u8; 32] = Sha256::digest(message_record.as_bytes()).into();
-    assert_eq!(row.source_record.record_digest, expected_digest);
+    assert_eq!(row.session_cwd.as_deref(), Some("/workspace"));
 }
 
 #[test]
@@ -227,17 +234,12 @@ fn source_backed_projection_prefilters_with_exact_scan_accounting() {
     assert_eq!(scan.counters.typed_json_parses, 2);
 
     let row = &sink.rows[0];
-    let retained_start = contents.len().saturating_sub(retained.len()) as u64;
     assert_eq!(row.raw_ordinal, 3);
-    assert_eq!(row.source_record.byte_offset, retained_start);
-    assert_eq!(row.source_record.byte_length, retained.len() as u64);
-    let expected_digest: [u8; 32] = Sha256::digest(retained.as_bytes()).into();
-    assert_eq!(row.source_record.record_digest, expected_digest);
+    assert_eq!(row.session_cwd.as_deref(), Some("/workspace"));
     assert_eq!(scan.counters.legacy_body_json_serializations, 0);
     assert_eq!(scan.counters.legacy_row_json_serializations, 0);
     assert_eq!(scan.counters.legacy_json_serialized_bytes, 0);
     assert_eq!(scan.counters.legacy_file_touch_rows_created, 0);
-    assert_eq!(scan.counters.legacy_complete_content_locators_created, 0);
     assert_eq!(scan.counters.legacy_page_owner_json_serializations, 0);
     assert_eq!(
         scan.counters.legacy_page_identity_owner_json_serializations,

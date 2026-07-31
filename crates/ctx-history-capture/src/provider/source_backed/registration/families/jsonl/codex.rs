@@ -648,8 +648,8 @@ pub fn register_codex_prompt_history_source_backed_route(
                             .into());
                         }
                         let _retained_page_bytes = page.retained_bytes;
-                        for document in page.documents {
-                            sink.add_core_record(document)
+                        for record in page.records {
+                            sink.add_core_record(record)
                                 .map_err(capture_coordinator_error)?;
                         }
                         Ok(())
@@ -740,8 +740,8 @@ pub fn register_codex_prompt_history_source_backed_route(
                                 .into());
                             }
                             let _retained_page_bytes = page.retained_bytes;
-                            for document in page.documents {
-                                sink.add_core_record(document)
+                            for record in page.records {
+                                sink.add_core_record(record)
                                     .map_err(capture_coordinator_error)?;
                             }
                             Ok(())
