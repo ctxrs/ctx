@@ -9,9 +9,10 @@ use crate::{
     DeleteSourceRequest, ErrorClass, FinishAdmittedSourceManifestRequest,
     FinishSourceManifestAdmissionRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
     MaterializeSourcePageRequest, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
-    ProtocolError, SourceDeleted, SourceManifestAdmissionBegan, SourceManifestAdmitted,
-    SourceManifestFinished, SourceManifestPageAdmitted, SourceManifestReceipt,
-    SourcePageMaterialized, SourcePrepared, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    ProtocolError, ReadSourceProgressPageRequest, SourceDeleted, SourceManifestAdmissionBegan,
+    SourceManifestAdmitted, SourceManifestFinished, SourceManifestPageAdmitted,
+    SourceManifestReceipt, SourcePageMaterialized, SourcePrepared, SourceProgressPage,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -98,6 +99,7 @@ pub enum HostMessage {
     BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest),
     AdmitSourceManifestPage(AdmitSourceManifestPageRequest),
     FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest),
+    ReadSourceProgressPage(ReadSourceProgressPageRequest),
     PrepareSource(PrepareSourceRequest),
     MaterializeSourcePage(MaterializeSourcePageRequest),
     DeleteSource(DeleteSourceRequest),
@@ -121,6 +123,7 @@ pub enum HelperMessage {
     SourceManifestAdmissionBegan(SourceManifestAdmissionBegan),
     SourceManifestPageAdmitted(SourceManifestPageAdmitted),
     SourceManifestAdmitted(SourceManifestAdmitted),
+    SourceProgressPage(SourceProgressPage),
     SourcePrepared(SourcePrepared),
     SourcePageMaterialized(SourcePageMaterialized),
     SourceDeleted(SourceDeleted),

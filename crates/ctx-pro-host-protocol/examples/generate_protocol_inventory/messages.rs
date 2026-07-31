@@ -63,6 +63,16 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             }),
         ),
         (
+            "read_source_progress_page",
+            HostMessage::ReadSourceProgressPage(ReadSourceProgressPageRequest {
+                admission: source_manifest_admission_receipt(),
+                materializer_revision: "golden-source-materializer-v1".to_owned(),
+                progress: SourceProgressReceipt::from_progress(&[source_progress(true)])
+                    .expect("golden source progress receipt"),
+                page_index: 0,
+            }),
+        ),
+        (
             "prepare_source",
             HostMessage::PrepareSource(PrepareSourceRequest {
                 core_generation_id: "a".repeat(64),
@@ -95,7 +105,8 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             "finish_admitted_source_manifest",
             HostMessage::FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest {
                 admission: source_manifest_admission_receipt(),
-                expected_progress: vec![source_progress(true)],
+                expected_progress: SourceProgressReceipt::from_progress(&[source_progress(true)])
+                    .expect("golden source progress receipt"),
             }),
         ),
         ("blame", HostMessage::Blame(blame(None, fingerprint))),
@@ -171,9 +182,23 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             HelperMessage::SourceManifestAdmitted(SourceManifestAdmitted {
                 receipt: source_manifest_admission_receipt(),
                 materializer_revision: "golden-source-materializer-v1".to_owned(),
-                progress: Vec::new(),
+                progress: SourceProgressReceipt::from_progress(&[source_progress(true)])
+                    .expect("golden source progress receipt"),
                 replayed: false,
             }),
+        ),
+        (
+            "source_progress_page",
+            HelperMessage::SourceProgressPage(
+                SourceProgressPage::new(
+                    &SourceProgressReceipt::from_progress(&[source_progress(true)])
+                        .expect("golden source progress receipt"),
+                    0,
+                    vec![source_progress(true)],
+                    false,
+                )
+                .expect("golden source progress page"),
+            ),
         ),
         (
             "source_prepared",

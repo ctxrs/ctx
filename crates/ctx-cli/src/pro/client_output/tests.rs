@@ -5,15 +5,16 @@ use std::fs;
 use ctx_history_capture::{ingest_codex_source_backed_v0, CodexLocatorResolverV0};
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, ScannedSourceCounts,
-    SourceInventoryObservation, SourceObservation, TypedKey,
+    SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use ctx_pro_host_protocol::{
     certified_source_revision_sha256, DeleteSourceRequest, FinishAdmittedSourceManifestRequest,
-    FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest, SourceDeleted,
-    SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
-    SourceManifestFinished, SourceManifestHeader, SourceManifestPage, SourceManifestPageAdmitted,
-    SourceMessageFact, SourcePageMaterialized, SourcePrepared, SourceRecordMetadata,
+    FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
+    ReadSourceProgressPageRequest, SourceDeleted, SourceManifestAdmissionBegan,
+    SourceManifestAdmitted, SourceManifestBegan, SourceManifestFinished, SourceManifestHeader,
+    SourceManifestPage, SourceManifestPageAdmitted, SourceMessageFact, SourcePageMaterialized,
+    SourcePrepared, SourceProgressPage, SourceProgressReceipt, SourceRecordMetadata,
     SourceSessionRelationships, TransientSourceContent, TransientSourceFact,
 };
 use sha2::{Digest, Sha256};
@@ -105,6 +106,11 @@ struct FixtureConsumer {
     admission_header: Option<SourceManifestHeader>,
     admission_cursor: Option<ctx_pro_host_protocol::SourceManifestAdmissionCursor>,
     admission_replayed: Vec<bool>,
+    progress_page_requests: Vec<u32>,
+    read_progress_pages: BTreeSet<u32>,
+    progress_page_replayed: Vec<bool>,
+    admitted_progress: Option<Vec<SourceBackedProProgress>>,
+    admitted_progress_receipt: Option<SourceProgressReceipt>,
 }
 
 impl FixtureConsumer {
@@ -124,6 +130,11 @@ impl FixtureConsumer {
             admission_header: None,
             admission_cursor: None,
             admission_replayed: Vec::new(),
+            progress_page_requests: Vec::new(),
+            read_progress_pages: BTreeSet::new(),
+            progress_page_replayed: Vec::new(),
+            admitted_progress: None,
+            admitted_progress_receipt: None,
         }
     }
 
@@ -245,7 +256,8 @@ impl SourceBackedProConsumer for FixtureConsumer {
                 core_generation_id: request.manifest.core_generation_id.clone(),
                 manifest_aggregate_sha256: "b".repeat(64),
                 materializer_revision: self.materializer_revision.clone(),
-                progress: request.expected_progress.clone(),
+                progress: SourceProgressReceipt::from_progress(&request.expected_progress)
+                    .map_err(|error| anyhow!(error.message))?,
             },
             replayed: false,
         })
@@ -262,6 +274,8 @@ impl SourceBackedProAdmissionConsumer for FixtureConsumer {
             self.admission_header = Some(header.clone());
             self.admission_cursor =
                 Some(ctx_pro_host_protocol::SourceManifestAdmissionCursor::initial(header));
+            self.admitted_progress = None;
+            self.admitted_progress_receipt = None;
         }
         self.admission_replayed.push(replayed);
         Ok(SourceManifestAdmissionBegan {
@@ -303,6 +317,11 @@ impl SourceBackedProAdmissionConsumer for FixtureConsumer {
             .as_ref()
             .expect("fixture admission cursor");
         assert!(cursor.is_complete_for(header));
+        let admitted_progress = self.progress.values().cloned().collect::<Vec<_>>();
+        let progress = SourceProgressReceipt::from_progress(&admitted_progress)
+            .map_err(|error| anyhow!(error.message))?;
+        self.admitted_progress = Some(admitted_progress);
+        self.admitted_progress_receipt = Some(progress.clone());
         Ok(SourceManifestAdmitted {
             receipt: ctx_pro_host_protocol::SourceManifestAdmissionReceipt {
                 header: header.clone(),
@@ -310,9 +329,44 @@ impl SourceBackedProAdmissionConsumer for FixtureConsumer {
                 terminal_chain_sha256: cursor.next_page_previous_sha256.clone(),
             },
             materializer_revision: self.materializer_revision.clone(),
-            progress: self.progress.values().cloned().collect(),
-            replayed: false,
+            progress,
+            replayed: self.admission_replayed.last().copied().unwrap_or(false),
         })
+    }
+
+    fn read_source_progress_page(
+        &mut self,
+        request: &ReadSourceProgressPageRequest,
+    ) -> Result<SourceProgressPage> {
+        request.validate().map_err(|error| anyhow!(error.message))?;
+        let progress = self
+            .admitted_progress
+            .as_ref()
+            .ok_or_else(|| anyhow!("fixture source progress was not admitted"))?;
+        let actual = self
+            .admitted_progress_receipt
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("fixture source progress was not admitted"))?;
+        if request.progress != actual {
+            bail!("fixture source progress request has the wrong receipt");
+        }
+        let start = usize::try_from(request.page_index)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(ctx_pro_host_protocol::MAX_SOURCE_PROGRESS_PAGE_ITEMS);
+        let end = start
+            .saturating_add(ctx_pro_host_protocol::MAX_SOURCE_PROGRESS_PAGE_ITEMS)
+            .min(progress.len());
+        let replayed = !self.read_progress_pages.insert(request.page_index);
+        self.progress_page_requests.push(request.page_index);
+        self.progress_page_replayed.push(replayed);
+        SourceProgressPage::new(
+            &actual,
+            request.page_index,
+            progress[start..end].to_vec(),
+            replayed,
+        )
+        .map_err(|error| anyhow!(error.message))
     }
 
     fn finish_admitted_source_manifest(
@@ -320,12 +374,11 @@ impl SourceBackedProAdmissionConsumer for FixtureConsumer {
         request: &FinishAdmittedSourceManifestRequest,
     ) -> Result<SourceManifestFinished> {
         self.finish_called = true;
-        self.progress = request
+        let progress = self.progress.values().cloned().collect::<Vec<_>>();
+        request
             .expected_progress
-            .iter()
-            .cloned()
-            .map(|progress| (progress.source.identity().digest(), progress))
-            .collect();
+            .validate_contents(&progress, Some(&self.materializer_revision), true)
+            .map_err(|error| anyhow!(error.message))?;
         Ok(SourceManifestFinished {
             receipt: SourceBackedProReceipt {
                 core_generation_id: request.admission.header.core_generation_id.clone(),
@@ -441,10 +494,139 @@ fn paged_manifest_restart_replays_admission_and_reuses_terminal_source_progress(
     .expect("restarted paged source sync");
 
     assert_eq!(consumer.admission_replayed, [false, true]);
+    assert_eq!(
+        consumer
+            .admission_cursor
+            .as_ref()
+            .expect("resumed admission cursor")
+            .next_page_index,
+        1,
+        "restart must skip the already admitted manifest page"
+    );
+    assert_eq!(
+        consumer.progress_page_requests,
+        [0],
+        "restart must reread prior progress from page zero despite the admission cursor"
+    );
+    assert_eq!(consumer.progress_page_replayed, [false]);
     assert_eq!(restarted.reread_pages, 0);
     assert_eq!(restarted.reread_records, 0);
     assert!(restarted_provider.requests.is_empty());
     assert_eq!(restarted.receipt, first_receipt);
+
+    let mut replay_provider = fixture.provider();
+    let replayed = sync_source_backed_pro_feed_paged(
+        fixture.manifest(),
+        &fixture.generation_manifest,
+        &mut replay_provider,
+        &mut consumer,
+    )
+    .expect("replayed progress-page sync");
+    assert_eq!(consumer.admission_replayed, [false, true, true]);
+    assert_eq!(consumer.progress_page_requests, [0, 0]);
+    assert_eq!(consumer.progress_page_replayed, [false, true]);
+    assert!(replay_provider.requests.is_empty());
+    assert_eq!(replayed.receipt, first_receipt);
+}
+
+#[test]
+fn full_5863_source_lifecycle_pages_progress_through_activation_replay_and_status() {
+    const SOURCE_COUNT: usize = 5_863;
+    let fixture = public_codex_fixture();
+    let materializer_revision = format!("fixture-materializer-v1-{}", "x".repeat(4 * 1024));
+    let mut sources = (0..u32::try_from(SOURCE_COUNT).expect("source count fits u32"))
+        .map(synthetic_source_at)
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|source| source.observation().source().identity().digest());
+    let progress = sources
+        .iter()
+        .map(|source| SourceBackedProProgress {
+            source: source.observation().source().clone(),
+            source_epoch: 1,
+            certified_revision_sha256: certified_source_revision_sha256(source)
+                .expect("synthetic certified revision"),
+            frontier: source.frontier().cloned(),
+            materializer_revision: materializer_revision.clone(),
+            terminal: true,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        serde_json::to_vec(&progress)
+            .expect("legacy progress encoding")
+            .len()
+            > ctx_pro_host_protocol::MAX_SOURCE_CONTROL_WIRE_BYTES
+    );
+    let manifest = SourceBackedProManifest::new(fixture.generation_id.clone(), sources, Vec::new())
+        .expect("synthetic source manifest");
+    let expected_progress_pages =
+        SOURCE_COUNT.div_ceil(ctx_pro_host_protocol::MAX_SOURCE_PROGRESS_PAGE_ITEMS);
+    let expected_page_indexes =
+        (0..u32::try_from(expected_progress_pages).unwrap()).collect::<Vec<_>>();
+    let mut consumer = FixtureConsumer::new(progress);
+    consumer.materializer_revision = materializer_revision;
+    let mut provider = FixtureProvider::default();
+
+    let first = sync_source_backed_pro_feed_paged(
+        manifest.clone(),
+        &fixture.generation_manifest,
+        &mut provider,
+        &mut consumer,
+    )
+    .expect("full synthetic source lifecycle");
+    assert!(consumer.finish_called);
+    assert_eq!(first.reread_pages, 0);
+    assert_eq!(first.reread_records, 0);
+    assert_eq!(consumer.progress_page_requests, expected_page_indexes);
+    assert!(consumer
+        .progress_page_replayed
+        .iter()
+        .all(|replayed| !replayed));
+    first.receipt.validate().expect("compact final receipt");
+    let final_response = SourceManifestFinished {
+        receipt: first.receipt.clone(),
+        replayed: false,
+    };
+    final_response.validate().expect("bounded final response");
+    let status = ctx_pro_host_protocol::StatusResult {
+        state: ctx_pro_host_protocol::GraphState::Ready,
+        authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
+        source_receipt: Some(first.receipt.clone()),
+    };
+    status.validate().expect("bounded ready status");
+
+    consumer.finish_called = false;
+    let mut replay_provider = FixtureProvider::default();
+    let replay = sync_source_backed_pro_feed_paged(
+        manifest,
+        &fixture.generation_manifest,
+        &mut replay_provider,
+        &mut consumer,
+    )
+    .expect("full synthetic source lifecycle replay");
+    assert!(consumer.finish_called);
+    assert_eq!(consumer.admission_replayed, [false, true]);
+    assert_eq!(
+        consumer
+            .admission_cursor
+            .as_ref()
+            .expect("complete resumed admission")
+            .next_page_index,
+        consumer
+            .admission_header
+            .as_ref()
+            .expect("synthetic admission header")
+            .page_count
+    );
+    assert_eq!(
+        consumer.progress_page_requests[expected_progress_pages..],
+        expected_page_indexes
+    );
+    assert!(consumer.progress_page_replayed[expected_progress_pages..]
+        .iter()
+        .all(|replayed| *replayed));
+    assert_eq!(replay.reread_pages, 0);
+    assert!(replay_provider.requests.is_empty());
+    assert_eq!(replay.receipt, first.receipt);
 }
 
 #[test]
@@ -573,7 +755,14 @@ fn source_backed_pro_rewrite_invalidates_old_epoch_before_reread() {
     assert!(!consumer
         .durable_ids_for(fixture.source.observation().source())
         .contains(&fixture.records[0].event_id.digest()));
-    assert_eq!(report.receipt.progress[0].source_epoch, 12);
+    assert_eq!(
+        consumer
+            .progress
+            .get(&source_id)
+            .expect("rewritten source progress")
+            .source_epoch,
+        12
+    );
 }
 
 #[test]
@@ -785,4 +974,44 @@ fn rewritten_certificate(base: &CertifiedSource) -> CertifiedSource {
         Some(frontier),
     )
     .unwrap()
+}
+
+fn synthetic_source_at(index: u32) -> CertifiedSource {
+    let mut lineage = [0_u8; 32];
+    lineage[..4].copy_from_slice(&index.to_be_bytes());
+    let source = SourceKey::derive(
+        "fixture",
+        "fixture_jsonl",
+        "fixture-v1",
+        1,
+        SourceAnchor::CatalogLineage(lineage),
+    )
+    .expect("synthetic source key");
+    let observation =
+        SourceObservation::new(source, "fixture-revision-v1", index.to_be_bytes().to_vec())
+            .expect("synthetic source observation");
+    let mut digest = [9_u8; 32];
+    digest[..4].copy_from_slice(&index.to_be_bytes());
+    let frontier = SourceFrontier::new(
+        "fixture-frontier-v1",
+        TypedKey::U64(u64::from(index) + 1),
+        10,
+        digest,
+    )
+    .expect("synthetic source frontier");
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "fixture-parser-v1",
+        digest,
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 10,
+            ..ScannedSourceCounts::default()
+        },
+        Some(frontier),
+    )
+    .expect("synthetic certified source")
 }

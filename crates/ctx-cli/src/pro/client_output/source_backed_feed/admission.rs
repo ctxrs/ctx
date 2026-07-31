@@ -62,7 +62,8 @@ where
             self.inner,
             &FinishAdmittedSourceManifestRequest {
                 admission: self.admission.clone(),
-                expected_progress: request.expected_progress.clone(),
+                expected_progress: SourceProgressReceipt::from_progress(&request.expected_progress)
+                    .map_err(|error| anyhow!("invalid_request: {}", error.message))?,
             },
         )
     }
@@ -179,6 +180,9 @@ where
         bail!("invalid_response: helper did not admit the exact source manifest");
     }
     let admitted = consumer.finish_source_manifest_admission(&header)?;
+    admitted
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
     let expected_receipt = SourceManifestAdmissionReceipt {
         header: header.clone(),
         page_count: header.page_count,
@@ -187,13 +191,37 @@ where
     if admitted.receipt != expected_receipt {
         bail!("invalid_response: helper admitted the wrong source manifest identity");
     }
+    let progress_capacity = admitted.progress.len();
+    let mut progress = Vec::with_capacity(progress_capacity);
+    for page_index in 0..admitted.progress.page_count {
+        let request = ReadSourceProgressPageRequest {
+            admission: admitted.receipt.clone(),
+            materializer_revision: admitted.materializer_revision.clone(),
+            progress: admitted.progress.clone(),
+            page_index,
+        };
+        request
+            .validate()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        let page = consumer.read_source_progress_page(&request)?;
+        page.validate_for(&admitted.progress)
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+        if page.page_index != page_index {
+            bail!("invalid_response: helper returned the wrong source progress page");
+        }
+        progress.extend(page.progress);
+    }
+    admitted
+        .progress
+        .validate_contents(&progress, None, false)
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
     let expected_aggregate = header.aggregate_sha256.clone();
     let mut admitted_consumer = AdmittedSourceBackedConsumer {
         inner: consumer,
         header,
         admission: admitted.receipt,
         materializer_revision: admitted.materializer_revision,
-        progress: admitted.progress,
+        progress,
     };
     let report = sync_source_backed_pro_feed(manifest, provider, &mut admitted_consumer)?;
     if report.receipt.manifest_aggregate_sha256 != expected_aggregate {
