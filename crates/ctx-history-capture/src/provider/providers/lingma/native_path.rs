@@ -1,5 +1,5 @@
 use ctx_history_core::EventType;
-use rusqlite::Connection;
+use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +24,73 @@ pub(crate) use source_backed::{
 const CORE_PAGE_LOOKAHEAD_ROWS: usize = 65;
 const CORE_PAGE_MAX_SOURCE_BYTES: usize = 7 * 1024 * 1024;
 const CORE_HASH_DOMAIN: &[u8] = b"ctx-lingma-nativepath-core-prefix-v1\0";
+const LINGMA_SET_READ_ROWS: usize = 256;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LingmaQueryCounters {
+    pub(crate) candidate_set_reads: u64,
+    pub(crate) raw_row_set_reads: u64,
+    pub(crate) raw_rows_read: u64,
+    pub(crate) identity_set_reads: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LINGMA_QUERY_COUNTERS: std::cell::Cell<LingmaQueryCounters> =
+        const { std::cell::Cell::new(LingmaQueryCounters {
+            candidate_set_reads: 0,
+            raw_row_set_reads: 0,
+            raw_rows_read: 0,
+            identity_set_reads: 0,
+        }) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_lingma_query_counters() {
+    LINGMA_QUERY_COUNTERS.set(LingmaQueryCounters::default());
+}
+
+#[cfg(test)]
+pub(crate) fn lingma_query_counters() -> LingmaQueryCounters {
+    LINGMA_QUERY_COUNTERS.get()
+}
+
+fn record_candidate_set_read() {
+    #[cfg(test)]
+    LINGMA_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.candidate_set_reads += 1;
+        slot.set(counters);
+    });
+}
+
+fn record_raw_row_set_read() {
+    #[cfg(test)]
+    LINGMA_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.raw_row_set_reads += 1;
+        slot.set(counters);
+    });
+}
+
+fn record_raw_row_read() {
+    #[cfg(test)]
+    LINGMA_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.raw_rows_read += 1;
+        slot.set(counters);
+    });
+}
+
+fn record_identity_set_read() {
+    #[cfg(test)]
+    LINGMA_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.identity_set_reads += 1;
+        slot.set(counters);
+    });
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SqliteEncoding {
@@ -111,6 +178,7 @@ fn load_candidates(
     after_rowid: Option<i64>,
     through_rowid: Option<i64>,
 ) -> Result<Vec<Candidate>> {
+    record_candidate_set_read();
     let after = if after_rowid.is_some() {
         "c.rowid > ?1"
     } else {
@@ -181,30 +249,71 @@ struct RawRow {
     extra: Option<Vec<u8>>,
 }
 
-fn load_raw_row(conn: &Connection, rowid: i64) -> Result<RawRow> {
-    conn.query_row(
-        "select c.rowid, cast(cast(c.session_id as text) as blob), \
-                cast(cast(c.request_id as text) as blob), \
-                cast(cast(c.chat_prompt as text) as blob), \
-                cast(cast(c.summary as text) as blob), \
-                cast(cast(c.error_result as text) as blob), \
-                cast(c.gmt_create as integer), cast(cast(c.extra as text) as blob) \
-         from chat_record c where c.rowid = ?1",
-        [rowid],
-        |row| {
-            Ok(RawRow {
-                rowid: row.get(0)?,
-                session_id: row.get(1)?,
-                request_id: row.get(2)?,
-                chat_prompt: row.get(3)?,
-                summary: row.get(4)?,
-                error_result: row.get(5)?,
-                gmt_create: row.get(6)?,
-                extra: row.get(7)?,
-            })
-        },
-    )
-    .map_err(CaptureError::from)
+fn visit_raw_rows<E>(
+    conn: &Connection,
+    rowids: &[i64],
+    mut visit: impl FnMut(RawRow) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    E: From<CaptureError>,
+{
+    if rowids.is_empty() {
+        return Ok(());
+    }
+    if rowids.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(E::from(CaptureError::SystemInvariant(
+            "Lingma raw-row set must be strictly ordered",
+        )));
+    }
+
+    for rowids in rowids.chunks(LINGMA_SET_READ_ROWS) {
+        record_raw_row_set_read();
+        let placeholders = std::iter::repeat_n("?", rowids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "select c.rowid, cast(cast(c.session_id as text) as blob), \
+                    cast(cast(c.request_id as text) as blob), \
+                    cast(cast(c.chat_prompt as text) as blob), \
+                    cast(cast(c.summary as text) as blob), \
+                    cast(cast(c.error_result as text) as blob), \
+                    cast(c.gmt_create as integer), cast(cast(c.extra as text) as blob) \
+               from chat_record c \
+              where c.rowid in ({placeholders}) \
+              order by c.rowid"
+        );
+        let parameters = rowids.iter().copied().map(SqlValue::Integer);
+        let mut statement = conn.prepare(&sql).map_err(CaptureError::from)?;
+        let mut rows = statement
+            .query(params_from_iter(parameters))
+            .map_err(CaptureError::from)?;
+        let mut expected = rowids.iter().copied();
+        while let Some(row) = rows.next().map_err(CaptureError::from)? {
+            let raw = RawRow {
+                rowid: row.get(0).map_err(CaptureError::from)?,
+                session_id: row.get(1).map_err(CaptureError::from)?,
+                request_id: row.get(2).map_err(CaptureError::from)?,
+                chat_prompt: row.get(3).map_err(CaptureError::from)?,
+                summary: row.get(4).map_err(CaptureError::from)?,
+                error_result: row.get(5).map_err(CaptureError::from)?,
+                gmt_create: row.get(6).map_err(CaptureError::from)?,
+                extra: row.get(7).map_err(CaptureError::from)?,
+            };
+            if expected.next() != Some(raw.rowid) {
+                return Err(E::from(CaptureError::from(
+                    rusqlite::Error::QueryReturnedNoRows,
+                )));
+            }
+            record_raw_row_read();
+            visit(raw)?;
+        }
+        if expected.next().is_some() {
+            return Err(E::from(CaptureError::from(
+                rusqlite::Error::QueryReturnedNoRows,
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn decode_raw_row(row: RawRow, encoding: SqliteEncoding) -> std::result::Result<LingmaRow, i64> {

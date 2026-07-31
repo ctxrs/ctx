@@ -1,11 +1,143 @@
 use std::{
+    cell::RefCell,
     fs,
     io::{Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
 use super::*;
+
+std::thread_local! {
+    static INVENTORY_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static INVENTORY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static GROUP_DIGEST_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static INVENTORY_DIGEST_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACTIVE_LEAF_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PEAK_LEAF_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACTIVE_DIRECTORY_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PEAK_DIRECTORY_HANDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EVENT_FILE_IO_COUNTER: RefCell<Option<EventFileIoCounter>> = const { RefCell::new(None) };
+}
+
+#[derive(Debug, Default)]
+pub(super) struct EventFileIoAtomicCounts {
+    body_reads: AtomicUsize,
+    leaf_lookups: AtomicUsize,
+}
+
+pub(super) type EventFileIoCounter = Arc<EventFileIoAtomicCounts>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct EventFileIoCounts {
+    pub inventory_opens: usize,
+    pub inventory_walks: usize,
+    pub body_reads: usize,
+    pub leaf_lookups: usize,
+    pub group_digest_builds: usize,
+    pub inventory_digest_builds: usize,
+    pub peak_transient_leaf_handles: usize,
+    pub peak_transient_directory_handles: usize,
+    pub active_transient_leaf_handles: usize,
+    pub active_transient_directory_handles: usize,
+}
+
+pub(super) fn note_inventory_open() {
+    INVENTORY_OPENS.with(|value| value.set(value.get().saturating_add(1)));
+}
+
+pub(super) fn note_inventory_walk() {
+    INVENTORY_WALKS.with(|value| value.set(value.get().saturating_add(1)));
+}
+
+pub(super) fn current_event_file_io_counter() -> Option<EventFileIoCounter> {
+    EVENT_FILE_IO_COUNTER.with(|counter| counter.borrow().clone())
+}
+
+pub(super) fn note_body_read(counter: Option<&EventFileIoCounter>) {
+    let counter = current_event_file_io_counter().or_else(|| counter.cloned());
+    if let Some(counter) = counter {
+        counter.body_reads.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(super) fn note_leaf_lookup(counter: Option<&EventFileIoCounter>) {
+    let counter = current_event_file_io_counter().or_else(|| counter.cloned());
+    if let Some(counter) = counter {
+        counter.leaf_lookups.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(super) fn note_group_digest_build() {
+    GROUP_DIGEST_BUILDS.with(|value| value.set(value.get().saturating_add(1)));
+}
+
+pub(super) fn note_inventory_digest_build() {
+    INVENTORY_DIGEST_BUILDS.with(|value| value.set(value.get().saturating_add(1)));
+}
+
+pub(super) fn note_handle_opened(kind: TransientHandleKind) {
+    let (active, peak) = match kind {
+        TransientHandleKind::Leaf => (&ACTIVE_LEAF_HANDLES, &PEAK_LEAF_HANDLES),
+        TransientHandleKind::Directory => (&ACTIVE_DIRECTORY_HANDLES, &PEAK_DIRECTORY_HANDLES),
+    };
+    active.with(|active| {
+        let next = active.get().saturating_add(1);
+        active.set(next);
+        peak.with(|peak| peak.set(peak.get().max(next)));
+    });
+}
+
+pub(super) fn note_handle_closed(kind: TransientHandleKind) {
+    let active = match kind {
+        TransientHandleKind::Leaf => &ACTIVE_LEAF_HANDLES,
+        TransientHandleKind::Directory => &ACTIVE_DIRECTORY_HANDLES,
+    };
+    active.with(|active| active.set(active.get().saturating_sub(1)));
+}
+
+pub(crate) fn count_event_file_io<T>(operation: impl FnOnce() -> T) -> (T, EventFileIoCounts) {
+    struct CounterScope(Option<EventFileIoCounter>);
+
+    impl Drop for CounterScope {
+        fn drop(&mut self) {
+            EVENT_FILE_IO_COUNTER.with(|counter| {
+                counter.replace(self.0.take());
+            });
+        }
+    }
+
+    let shared = Arc::new(EventFileIoAtomicCounts::default());
+    let previous = EVENT_FILE_IO_COUNTER.with(|counter| counter.replace(Some(Arc::clone(&shared))));
+    let scope = CounterScope(previous);
+    INVENTORY_OPENS.with(|value| value.set(0));
+    INVENTORY_WALKS.with(|value| value.set(0));
+    GROUP_DIGEST_BUILDS.with(|value| value.set(0));
+    INVENTORY_DIGEST_BUILDS.with(|value| value.set(0));
+    ACTIVE_LEAF_HANDLES.with(|value| value.set(0));
+    PEAK_LEAF_HANDLES.with(|value| value.set(0));
+    ACTIVE_DIRECTORY_HANDLES.with(|value| value.set(0));
+    PEAK_DIRECTORY_HANDLES.with(|value| value.set(0));
+    let output = operation();
+    drop(scope);
+    let counts = EventFileIoCounts {
+        inventory_opens: INVENTORY_OPENS.with(|value| value.replace(0)),
+        inventory_walks: INVENTORY_WALKS.with(|value| value.replace(0)),
+        body_reads: shared.body_reads.load(Ordering::Relaxed),
+        leaf_lookups: shared.leaf_lookups.load(Ordering::Relaxed),
+        group_digest_builds: GROUP_DIGEST_BUILDS.with(|value| value.replace(0)),
+        inventory_digest_builds: INVENTORY_DIGEST_BUILDS.with(|value| value.replace(0)),
+        peak_transient_leaf_handles: PEAK_LEAF_HANDLES.with(|value| value.replace(0)),
+        peak_transient_directory_handles: PEAK_DIRECTORY_HANDLES.with(|value| value.replace(0)),
+        active_transient_leaf_handles: ACTIVE_LEAF_HANDLES.with(|value| value.replace(0)),
+        active_transient_directory_handles: ACTIVE_DIRECTORY_HANDLES.with(|value| value.replace(0)),
+    };
+    (output, counts)
+}
 
 fn limits() -> EventFileLimits {
     EventFileLimits {
@@ -34,6 +166,10 @@ fn classify(path: &Path) -> Result<Option<EventFileCoordinates>> {
         .to_str()
         .unwrap()
         .to_owned();
+    let mut group_instance = PathBuf::new();
+    for component in components.iter().take(group_index.saturating_add(1)) {
+        group_instance.push(component.as_os_str());
+    }
     let relative_file_key = components[group_index + 1..]
         .iter()
         .map(|component| component.as_os_str().to_str().unwrap())
@@ -41,6 +177,7 @@ fn classify(path: &Path) -> Result<Option<EventFileCoordinates>> {
         .join("/");
     Ok(Some(EventFileCoordinates {
         group_key,
+        group_instance_key: group_instance.to_string_lossy().into_owned(),
         relative_file_key,
     }))
 }
@@ -70,6 +207,7 @@ fn directory_and_exact_file_inventories_are_sorted_and_body_free() {
         vec!["conversation-a", "conversation-b"]
     );
     let first = directory.groups().next().unwrap();
+    assert_eq!(first.ordinal(), 0);
     assert_eq!(
         first
             .leaves()
@@ -98,7 +236,9 @@ fn directory_and_exact_file_inventories_are_sorted_and_body_free() {
     assert_eq!(counts.body_reads, 0);
     assert_eq!(counts.active_transient_leaf_handles, 0);
     assert_eq!(counts.active_transient_directory_handles, 0);
-    let (bytes, counts) = count_event_file_io(|| group.read_leaf(&group.leaves()[0]).unwrap());
+    assert_eq!(group.leaves()[0].group_ordinal(), 0);
+    assert_eq!(group.leaves()[0].leaf_ordinal(), 0);
+    let (bytes, counts) = count_event_file_io(|| group.read_leaf_at(0).unwrap());
     assert_eq!(bytes, b"b");
     assert_eq!(counts.body_reads, 1);
     assert_eq!(counts.peak_transient_leaf_handles, 1);
@@ -133,13 +273,20 @@ fn two_thousand_leaf_inventory_has_a_constant_descriptor_working_set() {
         assert_eq!(inventory.retained_authority_handles(), 1);
         let group = inventory.groups().next().expect("large group");
         assert_eq!(group.leaves().len(), LEAF_COUNT);
+        let group_digest = group.observation_digest();
+        assert_eq!(group.observation_digest(), group_digest);
+        let inventory_digest = inventory.observation_digest();
+        assert_eq!(inventory.observation_digest(), inventory_digest);
         inventory
             .revalidate_all()
             .expect("metadata-only terminal inventory");
     });
 
     assert_eq!(counts.inventory_opens, 1);
+    assert_eq!(counts.inventory_walks, 2);
     assert_eq!(counts.body_reads, 0);
+    assert_eq!(counts.group_digest_builds, 2);
+    assert_eq!(counts.inventory_digest_builds, 1);
     assert_eq!(counts.peak_transient_leaf_handles, 1);
     assert!(counts.peak_transient_directory_handles <= 2);
     assert_eq!(counts.active_transient_leaf_handles, 0);
@@ -321,7 +468,7 @@ fn changed_leaf_is_rejected_before_reopened_body_read() {
     std::thread::sleep(Duration::from_millis(2));
     fs::write(&event, b"changed").unwrap();
 
-    let (result, counts) = count_event_file_io(|| group.read_leaf(&group.leaves()[0]));
+    let (result, counts) = count_event_file_io(|| group.read_leaf_at(0));
     assert!(matches!(
         result,
         Err(EventFileInventoryError::SourceChanged { .. })
@@ -405,5 +552,23 @@ fn exact_selection_rejects_a_non_event_file_instead_of_claiming_empty_authority(
     assert!(matches!(
         EventFileInventory::open(&selected, limits(), classify),
         Err(EventFileInventoryError::NoAcceptedExactFile { .. })
+    ));
+}
+
+#[test]
+fn duplicate_group_keys_from_distinct_physical_instances_fail_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("duplicate-groups");
+    let first = root.join("left").join("conversation-same");
+    let second = root.join("right").join("conversation-same");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    fs::write(first.join("first.json"), b"{}").unwrap();
+    fs::write(second.join("second.json"), b"{}").unwrap();
+
+    assert!(matches!(
+        EventFileInventory::open(&root, limits(), classify),
+        Err(EventFileInventoryError::DuplicateGroupInstance { group_key })
+            if group_key == "conversation-same"
     ));
 }

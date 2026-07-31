@@ -8,7 +8,7 @@ use ctx_history_relational::RelationalProjectionStatus;
 use serde_json::{json, Value};
 
 use crate::{
-    commands::import::load_explicit_source_catalog_authority,
+    commands::import::{load_explicit_source_catalog_authority, ExplicitSourceCatalogAuthority},
     compact_json,
     config::AppConfig,
     source_sql::{sql_compatibility_path, SqlCompatibility},
@@ -16,10 +16,11 @@ use crate::{
 
 use super::{
     paths_status::{
-        daemon_jobs_path, daemon_report_with_disabled_status,
+        daemon_jobs_path, daemon_report_with_disabled_status, daemon_semantic_job_path,
         daemon_source_backed_refresh_job_path, read_daemon_job_status,
     },
     source_backed_refresh_coordinator::source_backed_lexical_artifact_is_uncommitted_schema_only,
+    source_backed_relational_catch_up::read_status_json as read_relational_catch_up_status,
     vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
 };
 
@@ -60,9 +61,14 @@ pub(crate) fn source_epoch_status_report(
         index.as_ref(),
     );
     let resolver = resolver_report(generation_id.as_deref(), refresh_job.as_ref(), &daemon);
-    let semantic = semantic_report(data_root, config, index.as_ref());
-    let (relational, relational_counts) =
+    let mut semantic = semantic_report(data_root, config, index.as_ref());
+    attach_catch_up_status(
+        &mut semantic,
+        read_daemon_job_status(&daemon_semantic_job_path(data_root)),
+    );
+    let (mut relational, relational_counts) =
         relational_report(data_root, index.as_ref(), &current_policy_hash);
+    attach_catch_up_status(&mut relational, read_relational_catch_up_status(data_root));
     let pro_projection = pro_projection_report(data_root, generation_id.as_deref());
     let refresh = refresh_report(refresh_job.as_ref(), generation_id.as_deref(), &daemon);
 
@@ -101,6 +107,12 @@ pub(crate) fn source_epoch_status_report(
             "read_only": true,
         })),
     })
+}
+
+fn attach_catch_up_status(report: &mut Value, status: Option<Value>) {
+    if let Some(status) = status {
+        report["catch_up"] = status;
+    }
 }
 
 fn source_daemon_report(data_root: &Path) -> Value {
@@ -300,9 +312,25 @@ fn catalog_report(
             }))
         }
     };
-    let published_authority = refresh_job
+    let job_published_authority = refresh_job
         .and_then(|job| job.get("published_explicit_source_catalog"))
         .cloned();
+    let receipt_published_authority = refresh_job
+        .and_then(|job| job.get("receipt"))
+        .and_then(|receipt| receipt.get("published_explicit_source_catalog"))
+        .cloned();
+    let publication_verified = job_published_authority
+        .as_ref()
+        .zip(receipt_published_authority.as_ref())
+        .and_then(|(job, receipt)| {
+            ExplicitSourceCatalogAuthority::from_json(job)
+                .ok()
+                .zip(ExplicitSourceCatalogAuthority::from_json(receipt).ok())
+        })
+        .is_some_and(|(job, receipt)| job == receipt);
+    let published_authority = publication_verified
+        .then_some(job_published_authority)
+        .flatten();
     let published_generation = refresh_job
         .and_then(|job| job.get("published_generation"))
         .and_then(Value::as_str);
@@ -322,6 +350,8 @@ fn catalog_report(
         ("ready", None)
     } else if active_request || generation_id.is_none() {
         ("pending", Some("catalog_publication_pending"))
+    } else if !publication_verified {
+        ("unavailable", Some("catalog_publication_unverified"))
     } else if generation_mismatch {
         ("stale", Some("catalog_generation_mismatch"))
     } else if authority_mismatch {
@@ -334,6 +364,7 @@ fn catalog_report(
         "reason": reason,
         "authority": authority,
         "published_authority": published_authority,
+        "published_authority_present": publication_verified,
         "published_generation": published_generation,
         "generation_id": generation_id,
         "generation_matches": ready,

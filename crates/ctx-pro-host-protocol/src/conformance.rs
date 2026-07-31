@@ -44,8 +44,9 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::BeginSourceManifestAdmission(_) => "begin_source_manifest_admission",
         HostMessage::AdmitSourceManifestPage(_) => "admit_source_manifest_page",
         HostMessage::FinishSourceManifestAdmission(_) => "finish_source_manifest_admission",
+        HostMessage::ReadSourceProgressPage(_) => "read_source_progress_page",
         HostMessage::PrepareSource(_) => "prepare_source",
-        HostMessage::MaterializeSourcePage(_) => "materialize_source_page",
+        HostMessage::MaterializeSourcePages(_) => "materialize_source_pages",
         HostMessage::DeleteSource(_) => "delete_source",
         HostMessage::FinishAdmittedSourceManifest(_) => "finish_admitted_source_manifest",
         HostMessage::Blame(_) => "blame",
@@ -62,8 +63,9 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::SourceManifestAdmissionBegan(_) => "source_manifest_admission_began",
         HelperMessage::SourceManifestPageAdmitted(_) => "source_manifest_page_admitted",
         HelperMessage::SourceManifestAdmitted(_) => "source_manifest_admitted",
+        HelperMessage::SourceProgressPage(_) => "source_progress_page",
         HelperMessage::SourcePrepared(_) => "source_prepared",
-        HelperMessage::SourcePageMaterialized(_) => "source_page_materialized",
+        HelperMessage::SourcePagesMaterialized(_) => "source_pages_materialized",
         HelperMessage::SourceDeleted(_) => "source_deleted",
         HelperMessage::SourceManifestFinished(_) => "source_manifest_finished",
         HelperMessage::Blame(_) => "blame",
@@ -76,8 +78,9 @@ fn validate_host(message: &HostMessage) {
         HostMessage::BeginSourceManifestAdmission(request) => request.validate().unwrap(),
         HostMessage::AdmitSourceManifestPage(request) => request.validate().unwrap(),
         HostMessage::FinishSourceManifestAdmission(request) => request.validate().unwrap(),
+        HostMessage::ReadSourceProgressPage(request) => request.validate().unwrap(),
         HostMessage::PrepareSource(request) => request.validate().unwrap(),
-        HostMessage::MaterializeSourcePage(request) => request.validate().unwrap(),
+        HostMessage::MaterializeSourcePages(request) => request.validate().unwrap(),
         HostMessage::DeleteSource(request) => request.validate().unwrap(),
         HostMessage::FinishAdmittedSourceManifest(request) => request.validate().unwrap(),
         HostMessage::Blame(request) => request.validate().unwrap(),
@@ -94,8 +97,16 @@ fn validate_helper(message: &HelperMessage) {
         HelperMessage::Status(result) => result.validate().unwrap(),
         HelperMessage::Blame(result) => result.validate().unwrap(),
         HelperMessage::SourceManifestAdmitted(result) => result.validate().unwrap(),
+        HelperMessage::SourceProgressPage(result) => {
+            result
+                .validate_for(
+                    &SourceProgressReceipt::from_progress(&result.progress)
+                        .expect("golden source progress receipt"),
+                )
+                .unwrap();
+        }
         HelperMessage::SourcePrepared(result) => result.validate().unwrap(),
-        HelperMessage::SourcePageMaterialized(result) => result.validate().unwrap(),
+        HelperMessage::SourcePagesMaterialized(result) => result.validate().unwrap(),
         HelperMessage::SourceDeleted(result) => result.validate().unwrap(),
         HelperMessage::SourceManifestFinished(result) => result.validate().unwrap(),
         HelperMessage::Hello(_)
@@ -167,9 +178,10 @@ fn inventory_freezes_current_capabilities_and_message_kinds() {
             "finish_admitted_source_manifest",
             "finish_source_manifest_admission",
             "hello",
-            "materialize_source_page",
+            "materialize_source_pages",
             "prepare_graph_key_deletion",
             "prepare_source",
+            "read_source_progress_page",
             "status",
         ])
     );
@@ -187,8 +199,9 @@ fn inventory_freezes_current_capabilities_and_message_kinds() {
             "source_manifest_admitted",
             "source_manifest_finished",
             "source_manifest_page_admitted",
-            "source_page_materialized",
+            "source_pages_materialized",
             "source_prepared",
+            "source_progress_page",
             "status",
         ])
     );
@@ -251,19 +264,21 @@ fn source_manifest_admission_paging_and_transient_records_are_frozen() {
         "begin_source_manifest_admission",
         "admit_source_manifest_page",
         "finish_source_manifest_admission",
+        "read_source_progress_page",
         "finish_admitted_source_manifest",
     ] {
         assert!(host.contains_key(name), "missing {name}");
     }
-    let encoded = host["materialize_source_page"].as_str().unwrap();
+    let encoded = host["materialize_source_pages"].as_str().unwrap();
     let envelope =
         read_frame::<_, HostEnvelope>(&mut Cursor::new(unhex(encoded))).expect("source page");
-    let HostMessage::MaterializeSourcePage(request) = envelope.message else {
-        panic!("materialize source page fixture kind");
+    let HostMessage::MaterializeSourcePages(request) = envelope.message else {
+        panic!("materialize source pages fixture kind");
     };
     request.validate().unwrap();
-    assert_eq!(request.records.len(), 1);
-    assert_eq!(request.records[0].facts.len(), 3);
+    assert_eq!(request.pages.len(), 1);
+    assert_eq!(request.pages[0].records.len(), 1);
+    assert_eq!(request.pages[0].records[0].facts.len(), 3);
 }
 
 #[test]

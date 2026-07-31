@@ -33,9 +33,7 @@ pub(super) fn device_sign_in(
         Hint {
             text: "Open the sign-in link and enter the code.",
         },
-        Some(Action {
-            command: verification_uri,
-        }),
+        None,
     ));
     document
 }

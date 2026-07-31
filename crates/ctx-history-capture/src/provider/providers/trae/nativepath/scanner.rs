@@ -1,12 +1,14 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     ops::Range,
     path::{Component, Path, PathBuf},
+    sync::Mutex,
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{CaptureProvider, EventRole, EventType};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde::de::IgnoredAny;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -24,6 +26,7 @@ use crate::{
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderImportFailure, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -71,14 +74,23 @@ pub(super) struct TraeSourceAuthority {
     pub(super) workspace_id: String,
     pub(super) workspace_folder: Option<String>,
     pub(super) schema_evidence: Vec<u8>,
+    pub(super) logical_fingerprint: [u8; 32],
+    observed_keys: Vec<Option<TraeObservedKey>>,
     observed_at: DateTime<Utc>,
+}
+
+struct TraeObservedKey {
+    value_type: String,
+    retained_bytes: i64,
+    value: Option<Vec<u8>>,
 }
 
 pub(super) struct TraeSqliteDatabase {
     parent: ProviderSourceDirectory,
-    authority: SqliteSourceDirectoryAuthority,
+    _authority: SqliteSourceDirectoryAuthority,
     database_name: OsString,
     evidence: SqliteSourceEvidence,
+    snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
 }
 
 impl TraeSqliteDatabase {
@@ -112,17 +124,12 @@ impl TraeSqliteDatabase {
             .connection()
             .map_err(|error| trae_sqlite_source_error(path, error))
             .and_then(query);
-        let finished = snapshot
-            .finish()
-            .map_err(|error| trae_sqlite_source_error(path, error))?;
-        if finished != evidence {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
         let database = Self {
             parent,
-            authority,
+            _authority: authority,
             database_name,
             evidence,
+            snapshot: Mutex::new(Some(snapshot)),
         };
         database.revalidate()?;
         Ok((database, result?))
@@ -134,26 +141,7 @@ impl TraeSqliteDatabase {
         path: &Path,
         query: impl FnOnce(&Connection) -> Result<T>,
     ) -> Result<T> {
-        self.revalidate()?;
-        let snapshot =
-            open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
-                .map_err(|error| trae_sqlite_source_error(path, error))?;
-        let result = if snapshot.evidence() == &self.evidence {
-            snapshot
-                .connection()
-                .map_err(|error| trae_sqlite_source_error(path, error))
-                .and_then(query)
-        } else {
-            Err(CaptureError::SourceChangedDuringCapture)
-        };
-        let finished = snapshot
-            .finish()
-            .map_err(|error| trae_sqlite_source_error(path, error))?;
-        self.revalidate()?;
-        if finished != self.evidence {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        result
+        self.read_provider(path, query)
     }
 
     pub(super) fn read_provider<T, E>(
@@ -165,24 +153,27 @@ impl TraeSqliteDatabase {
         E: From<CaptureError>,
     {
         self.revalidate().map_err(E::from)?;
-        let snapshot =
-            open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
-                .map_err(|error| E::from(trae_sqlite_source_error(path, error)))?;
+        let retained = self.snapshot.lock().map_err(|_| {
+            E::from(CaptureError::ProviderSource {
+                provider: CaptureProvider::Trae.as_str(),
+                path: path.to_path_buf(),
+                kind: crate::ProviderSourceFailureKind::SourceDatabase,
+                detail: "Trae SQLite snapshot lock was poisoned".to_owned(),
+            })
+        })?;
+        let snapshot = retained
+            .as_ref()
+            .ok_or_else(|| E::from(CaptureError::SourceChangedDuringCapture))?;
+        snapshot
+            .revalidate()
+            .map_err(|error| E::from(trae_sqlite_source_error(path, error)))?;
         if snapshot.evidence() != &self.evidence {
             return Err(E::from(CaptureError::SourceChangedDuringCapture));
         }
-        let result = snapshot
+        snapshot
             .connection()
             .map_err(|error| E::from(trae_sqlite_source_error(path, error)))
-            .and_then(query);
-        let finished = snapshot
-            .finish()
-            .map_err(|error| E::from(trae_sqlite_source_error(path, error)))?;
-        self.revalidate().map_err(E::from)?;
-        if finished != self.evidence {
-            return Err(E::from(CaptureError::SourceChangedDuringCapture));
-        }
-        result
+            .and_then(query)
     }
 
     pub(super) fn revalidate(&self) -> Result<()> {
@@ -192,6 +183,55 @@ impl TraeSqliteDatabase {
 
     pub(super) fn evidence(&self) -> &SqliteSourceEvidence {
         &self.evidence
+    }
+
+    pub(super) fn terminal_revalidator(
+        &self,
+    ) -> Result<
+        Box<dyn Fn() -> std::result::Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
+    > {
+        let retained = self
+            .snapshot
+            .lock()
+            .map_err(|_| CaptureError::ProviderSource {
+                provider: CaptureProvider::Trae.as_str(),
+                path: PathBuf::from(&self.database_name),
+                kind: crate::ProviderSourceFailureKind::SourceDatabase,
+                detail: "Trae SQLite snapshot lock was poisoned".to_owned(),
+            })?;
+        retained
+            .as_ref()
+            .map(SqliteSourceReadSnapshot::terminal_revalidator)
+            .ok_or(CaptureError::SourceChangedDuringCapture)
+    }
+
+    pub(super) fn seal(&self, path: &Path) -> Result<SqliteSourceEvidence> {
+        self.seal_if_active(path)?
+            .ok_or(CaptureError::SourceChangedDuringCapture)
+    }
+
+    pub(super) fn seal_if_active(&self, path: &Path) -> Result<Option<SqliteSourceEvidence>> {
+        let Some(snapshot) = self
+            .snapshot
+            .lock()
+            .map_err(|_| CaptureError::ProviderSource {
+                provider: CaptureProvider::Trae.as_str(),
+                path: path.to_path_buf(),
+                kind: crate::ProviderSourceFailureKind::SourceDatabase,
+                detail: "Trae SQLite snapshot lock was poisoned".to_owned(),
+            })?
+            .take()
+        else {
+            return Ok(None);
+        };
+        let closing_evidence = snapshot
+            .finish()
+            .map_err(|error| trae_sqlite_source_error(path, error))?;
+        self.revalidate()?;
+        if closing_evidence != self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(Some(closing_evidence))
     }
 }
 
@@ -281,14 +321,89 @@ pub(super) fn acquire_source(
          policy={TRAE_SOURCE_POLICY_REVISION};user_version={user_version};schema={schema}"
     )
     .into_bytes();
+    let (logical_fingerprint, observed_keys) = database.read_provider(path, |conn| {
+        trae_logical_observation(conn, &schema_evidence)
+    })?;
     Ok(TraeSourceAuthority {
         database,
         raw_source_path: path.display().to_string(),
         workspace_id: trae_workspace_id(path),
         workspace_folder: trae_workspace_folder(path),
         schema_evidence,
+        logical_fingerprint,
+        observed_keys,
         observed_at,
     })
+}
+
+fn trae_logical_observation(
+    conn: &Connection,
+    schema_evidence: &[u8],
+) -> Result<([u8; 32], Vec<Option<TraeObservedKey>>)> {
+    let limit = i64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES)
+        .map_err(|_| CaptureError::SystemInvariant("Trae JSON bound exceeds i64"))?;
+    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let mut statement = conn.prepare(
+        "select [key], typeof(value), coalesce(octet_length(value), 0), \
+                case when typeof(value) = 'text' and octet_length(value) <= ?7 \
+                     then cast(value as text) end \
+         from ItemTable \
+         where [key] in (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    let mut rows = statement.query(rusqlite::params![
+        TRAE_CHAT_KEYS[0],
+        TRAE_CHAT_KEYS[1],
+        TRAE_CHAT_KEYS[2],
+        TRAE_CHAT_KEYS[3],
+        TRAE_CHAT_KEYS[4],
+        TRAE_CHAT_KEYS[5],
+        limit,
+    ])?;
+    let mut observed = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        observed.insert(
+            row.get::<_, String>(0)?,
+            (
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?.map(String::into_bytes),
+            ),
+        );
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-trae-logical-snapshot-v1\0");
+    digest.update((schema_evidence.len() as u64).to_be_bytes());
+    digest.update(schema_evidence);
+    let mut observed_keys = Vec::with_capacity(TRAE_CHAT_KEYS.len());
+    for chat_key in TRAE_CHAT_KEYS {
+        digest.update((chat_key.len() as u64).to_be_bytes());
+        digest.update(chat_key.as_bytes());
+        match observed.remove(*chat_key) {
+            Some((value_type, retained_bytes, value)) => {
+                digest.update([1]);
+                digest.update((value_type.len() as u64).to_be_bytes());
+                digest.update(value_type.as_bytes());
+                digest.update(retained_bytes.to_be_bytes());
+                if let Some(value) = value.as_deref() {
+                    digest.update([1]);
+                    digest.update((value.len() as u64).to_be_bytes());
+                    digest.update(value);
+                } else {
+                    digest.update([0]);
+                }
+                observed_keys.push(Some(TraeObservedKey {
+                    value_type,
+                    retained_bytes,
+                    value,
+                }));
+            }
+            None => {
+                digest.update([0]);
+                observed_keys.push(None);
+            }
+        }
+    }
+    Ok((digest.finalize().into(), observed_keys))
 }
 
 pub(super) fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
@@ -324,7 +439,7 @@ impl<'a> TraeScanner<'a> {
         }
     }
 
-    pub(super) fn next_page(&mut self, conn: &Connection) -> Result<Option<TraeScanPage>> {
+    pub(super) fn next_page(&mut self) -> Result<Option<TraeScanPage>> {
         if self.frontier.is_terminal() {
             return Ok(None);
         }
@@ -345,7 +460,7 @@ impl<'a> TraeScanner<'a> {
                 .is_none_or(|active| active.key_index != self.frontier.key_index)
             {
                 self.active = None;
-                match self.load_key(conn, self.frontier.key_index)? {
+                match self.load_key(self.frontier.key_index)? {
                     TraeLoadedKey::Missing => {
                         self.advance_key()?;
                         continue;
@@ -469,21 +584,16 @@ impl<'a> TraeScanner<'a> {
         Ok(Some(page))
     }
 
-    fn load_key(&mut self, conn: &Connection, key_index: u16) -> Result<TraeLoadedKey> {
+    fn load_key(&mut self, key_index: u16) -> Result<TraeLoadedKey> {
         let Some(chat_key) = TRAE_CHAT_KEYS.get(usize::from(key_index)).copied() else {
             return Ok(TraeLoadedKey::Missing);
         };
-        let candidate = {
-            let _guard = SqliteLengthPreflightGuard::new(conn);
-            conn.query_row(
-                "select typeof(value), coalesce(octet_length(value), 0) \
-                     from ItemTable where [key] = ?1",
-                [chat_key],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?
-        };
-        let Some((value_type, retained_bytes)) = candidate else {
+        let Some(observed) = self
+            .authority
+            .observed_keys
+            .get(usize::from(key_index))
+            .and_then(Option::as_ref)
+        else {
             return Ok(TraeLoadedKey::Missing);
         };
         self.decoded_rows =
@@ -492,7 +602,7 @@ impl<'a> TraeScanner<'a> {
                 .ok_or(CaptureError::SystemInvariant(
                     "Trae decoded-row counter overflow",
                 ))?;
-        let retained_bytes = u64::try_from(retained_bytes).map_err(|_| {
+        let retained_bytes = u64::try_from(observed.retained_bytes).map_err(|_| {
             CaptureError::InvalidPayload("Trae ItemTable value length is negative".into())
         })?;
         let observed_bytes = retained_bytes
@@ -503,18 +613,17 @@ impl<'a> TraeScanner<'a> {
                 "Trae ItemTable key `{chat_key}` exceeds the provider JSON bound"
             )));
         }
-        if value_type != "text" {
+        if observed.value_type != "text" {
             return Ok(TraeLoadedKey::Rejected(format!(
-                "Trae ItemTable key `{chat_key}` has unsupported SQLite type `{value_type}`"
+                "Trae ItemTable key `{chat_key}` has unsupported SQLite type `{}`",
+                observed.value_type
             )));
         }
-        let bytes = conn
-            .query_row(
-                "select cast(value as text) from ItemTable where [key] = ?1",
-                [chat_key],
-                |row| row.get::<_, String>(0),
-            )
-            .map(String::into_bytes)?;
+        let bytes = observed.value.clone().ok_or_else(|| {
+            CaptureError::InvalidPayload(format!(
+                "Trae ItemTable key `{chat_key}` exceeded its bounded observation"
+            ))
+        })?;
         if bytes.len() != usize::try_from(retained_bytes).unwrap_or(usize::MAX) {
             return Err(CaptureError::SourceChangedDuringCapture);
         }

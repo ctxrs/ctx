@@ -123,46 +123,43 @@ pub(super) fn scan_trae_authority(
     let mut counts = ScannedSourceCounts::default();
     let mut emitted_pages = 0_u64;
     let mut peak_buffered_documents = 0_u64;
-    authority.database.read_provider(canonical_path, |conn| {
-        while let Some(page) = scanner.next_page(conn)? {
-            let complete_records = u64::try_from(page.logical_units)
-                .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
-            let rejected_records = u64::try_from(page.rejections.len())
-                .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
-            let mut documents = Vec::with_capacity(page.core.len());
-            for record in page.core {
-                if let Some(document) = lexical_document(&source, authority, record)? {
-                    documents.push(document);
-                }
-            }
-            let retained_records = u64::try_from(documents.len())
-                .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
-            let ignored_records = complete_records
-                .checked_sub(
-                    retained_records
-                        .checked_add(rejected_records)
-                        .ok_or(TraeSourceBackedErrorV0::CountMismatch)?,
-                )
-                .ok_or(TraeSourceBackedErrorV0::CountMismatch)?;
-
-            counts.complete_records = checked_add(counts.complete_records, complete_records)?;
-            counts.retained_records = checked_add(counts.retained_records, retained_records)?;
-            counts.rejected_records = checked_add(counts.rejected_records, rejected_records)?;
-            counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
-            counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
-            peak_buffered_documents = peak_buffered_documents.max(retained_records);
-            if !documents.is_empty() {
-                if documents.len() > TRAE_SOURCE_BACKED_PAGE_ROWS {
-                    return Err(TraeSourceBackedErrorV0::CountMismatch);
-                }
-                emitted_pages = checked_add(emitted_pages, 1)?;
-                emit(TraeSourceBackedPageV0 { documents })?;
+    while let Some(page) = scanner.next_page()? {
+        let complete_records = u64::try_from(page.logical_units)
+            .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
+        let rejected_records = u64::try_from(page.rejections.len())
+            .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
+        let mut documents = Vec::with_capacity(page.core.len());
+        for record in page.core {
+            if let Some(document) = lexical_document(&source, authority, record)? {
+                documents.push(document);
             }
         }
-        Ok(())
-    })?;
+        let retained_records =
+            u64::try_from(documents.len()).map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
+        let ignored_records = complete_records
+            .checked_sub(
+                retained_records
+                    .checked_add(rejected_records)
+                    .ok_or(TraeSourceBackedErrorV0::CountMismatch)?,
+            )
+            .ok_or(TraeSourceBackedErrorV0::CountMismatch)?;
 
-    authority.database.revalidate()?;
+        counts.complete_records = checked_add(counts.complete_records, complete_records)?;
+        counts.retained_records = checked_add(counts.retained_records, retained_records)?;
+        counts.rejected_records = checked_add(counts.rejected_records, rejected_records)?;
+        counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
+        counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
+        peak_buffered_documents = peak_buffered_documents.max(retained_records);
+        if !documents.is_empty() {
+            if documents.len() > TRAE_SOURCE_BACKED_PAGE_ROWS {
+                return Err(TraeSourceBackedErrorV0::CountMismatch);
+            }
+            emitted_pages = checked_add(emitted_pages, 1)?;
+            emit(TraeSourceBackedPageV0 { documents })?;
+        }
+    }
+
+    let terminal_evidence = authority.database.seal(canonical_path)?;
     counts.certified_bytes = scanner.certified_source_bytes();
     let decoded_rows = scanner.decoded_rows();
     let source = SqliteLogicalSnapshot::new(
@@ -175,7 +172,7 @@ pub(super) fn scan_trae_authority(
     Ok(TraeSourceBackedScanV0 {
         source,
         terminal_fence: TraeSourceTerminalFence {
-            evidence: authority.database.evidence().clone(),
+            evidence: terminal_evidence,
         },
         row_decode_passes: 1,
         decoded_rows,

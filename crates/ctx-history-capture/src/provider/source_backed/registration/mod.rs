@@ -4,13 +4,6 @@ mod families;
 
 pub use families::*;
 
-pub(crate) fn provider_format_scope(
-    provider: CaptureProvider,
-    source_format: &'static str,
-) -> impl Fn(&SourceKey) -> bool + Send + Sync + 'static {
-    move |source| source.provider() == provider.as_str() && source.source_format() == source_format
-}
-
 pub(crate) fn executable_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,

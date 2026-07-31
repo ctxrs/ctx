@@ -20,18 +20,19 @@ abVHhCI+EJy1XX4ydQxFbqccMzhsz5g6Wim8q7pKliKT97uwV3r80f3DpjBUiG3e
 VNd6soFZl6R0F8V4tNR5CXwlMjgFogl6t2sKIGHUhHC7y1U01lYlRJNqmvCClD2N
 uvdK7q5ndg1XAgMBAAE=
 -----END RSA PUBLIC KEY-----"#;
-pub(super) const PRO_RELEASE_STAGING_KEY_ID: &str = "ctx-pro-release-staging-2026-07-21";
+pub(super) const PRO_RELEASE_STAGING_KEY_ID: &str = "ctx-pro-release-staging-2026-07-30";
 pub(super) const PRO_RELEASE_STAGING_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
-MIIBigKCAYEAzhEEzfwq/hJtK8l0G+K722eEUy9vNyTFvRLK2rIOkTBDwZQs1tgp
-7/dnshIKbk6MYkp2/QqfDJGECdIeIzXZ3M+5RtGXCHxmSJwzGgQ/1AUsFixEaKYP
-YlqQeohft939GJPtdyK+CPmqp6+5B2xeI8i0hen66x/76k73a258ZndFJnUKHPTo
-eCvWtv4i5TRNgtdQbuYW9rpwlQOihKaDzl5nSsrOet+/dp9ISjP/DYog7KXdQdOB
-oZwuvIgViqbbgXV4fU5DOczf6hG2aykxM5cDWWShLG3k82bvJhtrmEfD+zC0GINx
-a1j/hA17NW96si55r2bK1Y0hT8eoASjLX+XwM9QfW7fkYH6Ox0iQ6YuEcSyI8oov
-hJArDEAIbcp0NPyqcm5+p7Kk/RQWwaTJJ0Ak2W51u8BLFMTSSmPpDIUTG9svVETt
-Crct4wyMI76peaDsehiJoHcX+c6ldIKXgLWkADThS//JWYsxXB4qmlqczRxp90FT
-h6pox43/CszJAgMBAAE=
------END RSA PUBLIC KEY-----"#;
+MIIBigKCAYEArDw7seuvC1i9TddKQOiakTnChzaHfgycUAbZ4gz4E60FJX3t54l8
+7NILgkA5unkUsDr9mTXM+vtzWnKaa5mVzr5/xJgnTqcy/3OSB1iLnyKuGqfQN+vo
+voHHiQ6EGtG7KpMWJq6dX/TG5lBrxyl7oCNQKcYH1wHsYfbxPE6HakaPXsoDT1Dx
+mLvjL7z77fCbGRVe4N+rFLO236tnqu4SYtG9ynsRSn/fdvDvZexeGClwXiCo+BGn
+Xz6vW/NR3wQ4TxFIKAFGf6kCBJQTO/w4+fse/CaItVdGEqKYGsh5dcD4wljqLU4o
+KN27yQd1h6Hahcbsndy/U/mUBkhh+A+9NM0IoKhIDbt0MXwwG/6mvdpdgKQ7IIA2
+OqkJ827wDqVxKxW/9gdSJ/AsmfHvbdxKGy5y9rpurdk9bY86IYrjkFAKxUjuE08a
+NN7ajvCUtdk/O24cMGDn6+EBob2UflYbBWL05f627ptt9S8U94/tCmBTzCVn2YZG
+ZBtC7rgoUXofAgMBAAE=
+-----END RSA PUBLIC KEY-----
+"#;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ReleaseChannel {
@@ -374,8 +375,41 @@ mod release_tests {
         assert_eq!(stable.channel, ReleaseChannel::Stable);
         assert_eq!(stable.key_id, "ctx-pro-release-stable-2026-07-27");
         assert_eq!(staging.channel, ReleaseChannel::Staging);
+        assert_eq!(staging.key_id, "ctx-pro-release-staging-2026-07-30");
         assert_ne!(stable.key_id, staging.key_id);
         assert_ne!(stable.public_key_pem, staging.public_key_pem);
+    }
+
+    #[test]
+    fn rotated_staging_authority_accepts_its_vector_and_rejects_wrong_material() {
+        const MESSAGE: &[u8] = b"ctx-pro staging signing authority 2026-07-30";
+        const SIGNATURE: &str = concat!(
+            "P0MTA+fP+nCh7NlPkuHPInKqTKyuoUQSqZPjlrCr0Up3aOmj1PkjBp2luvC8Gii/",
+            "xJOO0KUodCaAisHMN87S89O9dr1T7qaYNxLpfQnCkxWd5ybTnW76kqL/EVOrsuaW",
+            "iPR0yxwKokxFXQORBTeTPol8n1KQW2qLT/MMzVvl6u/7kAlTzJALCMNxRs19LTPr",
+            "CPiU4pGZJHddnOZucvhmdrfD32nvs4xPBvjMUYZvyXum4OXI/HDS9nGvcd/jL4o",
+            "WWeMRljxfJY3TLxrtYpNwaaQ4wIfAcJhSClRUf9K0SHIf5CgDUPy99iYaRmfjNk0",
+            "RcTJXQrO86ROV3Q6Kj+Cc+UCHlpZvQfZPWAlSeIl6d5dsZx1Tg54iXOWI2modxN5",
+            "PklKeY4vnWin8xD9nlpv3TkZH/zAHIU6JKyJMcuob7bz1TIkZ+3dTPYhKgueJ3dq",
+            "LYJjW/dXDmmyoopA3fwyvTFjVmIQ7oAZ2Z/ZZRuoa/08OfApJihjALeie+fBKMfxE",
+        );
+        let staging = release_trust(ReleaseChannel::Staging).unwrap();
+        verify_signature_with_key(MESSAGE, SIGNATURE.as_bytes(), staging.public_key_pem).unwrap();
+
+        let stable = release_trust(ReleaseChannel::Stable).unwrap();
+        let error = verify_signature_with_key(MESSAGE, SIGNATURE.as_bytes(), stable.public_key_pem)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid_response: Pro manifest signature verification failed"
+        );
+        assert!(verify_signature_with_key(
+            b"ctx-pro staging signing authority retired",
+            SIGNATURE.as_bytes(),
+            staging.public_key_pem,
+        )
+        .is_err());
     }
 
     #[test]

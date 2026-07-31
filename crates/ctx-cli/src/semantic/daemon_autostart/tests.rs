@@ -758,6 +758,190 @@ fn setup_handoff_wait_accepts_authoritative_running_observation_without_sleep() 
 }
 
 #[test]
+fn setup_handoff_accepts_a_slow_healthy_daemon_owned_first_build() {
+    let expected = AppConfig::default();
+    let status = json!({
+        "status": "running",
+        "pid": 41,
+        "started_at_ms": 1_000,
+        "heartbeat_at_ms": 1_050,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": expected.daemon.enabled,
+                "daemon_mode": expected.daemon.mode.as_str(),
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+    let refresh_job = json!({
+        "owner": "daemon",
+        "kind": "source_backed",
+        "status": "running",
+        "request_id": "cold-build",
+        "request_state": "running",
+        "last_run_at_ms": 1_025,
+        "progress": {
+            "phase": "refreshing",
+            "completed_sources": 800,
+            "total_sources": 5_781,
+        },
+    });
+    let observation = daemon_handoff_observation_from(
+        Some(&status),
+        Some(41),
+        true,
+        Some(41),
+        Some(&expected),
+        1_050,
+    );
+    let active_refresh =
+        daemon_owned_source_refresh_is_active(Some(&status), Some(&refresh_job), Some(41), 1_050);
+
+    assert!(active_refresh);
+    assert_eq!(
+        complete_daemon_handoff_observation(
+            observation,
+            Some(&status),
+            Some(41),
+            true,
+            &expected,
+            false,
+            active_refresh,
+        ),
+        DaemonHandoffObservation::Running(DaemonHandoff {
+            pid: 41,
+            heartbeat_at_ms: 1_050,
+        })
+    );
+}
+
+#[test]
+fn setup_handoff_accepts_an_immediately_ready_endpoint() {
+    let expected = AppConfig::default();
+    let status = json!({
+        "status": "running",
+        "pid": 42,
+        "started_at_ms": 2_000,
+        "heartbeat_at_ms": 2_010,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": expected.daemon.enabled,
+                "daemon_mode": expected.daemon.mode.as_str(),
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+    let observation = daemon_handoff_observation_from(
+        Some(&status),
+        Some(42),
+        true,
+        Some(42),
+        Some(&expected),
+        2_010,
+    );
+
+    assert_eq!(
+        complete_daemon_handoff_observation(
+            observation,
+            Some(&status),
+            Some(42),
+            true,
+            &expected,
+            true,
+            false,
+        ),
+        DaemonHandoffObservation::Running(DaemonHandoff {
+            pid: 42,
+            heartbeat_at_ms: 2_010,
+        })
+    );
+}
+
+#[test]
+fn setup_handoff_rejects_real_daemon_and_refresh_failures() {
+    let expected = AppConfig::default();
+    let failed_status = json!({
+        "status": "failed",
+        "pid": 43,
+        "started_at_ms": 3_000,
+        "heartbeat_at_ms": 3_010,
+        "last_error": "cold build failed",
+    });
+    let failed_observation = daemon_handoff_observation_from(
+        Some(&failed_status),
+        Some(43),
+        true,
+        Some(43),
+        Some(&expected),
+        3_010,
+    );
+    assert_eq!(
+        complete_daemon_handoff_observation(
+            failed_observation,
+            Some(&failed_status),
+            Some(43),
+            true,
+            &expected,
+            false,
+            false,
+        ),
+        DaemonHandoffObservation::Failed("cold build failed".to_owned())
+    );
+
+    let running_status = json!({
+        "status": "running",
+        "pid": 44,
+        "started_at_ms": 4_000,
+        "heartbeat_at_ms": 4_010,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": expected.daemon.enabled,
+                "daemon_mode": expected.daemon.mode.as_str(),
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+    let failed_refresh = json!({
+        "owner": "daemon",
+        "kind": "source_backed",
+        "status": "failed",
+        "request_id": "failed-build",
+        "request_state": "failed",
+        "last_run_at_ms": 4_005,
+        "progress": {"phase": "failed"},
+        "last_error": "invalid generation",
+    });
+    assert!(!daemon_owned_source_refresh_is_active(
+        Some(&running_status),
+        Some(&failed_refresh),
+        Some(44),
+        4_010,
+    ));
+    assert_eq!(
+        complete_daemon_handoff_observation(
+            daemon_handoff_observation_from(
+                Some(&running_status),
+                Some(44),
+                true,
+                Some(44),
+                Some(&expected),
+                4_010,
+            ),
+            Some(&running_status),
+            Some(44),
+            true,
+            &expected,
+            false,
+            false,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+}
+
+#[test]
 fn enabled_daemon_handoff_is_bounded_to_five_seconds() {
     let pauses = DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS.saturating_sub(1);
     let maximum_wait = DAEMON_UPGRADE_POLL_INTERVAL

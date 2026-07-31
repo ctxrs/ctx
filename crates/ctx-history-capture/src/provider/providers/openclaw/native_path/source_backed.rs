@@ -27,8 +27,8 @@ use crate::{
         file_touches::visit_all_file_touch_drafts,
         normalization::provider_timestamp_value,
         source_backed::family::jsonl::{
-            JsonlFamilyAdapter, JsonlFamilyHydrator, JsonlFamilyInventory, JsonlFamilyLeaf,
-            JsonlFamilyProjector, JsonlRecordRef,
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
+            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
@@ -76,6 +76,10 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {

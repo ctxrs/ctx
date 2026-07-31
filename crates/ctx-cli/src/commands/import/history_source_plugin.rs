@@ -12,7 +12,10 @@ use crate::{
     },
     history_source_plugins::{prepare_source_backed_history_source, select_history_source_plugin},
     progress::{format_bytes, ProgressReporter},
-    semantic::{autostart_daemon_and_wait, SourceBackedRefreshMode},
+    semantic::{
+        autostart_daemon_and_wait, converge_source_backed_relational_generation,
+        SourceBackedRefreshMode,
+    },
     DaemonTriggerCommandArg, ImportArgs,
 };
 
@@ -84,6 +87,8 @@ pub(crate) fn run_history_source_plugin_import(
         .as_ref()
         .context("history source plugin refresh has no authoritative terminal receipt")?;
     let published_generation = refresh.pin.generation_id().to_owned();
+    converge_source_backed_relational_generation(&context.data_root, &published_generation)
+        .context("converge required relational projection after history source publication")?;
 
     let summary = ProviderImportSummary {
         imported: usize::from(receipt.generation_changed),

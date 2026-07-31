@@ -1,3 +1,8 @@
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
+
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy,
@@ -7,12 +12,42 @@ use ctx_history_core::{
 };
 use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
 use ctx_history_relational::{RawSqlValue, RelationalProjectionStatus};
+use rusqlite::types::ValueRef;
+use sha2::Digest as _;
 
 use super::*;
 use crate::source_sql::SqlCompatibility;
 
 const PROVIDER_TEXT: &str = "provider-body-sentinel-must-not-enter-relational";
 const PREVIEW_TEXT: &str = "provider-preview-sentinel-must-not-enter-relational";
+
+#[test]
+fn concurrent_catch_up_owners_serialize_the_complete_projection_run() {
+    const OWNERS: usize = 8;
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let generation = initial_generation(temp.path(), &source);
+    let barrier = Arc::new(Barrier::new(OWNERS));
+    let handles = (0..OWNERS)
+        .map(|_| {
+            let data_root = temp.path().to_path_buf();
+            let generation = generation.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                run_after_core_publication(&data_root, &generation)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let completed = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("catch-up owner panicked").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(completed.iter().filter(|run| run.did_work).count(), 1);
+    assert!(read_status(temp.path()).is_some_and(|status| status.is_completed_for(&generation)));
+    assert!(ready_projection_metadata(temp.path(), &generation).is_some());
+}
 
 #[test]
 fn durable_state_path_is_purpose_based() {
@@ -243,6 +278,62 @@ fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
         .any(|candidate| candidate == needle.as_bytes())
 }
 
+fn digest_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn logical_projection_digest(data_root: &Path) -> String {
+    let queries = [
+        "SELECT * FROM source_backed_relational_state ORDER BY singleton",
+        "SELECT * FROM source_backed_sources ORDER BY source_id",
+        "SELECT * FROM source_backed_sessions ORDER BY ctx_session_id",
+        "SELECT * FROM source_backed_events ORDER BY ctx_event_id",
+        "SELECT * FROM source_backed_files_touched ORDER BY ctx_file_touch_id",
+    ];
+    let connection = rusqlite::Connection::open(sql_compatibility_path(data_root)).unwrap();
+    let mut digest = sha2::Sha256::new();
+    for sql in queries {
+        digest.update((sql.len() as u64).to_be_bytes());
+        digest.update(sql.as_bytes());
+        let mut statement = connection.prepare(sql).unwrap();
+        let column_count = statement.column_count();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            digest.update([0xff]);
+            for column in 0..column_count {
+                match row.get_ref(column).unwrap() {
+                    ValueRef::Null => digest.update([0]),
+                    ValueRef::Integer(value) => {
+                        digest.update([1]);
+                        digest.update(value.to_be_bytes());
+                    }
+                    ValueRef::Real(value) => {
+                        digest.update([2]);
+                        digest.update(value.to_bits().to_be_bytes());
+                    }
+                    ValueRef::Text(value) => {
+                        digest.update([3]);
+                        digest.update((value.len() as u64).to_be_bytes());
+                        digest.update(value);
+                    }
+                    ValueRef::Blob(value) => {
+                        digest.update([4]);
+                        digest.update((value.len() as u64).to_be_bytes());
+                        digest.update(value);
+                    }
+                }
+            }
+        }
+    }
+    digest_hex(&digest.finalize())
+}
+
 #[test]
 fn relational_record_stream_holds_only_bounded_event_pages() {
     let temp = tempfile::tempdir().unwrap();
@@ -265,8 +356,10 @@ fn relational_record_stream_holds_only_bounded_event_pages() {
     }
 
     assert_eq!(events, 7);
-    assert_eq!(sessions, 1);
-    assert_eq!(records.pages_loaded, 8, "metadata and event passes page");
+    assert_eq!(sessions, 2, "one provisional and one finalized session");
+    assert_eq!(records.pages_loaded, 4, "each source page loads once");
+    assert_eq!(records.page_items_loaded, 7);
+    assert_eq!(records.max_session_aggregates, 1);
     assert!(
         records.max_page_items <= 2,
         "stream loaded {} events in one page",
@@ -293,8 +386,61 @@ fn relational_record_stream_closes_an_empty_certified_source_once() {
     }
 
     assert_eq!((begins, ends), (1, 1));
-    assert_eq!(records.pages_loaded, 2);
+    assert_eq!(records.pages_loaded, 1);
+    assert_eq!(records.page_items_loaded, 0);
     assert_eq!(records.max_page_items, 0);
+    assert_eq!(records.max_session_aggregates, 0);
+}
+
+#[test]
+#[ignore = "manual 40k-event relational catch-up profile"]
+fn relational_large_source_profile_fixture() {
+    const EVENT_COUNT: usize = 40_000;
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let documents = (1..=EVENT_COUNT as u64)
+        .map(|sequence| document(&source, sequence, "assistant", &["src/large.rs"]))
+        .collect();
+    replace_generation(temp.path(), &source, 1, documents);
+    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let generation = committed_generation(&index).unwrap();
+    let mut projection =
+        SourceBackedRelationalProjection::open(sql_compatibility_path(temp.path())).unwrap();
+    let mut records = RelationalRecordStream::new(
+        &index,
+        RelationalSourceSelection::All,
+        MAX_SOURCE_EVENT_PAGE_ITEMS,
+    );
+
+    let started = Instant::now();
+    let receipt = projection
+        .rebuild_stream(&generation, records.by_ref())
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(receipt.source_count, 1);
+    assert_eq!(receipt.session_count, 1);
+    assert_eq!(receipt.event_count, EVENT_COUNT as u64);
+    assert_eq!(receipt.file_touch_count, EVENT_COUNT as u64);
+    assert_eq!(records.pages_loaded, 10);
+    assert_eq!(records.page_items_loaded, EVENT_COUNT);
+    assert!(records.max_page_items <= MAX_SOURCE_EVENT_PAGE_ITEMS);
+    assert_eq!(records.max_session_aggregates, 1);
+    drop(projection);
+
+    let digest = logical_projection_digest(temp.path());
+    assert_eq!(
+        digest,
+        "51dc260b600bb9fdd533a33cd8e3ffab9373b3f2a04fc729a915d7b64e57ee97"
+    );
+    eprintln!(
+        "relational_large_source_profile events={EVENT_COUNT} pages={} \
+         page_items={} max_page_items={} max_sessions={} digest={digest} wall_ms={}",
+        records.pages_loaded,
+        records.page_items_loaded,
+        records.max_page_items,
+        records.max_session_aggregates,
+        elapsed.as_millis()
+    );
 }
 
 #[test]
@@ -587,6 +733,63 @@ fn generation_mismatch_is_persistent_and_never_creates_a_fallback_database() {
 }
 
 #[test]
+fn foreground_wait_requires_exact_ready_generation_and_surfaces_daemon_failure() {
+    let foreground = tempfile::tempdir().unwrap();
+    let foreground_source = source();
+    let foreground_generation = initial_generation(foreground.path(), &foreground_source);
+    converge_required_generation(foreground.path(), &foreground_generation).unwrap();
+    assert!(read_status(foreground.path())
+        .is_some_and(|status| status.is_completed_for(&foreground_generation)));
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let generation = initial_generation(temp.path(), &source);
+    run_after_core_publication(temp.path(), &generation).unwrap();
+
+    wait_for_completed_generation_with(temp.path(), &generation, false, Duration::ZERO, || {
+        panic!("ready relational generation must not poll")
+    })
+    .unwrap();
+
+    let wrong_generation = "f".repeat(64);
+    run_after_core_publication(temp.path(), &wrong_generation).unwrap();
+    let error = wait_for_completed_generation_with(
+        temp.path(),
+        &wrong_generation,
+        false,
+        Duration::ZERO,
+        || panic!("failed relational generation must not poll"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source_relational_generation_mismatch"),
+        "{error:#}"
+    );
+
+    let unavailable = tempfile::tempdir().unwrap();
+    let pending_generation = "e".repeat(64);
+    let pending =
+        status::SourceBackedRelationalCatchUpStatus::pending(&pending_generation, 1, None);
+    persist_status(unavailable.path(), &pending).unwrap();
+    let error = wait_for_completed_generation_with(
+        unavailable.path(),
+        &pending_generation,
+        true,
+        Duration::from_secs(1),
+        || panic!("--no-daemon import must not poll without a relational owner"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no foreground writer was started"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn materializer_has_no_provider_hydration_or_legacy_store_authority() {
     let source = include_str!("source_backed_relational_catch_up.rs");
     for forbidden in [
@@ -601,7 +804,8 @@ fn materializer_has_no_provider_hydration_or_legacy_store_authority() {
             "relational catch-up contains forbidden architecture term {forbidden}"
         );
     }
-    assert!(source.contains("VerifiedIndex::open"));
+    assert!(source.contains("open_verified_index"));
+    assert!(!source.contains(&["VerifiedIndex", "::open"].concat()));
     assert!(source.contains(".source_event_page("));
     assert!(source.contains("SourceBackedRelationalProjection::open"));
     assert!(!source.contains("Vec<EventRecord>"));

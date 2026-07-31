@@ -1,5 +1,33 @@
 use super::*;
 
+use crate::provider::source_backed::family::document::DocumentLeafExecutionPolicy;
+
+/// Central policy declaration for production replacement-document routes.
+///
+/// Cline, Roo, and CodeBuddy discover a content-free exact source descriptor
+/// per leaf, and each scan validates and certifies only that leaf. CodeBuddy's
+/// extension project index is immutable evidence copied into each affected
+/// leaf; it does not create cross-leaf session lineage.
+///
+/// Auggie and Continue derive exact source identity from document bodies, so
+/// they cannot satisfy the independent-leaf admission contract. Rovo Dev binds
+/// parent/root lineage across discovered sessions, while NanoClaw is one
+/// catalog-lineage compound source. Those routes retain the serial default.
+pub(crate) fn document_leaf_execution_policy(
+    provider: CaptureProvider,
+) -> DocumentLeafExecutionPolicy {
+    match provider {
+        CaptureProvider::Cline | CaptureProvider::RooCode | CaptureProvider::CodeBuddy => {
+            DocumentLeafExecutionPolicy::Independent
+        }
+        CaptureProvider::Auggie
+        | CaptureProvider::Continue
+        | CaptureProvider::RovoDev
+        | CaptureProvider::NanoClaw => DocumentLeafExecutionPolicy::Serial,
+        _ => DocumentLeafExecutionPolicy::Serial,
+    }
+}
+
 const DIRECT_ROUTES: &[RouteEntry] = &[
     RouteEntry::new(
         CaptureProvider::Auggie,
@@ -64,8 +92,29 @@ pub fn register_nanoclaw_source_backed_route(
     data_root: &Path,
     catalog_lineage: [u8; 32],
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = NanoClawDocumentTreeAdapter::new(data_root, source.path.clone(), catalog_lineage)
-        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    register_nanoclaw_source_backed_route_with_base_sources(
+        registry,
+        source,
+        data_root,
+        catalog_lineage,
+        &[],
+    )
+}
+
+pub fn register_nanoclaw_source_backed_route_with_base_sources(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    data_root: &Path,
+    catalog_lineage: [u8; 32],
+    base_sources: &[CertifiedSource],
+) -> SourceBackedCoordinatorResult<()> {
+    let adapter = NanoClawDocumentTreeAdapter::new_with_base_sources(
+        data_root,
+        source.path.clone(),
+        catalog_lineage,
+        base_sources,
+    )
+    .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     crate::provider::source_backed::family::document::register_replacement_document_tree_route_with_authority(
         registry,
         source,

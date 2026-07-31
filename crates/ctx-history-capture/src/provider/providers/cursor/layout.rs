@@ -85,10 +85,6 @@ impl CursorTranscriptPath {
         &self.authority_relative_path
     }
 
-    pub(crate) fn ordinary_file_token(&self) -> [u8; 32] {
-        self.ordinary_file_token
-    }
-
     pub(crate) fn authority(&self) -> &ProviderSourceRoot {
         &self.authority
     }

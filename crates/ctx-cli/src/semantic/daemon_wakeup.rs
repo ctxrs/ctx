@@ -12,7 +12,7 @@ use ctx_history_capture::{
     discover_provider_sources, validate_provider_source_roots_outside_data_root,
 };
 use notify::{
-    event::{AccessKind, AccessMode},
+    event::{AccessKind, AccessMode, MetadataKind, ModifyKind},
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use serde_json::{json, Value};
@@ -152,6 +152,8 @@ enum WatchMessage {
 struct WatchCounters {
     raw_events: u64,
     ignored_access_events: u64,
+    ignored_catalog_lock_events: u64,
+    ignored_access_time_events: u64,
     ignored_other_events: u64,
     last_ignored_access_path: Option<PathBuf>,
     backend_errors: u64,
@@ -179,15 +181,15 @@ impl DaemonFileWatcher {
         let counters = Arc::new(Mutex::new(WatchCounters::default()));
         let callback_sender = sender.clone();
         let callback_counters = Arc::clone(&counters);
+        let callback_data_root = data_root.to_path_buf();
         let watcher = RecommendedWatcher::new(
             move |event: notify::Result<Event>| {
-                if let Ok(event) = event.as_ref() {
-                    if ignored_access_event(event) {
-                        record_ignored_access_event(&callback_counters, event);
-                        return;
-                    }
-                }
-                let _ = callback_sender.send(WatchMessage::Event(event));
+                forward_watch_event(
+                    &callback_data_root,
+                    &callback_counters,
+                    &callback_sender,
+                    event,
+                );
             },
             Config::default(),
         )
@@ -285,6 +287,8 @@ impl DaemonFileWatcher {
             "watched_roots": self.watched.len(),
             "raw_events": counters.raw_events,
             "ignored_access_events": counters.ignored_access_events,
+            "ignored_catalog_lock_events": counters.ignored_catalog_lock_events,
+            "ignored_access_time_events": counters.ignored_access_time_events,
             "ignored_other_events": counters.ignored_other_events,
             "last_ignored_access_path": counters.last_ignored_access_path,
             "backend_errors": counters.backend_errors,
@@ -318,6 +322,21 @@ impl Drop for DaemonFileWatcher {
         // heartbeat writes.
         let _ = self.write_receipt("stopped");
     }
+}
+
+fn forward_watch_event(
+    data_root: &Path,
+    counters: &Mutex<WatchCounters>,
+    sender: &mpsc::Sender<WatchMessage>,
+    event: notify::Result<Event>,
+) {
+    if let Ok(event) = event.as_ref() {
+        if let Some(kind) = ignored_watch_event(data_root, event) {
+            record_ignored_watch_event(counters, event, kind);
+            return;
+        }
+    }
+    let _ = sender.send(WatchMessage::Event(event));
 }
 
 fn watch_event_loop(
@@ -378,8 +397,8 @@ fn record_watch_event(
             return true;
         }
     };
-    if ignored_access_event(&event) {
-        record_ignored_access_event(counters, &event);
+    if let Some(kind) = ignored_watch_event(data_root, &event) {
+        record_ignored_watch_event(counters, &event, kind);
         return false;
     }
     let targets = targets
@@ -410,21 +429,59 @@ fn record_watch_event(
     relevant
 }
 
-fn ignored_access_event(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::Access(AccessKind::Open(_))
-            | EventKind::Access(AccessKind::Close(AccessMode::Read))
-            | EventKind::Access(AccessKind::Read)
-    )
+#[derive(Clone, Copy)]
+enum IgnoredWatchEvent {
+    Access,
+    CatalogLock,
+    AccessTime,
 }
 
-fn record_ignored_access_event(counters: &Mutex<WatchCounters>, event: &Event) {
+fn ignored_watch_event(data_root: &Path, event: &Event) -> Option<IgnoredWatchEvent> {
+    if matches!(
+        event.kind,
+        EventKind::Access(kind)
+            if !matches!(kind, AccessKind::Close(AccessMode::Write))
+    ) {
+        return Some(IgnoredWatchEvent::Access);
+    }
+    if matches!(
+        event.kind,
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))
+    ) {
+        return Some(IgnoredWatchEvent::AccessTime);
+    }
+    let catalog_lock = data_root
+        .join("catalogs")
+        .join("explicit-sources")
+        .join("catalog.lock");
+    if !event.paths.is_empty() && event.paths.iter().all(|path| path == &catalog_lock) {
+        return Some(IgnoredWatchEvent::CatalogLock);
+    }
+    None
+}
+
+fn record_ignored_watch_event(
+    counters: &Mutex<WatchCounters>,
+    event: &Event,
+    kind: IgnoredWatchEvent,
+) {
     let mut counters = counters
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    counters.ignored_access_events = counters.ignored_access_events.saturating_add(1);
-    counters.last_ignored_access_path = event.paths.first().cloned();
+    match kind {
+        IgnoredWatchEvent::Access => {
+            counters.ignored_access_events = counters.ignored_access_events.saturating_add(1);
+            counters.last_ignored_access_path = event.paths.first().cloned();
+        }
+        IgnoredWatchEvent::CatalogLock => {
+            counters.ignored_catalog_lock_events =
+                counters.ignored_catalog_lock_events.saturating_add(1);
+        }
+        IgnoredWatchEvent::AccessTime => {
+            counters.ignored_access_time_events =
+                counters.ignored_access_time_events.saturating_add(1);
+        }
+    }
 }
 
 fn paths_overlap(target: &Path, event: &Path) -> bool {
@@ -517,6 +574,112 @@ pub(super) fn daemon_wakeup_report(data_root: &Path) -> Value {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn catalog_lock_query_churn_stays_idle_but_provider_append_wakes() {
+        use std::{fs::OpenOptions, io::Write};
+
+        let temp = tempfile::tempdir().expect("create watcher fixture");
+        let data_root = temp.path().join("data");
+        let catalog_root = data_root.join("catalogs").join("explicit-sources");
+        let provider_root = temp.path().join("provider");
+        let provider_file = provider_root.join("session.jsonl");
+        fs::create_dir_all(&catalog_root).expect("create catalog root");
+        fs::create_dir_all(&provider_root).expect("create provider root");
+        fs::write(
+            catalog_root.join("catalog-00000000000000000001.json"),
+            b"{\"revision\":1}\n",
+        )
+        .expect("write catalog");
+        fs::write(catalog_root.join("catalog.lock"), b"").expect("write catalog lock");
+        fs::write(&provider_file, b"{\"event\":1}\n").expect("write provider fixture");
+
+        let targets = Arc::new(RwLock::new(vec![
+            catalog_root.clone(),
+            provider_file.clone(),
+        ]));
+        let counters = Arc::new(Mutex::new(WatchCounters::default()));
+        let wakeup = Arc::new(DaemonWakeup::default());
+        let (sender, receiver) = mpsc::channel();
+        let callback_sender = sender.clone();
+        let callback_counters = Arc::clone(&counters);
+        let callback_data_root = data_root.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<Event>| {
+                forward_watch_event(
+                    &callback_data_root,
+                    &callback_counters,
+                    &callback_sender,
+                    event,
+                );
+            },
+            Config::default(),
+        )
+        .expect("start fixture watcher");
+        watcher
+            .watch(&catalog_root, RecursiveMode::Recursive)
+            .expect("watch catalog");
+        watcher
+            .watch(&provider_root, RecursiveMode::Recursive)
+            .expect("watch provider");
+
+        let thread_targets = Arc::clone(&targets);
+        let thread_counters = Arc::clone(&counters);
+        let thread_wakeup = Arc::clone(&wakeup);
+        let thread_data_root = data_root.clone();
+        let thread_daemon_root = daemon_root_path(&data_root);
+        let watch_thread = thread::spawn(move || {
+            watch_event_loop(
+                receiver,
+                thread_targets,
+                thread_counters,
+                thread_wakeup,
+                thread_data_root,
+                thread_daemon_root,
+            );
+        });
+
+        for _ in 0..128 {
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(catalog_root.join("catalog.lock"))
+                .expect("open catalog lock like a query");
+            fs::read_to_string(catalog_root.join("catalog-00000000000000000001.json"))
+                .expect("query catalog");
+            drop(lock);
+        }
+        thread::sleep(WATCH_DEBOUNCE_QUIET * 3);
+
+        let idle = wakeup.snapshot();
+        assert_eq!(idle["filesystem_signals"], 0, "{idle:#}");
+        assert_eq!(idle["work_cycles"], 0, "{idle:#}");
+        assert_eq!(idle["no_work_cycles"], 0, "{idle:#}");
+        let counters_after_churn = counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(counters_after_churn.coalesced_wakeups, 0);
+        assert_eq!(counters_after_churn.reconciliations, 0);
+        assert!(counters_after_churn.ignored_catalog_lock_events > 0);
+        drop(counters_after_churn);
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(provider_file)
+            .expect("open provider fixture for append");
+        file.write_all(b"{\"event\":2}\n")
+            .expect("append provider event");
+        file.flush().expect("flush provider append");
+        drop(file);
+        let wake = wakeup.wait(Duration::from_secs(2));
+        assert!(wake.filesystem, "provider append did not wake the daemon");
+        assert!(!wake.timed_out, "provider append exceeded two seconds");
+
+        sender.send(WatchMessage::Stop).expect("stop watch thread");
+        watch_thread.join().expect("join watch thread");
+        drop(watcher);
+    }
+
     #[test]
     fn wakeup_blocks_until_signaled_and_coalesces_reasons() {
         let wakeup = Arc::new(DaemonWakeup::default());
@@ -579,6 +742,29 @@ mod tests {
             Ok(access),
         ));
         assert_eq!(counters.lock().unwrap().raw_events, 0);
+        let mut access_time = event(&data_root.join("config.toml"));
+        access_time.kind = EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime));
+        assert!(!record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(access_time),
+        ));
+        let mut catalog_lock = event(
+            &data_root
+                .join("catalogs")
+                .join("explicit-sources")
+                .join("catalog.lock"),
+        );
+        catalog_lock.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
+        assert!(!record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(catalog_lock),
+        ));
         let mut close_write = event(&data_root.join("config.toml"));
         close_write.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
         assert!(record_watch_event(
@@ -596,5 +782,64 @@ mod tests {
             Ok(event(&data_root.join("config.toml"))),
         ));
         assert_eq!(counters.lock().unwrap().raw_events, 2);
+    }
+
+    #[test]
+    fn authoritative_changes_and_dynamic_discovery_remain_relevant() {
+        use notify::event::{CreateKind, DataChange, RenameMode};
+
+        let data_root = Path::new("/tmp/ctx-data");
+        let daemon_root = data_root.join("daemon");
+        let provider_file = PathBuf::from("/tmp/provider/session.jsonl");
+        let sqlite = PathBuf::from("/tmp/provider/history.sqlite");
+        let dynamic_source = PathBuf::from("/tmp/home/.codex/sessions");
+        let catalog_root = data_root.join("catalogs").join("explicit-sources");
+        let targets = RwLock::new(vec![
+            data_root.join("config.toml"),
+            catalog_root.clone(),
+            provider_file.clone(),
+            sqlite.clone(),
+            dynamic_source,
+        ]);
+        let counters = Mutex::new(WatchCounters::default());
+        let relevant = |kind, paths: &[&Path]| {
+            let mut event = Event::new(kind);
+            event
+                .paths
+                .extend(paths.iter().map(|path| path.to_path_buf()));
+            record_watch_event(&targets, &counters, data_root, &daemon_root, Ok(event))
+        };
+
+        assert!(relevant(
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            &[&data_root.join("config.toml")],
+        ));
+        assert!(relevant(
+            EventKind::Create(CreateKind::File),
+            &[&catalog_root.join("catalog-00000000000000000002.json")],
+        ));
+        assert!(relevant(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            &[&provider_file],
+        ));
+        assert!(relevant(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &[Path::new("/tmp/provider/session.tmp"), &provider_file],
+        ));
+        assert!(relevant(
+            EventKind::Create(CreateKind::Folder),
+            &[Path::new("/tmp/home/.codex")],
+        ));
+        assert!(relevant(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            &[Path::new("/tmp/provider/history.sqlite-wal")],
+        ));
+        assert!(record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Err(notify::Error::generic("overflow")),
+        ));
     }
 }

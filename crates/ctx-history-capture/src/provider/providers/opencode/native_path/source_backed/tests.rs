@@ -1,10 +1,15 @@
-use std::{ffi::OsString, fs};
+use std::{
+    ffi::OsString,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use ctx_history_core::{
-    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
+    BatchHydrationRequest, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
+    EventRole, EventType, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
+    TypedKey,
 };
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -66,6 +71,7 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         assert_eq!(scan.certificate.counts().complete_records, 2);
         assert_eq!(scan.certificate.counts().retained_records, 2);
         assert_eq!(scan.certificate.counts().indexed_documents, 2);
+        assert_eq!(scan.certificate.parser_revision(), PARSER_REVISION);
         assert!(scan.certificate.frontier().is_none());
         assert_eq!(
             scan.source.schema_variant(),
@@ -193,6 +199,240 @@ fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
         let stale_batch = batch_resolver.hydrate_batch(&batch_request).unwrap_err();
         assert_eq!(stale_batch.kind, HydrationFailureKind::StaleRecordEvidence);
     }
+}
+
+#[test]
+fn agent_switched_capture_canonicalizes_the_provider_role() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let provider_text = create_agent_switched_fixture(&path);
+
+    let (scan, documents) = collect_scan(registration, &path);
+
+    assert_eq!(scan.certificate.counts().complete_records, 1);
+    assert_eq!(scan.certificate.counts().retained_records, 1);
+    assert_eq!(scan.certificate.counts().indexed_documents, 1);
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].event_type, EventType::Notice.as_str());
+    assert_eq!(
+        documents[0].role.as_deref(),
+        Some(EventRole::Unknown.as_str())
+    );
+    assert_eq!(documents[0].body, provider_text);
+}
+
+#[test]
+fn agent_switched_exact_hydration_preserves_provider_text() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let provider_text = create_agent_switched_fixture(&path);
+    let (_, documents) = collect_scan(registration, &path);
+    let request =
+        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
+
+    let resolver = registration.exact_resolver(crate::test_provider_sqlite_data_root(), &path);
+    let hydrated = resolver.hydrate_event(&request).unwrap();
+
+    assert_eq!(hydrated.provider_bytes, provider_text.as_bytes());
+    assert_eq!(documents[0].body.as_bytes(), hydrated.provider_bytes);
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "update session_message
+         set type = 'model-switched'
+         where id = 'message-0'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        resolver.hydrate_event(&request).unwrap_err().kind,
+        HydrationFailureKind::StaleRecordEvidence
+    );
+}
+
+#[test]
+fn agent_switched_production_event_is_accepted_by_relational_projection_types() {
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let index = temp.path().join("index");
+    create_agent_switched_fixture(&path);
+    let source = provider_source_for_path(registration.provider(), path);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+    )
+    .unwrap();
+    let refresh = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let source = refresh.sources[0].observation().source();
+
+    let page = VerifiedIndex::open(&index)
+        .unwrap()
+        .source_event_page(source, None, 1)
+        .unwrap();
+
+    assert!(page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].event_type.parse::<EventType>().unwrap(),
+        EventType::Notice
+    );
+    assert_eq!(
+        page.items[0]
+            .role
+            .as_deref()
+            .unwrap()
+            .parse::<EventRole>()
+            .unwrap(),
+        EventRole::Unknown
+    );
+}
+
+#[test]
+fn unchanged_agent_switched_v2_generation_is_reprojected_to_canonical_role() {
+    const PRE_FIX_PARSER_REVISION: &str = "opencode-family-source-backed-v2";
+
+    let registration = opencode_source_backed_registration();
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("opencode.sqlite");
+    let template_index = temp.path().join("template-index");
+    let upgrade_index = temp.path().join("upgrade-index");
+    create_agent_switched_fixture(&path);
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+
+    let mut template_registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut template_registry,
+        provider_source_for_path(registration.provider(), path.clone()),
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+    )
+    .unwrap();
+    let template =
+        refresh_source_backed_generation(&template_index, &template_registry, options.clone())
+            .unwrap();
+    let template_certificate = &template.sources[0];
+    assert_eq!(template_certificate.parser_revision(), PARSER_REVISION);
+    assert!(template_certificate.frontier().is_some());
+
+    let (direct_scan, mut documents) = collect_scan(registration, &path);
+    assert_eq!(
+        direct_scan.certificate.content_digest(),
+        template_certificate.content_digest()
+    );
+    assert_eq!(documents.len(), 1);
+    assert_eq!(
+        documents[0].role.as_deref(),
+        Some(EventRole::Unknown.as_str())
+    );
+    documents[0].role = Some("agent-switched".to_owned());
+    let v2_certificate = CertifiedSource::certify_with_frontier(
+        template_certificate.observation().clone(),
+        template_certificate.observation().clone(),
+        PRE_FIX_PARSER_REVISION,
+        *template_certificate.content_digest(),
+        template_certificate.counts(),
+        template_certificate.frontier().cloned(),
+    )
+    .unwrap();
+
+    let mut v2_writer = GenerationWriter::open(&upgrade_index, options.clone()).unwrap();
+    v2_writer
+        .begin_source(v2_certificate.observation().source().clone())
+        .unwrap();
+    v2_writer.add_document(documents.remove(0)).unwrap();
+    v2_writer.certify_source(v2_certificate).unwrap();
+    let v2 = v2_writer.commit(|_| true).unwrap();
+    let v2_index = VerifiedIndex::open(&upgrade_index).unwrap();
+    let v2_source = v2_index.manifest().sources[0].observation().source();
+    assert_eq!(
+        v2_index.manifest().sources[0].parser_revision(),
+        PRE_FIX_PARSER_REVISION
+    );
+    assert_eq!(
+        v2_index
+            .source_event_page(v2_source, None, 1)
+            .unwrap()
+            .items[0]
+            .role
+            .as_deref(),
+        Some("agent-switched")
+    );
+    drop(v2_index);
+
+    let work = Arc::new(Mutex::new(Vec::new()));
+    let mut upgrade_registry = SourceBackedProviderRegistry::new();
+    adapter::register_with_work_observer(
+        &mut upgrade_registry,
+        provider_source_for_path(registration.provider(), path),
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+        Arc::clone(&work),
+    )
+    .unwrap();
+    let upgraded =
+        refresh_source_backed_generation(&upgrade_index, &upgrade_registry, options.clone())
+            .unwrap();
+
+    assert_ne!(upgraded.commit.generation_id, v2.generation_id);
+    assert_ne!(upgraded.commit.opstamp, v2.opstamp);
+    assert_eq!(upgraded.sources[0].parser_revision(), PARSER_REVISION);
+    let upgrade_work = work.lock().unwrap()[0];
+    assert_one_snapshot(upgrade_work);
+    assert_eq!(upgrade_work.logical_rows_observed, 1);
+    assert_eq!(upgrade_work.projection_passes, 1);
+    assert_eq!(upgrade_work.logical_rows_projected, 1);
+    assert_eq!(upgrade_work.documents_staged, 1);
+    assert_eq!(upgrade_work.exact_replays, 0);
+
+    let upgraded_index = VerifiedIndex::open(&upgrade_index).unwrap();
+    let upgraded_source = upgraded_index.manifest().sources[0].observation().source();
+    let upgraded_event = &upgraded_index
+        .source_event_page(upgraded_source, None, 1)
+        .unwrap()
+        .items[0];
+    assert_eq!(
+        upgraded_event.role.as_deref(),
+        Some(EventRole::Unknown.as_str())
+    );
+    assert_eq!(
+        upgraded_event
+            .role
+            .as_deref()
+            .unwrap()
+            .parse::<EventRole>()
+            .unwrap(),
+        EventRole::Unknown
+    );
+    drop(upgraded_index);
+
+    let unchanged =
+        refresh_source_backed_generation(&upgrade_index, &upgrade_registry, options).unwrap();
+    assert_eq!(
+        unchanged.commit.generation_id,
+        upgraded.commit.generation_id
+    );
+    assert_eq!(unchanged.commit.opstamp, upgraded.commit.opstamp);
+    let unchanged_work = work.lock().unwrap()[1];
+    assert_one_snapshot(unchanged_work);
+    assert_zero_projection_replay(unchanged_work, 1);
 }
 
 #[test]
@@ -528,7 +768,7 @@ fn active_wal_read_only_provider_directory_is_byte_and_name_unchanged() {
 }
 
 #[test]
-fn logical_same_route_replacement_preserves_the_certificate_without_append() {
+fn production_routes_use_one_snapshot_and_skip_projection_for_checkpoint_and_vacuum_replays() {
     for registration in opencode_family_source_backed_registrations() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp
@@ -539,33 +779,100 @@ fn logical_same_route_replacement_preserves_the_certificate_without_append() {
         let source = provider_source_for_path(registration.provider(), path.clone());
         assert_eq!(source.status, ProviderSourceStatus::Available);
         let mut registry = SourceBackedProviderRegistry::new();
-        register_source_backed_route(
+        let work = Arc::new(Mutex::new(Vec::new()));
+        adapter::register_with_work_observer(
             &mut registry,
             source,
             SourceBackedRouteSelection::ExplicitManual,
             crate::test_provider_sqlite_data_root(),
+            Arc::clone(&work),
         )
         .unwrap();
         let options = WriterOptions {
             indexer_threads: 1,
             memory_bytes: 15_000_000,
         };
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "journal_mode", "wal").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
         let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
-        let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("vacuum").unwrap();
-        drop(connection);
-        let replay = refresh_source_backed_generation(&index, &registry, options).unwrap();
+        let cold_work = work.lock().unwrap()[0];
+        assert_one_snapshot(cold_work);
+        assert_eq!(cold_work.logical_observation_passes, 1);
+        assert_eq!(cold_work.logical_rows_observed, 2);
+        assert_eq!(cold_work.projection_passes, 1);
+        assert_eq!(cold_work.logical_rows_projected, 2);
+        assert_eq!(cold_work.documents_staged, 2);
+        assert_eq!(cold_work.max_buffered_documents, 1);
+        assert_eq!(cold_work.exact_replays, 0);
 
-        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
-        assert_eq!(replay.commit.opstamp, cold.commit.opstamp);
-        assert_eq!(replay.commit.indexed_documents, 2);
-        assert_eq!(replay.sources, cold.sources);
+        writer
+            .execute_batch("pragma wal_checkpoint(truncate)")
+            .unwrap();
+        let checkpoint =
+            refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+        let checkpoint_work = work.lock().unwrap()[1];
+        assert_one_snapshot(checkpoint_work);
+        assert_zero_projection_replay(checkpoint_work, 2);
+        assert_eq!(checkpoint.commit.generation_id, cold.commit.generation_id);
+        assert_eq!(checkpoint.commit.opstamp, cold.commit.opstamp);
+
+        writer
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
+        drop(writer);
+        let vacuum = Connection::open(&path).unwrap();
+        vacuum.execute_batch("vacuum").unwrap();
+        drop(vacuum);
+        let vacuum_replay =
+            refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+        let vacuum_work = work.lock().unwrap()[2];
+        assert_one_snapshot(vacuum_work);
+        assert_zero_projection_replay(vacuum_work, 2);
+        assert_eq!(
+            vacuum_replay.commit.generation_id,
+            cold.commit.generation_id
+        );
+        assert_eq!(vacuum_replay.commit.opstamp, cold.commit.opstamp);
+
+        let replacement = Connection::open(&path).unwrap();
+        replacement
+            .execute(
+                "update session_message
+                 set data = ?1, time_updated = time_updated + 1
+                 where id = 'message-0'",
+                [r#"{"role":"user","text":"logical replacement"}"#],
+            )
+            .unwrap();
+        drop(replacement);
+        let replaced = refresh_source_backed_generation(&index, &registry, options).unwrap();
+        let replacement_work = work.lock().unwrap()[3];
+        assert_one_snapshot(replacement_work);
+        assert_eq!(replacement_work.logical_observation_passes, 1);
+        assert_eq!(replacement_work.logical_rows_observed, 2);
+        assert_eq!(replacement_work.projection_passes, 1);
+        assert_eq!(replacement_work.logical_rows_projected, 2);
+        assert_eq!(replacement_work.documents_staged, 2);
+        assert_eq!(replacement_work.max_buffered_documents, 1);
+        assert_eq!(replacement_work.exact_replays, 0);
+        assert_ne!(replaced.commit.generation_id, cold.commit.generation_id);
+
+        assert_eq!(checkpoint.commit.indexed_documents, 2);
+        assert_eq!(checkpoint.sources, cold.sources);
         assert!(cold.removals.is_empty());
-        assert!(replay.removals.is_empty());
-        assert!(replay
+        assert!(checkpoint.removals.is_empty());
+        assert!(cold
             .sources
             .iter()
-            .all(|certificate| certificate.frontier().is_none()));
+            .all(|certificate| certificate.frontier().is_some()));
+        assert_eq!(
+            cold.sources[0].observation().source().provider(),
+            registration.provider().as_str()
+        );
+        assert_eq!(
+            cold.sources[0].observation().source().source_format(),
+            registration.source_format()
+        );
     }
 }
 
@@ -754,6 +1061,25 @@ fn create_fixture(path: &Path, provider: &str, rows: usize) -> Vec<String> {
     expected
 }
 
+fn create_agent_switched_fixture(path: &Path) -> String {
+    create_fixture(path, "opencode", 1);
+    let provider_text = "agent switched from build to plan".to_owned();
+    let data = json!({
+        "agent": "plan",
+        "text": provider_text,
+    })
+    .to_string();
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "update session_message
+         set type = 'agent-switched', data = ?1
+         where id = 'message-0'",
+        [&data],
+    )
+    .unwrap();
+    provider_text
+}
+
 fn collect_scan(
     registration: OpenCodeSourceBackedRegistration,
     path: &Path,
@@ -804,4 +1130,31 @@ fn sqlite_directory_state(path: &Path) -> Vec<(OsString, Vec<u8>)> {
         .collect::<Vec<_>>();
     state.sort_by(|left, right| left.0.cmp(&right.0));
     state
+}
+
+fn assert_one_snapshot(counters: adapter::OpenCodeSqliteWorkCounters) {
+    assert_eq!(counters.snapshot_opens, 1);
+    assert_eq!(
+        counters.immutable_snapshot_opens + counters.copied_snapshot_opens,
+        1
+    );
+    if counters.copied_snapshot_opens == 0 {
+        assert_eq!(counters.source_bytes_copied, 0);
+    } else {
+        assert!(counters.source_bytes_copied > 0);
+    }
+    assert_eq!(counters.terminal_fences, 1);
+    assert!(counters.terminal_revalidations >= 2);
+    assert_eq!(counters.active_snapshots, 0);
+    assert_eq!(counters.max_active_snapshots, 1);
+}
+
+fn assert_zero_projection_replay(counters: adapter::OpenCodeSqliteWorkCounters, logical_rows: u64) {
+    assert_eq!(counters.logical_observation_passes, 1);
+    assert_eq!(counters.logical_rows_observed, logical_rows);
+    assert_eq!(counters.projection_passes, 0);
+    assert_eq!(counters.logical_rows_projected, 0);
+    assert_eq!(counters.documents_staged, 0);
+    assert_eq!(counters.max_buffered_documents, 0);
+    assert_eq!(counters.exact_replays, 1);
 }

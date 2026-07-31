@@ -131,6 +131,10 @@ pub(super) fn source_record() -> SourceRecord {
             checkout_id: Some("checkout-1".to_owned()),
             worktree_id: Some("worktree-1".to_owned()),
             object_format: Some("sha1".to_owned()),
+            worktree_root: Some(
+                SourceWorktreeRootLocator::new("/workspace/ctx".to_owned())
+                    .expect("golden worktree root"),
+            ),
         }),
         SourceRecordMetadata {
             event_sequence: 1,
@@ -206,7 +210,8 @@ pub(super) fn source_receipt() -> SourceManifestReceipt {
         core_generation_id: "a".repeat(64),
         manifest_aggregate_sha256: source_manifest_header().aggregate_sha256,
         materializer_revision: "golden-source-materializer-v1".to_owned(),
-        progress: vec![source_progress(true)],
+        progress: SourceProgressReceipt::from_progress(&[source_progress(true)])
+            .expect("golden source progress receipt"),
     }
 }
 

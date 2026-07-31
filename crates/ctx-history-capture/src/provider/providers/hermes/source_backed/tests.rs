@@ -1,9 +1,21 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use ctx_history_core::{CaptureProvider, NativeRecordCoordinate, SourceAnchor, TypedKey};
+use ctx_history_index::WriterOptions;
 use rusqlite::Connection;
 
 use super::*;
+use crate::{
+    provider::source_backed::{
+        family::document::register_replacement_document_tree_route,
+        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+    },
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
+};
 
 fn create_state_db(path: &Path, profile: &str, body: &str) {
     if let Some(parent) = path.parent() {
@@ -205,6 +217,106 @@ fn idle_wal_writer_first_scan_succeeds_and_append_changes_revision() {
 }
 
 #[test]
+fn terminal_family_treats_empty_wal_create_remove_and_sibling_churn_as_noops() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let path = temp.path().join("state.db");
+    let wal = path.with_file_name("state.db-wal");
+    let sibling = temp.path().join("unrelated-sibling");
+    create_state_db(&path, "terminal-noop", "terminal noop");
+    let writer = Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("pragma journal_mode = wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer
+        .execute_batch("pragma wal_autocheckpoint = 0")
+        .unwrap();
+    assert!(!wal.exists());
+
+    let (_, absent_snapshot) = open_root_authorized_snapshot_with_hook(&data_root, &path, || {
+        fs::write(&sibling, b"sibling churn during open").unwrap();
+    })
+    .unwrap();
+    let absent_revision = *absent_snapshot.evidence().revision();
+    let absent_terminal = absent_snapshot.terminal_revalidator();
+    absent_snapshot.finish().unwrap();
+    fs::write(&wal, b"").unwrap();
+    absent_terminal().unwrap();
+
+    let (_, empty_snapshot) = open_root_authorized_snapshot(&data_root, &path).unwrap();
+    assert_eq!(empty_snapshot.evidence().revision(), &absent_revision);
+    assert_eq!(empty_snapshot.evidence().wal_length(), None);
+    let empty_terminal = empty_snapshot.terminal_revalidator();
+    empty_snapshot.finish().unwrap();
+    fs::remove_file(&wal).unwrap();
+    empty_terminal().unwrap();
+
+    fs::write(&sibling, b"sibling churn after seal").unwrap();
+    empty_terminal().unwrap();
+    drop(writer);
+}
+
+#[test]
+fn terminal_family_rejects_nonempty_wal_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "terminal-wal", "before terminal mutation");
+    let writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute("update messages set content = content where id = 7", [])
+        .unwrap();
+
+    let (_, snapshot) = open_root_authorized_snapshot(&data_root, &path).unwrap();
+    let terminal = snapshot.terminal_revalidator();
+    snapshot.finish().unwrap();
+    writer
+        .execute(
+            "update messages set content = 'after terminal mutation' where id = 7",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        terminal(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    drop(writer);
+}
+
+#[test]
+fn concurrent_committed_wal_mutation_during_snapshot_open_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "concurrent-wal", "before concurrent mutation");
+    let writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute("update messages set content = content where id = 7", [])
+        .unwrap();
+
+    let result = open_root_authorized_snapshot_with_hook(&data_root, &path, || {
+        writer
+            .execute(
+                "update messages set content = 'during snapshot open' where id = 7",
+                [],
+            )
+            .unwrap();
+    });
+    assert!(matches!(
+        result,
+        Err(HermesSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::SourceChanged
+        ))
+    ));
+    drop(writer);
+}
+
+#[test]
 fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
@@ -225,14 +337,185 @@ fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
     assert_eq!(document.body, text);
     assert!(document.body.ends_with("hermes-tail"));
 
-    let hydrated = hydrate_hermes_source_backed_message(
+    let resolver = HermesLocatorResolver::new(
         crate::test_provider_sqlite_data_root(),
         candidate.path(),
-        &document.locator,
-    )
-    .unwrap();
+        candidate.source().clone(),
+    );
+    let hydrated = resolver
+        .hydrate_locators(&[&document.locator])
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(hydrated.text, text);
     assert_eq!(hydrated.provider_bytes, text.as_bytes());
+    assert_eq!(resolver.counters(), (1, 1, 1));
+}
+
+#[test]
+fn projection_and_hydration_use_bounded_native_row_sets() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "sets", "set message 7");
+    let mut conn = Connection::open(&path).unwrap();
+    let transaction = conn.transaction().unwrap();
+    for message_id in 8_i64..=136 {
+        transaction
+            .execute(
+                "insert into messages
+                     (id, session_id, role, content, timestamp, active, compacted)
+                 values (?1, 'sets-child', 'user', ?2, ?3, 1, 0)",
+                rusqlite::params![
+                    message_id,
+                    format!("set message {message_id}"),
+                    message_id as f64
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    drop(conn);
+
+    let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("sets").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut records = Vec::new();
+    let scan = scan_hermes_source_backed(&candidate, |page| {
+        records.extend(page.records);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(scan.decoded_rows, 132);
+    assert_eq!(scan.emitted_pages, 3);
+    assert_eq!(scan.peak_buffered_records, 64);
+    assert_eq!(scan.native_candidate_query_batches, 6);
+    assert_eq!(scan.native_hydration_query_batches, 4);
+    assert_eq!(scan.max_native_rows_per_set, 64);
+
+    let locators = records
+        .iter()
+        .filter_map(|record| match record {
+            HermesSourceBackedRecord::Event(document) => Some(&document.locator),
+            HermesSourceBackedRecord::Session(_) | HermesSourceBackedRecord::Rejected(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(locators.len(), 130);
+    let resolver = HermesLocatorResolver::new(
+        crate::test_provider_sqlite_data_root(),
+        candidate.path(),
+        candidate.source().clone(),
+    );
+    let hydrated = resolver.hydrate_locators(&locators).unwrap();
+    assert_eq!(hydrated.len(), 130);
+    assert_eq!(resolver.counters(), (1, 1, 130));
+    assert_eq!(hydrated.first().unwrap().text, "set message 7");
+    assert_eq!(hydrated.last().unwrap().text, "set message 136");
+}
+
+#[test]
+fn replacement_route_uses_one_active_wal_snapshot_and_zero_replay_projection() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let index = temp.path().join("index");
+    create_state_db(&path, "route", "route baseline");
+    let writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute("update messages set content = content where id = 7", [])
+        .unwrap();
+    let candidate = hermes_source_backed_explicit(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("route").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let source = ProviderSource {
+        provider: CaptureProvider::Hermes,
+        path: path.clone(),
+        exists: true,
+        source_format: HERMES_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_replacement_document_tree_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        candidate,
+    )
+    .unwrap();
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+
+    let before_cold = sqlite_persistent_bytes(&path);
+    reset_route_work_counters();
+    let cold = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert_eq!(sqlite_persistent_bytes(&path), before_cold);
+    assert!(cold.sources[0].frontier().is_some());
+    let cold_work = route_work_counters();
+    assert_eq!(cold_work.logical_observation_passes, 1);
+    assert_eq!(cold_work.projection_passes, 1);
+    assert_eq!(cold_work.immutable_snapshot_opens, 0);
+    assert_eq!(cold_work.copied_snapshot_opens, 1);
+    assert!(cold_work.source_bytes_copied > 0);
+    assert_eq!(cold_work.terminal_fences, 1);
+    assert_eq!(cold_work.terminal_revalidations, 2);
+
+    let before_replay = sqlite_persistent_bytes(&path);
+    reset_route_work_counters();
+    let replay = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert_eq!(sqlite_persistent_bytes(&path), before_replay);
+    assert_eq!(replay.sources, cold.sources);
+    assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(replay.commit.opstamp, cold.commit.opstamp);
+    let replay_work = route_work_counters();
+    assert_eq!(replay_work.logical_observation_passes, 1);
+    assert_eq!(replay_work.projection_passes, 0);
+    assert_eq!(replay_work.immutable_snapshot_opens, 0);
+    assert_eq!(replay_work.copied_snapshot_opens, 1);
+    assert!(replay_work.source_bytes_copied > 0);
+    assert_eq!(replay_work.terminal_fences, 1);
+    assert_eq!(replay_work.terminal_revalidations, 2);
+
+    writer
+        .execute(
+            "update messages set content = 'route replacement' where id = 7",
+            [],
+        )
+        .unwrap();
+    let before_replacement = sqlite_persistent_bytes(&path);
+    reset_route_work_counters();
+    let replacement = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    assert_eq!(sqlite_persistent_bytes(&path), before_replacement);
+    assert_ne!(replacement.sources, replay.sources);
+    assert!(replacement.sources[0].frontier().is_some());
+    let replacement_work = route_work_counters();
+    assert_eq!(replacement_work.logical_observation_passes, 1);
+    assert_eq!(replacement_work.projection_passes, 1);
+    assert_eq!(replacement_work.immutable_snapshot_opens, 0);
+    assert_eq!(replacement_work.copied_snapshot_opens, 1);
+    assert!(replacement_work.source_bytes_copied > 0);
+    assert_eq!(replacement_work.terminal_fences, 1);
+    assert_eq!(replacement_work.terminal_revalidations, 2);
+    drop(writer);
 }
 
 fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
@@ -259,6 +542,16 @@ fn scan_candidate(
         Ok(())
     })
     .unwrap();
+    assert_eq!(scan.row_decode_passes, 1);
+    assert_eq!(
+        scan.decoded_rows,
+        scan.certificate.counts().complete_records
+    );
+    assert_eq!(scan.emitted_pages == 0, records.is_empty());
+    assert!(scan.peak_buffered_records <= NATIVE_INGESTION_PAGE_MAX_UNITS as u64);
+    assert!(scan.native_candidate_query_batches > 0);
+    assert!(scan.native_hydration_query_batches <= scan.native_candidate_query_batches);
+    assert!(scan.max_native_rows_per_set <= 64);
     (scan.certificate, records)
 }
 

@@ -201,11 +201,11 @@ fn disabled_status_is_clear_and_enable_is_the_only_action() {
 }
 
 #[test]
-fn completed_forced_run_wins_over_disabled_persistent_preference() {
+fn completed_finite_run_wins_over_disabled_persistent_preference() {
     let report = json!({
         "enabled": false,
         "status": "completed",
-        "mode": "once",
+        "mode": "full",
         "running": false,
         "semantic_runtime_active": false,
         "config_reload": {"status": "applied"},

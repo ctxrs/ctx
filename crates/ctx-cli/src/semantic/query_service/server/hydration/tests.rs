@@ -142,6 +142,67 @@ fn request(items: &[&FixtureLocator], mode: &str, max_chars: Option<usize>) -> V
     })
 }
 
+fn generation_event(item: &FixtureLocator, source_path: Option<&str>) -> EventRecord {
+    EventRecord {
+        event_id: item.event_id,
+        session_id: derive_session_id(SessionIdentityInput {
+            source: item.locator.source(),
+            logical_session_kind: "thread",
+            native_session_key: &NativeSessionKey::native_id(
+                "session",
+                TypedKey::utf8("generation-session").unwrap(),
+            )
+            .unwrap(),
+        })
+        .unwrap(),
+        parent_session_id: None,
+        root_session_id: derive_session_id(SessionIdentityInput {
+            source: item.locator.source(),
+            logical_session_kind: "thread",
+            native_session_key: &NativeSessionKey::native_id(
+                "session",
+                TypedKey::utf8("generation-session").unwrap(),
+            )
+            .unwrap(),
+        })
+        .unwrap(),
+        locator: item.locator.clone(),
+        provider: item.locator.source().provider().to_owned(),
+        source_format: item.locator.source().source_format().to_owned(),
+        provider_session_id: None,
+        branch: None,
+        source_path: source_path.map(str::to_owned),
+        agent_type: "codex".to_owned(),
+        is_primary: true,
+        event_sequence: 1,
+        occurred_at_unix_ms: None,
+        event_type: "message".to_owned(),
+        role: Some("user".to_owned()),
+        workspace: None,
+        cwd: None,
+        touched_files: Vec::new(),
+    }
+}
+
+#[test]
+fn generation_authority_rejects_forged_same_source_coordinate_and_path_hint() {
+    let indexed = jsonl_fixture(34, 1, 64);
+    let forged = jsonl_fixture(34, 2, 64);
+    let event = generation_event(&indexed, Some("/provider/history.jsonl"));
+
+    let forged_coordinate = EventHydrationRequest::new(indexed.event_id, forged.locator).unwrap();
+    let coordinate_error =
+        validate_generation_bound_request(&event, &forged_coordinate).unwrap_err();
+    assert_eq!(coordinate_error.kind, HydrationFailureKind::InvalidLocator);
+
+    let forged_path = EventHydrationRequest::new(indexed.event_id, indexed.locator)
+        .unwrap()
+        .with_source_path_hint(Some("/provider/other.jsonl".to_owned()))
+        .unwrap();
+    let path_error = validate_generation_bound_request(&event, &forged_path).unwrap_err();
+    assert_eq!(path_error.kind, HydrationFailureKind::InvalidLocator);
+}
+
 fn assert_typed_budget_failure(response: &Value, snapshot: HydrationBudgetSnapshot) {
     assert_eq!(response["ok"], false);
     assert_eq!(response["code"], "hydration_budget_exceeded");

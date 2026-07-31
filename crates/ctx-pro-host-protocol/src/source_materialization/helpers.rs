@@ -132,6 +132,39 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
+fn source_progress_aggregate_sha256(progress: &[SourceProgress]) -> Result<String, ProtocolError> {
+    let source_count = u32::try_from(progress.len())
+        .map_err(|_| ProtocolError::new(ErrorClass::Bounds, "source progress count overflowed"))?;
+    let page_count = u32::try_from(progress.len().div_ceil(MAX_SOURCE_PROGRESS_PAGE_ITEMS))
+        .map_err(|_| {
+            ProtocolError::new(ErrorClass::Bounds, "source progress page count overflowed")
+        })?;
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-source-progress-receipt-v1\0");
+    digest.update(SOURCE_MATERIALIZATION_CONTRACT_VERSION.to_be_bytes());
+    digest.update(source_count.to_be_bytes());
+    digest.update(page_count.to_be_bytes());
+    for value in progress {
+        digest_json(&mut digest, value)?;
+    }
+    Ok(hex_digest(digest.finalize()))
+}
+
+fn source_progress_page_sha256(
+    receipt: &SourceProgressReceipt,
+    page: &SourceProgressPage,
+) -> Result<String, ProtocolError> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-source-progress-page-v1\0");
+    digest.update(SOURCE_MATERIALIZATION_CONTRACT_VERSION.to_be_bytes());
+    digest.update(receipt.source_count.to_be_bytes());
+    digest.update(receipt.page_count.to_be_bytes());
+    digest_field(&mut digest, receipt.aggregate_sha256.as_bytes());
+    digest.update(page.page_index.to_be_bytes());
+    digest_json(&mut digest, &page.progress)?;
+    Ok(hex_digest(digest.finalize()))
+}
+
 fn validate_progress_set(
     progress: &[SourceProgress],
     required_materializer_revision: Option<&str>,

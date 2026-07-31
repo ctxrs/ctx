@@ -1,12 +1,22 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
+};
+
+#[cfg(target_os = "linux")]
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
 };
 
 use ctx_history_core::{
-    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
-    TypedKey,
+    BatchHydrationRequest, CaptureProvider, CertifiedSource, ContentSourceResolver,
+    EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
+    SourceRecordLocator, TypedKey,
 };
 use ctx_history_index::{EventRecord, VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
@@ -17,7 +27,9 @@ use super::native_path::source_backed::{
     nanoclaw_source_key, set_before_source_backed_finish_hook, NanoClawDocumentTreeAdapter,
 };
 use super::position::{nanoclaw_message_locator, NanoClawMessageSource};
-use super::project::NanoClawSourceBackedProject;
+use super::project::{
+    NanoClawProjectOpenError, NanoClawSourceBackedProject, NANOCLAW_MAX_SESSION_SNAPSHOTS,
+};
 use super::*;
 use crate::complete_content::{
     source_access::set_nanoclaw_before_source_set_revalidation,
@@ -36,11 +48,24 @@ use crate::{
 
 const SOURCE_BACKED_LINEAGE: [u8; 32] = [0x4a; 32];
 
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_ROOT: &str = "CTX_NANOCLAW_FD_PROBE_ROOT";
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_SESSIONS: &str = "CTX_NANOCLAW_FD_PROBE_SESSIONS";
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_TEST: &str =
+    "provider::providers::nanoclaw::tests::compound_inventory_peak_fds_are_bounded_independent_of_snapshot_count";
+#[cfg(target_os = "linux")]
+const NANOCLAW_FD_PROBE_OUTPUT: &str = "nanoclaw_fd_peak=";
+const NANOCLAW_ADMISSION_CHILD: &str = "CTX_NANOCLAW_ADMISSION_CHILD";
+const NANOCLAW_ADMISSION_TEST: &str =
+    "provider::providers::nanoclaw::tests::compound_inventory_admits_n_snapshots_and_rejects_n_plus_one_before_projection";
+
 fn create_project(temp: &TempDir, name: &str, sessions: usize) -> PathBuf {
     let root = temp.path().join(name);
     let data = root.join("data");
     fs::create_dir_all(data.join("v2-sessions")).unwrap();
-    let central = Connection::open(data.join("v2.db")).unwrap();
+    let mut central = Connection::open(data.join("v2.db")).unwrap();
     central
         .execute_batch(
             "create table agent_groups (
@@ -64,22 +89,28 @@ fn create_project(temp: &TempDir, name: &str, sessions: usize) -> PathBuf {
             );",
         )
         .unwrap();
-    for index in 0..sessions {
-        central
-            .execute(
+    let transaction = central.transaction().unwrap();
+    {
+        let mut insert = transaction
+            .prepare(
                 "insert into sessions values (
                     ?1, 'ag-1', 'mg-1', ?2, 'codex', 'active', 'running',
                     ?3, ?4
                 )",
-                rusqlite::params![
+            )
+            .unwrap();
+        for index in 0..sessions {
+            insert
+                .execute(rusqlite::params![
                     format!("session-{index:04}"),
                     format!("thread-{index:04}"),
                     1_782_259_202_000_i64 + index as i64,
                     1_782_259_200_000_i64 + index as i64,
-                ],
-            )
-            .unwrap();
+                ])
+                .unwrap();
+        }
     }
+    transaction.commit().unwrap();
     root
 }
 
@@ -140,6 +171,15 @@ fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &st
         .unwrap();
 }
 
+fn restore_modified_time(path: &Path, modified: std::time::SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+}
+
 type PersistentDiskState = Vec<(PathBuf, Option<(Vec<u8>, u64, std::time::SystemTime)>)>;
 
 fn sqlite_persistent_disk_state(databases: &[&Path]) -> PersistentDiskState {
@@ -194,11 +234,19 @@ fn registry(root: &Path) -> SourceBackedProviderRegistry {
     registry
 }
 
-fn direct_registry(root: &Path) -> SourceBackedProviderRegistry {
-    let adapter = NanoClawDocumentTreeAdapter::new(
+fn direct_registry(root: &Path) -> (SourceBackedProviderRegistry, NanoClawDocumentTreeAdapter) {
+    direct_registry_with_base_sources(root, &[])
+}
+
+fn direct_registry_with_base_sources(
+    root: &Path,
+    base_sources: &[CertifiedSource],
+) -> (SourceBackedProviderRegistry, NanoClawDocumentTreeAdapter) {
+    let adapter = NanoClawDocumentTreeAdapter::new_with_base_sources(
         crate::test_provider_sqlite_data_root(),
         root.to_path_buf(),
         SOURCE_BACKED_LINEAGE,
+        base_sources,
     )
     .unwrap();
     let mut registry = SourceBackedProviderRegistry::new();
@@ -207,10 +255,10 @@ fn direct_registry(root: &Path) -> SourceBackedProviderRegistry {
         route_source(root),
         SourceBackedRouteSelection::ExplicitManual,
         SourceBackedSelectorAuthority::CatalogLineage,
-        adapter,
+        adapter.clone(),
     )
     .unwrap();
-    registry
+    (registry, adapter)
 }
 
 fn writer_options() -> WriterOptions {
@@ -284,13 +332,13 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(receipt.sources.len(), 1);
     let certificate = &receipt.sources[0];
-    assert_eq!(certificate.parser_revision(), "nanoclaw-source-backed-v2");
+    assert_eq!(certificate.parser_revision(), "nanoclaw-source-backed-v3");
     assert_eq!(certificate.counts().complete_records, 3);
     assert_eq!(certificate.counts().retained_records, 2);
     assert_eq!(certificate.counts().indexed_documents, 2);
     assert!(
-        certificate.frontier().is_none(),
-        "compound logical snapshots must not advertise physical replay"
+        certificate.frontier().is_some(),
+        "compound logical snapshots must persist their logical replay frontier"
     );
     let evidence: serde_json::Value =
         serde_json::from_slice(certificate.observation().revision()).unwrap();
@@ -309,8 +357,9 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
         assert!(event.is_primary);
         assert_eq!(
             event.locator.revision_policy(),
-            LocatorRevisionPolicy::ExactSourceRevision
+            LocatorRevisionPolicy::StableRecordEvidence
         );
+        assert!(event.locator.certified_source_revision_digest().is_none());
         let NativeRecordCoordinate::ProviderNative {
             namespace,
             coordinate,
@@ -360,15 +409,21 @@ fn logical_compound_lifecycle_discards_identical_staging_and_fails_closed() {
     let root = create_project(&temp, "document-lifecycle", 1);
     let (inbound, _) = create_message_stores(&root, "session-0000");
     insert_inbound(&inbound, "stable", 1, 1_000, "before");
-    let registry = direct_registry(&root);
+    let (registry, adapter) = direct_registry(&root);
     let index_root = temp.path().join("index");
 
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(adapter.work_counters(), (1, 2, 0, 1, 2, 2, 1, 0, 0, 0, 0));
     let stable_event_id = source_events(&index_root)[0].event_id;
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+    assert_eq!(
+        adapter.work_counters(),
+        (2, 4, 1, 1, 2, 2, 1, 0, 0, 0, 0),
+        "exact replay must visit and spool zero logical rows"
+    );
 
     Connection::open(&inbound)
         .unwrap()
@@ -380,6 +435,7 @@ fn logical_compound_lifecycle_discards_identical_staging_and_fails_closed() {
     let changed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(adapter.work_counters(), (4, 8, 2, 2, 4, 4, 2, 0, 0, 0, 0));
     let changed_event = &source_events(&index_root)[0];
     assert_eq!(changed_event.event_id, stable_event_id);
     assert_eq!(
@@ -393,6 +449,7 @@ fn logical_compound_lifecycle_discards_identical_staging_and_fails_closed() {
             .provider_bytes,
         b"after-"
     );
+    assert_eq!(adapter.work_counters(), (4, 8, 2, 2, 4, 4, 2, 1, 1, 1, 1));
 
     let mutate = inbound.clone();
     let _hook = set_before_source_backed_finish_hook(move || {
@@ -411,6 +468,7 @@ fn logical_compound_lifecycle_discards_identical_staging_and_fails_closed() {
         retained_generation
     );
 
+    let before_unavailable = adapter.work_counters();
     let unavailable = temp.path().join("document-lifecycle-unavailable");
     fs::rename(&root, unavailable).unwrap();
     let error =
@@ -423,6 +481,294 @@ fn logical_compound_lifecycle_discards_identical_staging_and_fails_closed() {
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
+    );
+    let after_unavailable = adapter.work_counters();
+    assert_eq!(
+        (
+            after_unavailable.3,
+            after_unavailable.4,
+            after_unavailable.5,
+            after_unavailable.6,
+        ),
+        (
+            before_unavailable.3,
+            before_unavailable.4,
+            before_unavailable.5,
+            before_unavailable.6,
+        ),
+        "unavailable replay must fail before logical rows, spooling, or projection"
+    );
+}
+
+#[test]
+fn fresh_registry_restores_certified_noop_and_rescans_rewrite_and_append_once() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "fresh-registry", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "stable", 1, 1_000, "before");
+    let index_root = temp.path().join("fresh-registry-index");
+
+    let (cold_registry, cold_adapter) = direct_registry(&root);
+    let cold =
+        refresh_source_backed_generation(&index_root, &cold_registry, writer_options()).unwrap();
+    assert_eq!(
+        cold_adapter.work_counters(),
+        (1, 2, 0, 1, 2, 2, 1, 0, 0, 0, 0)
+    );
+    let stable_event_id = source_events(&index_root)[0].event_id;
+    let cold_base = VerifiedIndex::open(&index_root).unwrap().manifest().sources[0].clone();
+
+    let (noop_registry, noop_adapter) =
+        direct_registry_with_base_sources(&root, std::slice::from_ref(&cold_base));
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &noop_registry, writer_options()).unwrap();
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
+    assert_eq!(
+        noop_adapter.work_counters(),
+        (1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        "a fresh registry must restore the certificate and skip logical rows and spooling"
+    );
+
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'rewritten' where id = 'stable'",
+            [],
+        )
+        .unwrap();
+    let (rewrite_registry, rewrite_adapter) =
+        direct_registry_with_base_sources(&root, std::slice::from_ref(&cold_base));
+    let rewritten =
+        refresh_source_backed_generation(&index_root, &rewrite_registry, writer_options()).unwrap();
+    assert_ne!(rewritten.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(
+        rewrite_adapter.work_counters(),
+        (1, 2, 1, 1, 2, 2, 1, 0, 0, 0, 0),
+        "a rewrite must reuse the physical precheck open and run one logical pass"
+    );
+    let rewritten_event = source_events(&index_root).remove(0);
+    assert_eq!(rewritten_event.event_id, stable_event_id);
+    assert_eq!(
+        rewrite_registry
+            .resolver_registry()
+            .hydrate_event(
+                &EventHydrationRequest::new(
+                    rewritten_event.event_id,
+                    rewritten_event.locator.clone(),
+                )
+                .unwrap()
+            )
+            .unwrap()
+            .provider_bytes,
+        b"rewritten"
+    );
+    let rewritten_base = VerifiedIndex::open(&index_root).unwrap().manifest().sources[0].clone();
+
+    insert_inbound(&inbound, "appended", 2, 2_000, "appended body");
+    let (append_registry, append_adapter) =
+        direct_registry_with_base_sources(&root, std::slice::from_ref(&rewritten_base));
+    let appended =
+        refresh_source_backed_generation(&index_root, &append_registry, writer_options()).unwrap();
+    assert_ne!(
+        appended.commit.generation_id,
+        rewritten.commit.generation_id
+    );
+    assert_eq!(
+        append_adapter.work_counters(),
+        (1, 2, 1, 1, 3, 3, 1, 0, 0, 0, 0),
+        "an append must run one replacement scan and spool each current logical row once"
+    );
+    let events = source_events(&index_root);
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| event.event_id == stable_event_id));
+}
+
+#[test]
+fn certified_revision_precheck_detects_active_wal_mutation() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "wal-replay", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    let writer = Connection::open(&inbound).unwrap();
+    assert_eq!(
+        writer
+            .query_row("pragma journal_mode=wal", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    writer
+        .execute(
+            "insert into messages_in values (
+                'wal-replay', 1, 'chat', 1000, 'done', 'message', 'chat-1',
+                'telegram', 'thread', 'before', null, 0
+            )",
+            [],
+        )
+        .unwrap();
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    let (registry, adapter) = direct_registry(&root);
+    let index_root = temp.path().join("index");
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let replay =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(adapter.work_counters(), (2, 4, 1, 1, 2, 2, 1, 0, 0, 0, 0));
+
+    writer
+        .execute(
+            "update messages_in set content = 'after!' where id = 'wal-replay'",
+            [],
+        )
+        .unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(
+        adapter.work_counters(),
+        (4, 8, 2, 2, 4, 4, 2, 0, 0, 0, 0),
+        "active WAL mutation must trigger exactly one changed logical pass"
+    );
+    let event = source_events(&index_root).remove(0);
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator).unwrap())
+        .unwrap();
+    assert_eq!(hydrated.provider_bytes, b"after!");
+}
+
+#[test]
+fn certified_revision_precheck_detects_rewrite_schema_replacement_and_deletion() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "revision-mutations", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "mutation", 1, 1_000, "before");
+    let (registry, adapter) = direct_registry(&root);
+    let index_root = temp.path().join("index");
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    let original_metadata = fs::metadata(&inbound).unwrap();
+    let original_modified = original_metadata.modified().unwrap();
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'after!' where id = 'mutation'",
+            [],
+        )
+        .unwrap();
+    restore_modified_time(&inbound, original_modified);
+    let rewritten_metadata = fs::metadata(&inbound).unwrap();
+    assert_eq!(rewritten_metadata.len(), original_metadata.len());
+    assert_eq!(rewritten_metadata.modified().unwrap(), original_modified);
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    Connection::open(root.join("data").join("v2.db"))
+        .unwrap()
+        .execute("alter table sessions add column replay_extra text", [])
+        .unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    Connection::open(&inbound)
+        .unwrap()
+        .execute("alter table messages_in add column message_extra text", [])
+        .unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    let replacement = inbound.with_extension("replacement");
+    fs::copy(&inbound, &replacement).unwrap();
+    Connection::open(&replacement)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'swapped' where id = 'mutation'",
+            [],
+        )
+        .unwrap();
+    let retired = inbound.with_extension("retired");
+    fs::rename(&inbound, retired).unwrap();
+    fs::rename(replacement, &inbound).unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    fs::remove_file(&inbound).unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert!(source_events(&index_root).is_empty());
+    assert_eq!(
+        adapter.work_counters(),
+        (12, 24, 6, 6, 11, 11, 6, 0, 0, 0, 0),
+        "each physical mutation must trigger one, and only one, logical pass"
+    );
+}
+
+#[test]
+fn truncated_component_fails_closed_before_logical_projection_and_recovers() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "revision-truncate", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "truncate", 1, 1_000, "retained");
+    let backup = inbound.with_extension("backup");
+    let (registry, adapter) = direct_registry(&root);
+    let index_root = temp.path().join("index");
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    fs::copy(&inbound, &backup).unwrap();
+
+    fs::File::options()
+        .write(true)
+        .open(&inbound)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    assert_eq!(
+        adapter.work_counters(),
+        (3, 6, 2, 1, 2, 2, 1, 0, 0, 0, 0),
+        "truncation must be rejected before a logical pass is certified"
+    );
+
+    fs::remove_file(&inbound).unwrap();
+    fs::rename(backup, &inbound).unwrap();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(adapter.work_counters(), (5, 10, 3, 2, 4, 4, 2, 0, 0, 0, 0));
+    assert_eq!(source_events(&index_root).len(), 1);
+}
+
+#[test]
+fn grouped_hydration_opens_only_the_addressed_component() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "selective-hydration", 3);
+    for index in 0..3 {
+        let (inbound, outbound) = create_message_stores(&root, &format!("session-{index:04}"));
+        insert_inbound(
+            &inbound,
+            &format!("in-{index}"),
+            1,
+            1_000,
+            &format!("inbound-{index}"),
+        );
+        insert_outbound(
+            &outbound,
+            &format!("out-{index}"),
+            2,
+            2_000,
+            &format!("outbound-{index}"),
+        );
+    }
+    let (registry, adapter) = direct_registry(&root);
+    let index_root = temp.path().join("index");
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let event = source_events(&index_root).remove(0);
+
+    registry
+        .resolver_registry()
+        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator).unwrap())
+        .unwrap();
+    assert_eq!(
+        adapter.work_counters(),
+        (1, 6, 0, 1, 9, 9, 1, 1, 1, 1, 1),
+        "one requested message must not open unrelated component databases"
     );
 }
 
@@ -449,11 +795,8 @@ fn deletion_and_unavailable_hydration_have_distinct_typed_failures() {
     let missing_locator = SourceRecordLocator::new(
         deleted.locator.source().clone(),
         deleted.locator.coordinate().clone(),
-        LocatorRevisionPolicy::ExactSourceRevision,
-        current[0]
-            .locator
-            .certified_source_revision_digest()
-            .copied(),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         *deleted.locator.record_digest(),
     )
     .unwrap();
@@ -493,8 +836,199 @@ fn compound_inventory_is_metadata_only_across_many_databases() {
     }
     let mut project =
         NanoClawSourceBackedProject::open(crate::test_provider_sqlite_data_root(), &root).unwrap();
-    assert_ne!(project.physical_fingerprint(), [0_u8; 32]);
+    assert_ne!(
+        project.snapshot().logical_authority_fingerprint(),
+        [0_u8; 32]
+    );
+    assert_eq!(project.snapshot().component_database_count(), 128);
     project.finish().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn run_compound_inventory_fd_probe(root: &Path, sessions: u64) {
+    let sampling = Arc::new(AtomicBool::new(true));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let sampler = {
+        let sampling = Arc::clone(&sampling);
+        let peak = Arc::clone(&peak);
+        thread::spawn(move || {
+            while sampling.load(Ordering::Relaxed) {
+                peak.fetch_max(
+                    fs::read_dir("/proc/self/fd").unwrap().count(),
+                    Ordering::Relaxed,
+                );
+                thread::yield_now();
+            }
+        })
+    };
+    let mut project =
+        NanoClawSourceBackedProject::open(crate::test_provider_sqlite_data_root(), root).unwrap();
+    assert_eq!(project.snapshot().selected_component_count(), sessions * 2);
+    thread::yield_now();
+    project.finish().unwrap();
+    sampling.store(false, Ordering::Relaxed);
+    sampler.join().unwrap();
+    println!("{NANOCLAW_FD_PROBE_OUTPUT}{}", peak.load(Ordering::Relaxed));
+}
+
+#[cfg(target_os = "linux")]
+fn isolated_compound_inventory_peak_fds(root: &Path, sessions: usize) -> usize {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg(NANOCLAW_FD_PROBE_TEST)
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .arg("--nocapture")
+        .env(NANOCLAW_FD_PROBE_ROOT, root)
+        .env(NANOCLAW_FD_PROBE_SESSIONS, sessions.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "NanoClaw FD probe child failed: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(NANOCLAW_FD_PROBE_OUTPUT))
+        .unwrap_or_else(|| panic!("NanoClaw FD probe did not report a peak:\n{stdout}"))
+        .parse()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compound_inventory_peak_fds_are_bounded_independent_of_snapshot_count() {
+    const SMALL_INVENTORY: usize = 64;
+    const MAXIMUM_PEAK_FDS: usize = 96;
+    const MAXIMUM_GROWTH_FDS: usize = 8;
+
+    if let Some(root) = std::env::var_os(NANOCLAW_FD_PROBE_ROOT) {
+        let sessions = std::env::var(NANOCLAW_FD_PROBE_SESSIONS)
+            .unwrap()
+            .parse()
+            .unwrap();
+        run_compound_inventory_fd_probe(Path::new(&root), sessions);
+        return;
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let small = create_project(&temp, "fd-small", SMALL_INVENTORY);
+    let large = create_project(&temp, "fd-large", NANOCLAW_MAX_SESSION_SNAPSHOTS);
+    for (root, sessions) in [
+        (&small, SMALL_INVENTORY),
+        (&large, NANOCLAW_MAX_SESSION_SNAPSHOTS),
+    ] {
+        for index in 0..sessions {
+            fs::create_dir_all(
+                root.join("data")
+                    .join("v2-sessions")
+                    .join("ag-1")
+                    .join(format!("session-{index:04}")),
+            )
+            .unwrap();
+        }
+    }
+
+    let small_peak = isolated_compound_inventory_peak_fds(&small, SMALL_INVENTORY);
+    let large_peak = isolated_compound_inventory_peak_fds(&large, NANOCLAW_MAX_SESSION_SNAPSHOTS);
+    eprintln!("NanoClaw isolated FD peaks: small={small_peak}, large={large_peak}");
+    assert!(
+        large_peak <= MAXIMUM_PEAK_FDS,
+        "NanoClaw inventory FD peak exceeded its process budget: peak={large_peak}, maximum={MAXIMUM_PEAK_FDS}"
+    );
+    assert!(
+        large_peak <= small_peak + MAXIMUM_GROWTH_FDS,
+        "NanoClaw inventory FD peak scaled with snapshots: small={small_peak}, large={large_peak}, allowed_growth={MAXIMUM_GROWTH_FDS}"
+    );
+}
+
+#[test]
+fn compound_inventory_admits_n_snapshots_and_rejects_n_plus_one_before_projection() {
+    if std::env::var_os(NANOCLAW_ADMISSION_CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg(NANOCLAW_ADMISSION_TEST)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(NANOCLAW_ADMISSION_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated NanoClaw admission contract failed: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(
+        &temp,
+        "bounded-inventory",
+        NANOCLAW_MAX_SESSION_SNAPSHOTS + 1,
+    );
+    for index in 0..NANOCLAW_MAX_SESSION_SNAPSHOTS {
+        fs::create_dir_all(
+            root.join("data")
+                .join("v2-sessions")
+                .join("ag-1")
+                .join(format!("session-{index:04}")),
+        )
+        .unwrap();
+    }
+
+    let direct_error =
+        match NanoClawSourceBackedProject::open(crate::test_provider_sqlite_data_root(), &root) {
+            Ok(_) => panic!("N+1 NanoClaw session snapshots were admitted"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        direct_error,
+        NanoClawProjectOpenError::SessionSnapshotLimitExceeded {
+            maximum: NANOCLAW_MAX_SESSION_SNAPSHOTS,
+            observed,
+        } if observed == NANOCLAW_MAX_SESSION_SNAPSHOTS + 1
+    ));
+
+    let (registry, adapter) = direct_registry(&root);
+    let route_error = refresh_source_backed_generation(
+        temp.path().join("bounded-index"),
+        &registry,
+        writer_options(),
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::RouteScan { source, .. } = route_error else {
+        panic!("snapshot admission did not return a typed route scan failure");
+    };
+    assert_eq!(source.kind, SourceBackedRouteErrorKind::InvalidSource);
+    assert_eq!(
+        source.detail,
+        format!(
+            "NanoClaw session snapshot admission limit exceeded: observed {}, maximum {}",
+            NANOCLAW_MAX_SESSION_SNAPSHOTS + 1,
+            NANOCLAW_MAX_SESSION_SNAPSHOTS
+        )
+    );
+    assert_eq!(adapter.work_counters(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+
+    Connection::open(root.join("data").join("v2.db"))
+        .unwrap()
+        .execute(
+            "delete from sessions where id = ?1",
+            [format!("session-{:04}", NANOCLAW_MAX_SESSION_SNAPSHOTS)],
+        )
+        .unwrap();
+    let mut admitted =
+        NanoClawSourceBackedProject::open(crate::test_provider_sqlite_data_root(), &root).unwrap();
+    assert_eq!(
+        admitted.snapshot().selected_component_count(),
+        (NANOCLAW_MAX_SESSION_SNAPSHOTS as u64) * 2
+    );
+    admitted.finish().unwrap();
 }
 
 #[test]
@@ -582,6 +1116,7 @@ fn production_route_is_thin_authority_aware_and_below_the_loc_gate() {
     let module_source = include_str!("../nanoclaw.rs");
     let native_path_source = include_str!("native_path.rs");
     let source_backed_source = include_str!("native_path/source_backed.rs");
+    let replay_source = include_str!("native_path/source_backed/replay.rs");
     let project_source = include_str!("project.rs");
     let scanner_source = include_str!("source.rs");
     let rows_source = include_str!("rows.rs");
@@ -589,7 +1124,12 @@ fn production_route_is_thin_authority_aware_and_below_the_loc_gate() {
     assert!(!native_path_source.contains("mod lifecycle;"));
     assert!(!native_path_source.contains("mod publication;"));
     assert!(!native_path_source.contains("mod scanner;"));
-    for source in [source_backed_source, scanner_source, rows_source] {
+    for source in [
+        source_backed_source,
+        replay_source,
+        scanner_source,
+        rows_source,
+    ] {
         assert!(!source.contains("ctx_history_store"));
         assert!(!source.contains("EventSearchBulkGuard"));
         assert!(!source.contains("NativePathPublicationGroup"));
@@ -598,6 +1138,7 @@ fn production_route_is_thin_authority_aware_and_below_the_loc_gate() {
     assert!(!module_source.contains("ctx_history_store"));
     for (name, source) in [
         ("source_backed", source_backed_source),
+        ("replay", replay_source),
         ("project", project_source),
         ("scanner", scanner_source),
         ("rows", rows_source),
@@ -617,7 +1158,7 @@ fn production_route_is_thin_authority_aware_and_below_the_loc_gate() {
     }
     let registration = include_str!("../../source_backed/registration/families/document.rs");
     let nanoclaw_registration = registration
-        .split("pub fn register_nanoclaw_source_backed_route")
+        .split("pub fn register_nanoclaw_source_backed_route_with_base_sources")
         .nth(1)
         .unwrap()
         .split("pub(super) fn register_rovodev_route")

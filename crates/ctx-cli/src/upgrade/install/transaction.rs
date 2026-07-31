@@ -35,6 +35,16 @@ pub(in crate::upgrade) fn run_windows_replacement_helper(
     windows::run_replacement_helper(install_path, attempt_id, parent_pid)
 }
 
+#[cfg(unix)]
+pub(super) fn discard_legacy_previous_binary(install_path: &Path) -> Result<()> {
+    let previous = super::durability::backup_path(install_path);
+    unix::remove_owner_regular_file(&previous)?;
+    if let Some(parent) = install_path.parent() {
+        super::durability::sync_directory(parent)?;
+    }
+    Ok(())
+}
+
 pub(in crate::upgrade) const RECOVERY_REEXEC_ENV: &str = "CTX_UPGRADE_RECOVERY_REEXEC_ATTEMPT";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

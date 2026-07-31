@@ -75,9 +75,17 @@ mod tests {
         }
     }
 
+    fn retained_generation(index_root: &Path) -> Option<VerifiedIndex> {
+        index_root
+            .join("meta.json")
+            .is_file()
+            .then(|| VerifiedIndex::open(index_root).unwrap())
+    }
+
     fn refresh_catalog(data_root: &Path, index_root: &Path) {
+        let retained = retained_generation(index_root);
         let mut build = empty_build();
-        register_explicit_source_catalog_routes(data_root, index_root, &mut build).unwrap();
+        register_explicit_source_catalog_routes(data_root, retained.as_ref(), &mut build).unwrap();
         SourceBackedRefreshExecutor::new(build.registry, WriterOptions::default())
             .refresh(
                 index_root,
@@ -140,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn disable_publishes_certified_deletion_but_missing_enabled_path_does_not() {
+    fn missing_enabled_path_does_not_publish_deletion() {
         let temp = tempdir().unwrap();
         let data_root = test_data_root(&temp);
         let source_path = temp.path().join("custom.jsonl");
@@ -154,38 +162,20 @@ mod tests {
         assert_eq!(first.manifest().sources.len(), 1);
 
         fs::remove_file(&source_path).unwrap();
+        let retained = retained_generation(&index_root);
         let mut missing_build = empty_build();
-        let missing =
-            register_explicit_source_catalog_routes(&data_root, &index_root, &mut missing_build)
-                .unwrap_err();
+        let missing = register_explicit_source_catalog_routes(
+            &data_root,
+            retained.as_ref(),
+            &mut missing_build,
+        )
+        .unwrap_err();
         assert!(missing
             .to_string()
             .contains("missing paths are not deletion authority"));
         let retained = VerifiedIndex::open(&index_root).unwrap();
         assert_eq!(retained.generation_id(), first_generation);
         assert_eq!(retained.manifest().sources.len(), 1);
-
-        disable_explicit_source(&data_root, CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT).unwrap();
-        refresh_catalog(&data_root, &index_root);
-        let deleted = VerifiedIndex::open(&index_root).unwrap();
-        assert!(deleted.manifest().sources.is_empty());
-        assert_eq!(deleted.manifest().removals.len(), 1);
-        assert!(deleted.manifest().removals[0]
-            .deletion()
-            .verifies(deleted.manifest().removals[0].inventory()));
-        let deleted_generation = deleted.generation_id().to_owned();
-        let deleted_inventory = deleted.manifest().removals[0].inventory().clone();
-        drop(deleted);
-
-        refresh_catalog(&data_root, &index_root);
-        let replayed = VerifiedIndex::open(&index_root).unwrap();
-        assert_eq!(replayed.generation_id(), deleted_generation);
-        assert!(replayed.manifest().sources.is_empty());
-        assert_eq!(replayed.manifest().removals.len(), 1);
-        assert_eq!(
-            replayed.manifest().removals[0].inventory(),
-            &deleted_inventory
-        );
     }
 
     #[test]
@@ -278,8 +268,7 @@ mod tests {
             issues: Vec::new(),
             discovery_duration: Duration::ZERO,
         };
-        register_explicit_source_catalog_routes(&data_root, &data_root.join("index"), &mut build)
-            .unwrap();
+        register_explicit_source_catalog_routes(&data_root, None, &mut build).unwrap();
         assert_eq!(build.registry.executable_route_count(), 2);
 
         let native = tempdir().unwrap();
@@ -300,11 +289,7 @@ mod tests {
         let mut exact = empty_build();
         explicit
             .authority
-            .register_routes(
-                &native_data_root,
-                &native_data_root.join("index"),
-                &mut exact,
-            )
+            .register_routes(&native_data_root, None, &mut exact)
             .unwrap();
         assert_eq!(exact.registry.executable_route_count(), 1);
 
@@ -329,46 +314,8 @@ mod tests {
         };
         explicit
             .authority
-            .register_routes(
-                &native_data_root,
-                &native_data_root.join("index"),
-                &mut distinct,
-            )
+            .register_routes(&native_data_root, None, &mut distinct)
             .unwrap();
         assert_eq!(distinct.registry.executable_route_count(), 2);
-    }
-
-    #[test]
-    fn immutable_catalog_revision_remains_loadable_after_disable() {
-        let temp = tempdir().unwrap();
-        let data_root = test_data_root(&temp);
-        let source_path = temp.path().join("custom.jsonl");
-        write_custom_history(&source_path, "immutable catalog authority");
-        let enabled = upsert_explicit_source(&data_root, &custom_source(&source_path)).unwrap();
-        let disabled =
-            disable_explicit_source(&data_root, CaptureProvider::Custom, CUSTOM_SOURCE_FORMAT)
-                .unwrap();
-        assert_ne!(enabled.authority, disabled);
-
-        let mut enabled_build = empty_build();
-        enabled
-            .authority
-            .register_routes(
-                &data_root,
-                &data_root.join("enabled-index"),
-                &mut enabled_build,
-            )
-            .unwrap();
-        assert_eq!(enabled_build.registry.executable_route_count(), 1);
-
-        let mut disabled_build = empty_build();
-        disabled
-            .register_routes(
-                &data_root,
-                &data_root.join("disabled-index"),
-                &mut disabled_build,
-            )
-            .unwrap();
-        assert_eq!(disabled_build.registry.executable_route_count(), 1);
     }
 }

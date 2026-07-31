@@ -19,7 +19,9 @@ mod unix {
 
     use super::super::{
         env_flag,
-        install::{classify_install_marker_at, ManagedInstallMarker},
+        install::{
+            classify_install_marker_at, discard_legacy_previous_binary, ManagedInstallMarker,
+        },
         platform_key, sha256_hex,
     };
 
@@ -208,16 +210,8 @@ mod unix {
                             &handoff_id,
                             None,
                         )?;
-                        finish_replacement_daemon_handoff(&data_root, &handoff_id)?;
-                        return Ok(());
-                    }
-                    ManagedInstallMarker::Valid(marker) if marker.version == LEGACY_VERSION => {
-                        complete_replacement_daemon_handoff(
-                            &data_root,
-                            &target,
-                            &handoff_id,
-                            None,
-                        )?;
+                        discard_legacy_previous_binary(&target)
+                            .context("discard committed v0.25 executable backup")?;
                         finish_replacement_daemon_handoff(&data_root, &handoff_id)?;
                         return Ok(());
                     }
@@ -226,7 +220,7 @@ mod unix {
             }
             if Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "legacy automatic ctx replacement did not publish a verified old or new managed image"
+                    "legacy automatic ctx replacement did not publish a verified new managed image; the stopped v0.25 daemon will not be relaunched"
                 ));
             }
             std::thread::sleep(Duration::from_millis(25));

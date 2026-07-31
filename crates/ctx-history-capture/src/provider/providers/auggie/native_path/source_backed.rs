@@ -18,7 +18,7 @@ use std::sync::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    EventIdentityInput, HydrationFailure, LocatorRevisionPolicy, NativeItemKey,
+    CaptureProvider, EventIdentityInput, HydrationFailure, LocatorRevisionPolicy, NativeItemKey,
     NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
@@ -45,10 +45,11 @@ use crate::{
         ProviderSourceRoot,
     },
     provider::source_backed::{
+        document_leaf_execution_policy,
         family::document::{
             register_replacement_document_tree_route, ChangedDocumentSink, CompleteDocumentTree,
-            DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
-            ReplacementDocumentTree,
+            DocumentLeafExecutionPolicy, DocumentLeafFingerprint, DocumentSourceTerminal,
+            ObservedDocumentLeaf, ReplacementDocumentTree,
         },
         route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
@@ -604,6 +605,10 @@ impl ReplacementDocumentTree for AuggieDocumentTreeAdapter {
 
     fn owns_source(&self, source: &SourceKey) -> bool {
         owns_auggie_source(source)
+    }
+
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        document_leaf_execution_policy(CaptureProvider::Auggie)
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<AuggieDocumentTree> {

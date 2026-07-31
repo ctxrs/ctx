@@ -55,18 +55,31 @@ fn writer_options() -> WriterOptions {
     }
 }
 
-fn registry_with_counters(
-    root: &Path,
-) -> (
-    SourceBackedProviderRegistry,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-) {
-    let projection_scans = Arc::new(AtomicUsize::new(0));
-    let hydration_scans = Arc::new(AtomicUsize::new(0));
+#[derive(Clone, Default)]
+struct RouteCounters {
+    projection_scans: Arc<AtomicUsize>,
+    hydration_scans: Arc<AtomicUsize>,
+    body_parses: Arc<AtomicUsize>,
+    ancestor_header_probes: Arc<AtomicUsize>,
+    lineage_visits: Arc<AtomicUsize>,
+}
+
+impl RouteCounters {
+    fn reset_parse_work(&self) {
+        self.body_parses.store(0, Ordering::Relaxed);
+        self.ancestor_header_probes.store(0, Ordering::Relaxed);
+        self.lineage_visits.store(0, Ordering::Relaxed);
+    }
+}
+
+fn registry_with_counters(root: &Path) -> (SourceBackedProviderRegistry, RouteCounters) {
+    let counters = RouteCounters::default();
     let adapter = RovoDevDocumentTreeAdapter::new(root.to_path_buf(), adapter_context(root))
-        .with_projection_scans(Arc::clone(&projection_scans))
-        .with_hydration_scans(Arc::clone(&hydration_scans));
+        .with_projection_scans(Arc::clone(&counters.projection_scans))
+        .with_hydration_scans(Arc::clone(&counters.hydration_scans))
+        .with_body_parses(Arc::clone(&counters.body_parses))
+        .with_ancestor_header_probes(Arc::clone(&counters.ancestor_header_probes))
+        .with_lineage_visits(Arc::clone(&counters.lineage_visits));
     let mut registry = SourceBackedProviderRegistry::new();
     crate::provider::source_backed::family::document::register_replacement_document_tree_route(
         &mut registry,
@@ -75,7 +88,7 @@ fn registry_with_counters(
         adapter,
     )
     .unwrap();
-    (registry, projection_scans, hydration_scans)
+    (registry, counters)
 }
 
 fn write_session(
@@ -146,11 +159,12 @@ fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
             json!("malformed"),
         ],
     );
-    let (registry, projection_scans, hydration_scans) = registry_with_counters(&root);
+    let (registry, counters) = registry_with_counters(&root);
 
     let receipt =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), 2);
     assert_eq!(receipt.sources.len(), 2);
     let child_source = rovodev_source_key("child-thread").unwrap();
     let child_certificate = receipt
@@ -216,7 +230,7 @@ fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
         .collect::<Vec<_>>();
     let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
     let hydrated = registry.resolver_registry().hydrate_batch(&batch).unwrap();
-    assert_eq!(hydration_scans.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.hydration_scans.load(Ordering::Relaxed), 1);
     assert_eq!(
         hydrated
             .records()
@@ -262,7 +276,7 @@ fn shared_route_preserves_exact_projection_lineage_and_grouped_hydration() {
         .hydrate_batch(&partly_valid)
         .unwrap_err();
     assert_eq!(error.kind, HydrationFailureKind::MissingRecord);
-    assert_eq!(hydration_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.hydration_scans.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -284,14 +298,19 @@ fn durable_replay_scans_one_changed_leaf_and_distinguishes_delete_from_unavailab
         None,
         &[json!({"id": "b-message", "role": "user", "content": "bravo-stable"})],
     );
-    let (registry, projection_scans, _) = registry_with_counters(&root);
+    let (registry, counters) = registry_with_counters(&root);
 
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), 2);
+    counters.reset_parse_work();
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.projection_scans.load(Ordering::Relaxed), 2);
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), 0);
+    assert_eq!(counters.ancestor_header_probes.load(Ordering::Relaxed), 0);
+    assert_eq!(counters.lineage_visits.load(Ordering::Relaxed), 0);
 
     let original = fs::metadata(&path_a).unwrap();
     write_session(
@@ -311,14 +330,15 @@ fn durable_replay_scans_one_changed_leaf_and_distinguishes_delete_from_unavailab
     let changed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 3);
+    assert_eq!(counters.projection_scans.load(Ordering::Relaxed), 3);
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), 1);
 
     fs::remove_dir_all(root.join("b")).unwrap();
     let deleted =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(deleted.sources.len(), 1);
     assert_eq!(deleted.removals.len(), 1);
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 3);
+    assert_eq!(counters.projection_scans.load(Ordering::Relaxed), 3);
 
     write_session(
         &root,
@@ -329,7 +349,7 @@ fn durable_replay_scans_one_changed_leaf_and_distinguishes_delete_from_unavailab
     );
     let restored =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(projection_scans.load(Ordering::Relaxed), 4);
+    assert_eq!(counters.projection_scans.load(Ordering::Relaxed), 4);
     let retained_generation = restored.commit.generation_id;
     fs::remove_dir_all(&root).unwrap();
     assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
@@ -340,7 +360,104 @@ fn durable_replay_scans_one_changed_leaf_and_distinguishes_delete_from_unavailab
 }
 
 #[test]
-fn terminal_tree_fence_runs_once_and_rejects_a_race() {
+fn deep_lineage_is_parse_once_and_path_compressed() {
+    const SESSION_COUNT: usize = 96;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".rovodev/sessions");
+    let index_root = temp.path().join("index");
+    for depth in 0..SESSION_COUNT {
+        let provider_session_id = format!("thread-{depth:03}");
+        let parent_session_id = depth
+            .checked_sub(1)
+            .map(|parent| format!("thread-{parent:03}"));
+        let directory_order = SESSION_COUNT - depth - 1;
+        write_session(
+            &root,
+            &format!("{directory_order:03}"),
+            &provider_session_id,
+            parent_session_id.as_deref(),
+            &[json!({
+                "id": format!("message-{depth:03}"),
+                "role": "user",
+                "content": format!("lineage-{depth:03}"),
+            })],
+        );
+    }
+    let (registry, counters) = registry_with_counters(&root);
+
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), SESSION_COUNT);
+    assert!(
+        counters.ancestor_header_probes.load(Ordering::Relaxed) <= SESSION_COUNT,
+        "each lineage header must be probed at most once"
+    );
+    assert!(
+        counters.lineage_visits.load(Ordering::Relaxed) <= SESSION_COUNT * 2,
+        "path compression must keep lineage visits linear"
+    );
+
+    counters.reset_parse_work();
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), 0);
+    assert_eq!(counters.ancestor_header_probes.load(Ordering::Relaxed), 0);
+    assert_eq!(counters.lineage_visits.load(Ordering::Relaxed), 0);
+
+    counters.reset_parse_work();
+    write_session(
+        &root,
+        "000",
+        &format!("thread-{:03}", SESSION_COUNT - 1),
+        Some(&format!("thread-{:03}", SESSION_COUNT - 2)),
+        &[json!({
+            "id": format!("message-{:03}", SESSION_COUNT - 1),
+            "role": "user",
+            "content": "changed-deep-leaf",
+        })],
+    );
+    refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(counters.body_parses.load(Ordering::Relaxed), 1);
+    assert!(
+        counters.ancestor_header_probes.load(Ordering::Relaxed) < SESSION_COUNT,
+        "only ancestors of the changed leaf should be header-probed"
+    );
+    assert!(
+        counters.lineage_visits.load(Ordering::Relaxed) <= SESSION_COUNT * 2,
+        "changed lineage resolution must remain linear"
+    );
+
+    let leaf_source = rovodev_source_key(&format!("thread-{:03}", SESSION_COUNT - 1)).unwrap();
+    let root_source = rovodev_source_key("thread-000").unwrap();
+    let root_session = rovodev_session_identity(&root_source, "thread-000").unwrap();
+    let events = source_events(&index_root, &leaf_source);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].root_session_id, root_session);
+}
+
+fn rewrite_during_terminal_fence(root: &Path) {
+    write_session(
+        root,
+        "session",
+        "session",
+        None,
+        &[json!({"id": "message", "role": "user", "content": "during-fence"})],
+    );
+}
+
+fn truncate_during_terminal_fence(root: &Path) {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("session/session_context.json"))
+        .unwrap()
+        .set_len(1)
+        .unwrap();
+}
+
+fn delete_during_terminal_fence(root: &Path) {
+    fs::remove_dir_all(root.join("session")).unwrap();
+}
+
+fn assert_terminal_mutation_is_rejected(mutate: fn(&Path)) {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".rovodev/sessions");
     let index_root = temp.path().join("index");
@@ -351,7 +468,7 @@ fn terminal_tree_fence_runs_once_and_rejects_a_race() {
         None,
         &[json!({"id": "message", "role": "user", "content": "cold"})],
     );
-    let (cold_registry, _, _) = registry_with_counters(&root);
+    let (cold_registry, _) = registry_with_counters(&root);
     let cold =
         refresh_source_backed_generation(&index_root, &cold_registry, writer_options()).unwrap();
     write_session(
@@ -370,13 +487,7 @@ fn terminal_tree_fence_runs_once_and_rejects_a_race() {
         .with_projection_scans(Arc::clone(&projection_scans))
         .with_terminal_revalidation_hook(Arc::new(move || {
             hook_calls.fetch_add(1, Ordering::Relaxed);
-            write_session(
-                &hook_root,
-                "session",
-                "session",
-                None,
-                &[json!({"id": "message", "role": "user", "content": "during-fence"})],
-            );
+            mutate(&hook_root);
         }));
     let mut race_registry = SourceBackedProviderRegistry::new();
     crate::provider::source_backed::family::document::register_replacement_document_tree_route(
@@ -396,6 +507,17 @@ fn terminal_tree_fence_runs_once_and_rejects_a_race() {
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
     );
+}
+
+#[test]
+fn terminal_tree_fence_runs_once_and_rejects_rewrite_truncate_and_delete() {
+    for mutation in [
+        rewrite_during_terminal_fence as fn(&Path),
+        truncate_during_terminal_fence,
+        delete_during_terminal_fence,
+    ] {
+        assert_terminal_mutation_is_rejected(mutation);
+    }
 }
 
 #[test]

@@ -16,7 +16,8 @@ use crate::provider::source_backed::{
 
 pub(crate) struct DeepAgentsTreeAuthority {
     scanner: Mutex<Option<DeepAgentsSourceBackedScannerV0>>,
-    fence: Mutex<Option<DeepAgentsSourceTerminalFence>>,
+    terminal_revalidate:
+        Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
 }
 
 impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
@@ -47,17 +48,14 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
             DeepAgentsSourceBackedScannerV0::open(self.clone(), DateTime::<Utc>::UNIX_EPOCH)
                 .map_err(route_error)?;
         let source = scanner.source().clone();
-        let fingerprint = DocumentLeafFingerprint::new(*scanner.evidence.revision());
+        let fingerprint = DocumentLeafFingerprint::new(scanner.logical_fingerprint());
+        let terminal_revalidate = scanner.terminal_revalidator();
         Ok(CompleteDocumentTree::new(
             fingerprint.as_bytes(),
-            vec![ObservedDocumentLeaf::with_durable_replay(
-                fingerprint,
-                source,
-                false,
-            )],
+            vec![ObservedDocumentLeaf::new(fingerprint, source)],
             DeepAgentsTreeAuthority {
                 scanner: Mutex::new(Some(scanner)),
-                fence: Mutex::new(None),
+                terminal_revalidate,
             },
         ))
     }
@@ -85,6 +83,7 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
                 sink.emit_document(document)?;
             }
         }
+        let opening_evidence = scanner.evidence.clone();
         let scan = scanner.finish().map_err(route_error)?;
         let counts = scan.certificate.counts();
         if !scan.source.exact_descriptor_eq(source)
@@ -97,11 +96,11 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
             ));
         }
         let terminal = document_terminal(scan.certificate);
-        *authority
-            .fence
-            .lock()
-            .map_err(|_| deepagents_internal("Deep Agents fence lock was poisoned"))? =
-            Some(scan.terminal_fence);
+        if scan.terminal_fence.evidence != opening_evidence {
+            return Err(deepagents_changed(
+                "Deep Agents terminal evidence changed while sealing the snapshot",
+            ));
+        }
         Ok(terminal)
     }
 
@@ -109,20 +108,17 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
-        let fence = tree
+        if let Some(scanner) = tree
             .authority
-            .fence
+            .scanner
             .lock()
-            .map_err(|_| deepagents_internal("Deep Agents fence lock was poisoned"))?
-            .clone()
-            .ok_or_else(|| deepagents_changed("Deep Agents scan has no terminal fence"))?;
-        if terminal_fence_matches(&self.data_root, self.path(), &fence).map_err(route_error)? {
-            Ok(tree.tree_fingerprint)
-        } else {
-            Err(deepagents_changed(
-                "Deep Agents physical source changed before commit",
-            ))
+            .map_err(|_| deepagents_internal("Deep Agents scanner lock was poisoned"))?
+            .take()
+        {
+            scanner.seal_unscanned().map_err(route_error)?;
         }
+        (tree.authority.terminal_revalidate)().map_err(route_error)?;
+        Ok(tree.tree_fingerprint)
     }
 
     fn hydrate_group(
@@ -151,17 +147,6 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
             detail: error.to_string(),
         })
     }
-}
-
-fn terminal_fence_matches(
-    data_root: &Path,
-    path: &Path,
-    expected: &DeepAgentsSourceTerminalFence,
-) -> DeepAgentsSourceBackedResultV0<bool> {
-    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, path)?;
-    let current = sqlite_snapshot.finish()?;
-    source_root.revalidate()?;
-    Ok(current == expected.evidence)
 }
 
 fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {

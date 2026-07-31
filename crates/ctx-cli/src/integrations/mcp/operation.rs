@@ -3,7 +3,13 @@ use std::{fs, io, path::Path};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
-use crate::analytics::{count_bucket, IntegrationResult, IntegrationTelemetry};
+use crate::{
+    analytics::{count_bucket, IntegrationResult, IntegrationTelemetry},
+    ui::{
+        empty_state, fields, outcome, section, Action, Document, EmptyState, Field, Outcome,
+        OutcomeState, RenderContext, Ui,
+    },
+};
 
 use super::{
     format::{self, ConfigKind, ConfigStatus},
@@ -67,6 +73,7 @@ pub(super) fn run_install(
     args: McpInstallArgs,
     context: &McpPathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let agents = selected_install_agents(&args, context);
     insert_selection_analytics(telemetry, &agents);
@@ -104,7 +111,8 @@ pub(super) fn run_install(
             })
         );
     } else {
-        print_install_results(&results);
+        let document = render_install_results(ui.stdout_context(), &results);
+        ui.write_stdout(&document)?;
     }
     if failed > 0 {
         return Err(anyhow!(
@@ -118,6 +126,7 @@ pub(super) fn run_status(
     args: McpStatusArgs,
     context: &McpPathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let agents = selected_status_agents(&args, context);
     insert_selection_analytics(telemetry, &agents);
@@ -163,7 +172,8 @@ pub(super) fn run_status(
             })
         );
     } else {
-        print_status_results(&results);
+        let document = render_status_results(ui.stdout_context(), &results);
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
@@ -357,91 +367,164 @@ fn write_target(target: &McpTarget, force: bool) -> Result<()> {
     fs::write(path, body).with_context(|| format!("write {}", path.display()))
 }
 
-fn print_install_results(results: &[McpInstallResult]) {
+fn render_install_results(context: &RenderContext, results: &[McpInstallResult]) -> Document {
     if results.is_empty() {
-        println!("No detected MCP-capable coding agents found.");
-        println!("Use --agent <name> or --all-agents to install a specific MCP config.");
-        return;
+        return empty_state(
+            context,
+            EmptyState {
+                title: "No MCP-capable coding agents detected",
+                detail: "Select a coding agent explicitly or install every supported target.",
+                action: Some(Action {
+                    command: "ctx integrations install mcp --all-agents",
+                }),
+            },
+        );
     }
     let all_current = results.iter().all(|result| result.already_installed);
     let all_success = results.iter().all(|result| result.success);
     let any_modified = results.iter().any(|result| result.modified);
-    let heading = if all_current {
-        "ctx MCP integration already installed"
+    let title = if all_current {
+        "ctx MCP integration is already installed"
     } else if all_success && any_modified {
         "ctx MCP integration installed"
     } else {
-        "ctx MCP integration"
+        "ctx MCP integration needs attention"
     };
-    println!("{heading}: {}", format::server_command().render_for_host());
-    for result in results {
-        let verb = if result.already_installed {
-            "current"
-        } else if result.modified {
-            "modified"
-        } else if result.success {
-            "ok"
-        } else {
-            "skipped"
-        };
-        let detail = result
-            .error
-            .as_deref()
-            .map(|error| format!(" - {error}"))
-            .unwrap_or_default();
-        let path = result
-            .target
-            .path
-            .as_ref()
-            .map(|path| format!(" -> {}", path.display()))
-            .unwrap_or_default();
-        println!(
-            "  {verb}: {}{}{}",
-            result.target.agent.display_name(),
-            path,
-            detail
-        );
-    }
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if all_success {
+                OutcomeState::Success
+            } else {
+                OutcomeState::Warning
+            },
+            title,
+            detail: None,
+        },
+    );
+    let command = format::server_command().render_for_host();
+    document.push_blank();
+    document.append(fields(context, &[Field::new("Server", &command)]));
+
+    let rows = results
+        .iter()
+        .map(|result| {
+            let status = if result.already_installed {
+                "current"
+            } else if result.modified {
+                "modified"
+            } else if result.success {
+                "ok"
+            } else {
+                "skipped"
+            };
+            (status, mcp_install_target_detail(result))
+        })
+        .collect::<Vec<_>>();
+    let target_fields = rows
+        .iter()
+        .map(|(status, detail)| Field::new(status, detail))
+        .collect::<Vec<_>>();
+    document.push_blank();
+    document.append(section("Targets", fields(context, &target_fields)));
+    document
 }
 
-fn print_status_results(results: &[McpStatusResult]) {
+fn render_status_results(context: &RenderContext, results: &[McpStatusResult]) -> Document {
     if results.is_empty() {
-        println!("No detected MCP-capable coding agents found.");
-        println!("Use --agent <name> or --all-agents to inspect a specific MCP config.");
-        return;
-    }
-    println!(
-        "ctx MCP integration status: {}",
-        format::server_command().render_for_host()
-    );
-    for result in results {
-        let detail = result
-            .error
-            .as_deref()
-            .map(|error| format!(" - {error}"))
-            .unwrap_or_default();
-        let path = result
-            .target
-            .path
-            .as_ref()
-            .map(|path| format!(" -> {}", path.display()))
-            .unwrap_or_default();
-        println!(
-            "  {}: {} ({}){}{}",
-            result.status.as_str(),
-            result.target.agent.display_name(),
-            result.target.scope.as_str(),
-            path,
-            detail
+        return empty_state(
+            context,
+            EmptyState {
+                title: "No MCP-capable coding agents detected",
+                detail: "Select a coding agent explicitly or inspect every supported target.",
+                action: Some(Action {
+                    command: "ctx integrations status mcp --all-agents",
+                }),
+            },
         );
     }
+    let all_current = results
+        .iter()
+        .all(|result| result.status == ConfigStatus::Current);
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if all_current {
+                OutcomeState::Success
+            } else {
+                OutcomeState::Warning
+            },
+            title: if all_current {
+                "ctx MCP integration is current"
+            } else {
+                "ctx MCP integration needs attention"
+            },
+            detail: None,
+        },
+    );
+    let command = format::server_command().render_for_host();
+    document.push_blank();
+    document.append(fields(context, &[Field::new("Server", &command)]));
+
+    let rows = results
+        .iter()
+        .map(|result| (result.status.as_str(), mcp_status_target_detail(result)))
+        .collect::<Vec<_>>();
+    let target_fields = rows
+        .iter()
+        .map(|(status, detail)| Field::new(status, detail))
+        .collect::<Vec<_>>();
+    document.push_blank();
+    document.append(section("Targets", fields(context, &target_fields)));
+    document
+}
+
+fn mcp_install_target_detail(result: &McpInstallResult) -> String {
+    let mut detail = result.target.agent.display_name().to_owned();
+    if let Some(path) = &result.target.path {
+        detail.push_str(" -> ");
+        detail.push_str(&path.display().to_string());
+    }
+    if let Some(error) = &result.error {
+        detail.push_str(" - ");
+        detail.push_str(error);
+    }
+    detail
+}
+
+fn mcp_status_target_detail(result: &McpStatusResult) -> String {
+    let mut detail = format!(
+        "{} ({})",
+        result.target.agent.display_name(),
+        result.target.scope.as_str()
+    );
+    if let Some(path) = &result.target.path {
+        detail.push_str(" -> ");
+        detail.push_str(&path.display().to_string());
+    }
+    if let Some(error) = &result.error {
+        detail.push_str(" - ");
+        detail.push_str(error);
+    }
+    detail
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, io::Write as _};
 
     use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    fn render_context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn strip_ansi(rendered: &str) -> String {
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream.write_all(rendered.as_bytes()).unwrap();
+        String::from_utf8(stream.into_inner()).unwrap()
+    }
 
     #[test]
     fn status_reports_unsupported_project_target() {
@@ -473,6 +556,43 @@ mod tests {
         assert!(result.already_installed);
         assert!(!result.modified);
         assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn human_install_and_status_results_use_the_typed_ui() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let path_context = McpPathContext::for_tests(home, temp.path().join("repo"));
+        let target = McpAgentArg::QwenCode.target(false, &path_context);
+        let missing = status_target(&target);
+        let installed = install_target(&target, false);
+        let current = status_target(&target);
+
+        for (document, expected) in [
+            (
+                render_install_results(&render_context(80, ColorMode::Never), &[installed]),
+                "ctx MCP integration installed",
+            ),
+            (
+                render_status_results(&render_context(80, ColorMode::Never), &[missing]),
+                "ctx MCP integration needs attention",
+            ),
+            (
+                render_status_results(&render_context(80, ColorMode::Never), &[current]),
+                "ctx MCP integration is current",
+            ),
+        ] {
+            let plain = document.render_plain();
+            assert!(plain.contains(expected), "{plain}");
+            assert!(plain.contains("Server"), "{plain}");
+            assert!(plain.contains("Targets"), "{plain}");
+        }
+
+        let color = render_context(80, ColorMode::Always);
+        let document = render_status_results(&color, &[status_target(&target)]);
+        let styled = document.render(&color);
+        assert!(styled.as_bytes().contains(&0x1b), "{styled:?}");
+        assert_eq!(strip_ansi(&styled), document.render_plain());
     }
 
     #[cfg(unix)]

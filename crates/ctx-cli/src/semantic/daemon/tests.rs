@@ -62,7 +62,7 @@ fn idle_cycles_emit_first_then_flush_a_coalesced_transition() {
 }
 
 #[test]
-fn run_once_has_no_runtime_event_but_preserves_provider_handoff() {
+fn scheduler_cycle_without_runtime_telemetry_preserves_provider_handoff() {
     let provider = PublicEventV1::ProviderRefreshCompleted(ProviderRefreshCompletedV1::new(
         Surface::Daemon,
         Outcome::Success,
@@ -117,25 +117,14 @@ fn released_daemon_service_artifacts_are_removed_after_forced_shutdown() -> Resu
 
 #[test]
 fn only_enabled_long_lived_daemon_uses_upgrade_scheduler() {
-    assert!(daemon_should_schedule_auto_upgrade(
-        true,
-        DaemonMode::Full,
-        false
-    ));
+    assert!(daemon_should_schedule_auto_upgrade(true, DaemonMode::Full));
     assert!(!daemon_should_schedule_auto_upgrade(
         false,
-        DaemonMode::Full,
-        false
+        DaemonMode::Full
     ));
     assert!(!daemon_should_schedule_auto_upgrade(
         true,
-        DaemonMode::Full,
-        true
-    ));
-    assert!(!daemon_should_schedule_auto_upgrade(
-        true,
-        DaemonMode::SourceRefreshOnly,
-        false
+        DaemonMode::SourceRefreshOnly
     ));
 }
 
@@ -172,7 +161,6 @@ fn persistent_default_never_has_a_finite_idle_exit() {
 fn test_daemon_run_args() -> DaemonRunArgs {
     DaemonRunArgs {
         foreground: false,
-        once: true,
         idle_exit_seconds: None,
         loop_interval_seconds: None,
         max_chunks: None,
@@ -210,6 +198,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
         history_refresh: Some(json!({"status": "completed"})),
         relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
+        relational_blocker: None,
     });
     let mut runtime = DaemonRuntime {
         config: AppConfig {
@@ -225,7 +214,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
         ..DaemonRuntime::default()
     };
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
@@ -263,6 +252,10 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
                     generation_id: receipt.generation_id,
+                    published_explicit_source_catalog:
+                        crate::commands::import::load_explicit_source_catalog_authority(
+                            execution.data_root,
+                        )?,
                     source_manifest: None,
                     resolver: None,
                     scanned_routes: 1,
@@ -290,7 +283,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
             ..DaemonRuntime::default()
         };
 
-        let iteration = run_daemon_once_with_activity(
+        let iteration = run_daemon_scheduler_cycle_with_activity(
             &test_daemon_run_args(),
             temp.path(),
             &mut runtime,
@@ -321,23 +314,44 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
         "unsupported_routes",
         "certified_source_count",
         "certified_source_bytes",
-        "timings_us",
+        "published_explicit_source_catalog",
+        "receipt",
     ] {
         assert_eq!(source_only[key], full[key], "{key}");
+    }
+    for key in ["discovery", "scan_stage", "commit"] {
+        assert_eq!(
+            source_only["timings_us"][key], full["timings_us"][key],
+            "timings_us.{key}"
+        );
+    }
+    for job in [&source_only, &full] {
+        assert!(
+            job["timings_us"]["publication_probe"]
+                .as_u64()
+                .is_some_and(|duration| duration > 0),
+            "{job:#}"
+        );
+        assert!(
+            job["timings_us"]["retirement"]
+                .as_u64()
+                .is_some_and(|duration| duration > 0),
+            "{job:#}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Result<()> {
+fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
     };
 
     let temp = tempfile::tempdir()?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let executor_calls = calls.clone();
+    let refresh_calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = refresh_calls.clone();
     let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
@@ -348,6 +362,10 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: receipt.generation_id,
+                published_explicit_source_catalog:
+                    crate::commands::import::load_explicit_source_catalog_authority(
+                        execution.data_root,
+                    )?,
                 source_manifest: None,
                 resolver: None,
                 scanned_routes: 1,
@@ -360,9 +378,35 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
         },
     ));
     assert!(!coordinator.has_pending_request());
+    let sidecar_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
+    let (_release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+    let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
+        calls: sidecar_calls.clone(),
+        history_refresh: None,
+        relational_projection: Some(json!({
+            "status": "completed",
+            "pending": false,
+            "retryable": false,
+            "did_work": true,
+        })),
+        semantic_index: Some(json!({
+            "status": "ready",
+            "source_generation_ready": true,
+            "source_work_remaining": false,
+        })),
+        relational_blocker: Some(std::rc::Rc::new(move || {
+            started_sender
+                .send(())
+                .expect("report blocked relational test job");
+            release_receiver
+                .recv_timeout(StdDuration::from_secs(10))
+                .expect("release blocked relational test job");
+        })),
+    });
     let mut runtime = DaemonRuntime::default();
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
@@ -374,19 +418,40 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
 
     assert!(iteration.did_work);
     assert!(!iteration.failed);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(iteration.continue_immediately);
+    assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    assert!(sidecar_calls.borrow().is_empty());
+    assert!(matches!(
+        started_receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
     let job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
         .ok_or_else(|| anyhow!("periodic source refresh job was not persisted"))?;
     assert_eq!(job["status"], "completed");
     assert_eq!(job["daemon_mode"], "full");
     assert_eq!(job["trigger"], "periodic");
     assert_eq!(job["trigger_provenance"], "daemon_scheduler");
-    assert_eq!(job["semantic_projection"]["status"], "ready");
-    let semantic_job = read_daemon_job_status(
-        &super::super::paths_status::daemon_semantic_job_path(temp.path()),
-    )
-    .ok_or_else(|| anyhow!("source-backed semantic projection job was not persisted"))?;
-    assert_eq!(semantic_job["status"], "ready");
+    assert_eq!(
+        job["published_explicit_source_catalog"],
+        job["receipt"]["published_explicit_source_catalog"]
+    );
+    assert!(job.get("relational_projection").is_none());
+    assert!(job.get("pro_projection").is_none());
+    assert!(job.get("semantic_projection").is_none());
+    assert!(!super::super::paths_status::daemon_semantic_job_path(temp.path()).exists());
+    let published_generation = job["published_generation"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Core generation was not published"))?;
+    assert_eq!(
+        runtime.sidecar_drain.generation.as_deref(),
+        Some(published_generation)
+    );
+    assert!(
+        super::super::source_backed_relational_catch_up::generation_needs_catch_up(
+            temp.path(),
+            published_generation
+        )
+    );
     assert!(temp
         .path()
         .join("search")
@@ -422,6 +487,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
         history_refresh: Some(json!({"status": "completed"})),
         relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
+        relational_blocker: None,
     });
     let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
@@ -432,6 +498,10 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: receipt.generation_id,
+                published_explicit_source_catalog:
+                    crate::commands::import::load_explicit_source_catalog_authority(
+                        execution.data_root,
+                    )?,
                 source_manifest: None,
                 resolver: None,
                 scanned_routes: 0,
@@ -445,7 +515,7 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
     ));
     let mut runtime = DaemonRuntime::default();
 
-    let iteration = run_daemon_once_with_activity(
+    let iteration = run_daemon_scheduler_cycle_with_activity(
         &test_daemon_run_args(),
         temp.path(),
         &mut runtime,
@@ -457,13 +527,26 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
 
     assert!(iteration.did_work);
     assert!(!iteration.failed);
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
+    assert!(iteration.continue_immediately);
+    assert!(calls.borrow().is_empty());
     assert!(!legacy_database.exists());
     assert_eq!(fs::read(&legacy_semantic_job)?, b"legacy-semantic-job");
     assert!(ctx_history_index::VerifiedIndex::open(
         crate::semantic::source_backed_refresh_coordinator::source_backed_index_root(temp.path())
     )
     .is_ok());
+    let sidecar = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!sidecar.failed);
+    assert!(sidecar.continue_immediately);
+    assert_eq!(&*calls.borrow(), &["relational_projection"]);
     let report = daemon_report(temp.path());
     assert_eq!(
         report["jobs"]["history_refresh"]["reason"],
@@ -600,7 +683,6 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
     let error = run_daemon_inner(
         DaemonRunArgs {
             foreground: false,
-            once: true,
             idle_exit_seconds: None,
             loop_interval_seconds: None,
             max_chunks: None,
@@ -619,6 +701,89 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
         .to_string()
         .contains("injected daemon failure before readiness"));
     assert!(super::super::daemon_autostart::read_daemon_restart_request(root.path()).is_some());
+    Ok(())
+}
+
+#[test]
+fn daemon_startup_repairs_verified_publication_before_service_readiness() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let discovery_root = tempfile::tempdir()?;
+    let discovery_home = discovery_root.path().join("discovery-home");
+    let discovery_cwd = discovery_root.path().join("discovery-cwd");
+    fs::create_dir_all(&discovery_home)?;
+    fs::create_dir_all(&discovery_cwd)?;
+    let _discovery =
+        super::super::source_backed_refresh_coordinator::install_test_discovery_context(
+            ctx_history_capture::DiscoveryContext::new(
+                &discovery_home,
+                &discovery_cwd,
+                ctx_history_capture::DiscoveryPlatform::Linux,
+                ctx_history_capture::DiscoveryPlatformDirs::default(),
+            ),
+        );
+    let generation_id = ctx_history_index::GenerationWriter::open(
+        super::super::source_backed_refresh_coordinator::source_backed_index_root(root.path()),
+        ctx_history_index::WriterOptions::default(),
+    )?
+    .commit(|_| true)?
+    .generation_id;
+    let catalog = crate::commands::import::load_explicit_source_catalog_authority(root.path())?;
+    let job_path = daemon_source_backed_refresh_job_path(root.path());
+    super::super::paths_status::write_daemon_job_status(
+        &job_path,
+        &json!({
+            "mode": "background",
+            "owner": "daemon",
+            "kind": "source_backed",
+            "status": "running",
+            "request_id": "startup-crash-window",
+            "request_state": "running",
+            "requested_explicit_source_catalog": catalog.to_json(),
+            "progress": {
+                "phase": "committed",
+                "completed_sources": 0,
+                "total_sources": 0,
+            },
+            "daemon_mode": "full",
+            "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
+        }),
+    )?;
+    fs::write(
+        root.path().join(".fail-daemon-before-ready-for-test"),
+        b"fail",
+    )?;
+
+    let error = run_daemon_inner(
+        DaemonRunArgs {
+            foreground: false,
+            idle_exit_seconds: None,
+            loop_interval_seconds: None,
+            max_chunks: None,
+            max_seconds: None,
+            force: false,
+            start_mode: Some(DaemonStartModeArg::Auto),
+            trigger_command: Some(DaemonTriggerCommandArg::Search),
+            format: crate::output::JsonOutputFormat::Json,
+        },
+        root.path(),
+        &AppConfig::default(),
+    )
+    .expect_err("the post-reconciliation readiness failure must surface");
+
+    assert!(error
+        .to_string()
+        .contains("injected daemon failure before readiness"));
+    let recovered = read_daemon_job_status(&job_path)
+        .ok_or_else(|| anyhow!("reconciled source refresh job is missing"))?;
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["request_state"], "published");
+    assert_eq!(recovered["published_generation"], generation_id);
+    assert_eq!(recovered["receipt"]["published_generation"], generation_id);
+    assert_eq!(
+        recovered["published_explicit_source_catalog"],
+        recovered["receipt"]["published_explicit_source_catalog"]
+    );
     Ok(())
 }
 

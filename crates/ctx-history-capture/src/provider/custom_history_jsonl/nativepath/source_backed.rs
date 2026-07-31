@@ -5,35 +5,42 @@
 //! provider facts, but it does not publish lifecycle state or retain event
 //! bodies.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs::File,
+    io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::UNIX_EPOCH,
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, ContentSourceResolver,
-    CtxHistoryJsonlEventRecord, CtxHistoryJsonlFileTouchRecord, CtxHistoryJsonlRecord,
-    CtxHistoryJsonlSessionRecord, CtxHistoryJsonlSourceRecord, EventHydrationRequest,
-    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
+    CertifiedSourceInventory, ContentSourceResolver, CtxHistoryJsonlEventRecord,
+    CtxHistoryJsonlRecord, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionEdgeType, SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
 use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::reader::{parse_custom_history, ParsedCustomHistory};
+use super::reader::{
+    emit_projection_pages, write_spooled_event, CatalogBudget, CustomHistoryCatalogLimits,
+    CUSTOM_HISTORY_CATALOG_ENTRY_OVERHEAD_BYTES,
+};
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::{
-        custom_history_jsonl::custom_history_internal_session_id,
+        custom_history_jsonl::{validate_custom_history_identifier, validate_custom_source_record},
         normalization::{provider_policy_event_text, provider_value_text},
     },
     CaptureError, ProviderImportSummary, MAX_PROVIDER_JSONL_LINE_BYTES,
@@ -42,31 +49,105 @@ use crate::{
 mod parser;
 mod resolver;
 
-use parser::{parse_projection, prefix_digest};
+use parser::parse_projection;
 pub(crate) use resolver::CustomHistorySourceBackedResolver;
 
 const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
 const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
 const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v1-source-backed-v1";
 const CUSTOM_SOURCE_REVISION_KIND: &str = "custom-history-ordinary-file-observation-v1";
-const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str = "custom-history-jsonl-source-backed-v1";
-const CUSTOM_SOURCE_FRONTIER_KIND: &str = "custom-history-jsonl-frontier-v1";
+const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str = "custom-history-jsonl-source-backed-v2";
+const CUSTOM_SOURCE_FRONTIER_KIND: &str = "custom-history-jsonl-frontier-v2";
 const CUSTOM_INVENTORY_AUTHORITY_NAMESPACE: &str = "custom-history.explicit-registration";
 const CUSTOM_INVENTORY_REVISION_KIND: &str = "custom-history-explicit-inventory-v1";
 const CUSTOM_DISCOVERY_REVISION: &str = "custom-history-explicit-only-v1";
-const CUSTOM_SESSION_KEY_NAMESPACE: &str = "custom-history.session";
-const CUSTOM_EVENT_KEY_NAMESPACE: &str = "custom-history.event";
-const CUSTOM_LOGICAL_SESSION_KIND: &str = "custom-history-session";
-const CUSTOM_LOGICAL_EVENT_KIND: &str = "custom-history-event";
-const CUSTOM_CHECKPOINT_VERSION: u32 = 1;
-const CUSTOM_PAGE_MAX_DOCUMENTS: usize = 64;
-const CUSTOM_PAGE_MAX_RETAINED_BYTES: usize = 1024 * 1024;
-const CUSTOM_DOCUMENT_METADATA_MAX_BYTES: usize = 64 * 1024;
-const CUSTOM_DOCUMENT_MAX_TOUCHED_FILES: usize = 256;
+pub(super) const CUSTOM_SESSION_KEY_NAMESPACE: &str = "custom-history.session";
+pub(super) const CUSTOM_EVENT_KEY_NAMESPACE: &str = "custom-history.event";
+pub(super) const CUSTOM_LOGICAL_SESSION_KIND: &str = "custom-history-session";
+pub(super) const CUSTOM_LOGICAL_EVENT_KIND: &str = "custom-history-event";
+const CUSTOM_CHECKPOINT_VERSION: u32 = 2;
+pub(super) const CUSTOM_PAGE_MAX_DOCUMENTS: usize = 64;
+pub(super) const CUSTOM_PAGE_MAX_RETAINED_BYTES: usize = 1024 * 1024;
+pub(super) const CUSTOM_DOCUMENT_METADATA_MAX_BYTES: usize = 64 * 1024;
+pub(super) const CUSTOM_DOCUMENT_MAX_TOUCHED_FILES: usize = 256;
+pub(super) const CUSTOM_HISTORY_CATALOG_MAX_RECORDS: usize = 1_000_000;
+pub(super) const CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES: usize = 256 * 1024 * 1024;
 const CUSTOM_MAX_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
 
-const SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.source-prefix.v1\0";
+const SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.source-prefix.v2\0";
 const INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.explicit-inventory.v1\0";
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CustomHistorySourceBackedWork {
+    pub(crate) projection_parses: usize,
+    pub(crate) source_read_passes: usize,
+    pub(crate) provider_records_parsed: usize,
+    pub(crate) session_nodes: usize,
+    pub(crate) session_dependencies: usize,
+    pub(crate) session_root_nodes: usize,
+    pub(crate) event_root_lookups: usize,
+    pub(crate) spooled_event_body_bytes: usize,
+    pub(crate) resident_event_body_bytes: usize,
+    pub(crate) peak_resident_event_body_bytes: usize,
+    pub(crate) peak_provider_record_bytes: usize,
+    pub(crate) retained_events_before_prior_prefix: usize,
+    pub(crate) catalog_records: usize,
+    pub(crate) catalog_metadata_bytes: usize,
+    pub(crate) hydration_passes: usize,
+    pub(crate) hydration_source_opens: usize,
+    pub(crate) hydrated_records: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CUSTOM_HISTORY_WORK: Cell<CustomHistorySourceBackedWork> =
+        const { Cell::new(CustomHistorySourceBackedWork {
+            projection_parses: 0,
+            source_read_passes: 0,
+            provider_records_parsed: 0,
+            session_nodes: 0,
+            session_dependencies: 0,
+            session_root_nodes: 0,
+            event_root_lookups: 0,
+            spooled_event_body_bytes: 0,
+            resident_event_body_bytes: 0,
+            peak_resident_event_body_bytes: 0,
+            peak_provider_record_bytes: 0,
+            retained_events_before_prior_prefix: 0,
+            catalog_records: 0,
+            catalog_metadata_bytes: 0,
+            hydration_passes: 0,
+            hydration_source_opens: 0,
+            hydrated_records: 0,
+        }) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_custom_history_source_backed_work() {
+    CUSTOM_HISTORY_WORK.set(CustomHistorySourceBackedWork::default());
+}
+
+#[cfg(test)]
+pub(crate) fn custom_history_source_backed_work() -> CustomHistorySourceBackedWork {
+    CUSTOM_HISTORY_WORK.get()
+}
+
+#[cfg(test)]
+pub(super) fn record_custom_history_work(update: impl FnOnce(&mut CustomHistorySourceBackedWork)) {
+    let mut work = CUSTOM_HISTORY_WORK.get();
+    update(&mut work);
+    CUSTOM_HISTORY_WORK.set(work);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CustomHistorySourceBackedBound {
+    CatalogRecords,
+    CatalogMetadataBytes,
+    ParentSessionIdBytes,
+    RootSessionIdBytes,
+    EdgeIdBytes,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum CustomHistorySourceBackedError {
@@ -80,6 +161,14 @@ pub(crate) enum CustomHistorySourceBackedError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(
+        "Custom History source-backed {limit:?} bound exceeded: maximum {maximum}, observed {observed}"
+    )]
+    Bounds {
+        limit: CustomHistorySourceBackedBound,
+        maximum: usize,
+        observed: usize,
+    },
     #[error("Custom History explicit inventory changed while it was being certified")]
     InventoryChanged,
     #[error("Custom History prior certificate belongs to another explicit registration")]
@@ -96,10 +185,6 @@ pub(crate) enum CustomHistorySourceBackedError {
     LocatorSourceNotFound,
     #[error("Custom History locator range exceeds the bounded JSONL record size")]
     LocatorRangeTooLarge,
-    #[error("Custom History locator range is no longer present")]
-    LocatorRangeMissing,
-    #[error("Custom History locator record digest no longer matches provider bytes")]
-    LocatorDigestMismatch,
     #[error("Custom History locator no longer decodes to the indexed provider event")]
     LocatorRecordMismatch,
 }
@@ -291,11 +376,62 @@ pub(crate) struct CustomHistorySourceBackedReceipt {
     pub(crate) route: CustomHistorySourceBackedRoute,
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CustomHistorySourceBackedDisposition,
+    pub(crate) append: Option<CertifiedSourceAppend>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing deletion evidence would complicate the coordinator-owned missing-source contract"
+)]
 pub(crate) enum CustomHistorySourceBackedOutcome {
-    Present(CustomHistorySourceBackedReceipt),
+    Present(Box<CustomHistorySourceBackedReceipt>),
+    Missing {
+        inventory: CertifiedSourceInventory,
+        deletion: Option<CertifiedSourceDeletion>,
+    },
+}
+
+#[derive(Debug)]
+struct CustomHistorySourceBackedStage {
+    receipt: CustomHistorySourceBackedReceipt,
+    projection: Option<ParsedProjection>,
+    emit_from: u64,
+}
+
+impl CustomHistorySourceBackedStage {
+    fn disposition(&self) -> &CustomHistorySourceBackedDisposition {
+        &self.receipt.disposition
+    }
+
+    fn emit_pages(
+        &mut self,
+        mut emit: impl FnMut(CustomHistorySourceBackedPage) -> CustomHistorySourceBackedResult<()>,
+    ) -> CustomHistorySourceBackedResult<()> {
+        if let Some(projection) = &mut self.projection {
+            emit_projection_pages(
+                &self.receipt.route.source,
+                &self.receipt.route.input,
+                projection,
+                self.emit_from,
+                &mut emit,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn into_receipt(self) -> CustomHistorySourceBackedReceipt {
+        self.receipt
+    }
+}
+
+#[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the staged missing variant preserves the public outcome's evidence shape"
+)]
+enum CustomHistorySourceBackedStagedOutcome {
+    Present(Box<CustomHistorySourceBackedStage>),
     Missing {
         inventory: CertifiedSourceInventory,
         deletion: Option<CertifiedSourceDeletion>,
@@ -311,21 +447,81 @@ struct CustomHistoryCheckpoint {
 }
 
 #[derive(Debug, Clone)]
-struct CompleteLine {
-    line_number: usize,
-    byte_offset: u64,
-    byte_length: u64,
-    physical_ordinal: u64,
-    record_digest: [u8; 32],
-    oversized: bool,
+pub(super) struct CompleteLine {
+    pub(super) line_number: usize,
+    pub(super) byte_offset: u64,
+    pub(super) byte_length: u64,
+    pub(super) physical_ordinal: u64,
+    pub(super) record_digest: [u8; 32],
+}
+
+pub(super) type CustomSessionKey = (String, String);
+pub(super) type CustomEventKey = (String, String, u64);
+
+#[derive(Debug)]
+pub(super) struct CustomSourceCatalogEntry {
+    pub(super) provider_key: String,
+    pub(super) raw_source_path: Option<String>,
 }
 
 #[derive(Debug)]
-struct ParsedProjection {
-    parsed: ParsedCustomHistory,
-    lines: Vec<CompleteLine>,
-    valid_sessions: BTreeSet<(String, String)>,
-    event_lines: BTreeMap<(String, String, u64), usize>,
+pub(super) struct CustomSessionCatalogEntry {
+    pub(super) line_number: usize,
+    pub(super) source_id: String,
+    pub(super) session_id: String,
+    pub(super) parent_session_id: Option<String>,
+    pub(super) root_session_id: Option<String>,
+    pub(super) agent_type: String,
+    pub(super) is_primary: bool,
+    pub(super) cwd: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) struct CustomEventCatalogEntry {
+    pub(super) line_number: usize,
+    pub(super) line: CompleteLine,
+}
+
+#[derive(Debug)]
+pub(super) struct SpooledCustomEvent {
+    pub(super) source_id: String,
+    pub(super) session_id: String,
+    pub(super) event_index: u64,
+    pub(super) event_id: Option<String>,
+    pub(super) event_type: String,
+    pub(super) role: Option<String>,
+    pub(super) occurred_at_unix_ms: i64,
+    pub(super) body: String,
+}
+
+impl SpooledCustomEvent {
+    pub(super) fn key(&self) -> CustomEventKey {
+        (
+            self.source_id.clone(),
+            self.session_id.clone(),
+            self.event_index,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TouchSpoolRef {
+    pub(super) byte_offset: u64,
+    pub(super) byte_length: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct ParsedProjection {
+    pub(super) sources: BTreeMap<String, CustomSourceCatalogEntry>,
+    pub(super) sessions: BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
+    pub(super) session_roots: BTreeMap<CustomSessionKey, String>,
+    pub(super) events: BTreeMap<CustomEventKey, CustomEventCatalogEntry>,
+    pub(super) event_touches: BTreeMap<CustomEventKey, Vec<TouchSpoolRef>>,
+    pub(super) event_spool: File,
+    pub(super) touch_spool: File,
+    observed_prior_prefix_digest: Option<[u8; 32]>,
+    retained_records_before_prior_prefix: Option<u64>,
+    appended_touch_changes_prior_document: bool,
     counts: ScannedSourceCounts,
     checkpoint: CustomHistoryCheckpoint,
     content_digest: [u8; 32],
@@ -383,8 +579,36 @@ pub(crate) fn observe_custom_history_source_backed_explicit(
 pub(crate) fn scan_custom_history_source_backed_explicit(
     input: &CustomHistorySourceBackedInput,
     prior: Option<&CertifiedSource>,
-    mut emit: impl FnMut(CustomHistorySourceBackedPage) -> CustomHistorySourceBackedResult<()>,
+    mut emit: impl FnMut(
+        &CustomHistorySourceBackedDisposition,
+        CustomHistorySourceBackedPage,
+    ) -> CustomHistorySourceBackedResult<()>,
 ) -> CustomHistorySourceBackedResult<CustomHistorySourceBackedOutcome> {
+    match stage_custom_history_source_backed_explicit(input, prior)? {
+        CustomHistorySourceBackedStagedOutcome::Present(mut stage) => {
+            let disposition = stage.disposition().clone();
+            stage.emit_pages(|page| emit(&disposition, page))?;
+            Ok(CustomHistorySourceBackedOutcome::Present(Box::new(
+                (*stage).into_receipt(),
+            )))
+        }
+        CustomHistorySourceBackedStagedOutcome::Missing {
+            inventory,
+            deletion,
+        } => Ok(CustomHistorySourceBackedOutcome::Missing {
+            inventory,
+            deletion,
+        }),
+    }
+}
+
+/// Builds one source-authoritative projection before the writer chooses its
+/// append or replacement staging mode. The staged projection is invocation
+/// local and is dropped after its bounded pages are emitted.
+fn stage_custom_history_source_backed_explicit(
+    input: &CustomHistorySourceBackedInput,
+    prior: Option<&CertifiedSource>,
+) -> CustomHistorySourceBackedResult<CustomHistorySourceBackedStagedOutcome> {
     let opening_inventory = observe_custom_history_source_backed_explicit(input)?;
     let source = opening_inventory.source().clone();
     if let Some(prior) = prior {
@@ -405,7 +629,7 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
                 )
             })
             .transpose()?;
-        return Ok(CustomHistorySourceBackedOutcome::Missing {
+        return Ok(CustomHistorySourceBackedStagedOutcome::Missing {
             inventory,
             deletion,
         });
@@ -418,27 +642,40 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
             .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
     )?;
     if let Some(prior) = prior {
+        let checkpoint = decode_checkpoint(prior);
         if prior.parser_revision() == CUSTOM_SOURCE_BACKED_PARSER_REVISION
             && prior.observation() == &opening_observation
-            && decode_checkpoint(prior).is_ok()
+            && checkpoint.is_ok()
         {
             let closing = observe_custom_history_source_backed_explicit(input)?;
             opening_inventory.certify_against(&closing)?;
-            return Ok(CustomHistorySourceBackedOutcome::Present(
-                CustomHistorySourceBackedReceipt {
-                    route: route(
-                        input,
-                        source,
-                        Arc::clone(
-                            opening_inventory
-                                .opened()
-                                .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
+            let checkpoint = checkpoint?;
+            let append = CertifiedSourceAppend::certify(
+                prior,
+                prior.clone(),
+                checkpoint.certified_prefix_bytes,
+                *prior.content_digest(),
+            )?;
+            return Ok(CustomHistorySourceBackedStagedOutcome::Present(Box::new(
+                CustomHistorySourceBackedStage {
+                    receipt: CustomHistorySourceBackedReceipt {
+                        route: route(
+                            input,
+                            source,
+                            Arc::clone(
+                                opening_inventory
+                                    .opened()
+                                    .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
+                            ),
                         ),
-                    ),
-                    certificate: prior.clone(),
-                    disposition: CustomHistorySourceBackedDisposition::Unchanged,
+                        certificate: prior.clone(),
+                        disposition: CustomHistorySourceBackedDisposition::Unchanged,
+                        append: Some(append),
+                    },
+                    projection: None,
+                    emit_from: 0,
                 },
-            ));
+            )));
         }
     }
 
@@ -447,7 +684,12 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
             .opened()
             .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
     );
-    let bytes = read_explicit_source(&opened)?;
+    let prior_prefix_bytes = prior
+        .filter(|prior| prior.parser_revision() == CUSTOM_SOURCE_BACKED_PARSER_REVISION)
+        .and_then(|prior| decode_checkpoint(prior).ok())
+        .map(|checkpoint| checkpoint.certified_prefix_bytes);
+    let projection = parse_projection(&opened, prior_prefix_bytes)?;
+    opened.revalidate()?;
     let closing_inventory = observe_custom_history_source_backed_explicit(input)?;
     let closing_ordinary = closing_inventory
         .ordinary()
@@ -457,7 +699,6 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
     }
     opening_inventory.certify_against(&closing_inventory)?;
     let closing_observation = source_observation(source.clone(), closing_ordinary)?;
-    let projection = parse_projection(&bytes)?;
     let certificate = CertifiedSource::certify_with_frontier(
         opening_observation,
         closing_observation,
@@ -472,15 +713,19 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
         )?),
     )?;
 
-    let (disposition, emit_from) = classify_projection(prior, &bytes, &projection, &certificate)?;
-    emit_projection_pages(&source, input, &projection, emit_from, &mut emit)?;
-    Ok(CustomHistorySourceBackedOutcome::Present(
-        CustomHistorySourceBackedReceipt {
-            route: route(input, source, opened),
-            certificate,
-            disposition,
+    let (disposition, emit_from, append) = classify_projection(prior, &projection, &certificate)?;
+    Ok(CustomHistorySourceBackedStagedOutcome::Present(Box::new(
+        CustomHistorySourceBackedStage {
+            receipt: CustomHistorySourceBackedReceipt {
+                route: route(input, source, opened),
+                certificate,
+                disposition,
+                append,
+            },
+            projection: Some(projection),
+            emit_from,
         },
-    ))
+    )))
 }
 
 pub(crate) fn revalidate_custom_history_source_backed(
@@ -520,10 +765,20 @@ fn open_explicit_source(
     Ok(Arc::new(open_provider_source_file(&path)?))
 }
 
-fn read_explicit_source(
-    source: &OpenedProviderSourceFile,
-) -> CustomHistorySourceBackedResult<Vec<u8>> {
-    Ok(source.read_all_bounded(usize::MAX)?)
+#[cfg(test)]
+pub(super) fn validate_custom_history_catalog_bounds(
+    input: &CustomHistorySourceBackedInput,
+    max_records: usize,
+    max_metadata_bytes: usize,
+) -> CustomHistorySourceBackedResult<ScannedSourceCounts> {
+    let opened = open_explicit_source(input.path())?;
+    let projection = parser::parse_projection_with_limits(
+        &opened,
+        None,
+        CustomHistoryCatalogLimits::new(max_records, max_metadata_bytes),
+    )?;
+    opened.revalidate()?;
+    Ok(projection.counts)
 }
 
 fn source_observation(
@@ -539,14 +794,17 @@ fn source_observation(
 
 fn classify_projection(
     prior: Option<&CertifiedSource>,
-    bytes: &[u8],
     projection: &ParsedProjection,
     certificate: &CertifiedSource,
-) -> CustomHistorySourceBackedResult<(CustomHistorySourceBackedDisposition, u64)> {
+) -> CustomHistorySourceBackedResult<(
+    CustomHistorySourceBackedDisposition,
+    u64,
+    Option<CertifiedSourceAppend>,
+)> {
     let Some(prior) = prior else {
-        return Ok((CustomHistorySourceBackedDisposition::Cold, 0));
+        return Ok((CustomHistorySourceBackedDisposition::Cold, 0, None));
     };
-    let replacement = || (CustomHistorySourceBackedDisposition::Replacement, 0);
+    let replacement = || (CustomHistorySourceBackedDisposition::Replacement, 0, None);
     if prior.parser_revision() != CUSTOM_SOURCE_BACKED_PARSER_REVISION {
         return Ok(replacement());
     }
@@ -555,17 +813,16 @@ fn classify_projection(
         Err(CustomHistorySourceBackedError::InvalidCheckpoint) => return Ok(replacement()),
         Err(error) => return Err(error),
     };
-    let prefix_len = usize::try_from(checkpoint.certified_prefix_bytes)
-        .map_err(|_| CustomHistorySourceBackedError::InvalidCheckpoint)?;
-    if projection.checkpoint.certified_prefix_bytes < checkpoint.certified_prefix_bytes
-        || bytes.len() < prefix_len
-    {
+    if projection.checkpoint.certified_prefix_bytes < checkpoint.certified_prefix_bytes {
         return Ok(replacement());
     }
-    if prefix_digest(&bytes[..prefix_len]) != *prior.content_digest() {
+    if projection.observed_prior_prefix_digest != Some(*prior.content_digest()) {
         return Ok(replacement());
     }
-    if appended_touch_changes_prior_document(projection, checkpoint.certified_prefix_bytes)? {
+    if projection.retained_records_before_prior_prefix != Some(prior.counts().indexed_documents) {
+        return Ok(replacement());
+    }
+    if projection.appended_touch_changes_prior_document {
         return Ok(replacement());
     }
     match CertifiedSourceAppend::certify(
@@ -574,267 +831,17 @@ fn classify_projection(
         checkpoint.certified_prefix_bytes,
         *prior.content_digest(),
     ) {
-        Ok(_) => Ok((
+        Ok(append) => Ok((
             CustomHistorySourceBackedDisposition::Append,
             checkpoint.certified_prefix_bytes,
+            Some(append),
         )),
         Err(ProjectionContractError::AppendCountRegression) => Ok(replacement()),
         Err(error) => Err(error.into()),
     }
 }
 
-fn appended_touch_changes_prior_document(
-    projection: &ParsedProjection,
-    prior_prefix_bytes: u64,
-) -> CustomHistorySourceBackedResult<bool> {
-    for (line_number, touch) in &projection.parsed.file_touches {
-        let Some(event_index) = touch.event_index else {
-            continue;
-        };
-        let touch_line = line_for_number(&projection.lines, *line_number)?;
-        if touch_line.byte_offset < prior_prefix_bytes {
-            continue;
-        }
-        let Some(event_line_number) = projection.event_lines.get(&(
-            touch.source_id.clone(),
-            touch.session_id.clone(),
-            event_index,
-        )) else {
-            continue;
-        };
-        if line_for_number(&projection.lines, *event_line_number)?.byte_offset < prior_prefix_bytes
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn emit_projection_pages(
-    source: &SourceKey,
-    input: &CustomHistorySourceBackedInput,
-    projection: &ParsedProjection,
-    emit_from: u64,
-    emit: &mut impl FnMut(CustomHistorySourceBackedPage) -> CustomHistorySourceBackedResult<()>,
-) -> CustomHistorySourceBackedResult<()> {
-    let touches = event_touches(&projection.parsed.file_touches);
-    let mut documents = Vec::new();
-    let mut retained_bytes = 0_usize;
-    for (line_number, event) in &projection.parsed.events {
-        if !projection
-            .valid_sessions
-            .contains(&(event.source_id.clone(), event.session_id.clone()))
-        {
-            continue;
-        }
-        let line = line_for_number(&projection.lines, *line_number)?;
-        if line.byte_offset < emit_from {
-            continue;
-        }
-        let source_record = &projection
-            .parsed
-            .sources
-            .get(&event.source_id)
-            .ok_or(CustomHistorySourceBackedError::CountMismatch)?
-            .1;
-        let session = &projection
-            .parsed
-            .sessions
-            .get(&(event.source_id.clone(), event.session_id.clone()))
-            .ok_or(CustomHistorySourceBackedError::CountMismatch)?
-            .1;
-        let document = lexical_document(
-            source,
-            input,
-            projection,
-            source_record,
-            session,
-            event,
-            line,
-            touches.get(&(
-                event.source_id.clone(),
-                event.session_id.clone(),
-                event.event_index,
-            )),
-        )?;
-        let document_bytes = retained_document_bytes(&document);
-        if !documents.is_empty()
-            && (documents.len() == CUSTOM_PAGE_MAX_DOCUMENTS
-                || retained_bytes.saturating_add(document_bytes) > CUSTOM_PAGE_MAX_RETAINED_BYTES)
-        {
-            emit(CustomHistorySourceBackedPage {
-                documents: std::mem::take(&mut documents),
-            })?;
-            retained_bytes = 0;
-        }
-        retained_bytes = retained_bytes.saturating_add(document_bytes);
-        documents.push(document);
-    }
-    if !documents.is_empty() {
-        emit(CustomHistorySourceBackedPage { documents })?;
-    }
-    Ok(())
-}
-
-fn event_touches(
-    touches: &[(usize, CtxHistoryJsonlFileTouchRecord)],
-) -> BTreeMap<(String, String, u64), Vec<String>> {
-    let mut by_event = BTreeMap::<(String, String, u64), Vec<String>>::new();
-    let mut retained_bytes = BTreeMap::<(String, String, u64), usize>::new();
-    for (_, touch) in touches {
-        let Some(event_index) = touch.event_index else {
-            continue;
-        };
-        let key = (
-            touch.source_id.clone(),
-            touch.session_id.clone(),
-            event_index,
-        );
-        let paths = by_event.entry(key.clone()).or_default();
-        let bytes = retained_bytes.entry(key).or_default();
-        if paths.len() == CUSTOM_DOCUMENT_MAX_TOUCHED_FILES
-            || touch.path.is_empty()
-            || touch.path.len() > CUSTOM_DOCUMENT_METADATA_MAX_BYTES
-            || bytes.saturating_add(touch.path.len()) > CUSTOM_DOCUMENT_METADATA_MAX_BYTES
-        {
-            continue;
-        }
-        *bytes = bytes.saturating_add(touch.path.len());
-        paths.push(touch.path.clone());
-    }
-    by_event
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lexical_document(
-    source: &SourceKey,
-    input: &CustomHistorySourceBackedInput,
-    projection: &ParsedProjection,
-    source_record: &CtxHistoryJsonlSourceRecord,
-    session: &CtxHistoryJsonlSessionRecord,
-    event: &CtxHistoryJsonlEventRecord,
-    line: &CompleteLine,
-    touched_files: Option<&Vec<String>>,
-) -> CustomHistorySourceBackedResult<LexicalDocument> {
-    let session_id = custom_session_identity(
-        source,
-        &source_record.provider_key,
-        &source_record.source_id,
-        &session.session_id,
-    )?;
-    let parent_session_id = session
-        .parent_session_id
-        .as_deref()
-        .map(|parent| {
-            custom_session_identity(
-                source,
-                &source_record.provider_key,
-                &source_record.source_id,
-                parent,
-            )
-        })
-        .transpose()?;
-    let root_session_id =
-        custom_root_session_identity(source, projection, source_record, session, session_id)?;
-    let event_key = custom_event_typed_key(event)?;
-    let native_item_key = NativeItemKey::native_id(CUSTOM_EVENT_KEY_NAMESPACE, event_key.clone())?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source,
-        session_id,
-        logical_item_kind: CUSTOM_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: line.byte_offset,
-            byte_length: line.byte_length,
-            physical_ordinal: line.physical_ordinal,
-            native_session_key: Some(custom_session_typed_key(
-                &source_record.provider_key,
-                &source_record.source_id,
-                &session.session_id,
-            )?),
-            native_event_key: Some(event_key),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        line.record_digest,
-    )?;
-    let source_path = source_record
-        .raw_source_path
-        .as_deref()
-        .or_else(|| input.path().to_str())
-        .and_then(bounded_metadata);
-    Ok(LexicalDocument {
-        event_id,
-        session_id,
-        parent_session_id,
-        root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(custom_history_internal_session_id(
-            &source_record.provider_key,
-            &source_record.source_id,
-            &session.session_id,
-        )),
-        // The v1 interchange schema has no branch or workspace field.
-        branch: None,
-        source_path,
-        agent_type: session.agent_type.as_str().to_owned(),
-        is_primary: session.is_primary,
-        event_sequence: event.event_index,
-        occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: event.role.map(|role| role.as_str().to_owned()),
-        body: lexical_body(event),
-        workspace: None,
-        cwd: session.cwd.as_deref().and_then(bounded_metadata),
-        touched_files: touched_files.cloned().unwrap_or_default(),
-    })
-}
-
-fn custom_root_session_identity(
-    source: &SourceKey,
-    projection: &ParsedProjection,
-    source_record: &CtxHistoryJsonlSourceRecord,
-    session: &CtxHistoryJsonlSessionRecord,
-    session_id: StableEntityId,
-) -> CustomHistorySourceBackedResult<StableEntityId> {
-    if let Some(root) = session.root_session_id.as_deref() {
-        return custom_session_identity(
-            source,
-            &source_record.provider_key,
-            &source_record.source_id,
-            root,
-        );
-    }
-    let mut current = session;
-    for _ in 0..=projection.parsed.sessions.len() {
-        let Some(parent) = current.parent_session_id.as_deref() else {
-            return if current.session_id == session.session_id {
-                Ok(session_id)
-            } else {
-                custom_session_identity(
-                    source,
-                    &source_record.provider_key,
-                    &source_record.source_id,
-                    &current.session_id,
-                )
-            };
-        };
-        current = &projection
-            .parsed
-            .sessions
-            .get(&(source_record.source_id.clone(), parent.to_owned()))
-            .ok_or(CustomHistorySourceBackedError::CountMismatch)?
-            .1;
-    }
-    Err(CustomHistorySourceBackedError::CountMismatch)
-}
-
-fn custom_session_typed_key(
+pub(super) fn custom_session_typed_key(
     provider_key: &str,
     source_id: &str,
     session_id: &str,
@@ -846,7 +853,7 @@ fn custom_session_typed_key(
     ])?)
 }
 
-fn custom_session_identity(
+pub(super) fn custom_session_identity(
     source: &SourceKey,
     provider_key: &str,
     source_id: &str,
@@ -870,17 +877,22 @@ fn custom_session_identity(
 fn custom_event_typed_key(
     event: &CtxHistoryJsonlEventRecord,
 ) -> CustomHistorySourceBackedResult<TypedKey> {
-    Ok(
-        match event.event_id.as_deref().filter(|id| !id.is_empty()) {
-            Some(event_id) => {
-                TypedKey::composite(vec![TypedKey::utf8("event_id")?, TypedKey::utf8(event_id)?])?
-            }
-            None => TypedKey::composite(vec![
-                TypedKey::utf8("event_index")?,
-                TypedKey::U64(event.event_index),
-            ])?,
-        },
-    )
+    custom_event_typed_key_parts(event.event_id.as_deref(), event.event_index)
+}
+
+pub(super) fn custom_event_typed_key_parts(
+    event_id: Option<&str>,
+    event_index: u64,
+) -> CustomHistorySourceBackedResult<TypedKey> {
+    Ok(match event_id.filter(|id| !id.is_empty()) {
+        Some(event_id) => {
+            TypedKey::composite(vec![TypedKey::utf8("event_id")?, TypedKey::utf8(event_id)?])?
+        }
+        None => TypedKey::composite(vec![
+            TypedKey::utf8("event_index")?,
+            TypedKey::U64(event_index),
+        ])?,
+    })
 }
 
 fn lexical_body(event: &CtxHistoryJsonlEventRecord) -> String {
@@ -898,36 +910,9 @@ fn lexical_body(event: &CtxHistoryJsonlEventRecord) -> String {
     }
 }
 
-fn bounded_metadata(value: &str) -> Option<String> {
+pub(super) fn bounded_metadata(value: &str) -> Option<String> {
     (!value.is_empty() && value.len() <= CUSTOM_DOCUMENT_METADATA_MAX_BYTES)
         .then(|| value.to_owned())
-}
-
-fn retained_document_bytes(document: &LexicalDocument) -> usize {
-    document
-        .body
-        .len()
-        .saturating_add(document.provider_session_id.as_ref().map_or(0, String::len))
-        .saturating_add(document.source_path.as_ref().map_or(0, String::len))
-        .saturating_add(document.cwd.as_ref().map_or(0, String::len))
-        .saturating_add(
-            document
-                .touched_files
-                .iter()
-                .map(String::len)
-                .sum::<usize>(),
-        )
-        .saturating_add(512)
-}
-
-fn line_for_number(
-    lines: &[CompleteLine],
-    line_number: usize,
-) -> CustomHistorySourceBackedResult<&CompleteLine> {
-    line_number
-        .checked_sub(1)
-        .and_then(|index| lines.get(index))
-        .ok_or(CustomHistorySourceBackedError::CountMismatch)
 }
 
 fn decode_checkpoint(

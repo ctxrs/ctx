@@ -29,10 +29,6 @@ impl NativeJsonlSourceFile {
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
-
-    pub(super) fn opened(&self) -> &Arc<OpenedProviderSourceFile> {
-        &self.opened
-    }
 }
 
 pub(super) fn visit_jsonl_tree_files(

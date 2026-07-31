@@ -76,13 +76,16 @@ fn resolve_lingma_vscode(
         installed_settings_found |= base.is_some() || !base_allows_absent_profile_fallback;
         if base.is_some() {
             add_lingma_vscode_choice(
+                context.data_root(),
                 report,
                 discovered,
                 spec,
                 base.as_ref(),
                 &default_db,
-                client,
-                LingmaVscodeProfile::Base,
+                LingmaDatabaseCatalogLineage::VscodeSelected {
+                    client,
+                    profile: LingmaVscodeProfile::Base,
+                },
             );
         }
         let profiles = user_root.join("profiles");
@@ -142,19 +145,23 @@ fn resolve_lingma_vscode(
                 }
             };
             add_lingma_vscode_choice(
+                context.data_root(),
                 report,
                 discovered,
                 spec,
                 effective,
                 &default_db,
-                client,
-                profile_key,
+                LingmaDatabaseCatalogLineage::VscodeSelected {
+                    client,
+                    profile: profile_key,
+                },
             );
         }
     }
 
     if !installed_settings_found && path_presence(&default_db).suppresses_fallback() {
         push_lingma_source(
+            context.data_root(),
             report,
             discovered,
             spec,
@@ -242,13 +249,13 @@ fn read_vscode_lingma_choice(
 }
 
 fn add_lingma_vscode_choice(
+    data_root: Option<&Path>,
     report: &mut DiscoveryReport,
     discovered: &mut Vec<DiscoveredLingmaDatabase>,
     spec: &ProviderSourceSpec,
     choice: Option<&LingmaRootChoice>,
     default_db: &Path,
-    client: LingmaVscodeClient,
-    profile: LingmaVscodeProfile,
+    selected_lineage: LingmaDatabaseCatalogLineage,
 ) {
     let (path, lineage) = match choice.unwrap_or(&LingmaRootChoice::Default) {
         LingmaRootChoice::Absent | LingmaRootChoice::Default => (
@@ -257,7 +264,7 @@ fn add_lingma_vscode_choice(
         ),
         LingmaRootChoice::Selected(root) => (
             root.join("sharedClientCache/cache/db/local.db"),
-            LingmaDatabaseCatalogLineage::VscodeSelected { client, profile },
+            selected_lineage,
         ),
         LingmaRootChoice::Unreconstructible(path) => {
             report.issues.push(issue(
@@ -269,7 +276,7 @@ fn add_lingma_vscode_choice(
             return;
         }
     };
-    push_lingma_source(report, discovered, spec, path, lineage);
+    push_lingma_source(data_root, report, discovered, spec, path, lineage);
 }
 
 fn resolve_lingma_jetbrains(
@@ -353,7 +360,14 @@ fn resolve_lingma_jetbrains(
                         }
                         LingmaRootChoice::Unreconstructible(_) => continue,
                     };
-                    push_lingma_source(report, discovered, spec, path, lineage);
+                    push_lingma_source(
+                        context.data_root(),
+                        report,
+                        discovered,
+                        spec,
+                        path,
+                        lineage,
+                    );
                 }
             }
             Err(_) if path_presence(&config_root).suppresses_fallback() => {
@@ -381,6 +395,7 @@ fn resolve_lingma_jetbrains(
         };
         if let Some(path) = selected {
             push_lingma_source(
+                context.data_root(),
                 report,
                 discovered,
                 spec,
@@ -392,13 +407,14 @@ fn resolve_lingma_jetbrains(
 }
 
 fn push_lingma_source(
+    data_root: Option<&Path>,
     report: &mut DiscoveryReport,
     discovered: &mut Vec<DiscoveredLingmaDatabase>,
     spec: &ProviderSourceSpec,
     path: PathBuf,
     lineage: LingmaDatabaseCatalogLineage,
 ) {
-    let source = safe_native_source(spec, path, LINGMA_FORMAT);
+    let source = safe_native_source(data_root, spec, path, LINGMA_FORMAT);
     if push_source_candidate(&mut report.sources, source.clone()) {
         discovered.push(DiscoveredLingmaDatabase::new(source, lineage));
     } else {

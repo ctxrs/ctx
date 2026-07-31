@@ -144,6 +144,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .map(|route| route.metadata.clone())
         .collect();
 
+    let leaf_worker_budget = source_backed_leaf_worker_budget(writer_options.indexer_threads);
     let scan_started = Instant::now();
     let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
     let mut owners = HashMap::new();
@@ -169,6 +170,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             owners: &mut owners,
             complete_inventories: &mut complete_inventory_owners,
             route_index,
+            leaf_worker_budget,
         };
         (driver.scan)(&mut sink).map_err(|source| SourceBackedCoordinatorError::RouteScan {
             provider: route.metadata.source.provider,
@@ -234,6 +236,15 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 .is_some_and(|revalidate| revalidate(inventory))
         },
     )?;
+    for route in &registry.routes {
+        if let Some(after_publication) = route
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.after_successful_publication.as_ref())
+        {
+            after_publication();
+        }
+    }
     let commit_duration = commit_started.elapsed();
     let _ = report_progress(SourceBackedRefreshProgress {
         phase: "committed",

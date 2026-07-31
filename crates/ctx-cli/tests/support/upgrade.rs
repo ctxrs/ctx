@@ -488,6 +488,27 @@ pub(crate) fn managed_candidate_in(
 }
 
 #[cfg(unix)]
+pub(crate) fn ensure_managed_test_binary_is_bounded(target: &Path) {
+    const MAX_MANAGED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+
+    if fs::metadata(target).unwrap().len() > MAX_MANAGED_BINARY_BYTES {
+        let stripped = std::process::Command::new("strip")
+            .arg(target)
+            .status()
+            .expect("run strip for the temporary managed debug candidate");
+        assert!(
+            stripped.success(),
+            "fully strip temporary managed debug candidate"
+        );
+    }
+    let size = fs::metadata(target).unwrap().len();
+    assert!(
+        size <= MAX_MANAGED_BINARY_BYTES,
+        "temporary managed debug candidate remains above the production binary bound after full strip: {size} > {MAX_MANAGED_BINARY_BYTES}"
+    );
+}
+
+#[cfg(unix)]
 fn finish_managed_candidate(
     temp: &TempDir,
     copied: PathBuf,
@@ -503,17 +524,7 @@ fn finish_managed_candidate(
 
 #[cfg(unix)]
 fn finish_managed_candidate_at(target: PathBuf, install_attempt_id: &str) -> PathBuf {
-    if fs::metadata(&target).unwrap().len() > 128 * 1024 * 1024 {
-        let stripped = std::process::Command::new("strip")
-            .arg("-S")
-            .arg(&target)
-            .status()
-            .expect("run strip for the temporary managed debug candidate");
-        assert!(
-            stripped.success(),
-            "strip temporary managed debug candidate"
-        );
-    }
+    ensure_managed_test_binary_is_bounded(&target);
     let current = fs::read(&target).unwrap();
     fs::write(
         install_marker_path(&target),

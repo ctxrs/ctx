@@ -11,6 +11,8 @@ pub(super) fn scan_conversations(
     let mut statement = prepare_conversation_candidates(conn)?;
     let limit = conversation_hydration_limit()?;
     let mut rows = statement.query(rusqlite::params![limit, 0])?;
+    #[cfg(test)]
+    super::super::super::source_backed::record_warp_projection_query();
     let mut hierarchy = BTreeMap::new();
     let mut emissions = Vec::new();
     while let Some(row) = rows.next()? {
@@ -77,120 +79,8 @@ pub(super) fn scan_conversations(
             source_digest: evidence_digest,
         });
     }
-    let pending = hierarchy
-        .values()
-        .filter_map(|node| node.parent_conversation_id.clone())
-        .filter(|parent| !hierarchy.contains_key(parent))
-        .collect::<Vec<_>>();
-    load_hierarchy_closure(conn, pending, &mut hierarchy, counters)?;
     resolve_hierarchy(&mut hierarchy)?;
     Ok((hierarchy, emissions))
-}
-
-fn load_hierarchy_closure(
-    conn: &Connection,
-    mut pending: Vec<String>,
-    hierarchy: &mut BTreeMap<String, WarpHierarchyNode>,
-    counters: &mut WarpNativeCounters,
-) -> Result<()> {
-    let limit = conversation_hydration_limit()?;
-    let mut conversation = conn.prepare(
-        "select rowid, \
-                typeof(conversation_id), coalesce(octet_length(conversation_id), 0), \
-                typeof(conversation_data), coalesce(octet_length(conversation_data), 0), \
-                typeof(last_modified_at), coalesce(octet_length(last_modified_at), 0), \
-                case when typeof(conversation_id) = 'text' \
-                           and typeof(conversation_data) = 'text' \
-                           and typeof(last_modified_at) = 'text' \
-                           and coalesce(octet_length(conversation_id), 0) \
-                             + coalesce(octet_length(conversation_data), 0) \
-                             + coalesce(octet_length(last_modified_at), 0) <= ?2 \
-                     then conversation_id end, \
-                case when typeof(conversation_id) = 'text' \
-                           and typeof(conversation_data) = 'text' \
-                           and typeof(last_modified_at) = 'text' \
-                           and coalesce(octet_length(conversation_id), 0) \
-                             + coalesce(octet_length(conversation_data), 0) \
-                             + coalesce(octet_length(last_modified_at), 0) <= ?2 \
-                     then conversation_data end, \
-                case when typeof(conversation_id) = 'text' \
-                           and typeof(conversation_data) = 'text' \
-                           and typeof(last_modified_at) = 'text' \
-                           and coalesce(octet_length(conversation_id), 0) \
-                             + coalesce(octet_length(conversation_data), 0) \
-                             + coalesce(octet_length(last_modified_at), 0) <= ?2 \
-                     then last_modified_at end \
-         from agent_conversations
-         where conversation_id = ?1 collate binary
-         limit 1",
-    )?;
-    let mut seen = hierarchy.keys().cloned().collect::<BTreeSet<_>>();
-    while let Some(requested_id) = pending.pop() {
-        if !seen.insert(requested_id.clone()) {
-            continue;
-        }
-        let _guard = SqliteLengthPreflightGuard::new(conn);
-        let candidate = conversation
-            .query_row(
-                rusqlite::params![requested_id, limit],
-                conversation_candidate_from_row,
-            )
-            .optional()?;
-        let Some(candidate) = candidate else {
-            continue;
-        };
-        counters.conversation_rows = counters.conversation_rows.saturating_add(1);
-        if reject_conversation_candidate(&candidate)?.is_some() {
-            continue;
-        }
-        let (Some(conversation_id), Some(raw_data), Some(raw_modified)) = (
-            candidate.hydrated_conversation_id,
-            candidate.hydrated_conversation_data,
-            candidate.hydrated_last_modified_at,
-        ) else {
-            return Err(CaptureError::SystemInvariant(
-                "Warp conversation passed preflight without bounded values",
-            ));
-        };
-        counters.conversation_rows_hydrated = counters.conversation_rows_hydrated.saturating_add(1);
-        counters.conversation_json_objects_parsed =
-            counters.conversation_json_objects_parsed.saturating_add(1);
-        let mut rejections = Vec::new();
-        let conversation_data =
-            parse_conversation_data(&raw_data, &conversation_id, &mut rejections);
-        let modified_at =
-            parse_optional_conversation_timestamp(&raw_modified, &conversation_id, &mut rejections);
-        let parent_conversation_id = conversation_data
-            .get("parent_conversation_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .filter(|value| !value.is_empty());
-        if let Some(parent) = parent_conversation_id.as_ref() {
-            pending.push(parent.clone());
-        }
-        let title = conversation_data
-            .get("agent_name")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(|value| truncate_chars(value, 240))
-            .unwrap_or_else(|| format!("Warp {conversation_id}"));
-        let metadata = bounded_session_metadata(&conversation_data)?;
-        counters.peak_session_metadata_rows = counters.peak_session_metadata_rows.max(1);
-        hierarchy.insert(
-            conversation_id.clone(),
-            WarpHierarchyNode {
-                parent_conversation_id,
-                root_conversation_id: conversation_id,
-                root_resolved: false,
-                parent_present: false,
-                title,
-                modified_at,
-                metadata,
-                rejections,
-            },
-        );
-    }
-    Ok(())
 }
 
 fn prepare_conversation_candidates(conn: &Connection) -> Result<Statement<'_>> {

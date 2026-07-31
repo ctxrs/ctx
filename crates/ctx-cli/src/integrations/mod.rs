@@ -86,13 +86,13 @@ pub(crate) fn run(
                 telemetry.target = Some(IntegrationTarget::Mcp);
                 args.add_initial_analytics(telemetry);
                 let context = mcp::McpPathContext::from_env()?;
-                run_mcp_install(args, &context, telemetry)
+                run_mcp_install(args, &context, telemetry, ui)
             }
             IntegrationInstallTarget::Skills(args) => {
                 telemetry.action = Some(IntegrationAction::Install);
                 telemetry.target = Some(IntegrationTarget::Skills);
                 args.add_initial_analytics(telemetry);
-                skill::run_install_command(args, telemetry)
+                skill::run_install_command(args, telemetry, ui)
             }
             IntegrationInstallTarget::SlashCommands(args) => {
                 telemetry.action = Some(IntegrationAction::Install);
@@ -108,13 +108,13 @@ pub(crate) fn run(
                 telemetry.target = Some(IntegrationTarget::Mcp);
                 args.add_initial_analytics(telemetry);
                 let context = mcp::McpPathContext::from_env()?;
-                run_mcp_status(args, &context, telemetry)
+                run_mcp_status(args, &context, telemetry, ui)
             }
             IntegrationStatusTarget::Skills(args) => {
                 telemetry.action = Some(IntegrationAction::Status);
                 telemetry.target = Some(IntegrationTarget::Skills);
                 args.add_initial_analytics(telemetry);
-                skill::run_status_command(args, telemetry)
+                skill::run_status_command(args, telemetry, ui)
             }
         },
     }

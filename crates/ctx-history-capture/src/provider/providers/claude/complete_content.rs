@@ -138,6 +138,18 @@ mod tests {
             claude_complete_content_message_record(&tool_result, 8),
             None
         );
+
+        let pure_tool_call = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call-1", "name": "Read"}]
+            }
+        });
+        assert_eq!(
+            claude_complete_content_message_record(&pure_tool_call, 9),
+            None
+        );
     }
 
     #[test]

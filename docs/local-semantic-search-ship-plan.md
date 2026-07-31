@@ -43,7 +43,7 @@ and private relevance evals justify flipping the default.
   remains available.
 - There is no product `max-runtime-seconds` option. Tests and dogfood can wrap
   foreground daemon commands in process-level timeouts; the product daemon runs
-  until `--once`, failure, idle exit, or normal service shutdown.
+  until failure, an explicit finite idle exit, or normal service shutdown.
 - `ctx setup`, `ctx import`, and `ctx search` should not write `config.toml` for
   implicit defaults. The config file is user-managed override surface.
 - `ctx setup` should be repeatable. If an existing user later enables
@@ -296,7 +296,8 @@ and private relevance evals justify flipping the default.
   or dirty work is already queued.
 - Do not expose a daemon runtime-cap product option. Tests and dogfood scripts
   can wrap foreground daemon commands in process-level timeouts, but the daemon
-  product behavior is to run until `--once`, failure, or idle exit.
+  product behavior is to run until failure, an explicit finite idle exit, or
+  normal service shutdown.
 - Keep the embedder warm within daemon loops.
 - Let default daemon semantic passes use the existing worker time budget; keep
   peak memory controlled by the adaptive embed policy rather than an artificially

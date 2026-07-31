@@ -1,17 +1,18 @@
 mod scanner;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use chrono::Duration;
 use ctx_history_core::EventType;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     common::io::{ProviderSourceDirectory, ProviderSourceRoot},
@@ -30,6 +31,7 @@ use crate::{
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
     OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, ProviderAdapterContext,
@@ -81,6 +83,7 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeSourceObservation 
     pub(super) database: Arc<ForgeCodeSqliteDatabase>,
     pub(super) schema_fingerprint: String,
     pub(super) user_version: i64,
+    pub(super) logical_fingerprint: [u8; 32],
     columns: BTreeSet<String>,
 }
 
@@ -144,11 +147,15 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
                 conn.pragma_query_value(None, "user_version", |row| row.get(0))?,
             ))
         })?;
+    let logical_fingerprint = database.read(&canonical_path, |conn| {
+        forgecode_logical_fingerprint(conn, &columns, &schema_fingerprint, user_version)
+    })?;
     Ok(ForgeCodeDiscovery::Live(ForgeCodeSourceObservation {
         canonical_path,
         database: Arc::new(database),
         schema_fingerprint,
         user_version,
+        logical_fingerprint,
         columns,
     }))
 }
@@ -177,9 +184,10 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 #[derive(Debug)]
 pub(in crate::provider::providers::forgecode) struct ForgeCodeSqliteDatabase {
     parent: ProviderSourceDirectory,
-    authority: SqliteSourceDirectoryAuthority,
+    _authority: SqliteSourceDirectoryAuthority,
     database_name: OsString,
     evidence: SqliteSourceEvidence,
+    snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
 }
 
 impl ForgeCodeSqliteDatabase {
@@ -213,17 +221,12 @@ impl ForgeCodeSqliteDatabase {
             .connection()
             .map_err(|error| forgecode_sqlite_source_error(path, error))
             .and_then(query);
-        let finished = snapshot
-            .finish()
-            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
-        if finished != evidence {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
         let database = Self {
             parent,
-            authority,
+            _authority: authority,
             database_name,
             evidence,
+            snapshot: Mutex::new(Some(snapshot)),
         };
         database.revalidate()?;
         Ok((database, result?))
@@ -235,25 +238,28 @@ impl ForgeCodeSqliteDatabase {
         query: impl FnOnce(&Connection) -> Result<T>,
     ) -> Result<T> {
         self.revalidate()?;
-        let snapshot =
-            open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
-                .map_err(|error| forgecode_sqlite_source_error(path, error))?;
-        let result = if snapshot.evidence() == &self.evidence {
-            snapshot
-                .connection()
-                .map_err(|error| forgecode_sqlite_source_error(path, error))
-                .and_then(query)
-        } else {
-            Err(CaptureError::SourceChangedDuringCapture)
-        };
-        let finished = snapshot
-            .finish()
+        let retained = self
+            .snapshot
+            .lock()
+            .map_err(|_| CaptureError::ProviderSource {
+                provider: ctx_history_core::CaptureProvider::ForgeCode.as_str(),
+                path: path.to_path_buf(),
+                kind: crate::ProviderSourceFailureKind::SourceDatabase,
+                detail: "ForgeCode SQLite snapshot lock was poisoned".to_owned(),
+            })?;
+        let snapshot = retained
+            .as_ref()
+            .ok_or(CaptureError::SourceChangedDuringCapture)?;
+        snapshot
+            .revalidate()
             .map_err(|error| forgecode_sqlite_source_error(path, error))?;
-        self.revalidate()?;
-        if finished != self.evidence {
+        if snapshot.evidence() != &self.evidence {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        result
+        snapshot
+            .connection()
+            .map_err(|error| forgecode_sqlite_source_error(path, error))
+            .and_then(query)
     }
 
     pub(super) fn revalidate(&self) -> Result<()> {
@@ -261,9 +267,149 @@ impl ForgeCodeSqliteDatabase {
         self.parent.authority_root().revalidate()
     }
 
+    #[cfg(test)]
     pub(super) fn evidence(&self) -> &SqliteSourceEvidence {
         &self.evidence
     }
+
+    pub(super) fn terminal_revalidator(
+        &self,
+    ) -> Result<
+        Box<dyn Fn() -> std::result::Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
+    > {
+        let retained = self
+            .snapshot
+            .lock()
+            .map_err(|_| CaptureError::ProviderSource {
+                provider: ctx_history_core::CaptureProvider::ForgeCode.as_str(),
+                path: PathBuf::from(&self.database_name),
+                kind: crate::ProviderSourceFailureKind::SourceDatabase,
+                detail: "ForgeCode SQLite snapshot lock was poisoned".to_owned(),
+            })?;
+        retained
+            .as_ref()
+            .map(SqliteSourceReadSnapshot::terminal_revalidator)
+            .ok_or(CaptureError::SourceChangedDuringCapture)
+    }
+
+    pub(super) fn finish_if_active(&self, path: &Path) -> Result<Option<SqliteSourceEvidence>> {
+        let Some(snapshot) = self
+            .snapshot
+            .lock()
+            .map_err(|_| CaptureError::ProviderSource {
+                provider: ctx_history_core::CaptureProvider::ForgeCode.as_str(),
+                path: path.to_path_buf(),
+                kind: crate::ProviderSourceFailureKind::SourceDatabase,
+                detail: "ForgeCode SQLite snapshot lock was poisoned".to_owned(),
+            })?
+            .take()
+        else {
+            return Ok(None);
+        };
+        let closing = snapshot
+            .finish()
+            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
+        self.revalidate()?;
+        if closing != self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(Some(closing))
+    }
+}
+
+fn forgecode_logical_fingerprint(
+    conn: &Connection,
+    columns: &BTreeSet<String>,
+    schema_fingerprint: &str,
+    user_version: i64,
+) -> Result<[u8; 32]> {
+    let title = optional_column_expr(columns, "title", "NULL");
+    let context = optional_column_expr(columns, "context", "NULL");
+    let updated_at = optional_column_expr(columns, "updated_at", "NULL");
+    let metrics = optional_column_expr(columns, "metrics", "NULL");
+    let retained = retained_length_expr(&[
+        "conversation_id",
+        title,
+        "CASE WHEN typeof(workspace_id) = 'integer' THEN NULL ELSE workspace_id END",
+        context,
+        "created_at",
+        updated_at,
+        metrics,
+    ]);
+    let sql = format!(
+        "select rowid, {retained}, typeof(conversation_id), typeof({title}), \
+                typeof(workspace_id), typeof({context}), typeof(created_at), \
+                typeof({updated_at}), typeof({metrics}), \
+                case when {retained} <= ?1 then cast(conversation_id as blob) end, \
+                case when {retained} <= ?1 then cast({title} as blob) end, \
+                case when {retained} <= ?1 then workspace_id end, \
+                case when {retained} <= ?1 then cast({context} as blob) end, \
+                case when {retained} <= ?1 then cast(created_at as blob) end, \
+                case when {retained} <= ?1 then cast({updated_at} as blob) end, \
+                case when {retained} <= ?1 then cast({metrics} as blob) end \
+         from conversations order by rowid"
+    );
+    let limit = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| CaptureError::SystemInvariant("ForgeCode value bound exceeds i64"))?;
+    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query([limit])?;
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-forgecode-logical-snapshot-v1\0");
+    digest.update((schema_fingerprint.len() as u64).to_be_bytes());
+    digest.update(schema_fingerprint.as_bytes());
+    digest.update(user_version.to_be_bytes());
+    while let Some(row) = rows.next()? {
+        let candidate = row_candidate(row)?;
+        digest.update(candidate.retained_bytes.to_be_bytes());
+        for storage_class in &candidate.storage_classes {
+            digest.update((storage_class.len() as u64).to_be_bytes());
+            digest.update(storage_class.as_bytes());
+        }
+        if candidate.rejection_reason().is_none()
+            && candidate.observed_bytes()? <= MAX_PROVIDER_SQLITE_VALUE_BYTES as u64
+        {
+            let hydrated = ForgeCodeHydratedRow {
+                rowid: row.get(0)?,
+                conversation_id: row.get(9)?,
+                title: row.get(10)?,
+                workspace_id: row.get(11)?,
+                context: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+                metrics: row.get(15)?,
+            };
+            match hydrated.decode() {
+                Ok(decoded) => {
+                    digest.update([1]);
+                    digest.update(forgecode_decoded_row_digest(&decoded)?);
+                }
+                Err(error) => {
+                    digest.update([2]);
+                    let reason = error.reason();
+                    digest.update((reason.len() as u64).to_be_bytes());
+                    digest.update(reason.as_bytes());
+                }
+            }
+        } else {
+            digest.update([0]);
+        }
+    }
+    Ok(digest.finalize().into())
+}
+
+fn forgecode_decoded_row_digest(row: &ForgeCodeDecodedRow) -> Result<[u8; 32]> {
+    Ok(ForgeCodeCompleteContentDigest::new(
+        row.rowid,
+        &row.conversation_id,
+        row.title.as_deref(),
+        row.workspace_id,
+        row.context.as_deref(),
+        &row.created_at,
+        row.updated_at.as_deref(),
+        row.metrics.as_deref(),
+    )?
+    .record_digest())
 }
 
 fn forgecode_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
@@ -289,6 +435,8 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
     wants_outputs: bool,
     exhausted: bool,
     active_decoded: Option<ForgeCodeDecodedRow>,
+    active_terminal: bool,
+    pending_candidates: VecDeque<ForgeCodeRowCandidate>,
     decoded_rows: u64,
 }
 
@@ -386,6 +534,8 @@ struct ForgeCodeRowCandidate {
     rowid: i64,
     retained_bytes: i64,
     storage_classes: [String; 7],
+    hydrated: Option<ForgeCodeHydratedRow>,
+    terminal: bool,
 }
 
 impl ForgeCodeRowCandidate {
@@ -429,6 +579,9 @@ impl ForgeCodeRowCandidate {
 }
 
 fn row_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForgeCodeRowCandidate> {
+    let conversation_id = row.get::<_, Option<Vec<u8>>>(9)?;
+    let workspace_id = row.get::<_, Option<i64>>(11)?;
+    let created_at = row.get::<_, Option<Vec<u8>>>(13)?;
     Ok(ForgeCodeRowCandidate {
         rowid: row.get(0)?,
         retained_bytes: row.get(1)?,
@@ -441,6 +594,22 @@ fn row_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForgeCodeRowCandid
             row.get(7)?,
             row.get(8)?,
         ],
+        hydrated: match (conversation_id, workspace_id, created_at) {
+            (Some(conversation_id), Some(workspace_id), Some(created_at)) => {
+                Some(ForgeCodeHydratedRow {
+                    rowid: row.get(0)?,
+                    conversation_id,
+                    title: row.get(10)?,
+                    workspace_id,
+                    context: row.get(12)?,
+                    created_at,
+                    updated_at: row.get(14)?,
+                    metrics: row.get(15)?,
+                })
+            }
+            _ => None,
+        },
+        terminal: false,
     })
 }
 

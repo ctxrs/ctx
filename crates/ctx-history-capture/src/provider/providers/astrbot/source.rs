@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, optional_text_column_expr, optional_timestamp_millis_expr,
@@ -9,6 +9,63 @@ use crate::provider::sqlite::{
 use crate::{CaptureError, Result};
 
 use super::model::{ConversationRow, LegacyOrderKey, PlatformMessageRow};
+
+const ASTRBOT_SET_READ_ROWS: usize = 256;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AstrBotQueryCounters {
+    pub(crate) candidate_set_reads: u64,
+    pub(crate) hydration_set_reads: u64,
+    pub(crate) hydrated_rows: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ASTRBOT_QUERY_COUNTERS: std::cell::Cell<AstrBotQueryCounters> =
+        const { std::cell::Cell::new(AstrBotQueryCounters {
+            candidate_set_reads: 0,
+            hydration_set_reads: 0,
+            hydrated_rows: 0,
+        }) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_astrbot_query_counters() {
+    ASTRBOT_QUERY_COUNTERS.set(AstrBotQueryCounters::default());
+}
+
+#[cfg(test)]
+pub(crate) fn astrbot_query_counters() -> AstrBotQueryCounters {
+    ASTRBOT_QUERY_COUNTERS.get()
+}
+
+fn record_candidate_set_read() {
+    #[cfg(test)]
+    ASTRBOT_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.candidate_set_reads += 1;
+        slot.set(counters);
+    });
+}
+
+fn record_hydration_set_read() {
+    #[cfg(test)]
+    ASTRBOT_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.hydration_set_reads += 1;
+        slot.set(counters);
+    });
+}
+
+fn record_hydrated_row() {
+    #[cfg(test)]
+    ASTRBOT_QUERY_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        counters.hydrated_rows += 1;
+        slot.set(counters);
+    });
+}
 
 pub(super) struct AstrBotSql {
     pub(super) conversation_candidate_initial: String,
@@ -61,18 +118,18 @@ impl AstrBotSql {
         let conversation_candidate_initial = format!(
             "{conversation_cte} select p.physical_rowid, {conversation_retained}, \
              p.created_at, p.row_id \
-             from projected p order by p.physical_rowid limit 1"
+             from projected p order by p.physical_rowid limit ?1"
         );
         let conversation_candidate_after = format!(
             "{conversation_cte} select p.physical_rowid, {conversation_retained}, \
              p.created_at, p.row_id \
              from projected p where p.physical_rowid > ?1 \
-             order by p.physical_rowid limit 1"
+             order by p.physical_rowid limit ?2"
         );
         let conversation_hydration = format!(
-            "{conversation_cte} select row_id, inner_conversation_id, conversation_id, \
+            "{conversation_cte} select physical_rowid, row_id, inner_conversation_id, conversation_id, \
              platform_id, user_id, content, title, persona_id, token_usage, created_at, \
-             updated_at from projected where physical_rowid = ?1"
+             updated_at from projected"
         );
         let (
             platform_message_candidate_initial,
@@ -101,17 +158,17 @@ impl AstrBotSql {
                 Some(format!(
                     "{cte} select p.physical_rowid, {retained}, p.created_at, p.id \
                          from projected p \
-                         order by p.physical_rowid limit 1"
+                         order by p.physical_rowid limit ?1"
                 )),
                 Some(format!(
                     "{cte} select p.physical_rowid, {retained}, p.created_at, p.id \
                          from projected p \
-                         where p.physical_rowid > ?1 order by p.physical_rowid limit 1"
+                         where p.physical_rowid > ?1 order by p.physical_rowid limit ?2"
                 )),
                 Some(format!(
-                    "{cte} select id, platform_id, user_id, sender_id, sender_name, \
+                    "{cte} select physical_rowid, id, platform_id, user_id, sender_id, sender_name, \
                          content, llm_checkpoint_id, created_at from projected \
-                         where physical_rowid = ?1"
+                         "
                 )),
             )
         } else {
@@ -207,12 +264,18 @@ pub(super) fn with_astrbot_length_preflight<T>(
     query().map_err(CaptureError::from)
 }
 
-pub(super) fn fetch_candidate(
+pub(super) fn fetch_candidates(
     conn: &Connection,
     initial_sql: &str,
     after_sql: &str,
     after_rowid: Option<i64>,
-) -> Result<Option<RowCandidate>> {
+    limit: usize,
+) -> Result<Vec<RowCandidate>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit)
+        .map_err(|_| CaptureError::SystemInvariant("AstrBot query page exceeds i64"))?;
     let map_row = |row: &rusqlite::Row<'_>| {
         let physical_rowid = row.get(0)?;
         let timestamp = row.get::<_, Option<i64>>(2)?;
@@ -227,13 +290,55 @@ pub(super) fn fetch_candidate(
             },
         })
     };
+    record_candidate_set_read();
     with_astrbot_length_preflight(conn, || {
-        match after_rowid {
-            Some(rowid) => conn.query_row(after_sql, [rowid], map_row),
-            None => conn.query_row(initial_sql, [], map_row),
-        }
-        .optional()
+        let mut statement = conn.prepare(if after_rowid.is_some() {
+            after_sql
+        } else {
+            initial_sql
+        })?;
+        let rows = match after_rowid {
+            Some(rowid) => statement.query_map((rowid, limit), map_row)?,
+            None => statement.query_map([limit], map_row)?,
+        };
+        rows.collect()
     })
+}
+
+pub(super) fn visit_conversations<E>(
+    conn: &Connection,
+    sql: &str,
+    physical_rowids: &[i64],
+    mut visit: impl FnMut(i64, ConversationRow) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    E: From<CaptureError>,
+{
+    visit_rows(
+        conn,
+        sql,
+        physical_rowids,
+        |row| {
+            let physical_rowid = row.get(0)?;
+            Ok((
+                physical_rowid,
+                ConversationRow {
+                    row_id: row.get(1)?,
+                    inner_conversation_id: row.get(2)?,
+                    conversation_id: row.get(3)?,
+                    platform_id: row.get(4)?,
+                    user_id: row.get(5)?,
+                    content: row.get(6)?,
+                    title: row.get(7)?,
+                    persona_id: row.get(8)?,
+                    token_usage: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                },
+            ))
+        },
+        &mut visit,
+    )
 }
 
 pub(super) fn hydrate_conversation(
@@ -241,40 +346,94 @@ pub(super) fn hydrate_conversation(
     sql: &str,
     physical_rowid: i64,
 ) -> Result<ConversationRow> {
-    conn.query_row(sql, [physical_rowid], |row| {
-        Ok(ConversationRow {
-            row_id: row.get(0)?,
-            inner_conversation_id: row.get(1)?,
-            conversation_id: row.get(2)?,
-            platform_id: row.get(3)?,
-            user_id: row.get(4)?,
-            content: row.get(5)?,
-            title: row.get(6)?,
-            persona_id: row.get(7)?,
-            token_usage: row.get(8)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
-        })
-    })
-    .map_err(CaptureError::from)
+    let mut hydrated = None;
+    visit_conversations(conn, sql, &[physical_rowid], |_, row| -> Result<()> {
+        hydrated = Some(row);
+        Ok(())
+    })?;
+    hydrated.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
 }
 
-pub(super) fn hydrate_platform_message(
+pub(super) fn visit_platform_messages<E>(
     conn: &Connection,
     sql: &str,
-    physical_rowid: i64,
-) -> Result<PlatformMessageRow> {
-    conn.query_row(sql, [physical_rowid], |row| {
-        Ok(PlatformMessageRow {
-            id: row.get(0)?,
-            platform_id: row.get(1)?,
-            user_id: row.get(2)?,
-            sender_id: row.get(3)?,
-            sender_name: row.get(4)?,
-            content: row.get(5)?,
-            llm_checkpoint_id: row.get(6)?,
-            created_at: row.get(7)?,
-        })
-    })
-    .map_err(CaptureError::from)
+    physical_rowids: &[i64],
+    mut visit: impl FnMut(i64, PlatformMessageRow) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    E: From<CaptureError>,
+{
+    visit_rows(
+        conn,
+        sql,
+        physical_rowids,
+        |row| {
+            let physical_rowid = row.get(0)?;
+            Ok((
+                physical_rowid,
+                PlatformMessageRow {
+                    id: row.get(1)?,
+                    platform_id: row.get(2)?,
+                    user_id: row.get(3)?,
+                    sender_id: row.get(4)?,
+                    sender_name: row.get(5)?,
+                    content: row.get(6)?,
+                    llm_checkpoint_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                },
+            ))
+        },
+        &mut visit,
+    )
+}
+
+fn visit_rows<T, E>(
+    conn: &Connection,
+    sql: &str,
+    physical_rowids: &[i64],
+    mut decode: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(i64, T)>,
+    visit: &mut impl FnMut(i64, T) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    E: From<CaptureError>,
+{
+    if physical_rowids.is_empty() {
+        return Ok(());
+    }
+    if physical_rowids.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(E::from(CaptureError::SystemInvariant(
+            "AstrBot hydration set must be strictly ordered",
+        )));
+    }
+
+    for physical_rowids in physical_rowids.chunks(ASTRBOT_SET_READ_ROWS) {
+        record_hydration_set_read();
+        let placeholders = std::iter::repeat_n("?", physical_rowids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query =
+            format!("{sql} where physical_rowid in ({placeholders}) order by physical_rowid");
+        let parameters = physical_rowids.iter().copied().map(SqlValue::Integer);
+        let mut statement = conn.prepare(&query).map_err(CaptureError::from)?;
+        let mut rows = statement
+            .query(params_from_iter(parameters))
+            .map_err(CaptureError::from)?;
+        let mut expected = physical_rowids.iter().copied();
+        while let Some(row) = rows.next().map_err(CaptureError::from)? {
+            let (physical_rowid, value) = decode(row).map_err(CaptureError::from)?;
+            if expected.next() != Some(physical_rowid) {
+                return Err(E::from(CaptureError::from(
+                    rusqlite::Error::QueryReturnedNoRows,
+                )));
+            }
+            record_hydrated_row();
+            visit(physical_rowid, value)?;
+        }
+        if expected.next().is_some() {
+            return Err(E::from(CaptureError::from(
+                rusqlite::Error::QueryReturnedNoRows,
+            )));
+        }
+    }
+    Ok(())
 }

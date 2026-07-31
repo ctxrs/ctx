@@ -490,21 +490,57 @@ fn schema_two_interrupted_publication_recovers_by_rolling_back_current_format_in
 
 #[cfg(unix)]
 #[test]
-fn schema_two_interrupted_commit_keeps_published_install_and_finishes_cleanup() {
+fn schema_two_interrupted_commit_keeps_published_install_and_discards_old_binary() {
     let temp = tempdir().unwrap();
     let (mut transaction, target, marker) =
         interrupted_schema_two_binary_publication(temp.path(), JournalPhase::Committed);
+    fs::write(temp.path().join("ctx.previous"), b"older-release").unwrap();
 
     let outcome = super::unix::recover_transaction(temp.path(), &mut transaction).unwrap();
 
     assert_eq!(outcome, RecoveryOutcome::Committed);
     assert_eq!(fs::read(&target).unwrap(), b"replacement");
     assert_eq!(fs::read(&marker).unwrap(), b"replacement-marker");
-    assert_eq!(
-        fs::read(temp.path().join("ctx.previous")).unwrap(),
-        b"current-format"
-    );
+    assert!(!temp.path().join("ctx.previous").exists());
     assert!(!journal::install_transaction_path(&target).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn committed_retry_discards_durable_old_binary_after_transaction_backup_is_gone() {
+    let temp = tempdir().unwrap();
+    let (mut transaction, target, _marker) =
+        interrupted_schema_two_binary_publication(temp.path(), JournalPhase::Committed);
+    let binary_backup = transaction
+        .paths
+        .iter()
+        .find(|path| path.label == "ctx binary")
+        .unwrap()
+        .backup
+        .clone();
+    fs::remove_file(binary_backup).unwrap();
+    fs::write(temp.path().join("ctx.previous"), b"older-release").unwrap();
+
+    let outcome = super::unix::recover_transaction(temp.path(), &mut transaction).unwrap();
+
+    assert_eq!(outcome, RecoveryOutcome::Committed);
+    assert_eq!(fs::read(&target).unwrap(), b"replacement");
+    assert!(!temp.path().join("ctx.previous").exists());
+    assert!(!journal::install_transaction_path(&target).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_bridge_discards_owner_regular_durable_old_binary() {
+    let temp = tempdir().unwrap();
+    let target = temp.path().join("ctx");
+    fs::write(&target, b"replacement").unwrap();
+    fs::write(temp.path().join("ctx.previous"), b"v0.25").unwrap();
+
+    super::discard_legacy_previous_binary(&target).unwrap();
+
+    assert_eq!(fs::read(target).unwrap(), b"replacement");
+    assert!(!temp.path().join("ctx.previous").exists());
 }
 
 #[cfg(unix)]

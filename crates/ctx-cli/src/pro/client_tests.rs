@@ -7,7 +7,7 @@ fn source_receipt(generation: char) -> ctx_pro_host_protocol::SourceManifestRece
         core_generation_id: generation.to_string().repeat(64),
         manifest_aggregate_sha256: "b".repeat(64),
         materializer_revision: "materializer-v1".to_owned(),
-        progress: Vec::new(),
+        progress: ctx_pro_host_protocol::SourceProgressReceipt::from_progress(&[]).unwrap(),
     }
 }
 
@@ -299,6 +299,14 @@ fn status_binds_installation_identity_and_preserves_locked_state() {
     let status = BTreeSet::from([Capability::Status]);
     assert!(authorization_required(&status, true));
     assert!(!authorization_required(&status, false));
+    let materialization = include_str!("client/materialization.rs");
+    assert_eq!(
+        materialization
+            .matches("ProClient::connect_for_status(data_root, &required)")
+            .count(),
+        2,
+        "both materialization status probes must bind the installation identity"
+    );
     assert_eq!(
         status_outcome(GraphState::Ready, Some(EntitlementAccessState::Locked)),
         (false, true, Some("entitlement_expired"))

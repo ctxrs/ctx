@@ -5,22 +5,27 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+#[cfg(test)]
+use ctx_history_core::ScannedSourceCounts;
 use ctx_history_core::{
-    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, ScannedSourceCounts, SourceFrontier, SourceInventoryObservation,
-    SourceKey, SourceObservation, TypedKey,
+    CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
+    EventHydrationRequest, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    SourceInventoryObservation, SourceKey, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::cell::Cell;
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Barrier,
+};
 
 use super::{
     observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
-    JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlReader, JsonlRecordRef,
-    JsonlSourceChange, JsonlSourceIdentity,
+    JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlRecordRef,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -33,18 +38,21 @@ use crate::{
 };
 
 const FAMILY_PARSER_REVISION: &str = "borrowed-jsonl-family-v1";
-const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-replacement-v1";
+const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-certified-append-v1";
 const FAMILY_FRONTIER_KIND: &str = "borrowed-jsonl-family-checkpoint-v1";
 const FAMILY_SOURCE_REVISION_KIND: &str = "borrowed-jsonl-file-observation-v1";
 const FAMILY_INVENTORY_AUTHORITY: &str = "borrowed-jsonl-provider-root-v1";
 const FAMILY_INVENTORY_REVISION: &str = "borrowed-jsonl-inventory-v1";
 const FAMILY_DISCOVERY_REVISION: &str = "borrowed-jsonl-discovery-v1";
 const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
-
 mod hydration;
 #[cfg(test)]
 use hydration::set_after_jsonl_group_open_hook;
 use hydration::{hydrate_batch, hydrate_single};
+mod leaf;
+#[cfg(test)]
+use leaf::family_scanner_worker_count_policy;
+use leaf::{physical_identity, scan_leaves, source_observation};
 mod ownership;
 use ownership::base_sources_for_root;
 mod revalidation;
@@ -62,10 +70,28 @@ pub(crate) struct JsonlFamilyWork {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct JsonlFamilyScannerActivity {
+    pub(crate) worker_count: usize,
+    pub(crate) sources_started: usize,
+    pub(crate) sources_completed: usize,
+    pub(crate) peak_active_scanners: usize,
+}
+
+#[cfg(test)]
 thread_local! {
     static FAMILY_DISCOVERIES: Cell<usize> = const { Cell::new(0) };
     static FAMILY_LEAF_OPENS: Cell<usize> = const { Cell::new(0) };
     static FAMILY_PROVIDER_PROJECTIONS: Cell<usize> = const { Cell::new(0) };
+    static FAMILY_PROVIDER_PROJECTION_BYTES: Cell<usize> = const { Cell::new(0) };
+    static FAMILY_SCANNER_WORKERS_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    static FAMILY_SCANNER_ACTIVITY: Cell<JsonlFamilyScannerActivity> =
+        const { Cell::new(JsonlFamilyScannerActivity {
+            worker_count: 0,
+            sources_started: 0,
+            sources_completed: 0,
+            peak_active_scanners: 0,
+        }) };
 }
 
 #[cfg(test)]
@@ -73,6 +99,7 @@ pub(crate) fn reset_jsonl_family_work() {
     FAMILY_DISCOVERIES.set(0);
     FAMILY_LEAF_OPENS.set(0);
     FAMILY_PROVIDER_PROJECTIONS.set(0);
+    FAMILY_PROVIDER_PROJECTION_BYTES.set(0);
 }
 
 #[cfg(test)]
@@ -82,6 +109,103 @@ pub(crate) fn jsonl_family_work() -> JsonlFamilyWork {
         leaf_opens: FAMILY_LEAF_OPENS.get(),
         provider_projections: FAMILY_PROVIDER_PROJECTIONS.get(),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn jsonl_family_projection_bytes() -> usize {
+    FAMILY_PROVIDER_PROJECTION_BYTES.get()
+}
+
+#[cfg(test)]
+pub(crate) fn jsonl_family_scanner_activity() -> JsonlFamilyScannerActivity {
+    FAMILY_SCANNER_ACTIVITY.get()
+}
+
+#[cfg(test)]
+struct JsonlFamilyScannerProbe {
+    sources_started: AtomicUsize,
+    sources_completed: AtomicUsize,
+    active_scanners: AtomicUsize,
+    peak_active_scanners: AtomicUsize,
+    rendezvous_arrivals: AtomicUsize,
+    rendezvous_target: usize,
+    rendezvous: Barrier,
+}
+
+#[cfg(test)]
+impl JsonlFamilyScannerProbe {
+    fn enter(&self) -> JsonlFamilyActiveScanner<'_> {
+        self.sources_started.fetch_add(1, Ordering::SeqCst);
+        let active = self
+            .active_scanners
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.peak_active_scanners
+            .fetch_max(active, Ordering::SeqCst);
+        if self.rendezvous_arrivals.fetch_add(1, Ordering::SeqCst) < self.rendezvous_target {
+            self.rendezvous.wait();
+        }
+        JsonlFamilyActiveScanner { probe: self }
+    }
+
+    fn snapshot(&self, worker_count: usize) -> JsonlFamilyScannerActivity {
+        debug_assert_eq!(self.active_scanners.load(Ordering::SeqCst), 0);
+        JsonlFamilyScannerActivity {
+            worker_count,
+            sources_started: self.sources_started.load(Ordering::SeqCst),
+            sources_completed: self.sources_completed.load(Ordering::SeqCst),
+            peak_active_scanners: self.peak_active_scanners.load(Ordering::SeqCst),
+        }
+    }
+}
+
+#[cfg(test)]
+struct JsonlFamilyActiveScanner<'probe> {
+    probe: &'probe JsonlFamilyScannerProbe,
+}
+
+#[cfg(test)]
+impl Drop for JsonlFamilyActiveScanner<'_> {
+    fn drop(&mut self) {
+        self.probe.sources_completed.fetch_add(1, Ordering::SeqCst);
+        self.probe.active_scanners.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn jsonl_family_scanner_probe(worker_count: usize) -> Option<Arc<JsonlFamilyScannerProbe>> {
+    FAMILY_SCANNER_WORKERS_OVERRIDE.with(|workers| {
+        workers.get().map(|_| {
+            let rendezvous_target = worker_count.clamp(1, 4);
+            Arc::new(JsonlFamilyScannerProbe {
+                sources_started: AtomicUsize::new(0),
+                sources_completed: AtomicUsize::new(0),
+                active_scanners: AtomicUsize::new(0),
+                peak_active_scanners: AtomicUsize::new(0),
+                rendezvous_arrivals: AtomicUsize::new(0),
+                rendezvous_target,
+                rendezvous: Barrier::new(rendezvous_target),
+            })
+        })
+    })
+}
+
+#[cfg(test)]
+fn record_jsonl_family_scanner_activity(
+    worker_count: usize,
+    probe: Option<&JsonlFamilyScannerProbe>,
+) {
+    FAMILY_SCANNER_ACTIVITY.set(
+        probe.map_or_else(JsonlFamilyScannerActivity::default, |probe| {
+            probe.snapshot(worker_count)
+        }),
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFamilyAppendMode {
+    CertifiedSuffix,
+    Replacement,
 }
 
 pub(crate) trait JsonlFamilyProjector: Send {
@@ -123,8 +247,13 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     fn source_format(&self) -> &'static str;
     fn schema_variant(&self) -> &'static str;
     fn parser_revision(&self) -> &'static str;
+    fn append_mode(&self) -> JsonlFamilyAppendMode;
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory>;
+
+    fn discovery_error_kind(&self, _error: &CaptureError) -> SourceBackedRouteErrorKind {
+        SourceBackedRouteErrorKind::InvalidSource
+    }
 
     fn projector(
         &self,
@@ -161,6 +290,27 @@ pub(crate) struct JsonlFamilyLeaf {
 }
 
 impl JsonlFamilyLeaf {
+    pub(crate) fn bind_observed(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+        observation: JsonlFileObservation,
+    ) -> Self {
+        Self {
+            source,
+            source_path,
+            authority_path,
+            authority,
+            observation,
+            binding,
+            identity_probe: None,
+            identity_probe_rejected_records: 0,
+            whole_record: false,
+        }
+    }
+
     pub(crate) fn observe(
         source: SourceKey,
         source_path: PathBuf,
@@ -337,11 +487,36 @@ impl JsonlFamilyLeaf {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct JsonlFamilyRejectedLeaf {
+    source_path: PathBuf,
+    authority_path: PathBuf,
+    proof: TypedKey,
+    rejected_records: u64,
+}
+
+impl JsonlFamilyRejectedLeaf {
+    pub(crate) fn bind_observed(
+        source_path: PathBuf,
+        authority_path: PathBuf,
+        proof: TypedKey,
+        rejected_records: u64,
+    ) -> Self {
+        Self {
+            source_path,
+            authority_path,
+            proof,
+            rejected_records,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct JsonlFamilyInventory {
     root_missing: bool,
     observation: SourceInventoryObservation,
     authority: Option<Arc<ProviderSourceRoot>>,
     leaves: Vec<JsonlFamilyLeaf>,
+    rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
 }
 
 impl JsonlFamilyInventory {
@@ -349,24 +524,44 @@ impl JsonlFamilyInventory {
         provider: CaptureProvider,
         root: &Path,
         authority: Arc<ProviderSourceRoot>,
+        leaves: Vec<JsonlFamilyLeaf>,
+    ) -> Result<Self> {
+        Self::present_with_rejected(provider, root, authority, leaves, Vec::new())
+    }
+
+    pub(crate) fn present_with_rejected(
+        provider: CaptureProvider,
+        root: &Path,
+        authority: Arc<ProviderSourceRoot>,
         mut leaves: Vec<JsonlFamilyLeaf>,
+        mut rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
     ) -> Result<Self> {
         leaves.sort_by(|left, right| left.source_path.cmp(&right.source_path));
-        let observation = inventory_observation(provider, root, false, Some(&authority), &leaves)?;
+        rejected_leaves.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+        let observation = inventory_observation(
+            provider,
+            root,
+            false,
+            Some(&authority),
+            &leaves,
+            &rejected_leaves,
+        )?;
         Ok(Self {
             root_missing: false,
             observation,
             authority: Some(authority),
             leaves,
+            rejected_leaves,
         })
     }
 
     pub(crate) fn missing(provider: CaptureProvider, root: &Path) -> Result<Self> {
         Ok(Self {
             root_missing: true,
-            observation: inventory_observation(provider, root, true, None, &[])?,
+            observation: inventory_observation(provider, root, true, None, &[], &[])?,
             authority: None,
             leaves: Vec::new(),
+            rejected_leaves: Vec::new(),
         })
     }
 
@@ -376,6 +571,10 @@ impl JsonlFamilyInventory {
 
     pub(crate) fn leaves(&self) -> &[JsonlFamilyLeaf] {
         &self.leaves
+    }
+
+    pub(crate) fn rejected_leaves(&self) -> &[JsonlFamilyRejectedLeaf] {
+        &self.rejected_leaves
     }
 
     fn certify_against(&self, closing: &Self) -> Result<CertifiedSourceInventory> {
@@ -516,11 +715,33 @@ fn capture(
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<()> {
     reset_terminal(resident)?;
-    let opening = discover(adapter, root).map_err(route_invalid)?;
+    let opening = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing() {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::Unavailable,
             "provider JSONL root is unavailable",
+        ));
+    }
+    if opening.leaves().is_empty() && !opening.rejected_leaves().is_empty() {
+        let rejected_records =
+            opening
+                .rejected_leaves()
+                .iter()
+                .try_fold(0_u64, |total, leaf| {
+                    total.checked_add(leaf.rejected_records).ok_or_else(|| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            "provider JSONL rejected-record count overflow",
+                        )
+                    })
+                })?;
+        return Err(SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::InvalidSource,
+            format!(
+                "direct JSONL route rejected {rejected_records} records across {} sources; \
+                 all provider-native session identity leaves were rejected",
+                opening.rejected_leaves().len()
+            ),
         ));
     }
     let bases = base_sources_for_root(adapter, &opening, sink).map_err(route_invalid)?;
@@ -555,24 +776,10 @@ fn capture(
             );
         }
     }
-    let mut terminal_sources = HashMap::with_capacity(opening.leaves.len());
+    let bases_by_descriptor = bases_by_descriptor(&bases)?;
+    let terminal_sources = scan_leaves(adapter, opening.leaves(), &bases_by_descriptor, sink)?;
 
-    for leaf in opening.leaves() {
-        let base = bases.iter().find(|base| {
-            base.observation()
-                .source()
-                .exact_descriptor_eq(leaf.source())
-        });
-        let evidence = scan_leaf(adapter, leaf, base, sink)?;
-        if terminal_sources
-            .insert(leaf.source().exact_descriptor_digest(), evidence)
-            .is_some()
-        {
-            return Err(route_invalid("duplicate JSONL source identity"));
-        }
-    }
-
-    let closing = discover(adapter, root).map_err(route_invalid)?;
+    let closing = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
     let inventory = opening.certify_against(&closing).map_err(route_invalid)?;
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_internal)?;
@@ -598,292 +805,39 @@ fn capture(
     Ok(())
 }
 
-fn scan_leaf(
-    adapter: &dyn JsonlFamilyAdapter,
-    leaf: &JsonlFamilyLeaf,
-    base: Option<&CertifiedSource>,
-    sink: &mut SourceBackedGenerationSink<'_>,
-) -> SourceBackedRouteResult<TerminalSourceEvidence> {
-    let (leaf, opened) = leaf.open_for_scan().map_err(route_invalid)?;
-    let previous = base.and_then(|base| decode_checkpoint(adapter, &leaf, base).ok());
-    let exact_terminal = previous.as_ref().is_some_and(|checkpoint| {
-        checkpoint.physical.terminal()
-            && checkpoint.physical.source_observation() == leaf.observation()
-    });
-    let previous_physical = exact_terminal
-        .then_some(previous.as_ref())
-        .flatten()
-        .map(|checkpoint| &checkpoint.physical);
-    let mut reader = if leaf.whole_record {
-        JsonlReader::open_whole_record(
-            physical_identity(adapter, &leaf),
-            Arc::clone(&opened),
-            previous_physical,
-        )
-    } else {
-        JsonlReader::open(
-            physical_identity(adapter, &leaf),
-            Arc::clone(&opened),
-            previous_physical,
-            leaf.identity_probe.clone(),
-        )
-    }
-    .map_err(route_invalid)?;
-
-    if reader.source_change() == JsonlSourceChange::Unchanged {
-        let base = base.ok_or_else(|| route_invalid("unchanged JSONL source has no base"))?;
-        let staged = sink
-            .begin_source_append(leaf.source.clone())
-            .map_err(route_internal)?;
-        if staged != base {
-            return Err(route_invalid("JSONL no-op base changed before staging"));
-        }
-        while reader
-            .visit_page(&mut |_record| -> Result<()> { Ok(()) })
-            .map_err(route_invalid)?
-            .is_some()
-        {}
-        let outcome = reader
-            .outcome()
-            .ok_or_else(|| route_invalid("JSONL no-op scan has no terminal checkpoint"))?;
-        let decoded = previous.ok_or_else(|| route_invalid("JSONL no-op checkpoint is absent"))?;
-        if outcome.checkpoint() != &decoded.physical {
-            return Err(route_invalid("JSONL no-op checkpoint changed"));
-        }
-        let frontier = base
-            .frontier()
-            .ok_or_else(|| route_invalid("JSONL no-op base frontier is absent"))?;
-        let append = CertifiedSourceAppend::certify(
-            base,
-            base.clone(),
-            frontier.certified_prefix_bytes(),
-            *frontier.certified_prefix_digest(),
-        )
-        .map_err(route_invalid)?;
-        sink.certify_source_append(append).map_err(route_internal)?;
-        return Ok(TerminalSourceEvidence {
-            certificate: base.clone(),
-            checkpoint: Some(decoded.physical),
-        });
-    }
-
-    sink.begin_source(leaf.source.clone())
-        .map_err(route_internal)?;
-    let mut projector = adapter
-        .projector(&leaf, opened, DateTime::<Utc>::UNIX_EPOCH)
-        .map_err(route_invalid)?;
-    let mut physical_records = leaf
-        .identity_probe
-        .as_ref()
-        .map(JsonlProbe::next_physical_ordinal)
-        .unwrap_or(0);
-    let mut represented_records = 0_u64;
-    let mut documents = 0_u64;
-    while reader
-        .visit_page(&mut |record| -> Result<()> {
-            physical_records = checked_increment(physical_records)?;
-            let before = documents;
-            #[cfg(test)]
-            FAMILY_PROVIDER_PROJECTIONS.with(|count| count.set(count.get().saturating_add(1)));
-            projector.project(record, &mut |document| {
-                if !document.source.exact_descriptor_eq(leaf.source()) {
-                    return Err(CaptureError::InvalidPayload(
-                        "JSONL projector changed the bound source".to_owned(),
-                    ));
-                }
-                sink.add_document(document)
-                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-                documents = checked_increment(documents)?;
-                Ok(())
-            })?;
-            if documents != before {
-                represented_records = checked_increment(represented_records)?;
-            }
-            Ok(())
-        })
-        .map_err(route_invalid)?
-        .is_some()
-    {}
-    let before_finish = documents;
-    projector
-        .finish_projecting(&mut |document| {
-            if !document.source.exact_descriptor_eq(leaf.source()) {
-                return Err(CaptureError::InvalidPayload(
-                    "JSONL projector changed the bound source".to_owned(),
+fn bases_by_descriptor(
+    bases: &[CertifiedSource],
+) -> SourceBackedRouteResult<HashMap<[u8; 32], &CertifiedSource>> {
+    let mut by_descriptor = HashMap::with_capacity(bases.len());
+    for base in bases {
+        let source = base.observation().source();
+        let digest = source.exact_descriptor_digest();
+        if let Some(previous) = by_descriptor.insert(digest, base) {
+            if !previous.observation().source().exact_descriptor_eq(source) {
+                return Err(route_invalid(
+                    "JSONL base source descriptor digest collision",
                 ));
             }
-            sink.add_document(document)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-            documents = checked_increment(documents)?;
-            Ok(())
-        })
-        .map_err(route_invalid)?;
-    let rejected_records = leaf
-        .identity_probe_rejected_records
-        .checked_add(projector.rejected_records())
-        .ok_or_else(|| route_invalid("JSONL rejected count overflowed"))?;
-    if documents != before_finish {
-        represented_records = physical_records;
+            return Err(route_invalid("duplicate JSONL base source descriptor"));
+        }
     }
-    let outcome = reader
-        .outcome()
-        .ok_or_else(|| route_invalid("JSONL replacement scan has no terminal checkpoint"))?;
-    if physical_records != outcome.checkpoint().next_physical_ordinal() {
-        return Err(route_invalid(
-            "JSONL physical record count did not reconcile",
-        ));
-    }
-    let checkpoint = FamilyCheckpoint {
-        version: FamilyCheckpoint::VERSION,
-        provider_parser_revision: adapter.parser_revision().to_owned(),
-        binding_digest: binding_digest(&leaf).map_err(route_invalid)?,
-        physical: outcome.checkpoint().clone(),
-        represented_physical_records: represented_records,
-        rejected_records,
-        indexed_documents: documents,
-    };
-    let certificate = certify(adapter, &leaf, checkpoint)?;
-    sink.certify_source(certificate.clone())
-        .map_err(route_internal)?;
-    Ok(TerminalSourceEvidence {
-        certificate,
-        checkpoint: Some(outcome.checkpoint().clone()),
-    })
+    Ok(by_descriptor)
 }
 
-fn certify(
-    adapter: &dyn JsonlFamilyAdapter,
-    leaf: &JsonlFamilyLeaf,
-    checkpoint: FamilyCheckpoint,
-) -> SourceBackedRouteResult<CertifiedSource> {
-    if !checkpoint.valid_for(adapter, leaf) {
-        return Err(route_invalid("JSONL checkpoint is internally inconsistent"));
-    }
-    let classified = checkpoint
-        .represented_physical_records
-        .checked_add(checkpoint.rejected_records)
-        .ok_or_else(|| route_invalid("JSONL classified count overflowed"))?;
-    let ignored = checkpoint
-        .physical
-        .next_physical_ordinal()
-        .checked_sub(classified)
-        .ok_or_else(|| route_invalid("JSONL ignored count underflowed"))?;
-    let complete_records = checkpoint
-        .indexed_documents
-        .checked_add(checkpoint.rejected_records)
-        .and_then(|records| records.checked_add(ignored))
-        .ok_or_else(|| route_invalid("JSONL complete count overflowed"))?;
-    let frontier = SourceFrontier::new(
-        FAMILY_FRONTIER_KIND,
-        TypedKey::bytes(serde_json::to_vec(&checkpoint).map_err(route_invalid)?)
-            .map_err(route_invalid)?,
-        checkpoint.physical.complete_prefix_end(),
-        *checkpoint.physical.complete_prefix_sha256(),
-    )
-    .map_err(route_invalid)?;
-    CertifiedSource::certify_with_frontier(
-        source_observation(&leaf.source, &leaf.observation).map_err(route_invalid)?,
-        source_observation(&leaf.source, &leaf.observation).map_err(route_invalid)?,
-        FAMILY_PARSER_REVISION,
-        *checkpoint.physical.complete_prefix_sha256(),
-        ScannedSourceCounts {
-            complete_records,
-            retained_records: checkpoint.indexed_documents,
-            rejected_records: checkpoint.rejected_records,
-            ignored_records: ignored,
-            indexed_documents: checkpoint.indexed_documents,
-            certified_bytes: checkpoint.physical.complete_prefix_end(),
-        },
-        Some(frontier),
-    )
-    .map_err(route_invalid)
-}
+#[cfg(test)]
+fn with_family_scanner_workers<T>(workers: usize, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<usize>);
 
-fn decode_checkpoint(
-    adapter: &dyn JsonlFamilyAdapter,
-    leaf: &JsonlFamilyLeaf,
-    certificate: &CertifiedSource,
-) -> Result<FamilyCheckpoint> {
-    certificate.validate_contract().map_err(contract_error)?;
-    leaf.source
-        .validate_exact_descriptor(certificate.observation().source())
-        .map_err(contract_error)?;
-    if certificate.parser_revision() != FAMILY_PARSER_REVISION {
-        return Err(CaptureError::InvalidPayload(
-            "JSONL base parser revision changed".to_owned(),
-        ));
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FAMILY_SCANNER_WORKERS_OVERRIDE.set(self.0);
+        }
     }
-    let frontier = certificate
-        .frontier()
-        .ok_or_else(|| CaptureError::InvalidPayload("JSONL base frontier is absent".to_owned()))?;
-    if frontier.checkpoint_kind() != FAMILY_FRONTIER_KIND {
-        return Err(CaptureError::InvalidPayload(
-            "JSONL base frontier kind changed".to_owned(),
-        ));
-    }
-    let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
-        return Err(CaptureError::InvalidPayload(
-            "JSONL base checkpoint is malformed".to_owned(),
-        ));
-    };
-    let checkpoint: FamilyCheckpoint = serde_json::from_slice(bytes)?;
-    let classified = checkpoint
-        .represented_physical_records
-        .checked_add(checkpoint.rejected_records)
-        .ok_or_else(|| CaptureError::InvalidPayload("JSONL base counts are invalid".to_owned()))?;
-    let ignored = checkpoint
-        .physical
-        .next_physical_ordinal()
-        .checked_sub(classified)
-        .ok_or_else(|| CaptureError::InvalidPayload("JSONL base counts are invalid".to_owned()))?;
-    let counts = certificate.counts();
-    if !checkpoint.valid_for(adapter, leaf)
-        || checkpoint.physical.complete_prefix_end() != frontier.certified_prefix_bytes()
-        || checkpoint.physical.complete_prefix_sha256() != frontier.certified_prefix_digest()
-        || checkpoint.physical.complete_prefix_sha256() != certificate.content_digest()
-        || checkpoint.indexed_documents != counts.retained_records
-        || checkpoint.indexed_documents != counts.indexed_documents
-        || checkpoint.rejected_records != counts.rejected_records
-        || ignored != counts.ignored_records
-        || checkpoint
-            .indexed_documents
-            .checked_add(checkpoint.rejected_records)
-            .and_then(|records| records.checked_add(ignored))
-            != Some(counts.complete_records)
-        || checkpoint.physical.complete_prefix_end() != counts.certified_bytes
-        || certificate.observation()
-            != &source_observation(&leaf.source, checkpoint.physical.source_observation())?
-    {
-        return Err(CaptureError::InvalidPayload(
-            "JSONL base checkpoint does not reconcile".to_owned(),
-        ));
-    }
-    Ok(checkpoint)
-}
 
-fn physical_identity(
-    adapter: &dyn JsonlFamilyAdapter,
-    leaf: &JsonlFamilyLeaf,
-) -> JsonlSourceIdentity {
-    JsonlSourceIdentity::new(
-        adapter.provider().as_str(),
-        adapter.parser_revision(),
-        FAMILY_POLICY_REVISION,
-        leaf.source.exact_descriptor_digest(),
-        leaf.source_path.clone(),
-    )
-}
-
-fn source_observation(
-    source: &SourceKey,
-    observation: &JsonlFileObservation,
-) -> Result<SourceObservation> {
-    SourceObservation::new(
-        source.clone(),
-        FAMILY_SOURCE_REVISION_KIND,
-        serde_json::to_vec(observation)?,
-    )
-    .map_err(contract_error)
+    let previous = FAMILY_SCANNER_WORKERS_OVERRIDE.replace(Some(workers));
+    let _restore = Restore(previous);
+    FAMILY_SCANNER_ACTIVITY.set(JsonlFamilyScannerActivity::default());
+    run()
 }
 
 fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -892,14 +846,15 @@ fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamily
     adapter.discover(root)
 }
 
-fn checked_increment(value: u64) -> Result<u64> {
-    value.checked_add(1).ok_or(CaptureError::SystemInvariant(
-        "JSONL work counter overflowed",
-    ))
-}
-
 fn route_invalid(error: impl std::fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
+}
+
+fn route_discovery(
+    adapter: &dyn JsonlFamilyAdapter,
+    error: CaptureError,
+) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(adapter.discovery_error_kind(&error), error.to_string())
 }
 
 fn route_internal(error: impl std::fmt::Display) -> SourceBackedRouteError {

@@ -264,7 +264,8 @@ impl Default for WriterOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LexicalDocument {
     pub event_id: StableEntityId,
     pub session_id: StableEntityId,
@@ -289,6 +290,12 @@ pub struct LexicalDocument {
 }
 
 impl LexicalDocument {
+    /// Validates all provider-neutral lexical document bounds and identity
+    /// relationships before a document enters temporary or Tantivy staging.
+    pub fn validate_contract(&self) -> Result<()> {
+        self.validate().map(|_| ())
+    }
+
     pub(crate) fn validate(&self) -> Result<Vec<u8>> {
         self.locator.validate_contract()?;
         if self.locator.source() != &self.source {

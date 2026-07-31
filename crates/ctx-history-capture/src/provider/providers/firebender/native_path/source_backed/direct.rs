@@ -1,7 +1,7 @@
 use std::{
-    ffi::{OsStr, OsString},
-    io,
+    collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use ctx_history_core::{
@@ -9,7 +9,7 @@ use ctx_history_core::{
     ScannedSourceCounts, SourceKey,
 };
 use ctx_history_index::LexicalDocument;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params_from_iter, Connection};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -17,7 +17,6 @@ use super::{
     firebender_workspace, increment, FirebenderSourceBackedError, FirebenderSourceBackedResult,
 };
 use crate::{
-    common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     provider::{
         source_backed::{
             family::document::{
@@ -32,8 +31,7 @@ use crate::{
         sqlite::{sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard},
     },
     provider_sources::{
-        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteLogicalSnapshot, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteLogicalSnapshot, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
     },
     CaptureError, ProviderSource,
 };
@@ -42,10 +40,13 @@ use super::super::{
     firebender_path_identity, firebender_raw_row_digest, validate_schema, FirebenderRow,
     FIREBENDER_PAGE_OVERHEAD_BYTES, FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES,
 };
+pub(super) use super::direct_snapshot::{open_database_leaf, OpenDatabaseLeaf};
+use super::direct_snapshot::{MissingLeafFence, OpenedSnapshot};
 use super::hydration::FirebenderExactResolver;
 
 const DIRECT_PAGE_DOCUMENTS: usize = 64;
 const CONTENT_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-logical-content-v2\0";
+const LOGICAL_FINGERPRINT_DOMAIN: &[u8] = b"ctx-firebender-logical-fingerprint-v1\0";
 const OVERSIZE_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-oversize-row-v1\0";
 const DIRECT_PARSER_REVISION: &str = "firebender-source-backed-v2";
 
@@ -58,6 +59,9 @@ pub(crate) struct FirebenderDirectScan {
     row_decode_passes: u64,
     decoded_rows: u64,
     peak_buffered_documents: u64,
+    candidate_query_batches: u64,
+    row_set_queries: u64,
+    max_rows_per_set: u64,
 }
 
 #[cfg(test)]
@@ -74,12 +78,31 @@ impl FirebenderDirectScan {
             self.peak_buffered_documents,
         )
     }
+
+    pub(crate) fn set_read_counters(&self) -> (u64, u64, u64) {
+        (
+            self.candidate_query_batches,
+            self.row_set_queries,
+            self.max_rows_per_set,
+        )
+    }
 }
 
-#[derive(Debug)]
 enum FirebenderTreeAuthority {
-    Present(SqliteSourceEvidence),
+    Present(Box<FirebenderPresentAuthority>),
     Missing(MissingLeafFence),
+}
+
+struct FirebenderPresentAuthority {
+    opening_evidence: SqliteSourceEvidence,
+    _sqlite_authority: SqliteSourceDirectoryAuthority,
+    snapshot: Mutex<Option<Box<OpenedSnapshot>>>,
+    terminal_revalidate: Box<
+        dyn Fn() -> Result<(), crate::provider_sources::SqliteSourceAccessError>
+            + Send
+            + Sync
+            + 'static,
+    >,
 }
 
 #[derive(Debug)]
@@ -108,16 +131,28 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
             firebender_database_path_and_source(&self.path).map_err(route_error)?;
         match open_database_leaf(&self.data_root, &database_path).map_err(route_error)? {
             OpenDatabaseLeaf::Present(snapshot) => {
-                let evidence = snapshot.finish().map_err(route_error)?;
-                let fingerprint = *evidence.revision();
+                let opening_evidence = snapshot.evidence().map_err(route_error)?.clone();
+                let fingerprint = observe_logical_snapshot(
+                    snapshot.connection().map_err(route_error)?,
+                    &database_path,
+                )
+                .map_err(route_error)?;
+                snapshot.revalidate().map_err(route_error)?;
+                record_logical_observation();
                 Ok(CompleteDocumentTree::new(
                     fingerprint,
-                    vec![ObservedDocumentLeaf::with_durable_replay(
+                    vec![ObservedDocumentLeaf::new(
                         DocumentLeafFingerprint::new(fingerprint),
                         source,
-                        false,
                     )],
-                    FirebenderTreeAuthority::Present(evidence),
+                    FirebenderTreeAuthority::Present(Box::new(FirebenderPresentAuthority {
+                        opening_evidence,
+                        _sqlite_authority: snapshot.sqlite_authority(),
+                        terminal_revalidate: snapshot
+                            .terminal_revalidator()
+                            .map_err(route_error)?,
+                        snapshot: Mutex::new(Some(snapshot)),
+                    })),
                 ))
             }
             OpenDatabaseLeaf::Missing(fence) => {
@@ -137,26 +172,31 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        let FirebenderTreeAuthority::Present(expected_physical) = authority else {
+        let FirebenderTreeAuthority::Present(authority) = authority else {
             return Err(internal_error(
                 "Firebender missing inventory unexpectedly contained a document leaf",
             ));
         };
+        let (database_path, _) =
+            firebender_database_path_and_source(&self.path).map_err(route_error)?;
+        let snapshot = take_opened_snapshot(&authority.snapshot)?;
         sink.begin_source(leaf.clone())?;
-        let scan = scan_source(&self.data_root, &self.path, &mut |page| {
+        let scan = scan_opened_snapshot(&snapshot, &database_path, leaf.clone(), &mut |page| {
             page.into_iter()
                 .try_for_each(|document| sink.emit_document(document).map_err(Into::into))
         })
-        .map_err(firebender_scan_error)?
-        .ok_or_else(|| {
-            source_changed("Firebender SQLite leaf disappeared during logical projection")
-        })?;
+        .map_err(firebender_scan_error)?;
         validate_scan_receipt(&scan)?;
-        if !scan.source.exact_descriptor_eq(leaf) || &scan.terminal_fence != expected_physical {
+        if !scan.source.exact_descriptor_eq(leaf)
+            || scan.terminal_fence != authority.opening_evidence
+        {
             return Err(source_changed(
                 "Firebender SQLite physical inventory changed during logical projection",
             ));
         }
+        snapshot.revalidate().map_err(route_error)?;
+        restore_opened_snapshot(&authority.snapshot, snapshot)?;
+        record_projection();
         Ok(document_terminal(scan))
     }
 
@@ -165,16 +205,25 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
         match &tree.authority {
-            FirebenderTreeAuthority::Present(expected) => {
-                let (database_path, _) =
-                    firebender_database_path_and_source(&self.path).map_err(route_error)?;
-                let current = open_snapshot(&self.data_root, &database_path)
-                    .and_then(OpenedSnapshot::finish)
-                    .map_err(route_error)?;
-                if &current != expected {
+            FirebenderTreeAuthority::Present(authority) => {
+                let snapshot = take_opened_snapshot(&authority.snapshot)?;
+                let evidence = snapshot.finish().map_err(route_error)?;
+                if evidence != authority.opening_evidence {
                     return Err(source_changed(
                         "Firebender SQLite physical inventory changed before commit",
                     ));
+                }
+                (authority.terminal_revalidate)().map_err(route_error)?;
+                #[cfg(test)]
+                {
+                    let counters = authority._sqlite_authority.snapshot_counters();
+                    record_snapshot_counters(
+                        counters.immutable_snapshot_opens(),
+                        counters.copied_snapshot_opens(),
+                        counters.source_bytes_copied(),
+                        counters.terminal_fences(),
+                        counters.terminal_revalidations(),
+                    );
                 }
             }
             FirebenderTreeAuthority::Missing(fence) if !fence.revalidate() => {
@@ -209,6 +258,92 @@ pub(crate) fn register_source_backed_route(
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 
+fn take_opened_snapshot(
+    slot: &Mutex<Option<Box<OpenedSnapshot>>>,
+) -> SourceBackedRouteResult<Box<OpenedSnapshot>> {
+    slot.lock()
+        .map_err(|_| internal_error("Firebender SQLite snapshot lock was poisoned"))?
+        .take()
+        .ok_or_else(|| internal_error("Firebender SQLite snapshot was already consumed"))
+}
+
+fn restore_opened_snapshot(
+    slot: &Mutex<Option<Box<OpenedSnapshot>>>,
+    snapshot: Box<OpenedSnapshot>,
+) -> SourceBackedRouteResult<()> {
+    let mut slot = slot
+        .lock()
+        .map_err(|_| internal_error("Firebender SQLite snapshot lock was poisoned"))?;
+    if slot.replace(snapshot).is_some() {
+        return Err(internal_error(
+            "Firebender SQLite snapshot slot was already occupied",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FirebenderRouteWorkCounters {
+    pub(crate) logical_observation_passes: u64,
+    pub(crate) projection_passes: u64,
+    pub(crate) immutable_snapshot_opens: u64,
+    pub(crate) copied_snapshot_opens: u64,
+    pub(crate) source_bytes_copied: u64,
+    pub(crate) terminal_fences: u64,
+    pub(crate) terminal_revalidations: u64,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FIREBENDER_ROUTE_WORK: std::cell::RefCell<FirebenderRouteWorkCounters> =
+        std::cell::RefCell::new(FirebenderRouteWorkCounters::default());
+}
+
+#[cfg(test)]
+pub(crate) fn reset_route_work_counters() {
+    FIREBENDER_ROUTE_WORK.with(|work| *work.borrow_mut() = FirebenderRouteWorkCounters::default());
+}
+
+#[cfg(test)]
+pub(crate) fn route_work_counters() -> FirebenderRouteWorkCounters {
+    FIREBENDER_ROUTE_WORK.with(|work| *work.borrow())
+}
+
+fn record_logical_observation() {
+    #[cfg(test)]
+    FIREBENDER_ROUTE_WORK.with(|work| {
+        let mut work = work.borrow_mut();
+        work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
+    });
+}
+
+fn record_projection() {
+    #[cfg(test)]
+    FIREBENDER_ROUTE_WORK.with(|work| {
+        let mut work = work.borrow_mut();
+        work.projection_passes = work.projection_passes.saturating_add(1);
+    });
+}
+
+#[cfg(test)]
+fn record_snapshot_counters(
+    immutable_snapshot_opens: u64,
+    copied_snapshot_opens: u64,
+    source_bytes_copied: u64,
+    terminal_fences: u64,
+    terminal_revalidations: u64,
+) {
+    FIREBENDER_ROUTE_WORK.with(|work| {
+        let mut work = work.borrow_mut();
+        work.immutable_snapshot_opens = immutable_snapshot_opens;
+        work.copied_snapshot_opens = copied_snapshot_opens;
+        work.source_bytes_copied = source_bytes_copied;
+        work.terminal_fences = terminal_fences;
+        work.terminal_revalidations = terminal_revalidations;
+    });
+}
+
 fn document_terminal(scan: FirebenderDirectScan) -> DocumentSourceTerminal {
     let observation = scan.certificate.observation().clone();
     DocumentSourceTerminal {
@@ -229,6 +364,9 @@ fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult
         || scan.emitted_pages != expected_pages
         || scan.peak_buffered_documents != indexed.min(page_size)
         || (scan.decoded_rows == 0 && scan.certificate.counts().certified_bytes != 0)
+        || scan.candidate_query_batches == 0
+        || scan.row_set_queries > scan.candidate_query_batches
+        || scan.max_rows_per_set > DIRECT_PAGE_DOCUMENTS as u64
     {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::Internal,
@@ -238,6 +376,7 @@ fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult
     Ok(())
 }
 
+#[cfg(test)]
 fn scan_source(
     data_root: &Path,
     explicit_path: &Path,
@@ -250,199 +389,86 @@ fn scan_source(
         OpenDatabaseLeaf::Present(snapshot) => snapshot,
         OpenDatabaseLeaf::Missing(_) => return Ok(None),
     };
-    let scan = {
-        let connection = snapshot.connection()?;
-        validate_schema(connection, &database_path)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
-        let include_deleted_filter =
-            sqlite_table_columns(connection, "chat_sessions")?.contains("deleted_at");
-        scan_rows(
-            connection,
-            &database_path,
-            source.clone(),
-            include_deleted_filter,
-            emit,
-        )?
-        .with_schema_fingerprint(schema_fingerprint)
-    };
-    let terminal_fence = snapshot.finish()?;
-    let logical = SqliteLogicalSnapshot::new(
+    let scan = scan_opened_snapshot(&snapshot, &database_path, source, emit)?;
+    let closing_evidence = snapshot.finish()?;
+    if closing_evidence != scan.terminal_fence {
+        return Err(FirebenderSourceBackedError::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    Ok(Some(scan))
+}
+
+fn scan_opened_snapshot(
+    snapshot: &OpenedSnapshot,
+    database_path: &Path,
+    source: SourceKey,
+    emit: &mut dyn FnMut(Vec<LexicalDocument>) -> FirebenderSourceBackedResult<()>,
+) -> FirebenderSourceBackedResult<FirebenderDirectScan> {
+    let connection = snapshot.connection()?;
+    validate_schema(connection, database_path)?;
+    let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
+    let include_deleted_filter =
+        sqlite_table_columns(connection, "chat_sessions")?.contains("deleted_at");
+    let scan = scan_rows(
+        connection,
+        database_path,
+        source.clone(),
+        include_deleted_filter,
+        emit,
+    )?
+    .with_schema_fingerprint(schema_fingerprint);
+    let certificate = SqliteLogicalSnapshot::new(
         DIRECT_PARSER_REVISION,
         scan.schema_fingerprint.as_bytes(),
         scan.content_digest,
         scan.counts,
-    );
-    let certificate = logical.certify(source.clone())?;
-    Ok(Some(FirebenderDirectScan {
+    )
+    .certify(source.clone())?;
+    Ok(FirebenderDirectScan {
         source,
         certificate,
-        terminal_fence,
+        terminal_fence: snapshot.evidence()?.clone(),
         emitted_pages: scan.emitted_pages,
         row_decode_passes: 1,
         decoded_rows: scan.decoded_rows,
         peak_buffered_documents: scan.peak_buffered_documents,
-    }))
-}
-
-#[derive(Debug)]
-pub(super) struct MissingLeafFence {
-    root: ProviderSourceRoot,
-    directory: ProviderSourceDirectory,
-    leaf: OsString,
-}
-
-impl MissingLeafFence {
-    fn fingerprint(&self) -> [u8; 32] {
-        self.root.authority_fingerprint()
-    }
-
-    pub(super) fn revalidate(&self) -> bool {
-        if self.root.revalidate().is_err() || self.directory.revalidate().is_err() {
-            return false;
-        }
-        let missing = matches!(
-            self.directory.open_child(&self.leaf),
-            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound
-        );
-        missing && self.directory.revalidate().is_ok() && self.root.revalidate().is_ok()
-    }
-}
-
-pub(super) enum OpenDatabaseLeaf {
-    Present(Box<OpenedSnapshot>),
-    Missing(MissingLeafFence),
-}
-
-pub(super) fn open_database_leaf(
-    data_root: &Path,
-    path: &Path,
-) -> FirebenderSourceBackedResult<OpenDatabaseLeaf> {
-    let parent = database_parent(path)?;
-    let leaf = database_leaf(path)?;
-    let root = ProviderSourceRoot::open(parent)?;
-    let directory = root.directory()?;
-    root.revalidate()?;
-    directory.revalidate()?;
-    match directory.open_child(leaf) {
-        Ok(OpenedProviderSourcePath::File(file)) => {
-            file.revalidate()?;
-            directory.revalidate()?;
-            root.revalidate()?;
-            open_snapshot_from_authority(data_root, parent, leaf, root, directory)
-                .map(Box::new)
-                .map(OpenDatabaseLeaf::Present)
-        }
-        Ok(OpenedProviderSourcePath::Directory(_)) => Err(invalid_database_leaf(path).into()),
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            directory.revalidate()?;
-            root.revalidate()?;
-            Ok(OpenDatabaseLeaf::Missing(MissingLeafFence {
-                root,
-                directory,
-                leaf: leaf.to_os_string(),
-            }))
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(super) struct OpenedSnapshot {
-    root: ProviderSourceRoot,
-    snapshot: Option<SqliteSourceReadSnapshot>,
-}
-
-impl OpenedSnapshot {
-    pub(super) fn connection(&self) -> FirebenderSourceBackedResult<&Connection> {
-        self.snapshot
-            .as_ref()
-            .ok_or(FirebenderSourceBackedError::Capture(
-                CaptureError::SystemInvariant("Firebender SQLite snapshot is inactive"),
-            ))?
-            .connection()
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
-    }
-
-    pub(super) fn finish(mut self) -> FirebenderSourceBackedResult<SqliteSourceEvidence> {
-        let snapshot = self
-            .snapshot
-            .take()
-            .ok_or(FirebenderSourceBackedError::Capture(
-                CaptureError::SystemInvariant("Firebender SQLite snapshot is inactive"),
-            ))?;
-        let evidence = snapshot
-            .finish()
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        self.root.revalidate()?;
-        Ok(evidence)
-    }
-}
-
-pub(super) fn open_snapshot(
-    data_root: &Path,
-    path: &Path,
-) -> FirebenderSourceBackedResult<OpenedSnapshot> {
-    match open_database_leaf(data_root, path)? {
-        OpenDatabaseLeaf::Present(snapshot) => Ok(*snapshot),
-        OpenDatabaseLeaf::Missing(_) => Err(CaptureError::Io(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Firebender SQLite database leaf is absent from the retained provider root",
-        ))
-        .into()),
-    }
-}
-
-fn open_snapshot_from_authority(
-    data_root: &Path,
-    parent: &Path,
-    leaf: &OsStr,
-    root: ProviderSourceRoot,
-    directory: ProviderSourceDirectory,
-) -> FirebenderSourceBackedResult<OpenedSnapshot> {
-    let handle = directory
-        .try_clone_authority_handle()
-        .map_err(CaptureError::Io)?;
-    let authority = retain_sqlite_source_directory_authority(data_root, &handle, parent)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let snapshot = open_root_handle_sqlite_source_snapshot(&authority, leaf)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    snapshot
-        .revalidate()
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    directory.revalidate()?;
-    root.revalidate()?;
-    Ok(OpenedSnapshot {
-        root,
-        snapshot: Some(snapshot),
+        candidate_query_batches: scan.row_reads.candidate_queries,
+        row_set_queries: scan.row_reads.row_set_queries,
+        max_rows_per_set: scan.row_reads.max_rows_per_set,
     })
 }
 
-fn database_parent(path: &Path) -> FirebenderSourceBackedResult<&Path> {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| {
-            CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Firebender SQLite source must have a parent directory",
-            }
-            .into()
-        })
-}
-
-fn database_leaf(path: &Path) -> FirebenderSourceBackedResult<&OsStr> {
-    path.file_name().ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Firebender SQLite source must have a database leaf name",
+fn observe_logical_snapshot(
+    connection: &Connection,
+    database_path: &Path,
+) -> FirebenderSourceBackedResult<[u8; 32]> {
+    validate_schema(connection, database_path)?;
+    let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
+    let include_deleted_filter =
+        sqlite_table_columns(connection, "chat_sessions")?.contains("deleted_at");
+    let mut digest = Sha256::new();
+    digest.update(LOGICAL_FINGERPRINT_DOMAIN);
+    digest.update((DIRECT_PARSER_REVISION.len() as u64).to_be_bytes());
+    digest.update(DIRECT_PARSER_REVISION.as_bytes());
+    digest.update((schema_fingerprint.len() as u64).to_be_bytes());
+    digest.update(schema_fingerprint.as_bytes());
+    let mut after = None;
+    let mut rows = 0_u64;
+    let mut row_reads = RowReadCounters::default();
+    loop {
+        let page = next_rows(connection, after, include_deleted_filter, &mut row_reads)?;
+        if page.is_empty() {
+            break;
         }
-        .into()
-    })
-}
-
-fn invalid_database_leaf(path: &Path) -> CaptureError {
-    CaptureError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "Firebender SQLite source must be a regular non-symlink file",
+        for decoded in page {
+            after = Some((decoded.updated_at, decoded.rowid));
+            increment(&mut rows, 1)?;
+            hash_decoded_row(&mut digest, &decoded);
+        }
     }
+    digest.update(rows.to_be_bytes());
+    Ok(digest.finalize().into())
 }
 
 struct WorkingScan {
@@ -452,6 +478,7 @@ struct WorkingScan {
     emitted_pages: u64,
     decoded_rows: u64,
     peak_buffered_documents: u64,
+    row_reads: RowReadCounters,
 }
 
 impl WorkingScan {
@@ -478,53 +505,60 @@ fn scan_rows(
     let mut emitted_pages = 0_u64;
     let mut decoded_rows = 0_u64;
     let mut peak_buffered_documents = 0_u64;
+    let mut row_reads = RowReadCounters::default();
 
-    while let Some(decoded) = next_row(connection, after, include_deleted_filter)? {
-        after = Some((decoded.updated_at, decoded.rowid));
-        increment(&mut decoded_rows, 1)?;
-        hash_decoded_row(&mut hasher, &decoded);
-        match decoded.row {
-            None => {
-                increment(&mut counts.complete_records, 1)?;
-                increment(&mut counts.rejected_records, 1)?;
-                increment(&mut counts.certified_bytes, decoded.retained_bytes)?;
-            }
-            Some(row) => {
-                increment(&mut counts.certified_bytes, canonical_row_bytes(&row)?)?;
-                if decoded.rejection.is_some() {
+    loop {
+        let rows = next_rows(connection, after, include_deleted_filter, &mut row_reads)?;
+        if rows.is_empty() {
+            break;
+        }
+        for decoded in rows {
+            after = Some((decoded.updated_at, decoded.rowid));
+            increment(&mut decoded_rows, 1)?;
+            hash_decoded_row(&mut hasher, &decoded);
+            match decoded.row {
+                None => {
                     increment(&mut counts.complete_records, 1)?;
                     increment(&mut counts.rejected_records, 1)?;
-                    continue;
+                    increment(&mut counts.certified_bytes, decoded.retained_bytes)?;
                 }
-                let session_id = firebender_session_id(&source, &row.id)?;
-                let row_digest = firebender_raw_row_digest(&row.logical_values());
-                for (message_index, message) in row.messages.iter().enumerate() {
-                    increment(&mut counts.complete_records, 1)?;
-                    let Some(document) = firebender_document(
-                        &source,
-                        session_id,
-                        &source_path,
-                        workspace.as_deref(),
-                        &row,
-                        message_index,
-                        message,
-                        row_digest,
-                    )?
-                    else {
-                        increment(&mut counts.ignored_records, 1)?;
+                Some(row) => {
+                    increment(&mut counts.certified_bytes, canonical_row_bytes(&row)?)?;
+                    if decoded.rejection.is_some() {
+                        increment(&mut counts.complete_records, 1)?;
+                        increment(&mut counts.rejected_records, 1)?;
                         continue;
-                    };
-                    increment(&mut counts.retained_records, 1)?;
-                    increment(&mut counts.indexed_documents, 1)?;
-                    page.push(document);
-                    peak_buffered_documents = peak_buffered_documents.max(
-                        u64::try_from(page.len())
-                            .map_err(|_| FirebenderSourceBackedError::CountOverflow)?,
-                    );
-                    if page.len() == DIRECT_PAGE_DOCUMENTS {
-                        emit(std::mem::take(&mut page))?;
-                        page = Vec::with_capacity(DIRECT_PAGE_DOCUMENTS);
-                        increment(&mut emitted_pages, 1)?;
+                    }
+                    let session_id = firebender_session_id(&source, &row.id)?;
+                    let row_digest = firebender_raw_row_digest(&row.logical_values());
+                    for (message_index, message) in row.messages.iter().enumerate() {
+                        increment(&mut counts.complete_records, 1)?;
+                        let Some(document) = firebender_document(
+                            &source,
+                            session_id,
+                            &source_path,
+                            workspace.as_deref(),
+                            &row,
+                            message_index,
+                            message,
+                            row_digest,
+                        )?
+                        else {
+                            increment(&mut counts.ignored_records, 1)?;
+                            continue;
+                        };
+                        increment(&mut counts.retained_records, 1)?;
+                        increment(&mut counts.indexed_documents, 1)?;
+                        page.push(document);
+                        peak_buffered_documents = peak_buffered_documents.max(
+                            u64::try_from(page.len())
+                                .map_err(|_| FirebenderSourceBackedError::CountOverflow)?,
+                        );
+                        if page.len() == DIRECT_PAGE_DOCUMENTS {
+                            emit(std::mem::take(&mut page))?;
+                            page = Vec::with_capacity(DIRECT_PAGE_DOCUMENTS);
+                            increment(&mut emitted_pages, 1)?;
+                        }
                     }
                 }
             }
@@ -541,6 +575,7 @@ fn scan_rows(
         emitted_pages,
         decoded_rows,
         peak_buffered_documents,
+        row_reads,
     })
 }
 
@@ -553,63 +588,54 @@ struct DecodedRow {
     lengths: [u64; 4],
 }
 
-fn next_row(
+#[derive(Clone, Copy, Debug, Default)]
+struct RowReadCounters {
+    candidate_queries: u64,
+    row_set_queries: u64,
+    max_rows_per_set: u64,
+}
+
+struct RowCandidate {
+    rowid: i64,
+    updated_at: i64,
+    created_at: i64,
+    retained_bytes: u64,
+    lengths: [u64; 4],
+    load_values: bool,
+}
+
+fn next_rows(
     connection: &Connection,
     after: Option<(i64, i64)>,
     include_deleted_filter: bool,
-) -> FirebenderSourceBackedResult<Option<DecodedRow>> {
+    counters: &mut RowReadCounters,
+) -> FirebenderSourceBackedResult<Vec<DecodedRow>> {
     let deleted_filter = if include_deleted_filter {
         "deleted_at is null and"
     } else {
         ""
     };
     let sql = format!(
-        "with candidate as (
-             select rowid source_rowid, cast(updated_at as integer) source_updated_at,
-                    cast(created_at as integer) source_created_at,
-                    length(cast(id as blob)) id_bytes,
-                    length(cast(name as blob)) name_bytes,
-                    length(cast(messages_json as blob)) messages_bytes,
-                    length(cast(metadata_json as blob)) metadata_bytes,
-                    cast(id as text) source_id, cast(name as text) source_name,
-                    cast(messages_json as text) source_messages,
-                    cast(metadata_json as text) source_metadata
-             from chat_sessions
-             where {deleted_filter}
-                   (?1 = 0 or cast(updated_at as integer) > ?2 or
-                    (cast(updated_at as integer) = ?2 and rowid > ?3))
-             order by cast(updated_at as integer), rowid
-             limit 1
-         )
-         select source_rowid, source_updated_at, source_created_at,
-                id_bytes, name_bytes, messages_bytes, metadata_bytes,
-                case when id_bytes + name_bytes + messages_bytes + metadata_bytes <= ?4
-                     then source_id end,
-                case when id_bytes + name_bytes + messages_bytes + metadata_bytes <= ?4
-                     then source_name end,
-                case when id_bytes + name_bytes + messages_bytes + metadata_bytes <= ?4
-                     then source_messages end,
-                case when id_bytes + name_bytes + messages_bytes + metadata_bytes <= ?4
-                     then source_metadata end
-         from candidate"
+        "select rowid, cast(updated_at as integer), cast(created_at as integer),
+                length(cast(id as blob)), length(cast(name as blob)),
+                length(cast(messages_json as blob)), length(cast(metadata_json as blob))
+         from chat_sessions
+         where {deleted_filter}
+               (?1 = 0 or cast(updated_at as integer) > ?2 or
+                (cast(updated_at as integer) = ?2 and rowid > ?3))
+         order by cast(updated_at as integer), rowid
+         limit ?4"
     );
     let (has_after, updated_at, rowid) = after.map_or((0_i64, 0_i64, 0_i64), |(updated, row)| {
         (1_i64, updated, row)
     });
-    let maximum_payload = FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES
-        .checked_sub(FIREBENDER_PAGE_OVERHEAD_BYTES)
-        .ok_or(FirebenderSourceBackedError::CountOverflow)?;
-    let max_bytes =
-        i64::try_from(maximum_payload).map_err(|_| FirebenderSourceBackedError::CountOverflow)?;
+    increment(&mut counters.candidate_queries, 1)?;
     let _guard = SqliteLengthPreflightGuard::new(connection);
-    connection
-        .query_row(
-            &sql,
-            params![has_after, updated_at, rowid, max_bytes],
+    let mut statement = connection.prepare(&sql).map_err(CaptureError::from)?;
+    let rows = statement
+        .query_map(
+            [has_after, updated_at, rowid, DIRECT_PAGE_DOCUMENTS as i64],
             |row| {
-                let source_rowid = row.get(0)?;
-                let source_updated_at = row.get(1)?;
-                let source_created_at = row.get(2)?;
                 let raw_lengths = [
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
@@ -623,36 +649,98 @@ fn next_row(
                         total.checked_add(length)
                     })
                     .unwrap_or(u64::MAX);
-                let id = row.get::<_, Option<String>>(7)?;
-                let name = row.get::<_, Option<String>>(8)?;
-                let messages_json = row.get::<_, Option<String>>(9)?;
-                let metadata_json = row.get::<_, Option<String>>(10)?;
-                let within_bound = retained_bytes <= FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES as u64;
-                if !within_bound {
-                    return Ok(DecodedRow {
-                        rowid: source_rowid,
-                        updated_at: source_updated_at,
-                        row: None,
-                        rejection: Some("Firebender row exceeds the bounded scan limit".to_owned()),
-                        retained_bytes: FIREBENDER_PAGE_OVERHEAD_BYTES as u64,
-                        lengths,
-                    });
-                }
-                let (id, name, messages_json, metadata_json) =
-                    match (id, name, messages_json, metadata_json) {
-                        (Some(id), Some(name), Some(messages), Some(metadata)) => {
-                            (id, name, messages, metadata)
-                        }
-                        _ => {
-                            return Err(rusqlite::Error::InvalidColumnType(
-                                7,
-                                "chat_sessions logical values".to_owned(),
-                                rusqlite::types::Type::Null,
-                            ));
-                        }
-                    };
-                let parsed = serde_json::from_str::<Vec<serde_json::Value>>(&messages_json);
-                let (messages, rejection) = match parsed {
+                Ok(RowCandidate {
+                    rowid: row.get(0)?,
+                    updated_at: row.get(1)?,
+                    created_at: row.get(2)?,
+                    retained_bytes,
+                    lengths,
+                    load_values: retained_bytes <= FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES as u64,
+                })
+            },
+        )
+        .map_err(CaptureError::from)?;
+    let candidates = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(CaptureError::from)?;
+    drop(statement);
+    drop(_guard);
+    let mut selected = Vec::new();
+    let mut loaded_bytes = 0_u64;
+    for candidate in candidates {
+        if candidate.load_values {
+            let next = loaded_bytes
+                .checked_add(candidate.retained_bytes)
+                .ok_or(FirebenderSourceBackedError::CountOverflow)?;
+            if !selected.is_empty() && next > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES as u64 {
+                break;
+            }
+            loaded_bytes = next;
+        }
+        selected.push(candidate);
+    }
+    let safe_rowids = selected
+        .iter()
+        .filter(|candidate| candidate.load_values)
+        .map(|candidate| candidate.rowid)
+        .collect::<Vec<_>>();
+    let mut values = BTreeMap::new();
+    if !safe_rowids.is_empty() {
+        increment(&mut counters.row_set_queries, 1)?;
+        counters.max_rows_per_set = counters.max_rows_per_set.max(safe_rowids.len() as u64);
+        let placeholders = (1..=safe_rowids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let deleted_filter = if include_deleted_filter {
+            " and deleted_at is null"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "select rowid, cast(id as text), cast(name as text),
+                    cast(messages_json as text), cast(metadata_json as text)
+             from chat_sessions
+             where rowid in ({placeholders}){deleted_filter}
+             order by cast(updated_at as integer), rowid"
+        );
+        let mut statement = connection.prepare(&sql).map_err(CaptureError::from)?;
+        let rows = statement
+            .query_map(params_from_iter(&safe_rowids), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    (
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ),
+                ))
+            })
+            .map_err(CaptureError::from)?;
+        values = rows
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .map_err(CaptureError::from)?;
+    }
+    selected
+        .into_iter()
+        .map(|candidate| {
+            if !candidate.load_values {
+                return Ok(DecodedRow {
+                    rowid: candidate.rowid,
+                    updated_at: candidate.updated_at,
+                    row: None,
+                    rejection: Some("Firebender row exceeds the bounded scan limit".to_owned()),
+                    retained_bytes: FIREBENDER_PAGE_OVERHEAD_BYTES as u64,
+                    lengths: candidate.lengths,
+                });
+            }
+            let (id, name, messages_json, metadata_json) =
+                values.remove(&candidate.rowid).ok_or_else(|| {
+                    FirebenderSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture)
+                })?;
+            let (messages, rejection) =
+                match serde_json::from_str::<Vec<serde_json::Value>>(&messages_json) {
                     Ok(messages) => (messages, None),
                     Err(error) => (
                         Vec::new(),
@@ -661,27 +749,25 @@ fn next_row(
                         )),
                     ),
                 };
-                Ok(DecodedRow {
-                    rowid: source_rowid,
-                    updated_at: source_updated_at,
-                    row: Some(FirebenderRow {
-                        rowid: source_rowid,
-                        id,
-                        name,
-                        created_at: source_created_at,
-                        updated_at: source_updated_at,
-                        messages_json,
-                        metadata_json,
-                        messages,
-                    }),
-                    rejection,
-                    retained_bytes,
-                    lengths,
-                })
-            },
-        )
-        .optional()
-        .map_err(|error| FirebenderSourceBackedError::Capture(CaptureError::from(error)))
+            Ok(DecodedRow {
+                rowid: candidate.rowid,
+                updated_at: candidate.updated_at,
+                row: Some(FirebenderRow {
+                    rowid: candidate.rowid,
+                    id,
+                    name,
+                    created_at: candidate.created_at,
+                    updated_at: candidate.updated_at,
+                    messages_json,
+                    metadata_json,
+                    messages,
+                }),
+                rejection,
+                retained_bytes: candidate.retained_bytes,
+                lengths: candidate.lengths,
+            })
+        })
+        .collect()
 }
 
 fn hash_decoded_row(hasher: &mut Sha256, decoded: &DecodedRow) {

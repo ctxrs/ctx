@@ -1,8 +1,9 @@
 use std::{
+    cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     fmt, fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant as StdInstant},
 };
 
@@ -29,8 +30,8 @@ use uuid::Uuid;
 
 use crate::{
     commands::import::{
-        load_explicit_source_catalog_authority, register_explicit_source_catalog_routes,
-        validate_explicit_source_catalog_roots, ExplicitSourceCatalogAuthority,
+        load_explicit_source_catalog_authority, validate_explicit_source_catalog_roots,
+        ExplicitSourceCatalogAuthority,
     },
     compact_json,
     config::{AppConfig, DaemonMode},
@@ -47,8 +48,12 @@ use super::{
 
 mod capture_refresh;
 mod coordinator_state;
+mod current_state;
 mod old_store_retirement;
+mod recovery;
 
+#[cfg(test)]
+pub(in crate::semantic) use capture_refresh::install_test_discovery_context;
 use capture_refresh::{
     execute_capture_owned_refresh, execute_source_backed_refresh, hydration_failure_queues_refresh,
     recover_capture_owned_resolver,
@@ -66,6 +71,7 @@ pub(crate) use coordinator_state::{
     GenerationBoundSourceBackedResolver, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
     SourceBackedRefreshReceipt, SourceBackedRefreshTimings, SourceBackedResolverAccessError,
 };
+pub(crate) use current_state::SourceBackedRefreshCurrent;
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -80,6 +86,75 @@ const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unava
 // Covers a search/show generation pin crossing the daemon IPC boundary; an
 // acquired Arc lease keeps its exact resolver alive beyond this grace.
 const SOURCE_RESOLVER_RETIREMENT_GRACE: StdDuration = StdDuration::from_secs(5 * 60);
+
+thread_local! {
+    /// Weak, exact-generation handoff for the synchronous daemon publication
+    /// cycle. The coordinator's generation authority owns the strong pin; this
+    /// slot neither prolongs its lifetime nor serves another generation.
+    static DAEMON_CYCLE_VERIFIED_INDEX: RefCell<
+        Option<(PathBuf, String, Weak<VerifiedIndex>)>,
+    > = const { RefCell::new(None) };
+
+    #[cfg(test)]
+    static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+pub(super) fn open_verified_index(
+    index_root: &Path,
+) -> std::result::Result<VerifiedIndex, IndexError> {
+    #[cfg(test)]
+    VERIFIED_INDEX_OPEN_COUNT.with(|count| {
+        if let Some(current) = count.get() {
+            count.set(Some(current.saturating_add(1)));
+        }
+    });
+    VerifiedIndex::open_pinned(index_root)
+}
+
+#[cfg(test)]
+pub(super) fn count_verified_index_opens<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    VERIFIED_INDEX_OPEN_COUNT.with(|count| {
+        let previous = count.replace(Some(0));
+        assert!(
+            previous.is_none(),
+            "verified-index open counters must not be nested"
+        );
+        let output = operation();
+        let observed = count.replace(None).unwrap_or(0);
+        (output, observed)
+    })
+}
+
+fn retain_daemon_cycle_verified_index(index_root: &Path, index: &Arc<VerifiedIndex>) {
+    let generation_id = index.generation_id().to_owned();
+    let index = Arc::downgrade(index);
+    DAEMON_CYCLE_VERIFIED_INDEX.with(|retained| {
+        retained.replace(Some((index_root.to_path_buf(), generation_id, index)));
+    });
+}
+
+pub(super) fn daemon_cycle_verified_index(
+    data_root: &Path,
+    generation_id: &str,
+) -> Option<Arc<VerifiedIndex>> {
+    let index_root = source_backed_index_root(data_root);
+    DAEMON_CYCLE_VERIFIED_INDEX.with(|retained| {
+        let retained = retained.borrow();
+        let (retained_root, retained_generation, retained_index) = retained.as_ref()?;
+        if retained_root != &index_root || retained_generation != generation_id {
+            return None;
+        }
+        retained_index
+            .upgrade()
+            .filter(|index| index.generation_id() == generation_id)
+    })
+}
+
+pub(super) fn nonzero_duration_micros(duration: StdDuration) -> u64 {
+    u64::try_from(duration.as_micros())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SourceBackedRefreshMode {
@@ -134,6 +209,8 @@ impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 #[derive(Debug, Clone)]
 pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
+    /// Exact explicit-source catalog snapshot registered into this publication.
+    pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     /// Exact metadata-only Pro handoff for this Core generation. Test
     /// executors may omit it; the capture-owned production executor never does.
     pub(crate) source_manifest: Option<SourceManifest>,
@@ -147,76 +224,6 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) certified_source_bytes: u64,
     pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) timings: SourceBackedRefreshTimings,
-}
-
-/// Exact cardinalities of the generation that was verified after publication.
-///
-/// These are current-state facts, not deltas attributed to one refresh.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) struct SourceBackedRefreshCurrent {
-    pub(crate) source_count: usize,
-    pub(crate) indexed_documents: u64,
-    pub(crate) complete_records: u64,
-    pub(crate) retained_records: u64,
-    pub(crate) rejected_records: u64,
-    pub(crate) ignored_records: u64,
-    pub(crate) certified_source_bytes: u64,
-    pub(crate) sources_with_rejections: usize,
-    pub(crate) removed_source_count: usize,
-}
-
-impl SourceBackedRefreshCurrent {
-    fn from_sources(sources: &[CertifiedSource], removed_source_count: usize) -> Result<Self> {
-        let mut current = Self {
-            source_count: sources.len(),
-            removed_source_count,
-            ..Self::default()
-        };
-        for source in sources {
-            let counts = source.counts();
-            current.add_counts(counts)?;
-            current.sources_with_rejections = current
-                .sources_with_rejections
-                .checked_add(usize::from(counts.rejected_records > 0))
-                .ok_or_else(|| anyhow!("source-backed current rejection-source count overflow"))?;
-        }
-        Ok(current)
-    }
-
-    fn add_counts(&mut self, counts: ScannedSourceCounts) -> Result<()> {
-        self.indexed_documents =
-            checked_current_count(self.indexed_documents, counts.indexed_documents)?;
-        self.complete_records =
-            checked_current_count(self.complete_records, counts.complete_records)?;
-        self.retained_records =
-            checked_current_count(self.retained_records, counts.retained_records)?;
-        self.rejected_records =
-            checked_current_count(self.rejected_records, counts.rejected_records)?;
-        self.ignored_records = checked_current_count(self.ignored_records, counts.ignored_records)?;
-        self.certified_source_bytes =
-            checked_current_count(self.certified_source_bytes, counts.certified_bytes)?;
-        Ok(())
-    }
-
-    fn to_json(self) -> Value {
-        json!({
-            "current_source_count": self.source_count,
-            "current_indexed_documents": self.indexed_documents,
-            "current_complete_records": self.complete_records,
-            "current_retained_records": self.retained_records,
-            "current_rejected_records": self.rejected_records,
-            "current_ignored_records": self.ignored_records,
-            "current_certified_source_bytes": self.certified_source_bytes,
-            "current_sources_with_rejections": self.sources_with_rejections,
-            "removed_source_count": self.removed_source_count,
-        })
-    }
-}
-
-fn checked_current_count(current: u64, next: u64) -> Result<u64> {
-    current
-        .checked_add(next)
-        .ok_or_else(|| anyhow!("source-backed current generation count overflow"))
 }
 
 pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
@@ -238,7 +245,7 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
         }
         return Ok(None);
     }
-    match VerifiedIndex::open_pinned(&index_root) {
+    match open_verified_index(&index_root) {
         Ok(index) => Ok(Some(index)),
         // Tantivy creates schema-only meta.json before the first ctx commit.
         // It is replaceable only while no durable publication receipt proves
@@ -257,6 +264,34 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
             )
         }),
     }
+}
+
+fn verify_source_backed_publication(
+    publication: &SourceBackedRefreshPublication,
+    verified: &VerifiedIndex,
+) -> Result<()> {
+    if verified.generation_id() != publication.generation_id {
+        bail!(
+            "source-backed refresh returned generation {}, but its verified pin carries {}",
+            publication.generation_id,
+            verified.generation_id()
+        );
+    }
+    if publication.source_manifest.is_some() && publication.resolver.is_some() {
+        let manifest = verified.manifest();
+        let verified_current =
+            SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+        if verified_current != publication.current
+            || publication.certified_source_count != verified_current.source_count
+            || publication.certified_source_bytes != verified_current.certified_source_bytes
+            || manifest.indexed_documents != verified_current.indexed_documents
+        {
+            bail!(
+                "source-backed refresh publication facts do not match its exact verified generation"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(in crate::semantic) fn source_backed_lexical_artifact_is_uncommitted_schema_only(
@@ -342,12 +377,21 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
     Ok(Some(meta_generation.to_owned()))
 }
 
+#[cfg(test)]
 fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
     if !old_store_retirement::is_required(data_root)? {
         return Ok(());
     }
-    let verified = VerifiedIndex::open_pinned(source_backed_index_root(data_root))
+    let verified = open_verified_index(&source_backed_index_root(data_root))
         .context("reopen source-backed generation before retiring the old Store family")?;
+    complete_verified_source_epoch_with(data_root, generation_id, &verified)
+}
+
+fn complete_verified_source_epoch_with(
+    data_root: &Path,
+    generation_id: &str,
+    verified: &VerifiedIndex,
+) -> Result<()> {
     if verified.generation_id() != generation_id {
         bail!(
             "active source-backed generation {} changed before retiring old Store state for {generation_id}",
@@ -359,13 +403,15 @@ fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Resu
 }
 
 pub(in crate::semantic) fn reconcile_verified_source_epoch(data_root: &Path) -> Result<()> {
+    recovery::reconcile_persisted_refresh_job(data_root)?;
     if !old_store_retirement::is_required(data_root)? {
         return Ok(());
     }
     let Some(verified) = open_published_generation(data_root)? else {
         return Ok(());
     };
-    complete_verified_source_epoch(data_root, verified.generation_id())
+    let generation_id = verified.generation_id().to_owned();
+    complete_verified_source_epoch_with(data_root, &generation_id, &verified)
 }
 
 fn remove_old_store_family(data_root: &Path) -> Result<()> {
@@ -716,6 +762,14 @@ fn published_refresh_receipt(
         .ok_or_else(|| {
             anyhow!("published daemon source refresh receipt has no generation_changed fact")
         })?;
+    let published_explicit_source_catalog = value
+        .get("published_explicit_source_catalog")
+        .ok_or_else(|| {
+            anyhow!(
+                "published daemon source refresh receipt has no explicit source catalog authority"
+            )
+        })
+        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
     let current_value = value
         .get("current")
         .and_then(Value::as_object)
@@ -743,13 +797,22 @@ fn published_refresh_receipt(
         .get("generation_changed")
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
+    let top_published_explicit_source_catalog = response
+        .get("published_explicit_source_catalog")
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh has no explicit source catalog authority")
+        })
+        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
     if previous_generation != top_previous_generation
         || published_generation != top_published_generation
         || generation_changed != top_generation_changed
         || generation_changed != identity_changed
+        || published_explicit_source_catalog != top_published_explicit_source_catalog
     {
-        bail!("published daemon source refresh receipt has inconsistent generation identity facts");
+        bail!(
+            "published daemon source refresh receipt has inconsistent publication identity facts"
+        );
     }
 
     let manifest = pin.index.manifest();
@@ -776,6 +839,7 @@ fn published_refresh_receipt(
         previous_generation,
         published_generation,
         generation_changed,
+        published_explicit_source_catalog,
         current,
     })
 }
@@ -874,6 +938,14 @@ pub(crate) fn pin_active_verified_generation(
         .context("source_unavailable: verify active Core generation")?
         .ok_or_else(|| anyhow!("source_unavailable: active verified Core generation is missing"))
 }
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_retained_generation_tests.rs"]
+mod retained_generation_tests;
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_recovery.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests.rs"]

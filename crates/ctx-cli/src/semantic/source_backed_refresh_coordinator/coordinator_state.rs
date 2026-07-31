@@ -1,38 +1,21 @@
 use super::*;
 
+mod generation_authority;
 mod generation_observation;
+mod read_model;
 mod runtime_metadata;
+use generation_authority::RetainedGenerationResolver;
+pub(crate) use generation_authority::{
+    GenerationBoundSourceBackedResolver, SourceBackedResolverAccessError,
+};
+use read_model::{
+    SourceBackedRefreshAttempt, SourceBackedRefreshProgress, SourceBackedRefreshState,
+};
+pub(crate) use read_model::{SourceBackedRefreshReceipt, SourceBackedRefreshTimings};
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
     SourceRefreshRuntimeMetadata,
 };
-
-/// Verified terminal receipt for one daemon-owned source refresh.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct SourceBackedRefreshReceipt {
-    pub(crate) previous_generation: Option<String>,
-    pub(crate) published_generation: String,
-    pub(crate) generation_changed: bool,
-    pub(crate) current: SourceBackedRefreshCurrent,
-}
-
-impl SourceBackedRefreshReceipt {
-    pub(crate) fn to_json(&self) -> Value {
-        compact_json(json!({
-            "previous_generation": self.previous_generation,
-            "published_generation": self.published_generation,
-            "generation_changed": self.generation_changed,
-            "current": self.current.to_json(),
-        }))
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) struct SourceBackedRefreshTimings {
-    pub(crate) discovery_us: u64,
-    pub(crate) scan_stage_us: u64,
-    pub(crate) commit_us: u64,
-}
 
 pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) phase: String,
@@ -111,231 +94,12 @@ impl SourceBackedRefreshExecutor for CaptureOwnedSourceBackedRefreshExecutor {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum SourceBackedRefreshState {
-    Queued,
-    Running,
-    Published,
-    Failed,
-}
-
-impl SourceBackedRefreshState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Published => "published",
-            Self::Failed => "failed",
-        }
-    }
-
-    fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SourceBackedRefreshProgress {
-    phase: String,
-    completed_sources: usize,
-    total_sources: usize,
-    current_source: Option<String>,
-}
-
-impl Default for SourceBackedRefreshProgress {
-    fn default() -> Self {
-        Self {
-            phase: "queued".to_owned(),
-            completed_sources: 0,
-            total_sources: 0,
-            current_source: None,
-        }
-    }
-}
-
-impl SourceBackedRefreshProgress {
-    fn to_json(&self) -> Value {
-        compact_json(json!({
-            "phase": self.phase,
-            "completed_sources": self.completed_sources,
-            "total_sources": self.total_sources,
-            "current_source": self.current_source,
-        }))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SourceBackedRefreshAttempt {
-    request_id: String,
-    state: SourceBackedRefreshState,
-    requested_at_ms: i64,
-    started_at_ms: Option<i64>,
-    finished_at_ms: Option<i64>,
-    previous_generation: Option<String>,
-    published_generation: Option<String>,
-    requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    coalesced_requests: u64,
-    progress: SourceBackedRefreshProgress,
-    scanned_routes: Option<usize>,
-    unsupported_routes: Option<usize>,
-    certified_source_count: Option<usize>,
-    certified_source_bytes: Option<u64>,
-    receipt: Option<SourceBackedRefreshReceipt>,
-    timings: Option<SourceBackedRefreshTimings>,
-    daemon_mode: DaemonMode,
-    trigger: &'static str,
-    trigger_provenance: &'static str,
-    last_error: Option<String>,
-    post_publication_error: Option<String>,
-}
-
-impl SourceBackedRefreshAttempt {
-    fn failure_code(&self) -> Option<&'static str> {
-        self.last_error
-            .as_deref()
-            .filter(|error| error.contains(TERMINAL_COVERAGE_ERROR_CODE))
-            .map(|_| TERMINAL_COVERAGE_ERROR_CODE)
-    }
-
-    fn failure_reason(&self) -> Option<&'static str> {
-        self.failure_code()
-            .map(|_| "provider_terminal_coverage_unavailable")
-    }
-
-    fn to_json(&self) -> Value {
-        compact_json(json!({
-            "ok": true,
-            "schema_version": 1,
-            "owner": "daemon",
-            "request_id": self.request_id,
-            "request_state": self.state.as_str(),
-            "requested_at_ms": self.requested_at_ms,
-            "started_at_ms": self.started_at_ms,
-            "finished_at_ms": self.finished_at_ms,
-            "previous_generation": self.previous_generation,
-            "published_generation": self.published_generation,
-            "requested_explicit_source_catalog": self.requested_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "published_explicit_source_catalog": self.published_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
-            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
-            "coalesced_requests": self.coalesced_requests,
-            "progress": self.progress.to_json(),
-            "scanned_routes": self.scanned_routes,
-            "unsupported_routes": self.unsupported_routes,
-            "certified_source_count": self.certified_source_count,
-            "certified_source_bytes": self.certified_source_bytes,
-            "timings_us": self.timings.map(SourceBackedRefreshTimings::to_json),
-            "daemon_mode": self.daemon_mode.as_str(),
-            "trigger": self.trigger,
-            "trigger_provenance": self.trigger_provenance,
-            "error_code": self.failure_code(),
-            "reason": self.failure_reason(),
-            "last_error": self.last_error,
-            "post_publication_error": self.post_publication_error,
-        }))
-    }
-
-    fn job_json(&self) -> Value {
-        let status = match self.state {
-            SourceBackedRefreshState::Published => "completed",
-            SourceBackedRefreshState::Failed => "failed",
-            SourceBackedRefreshState::Queued | SourceBackedRefreshState::Running => "running",
-        };
-        compact_json(json!({
-            "mode": SourceBackedRefreshMode::Background.as_str(),
-            "owner": "daemon",
-            "kind": "source_backed",
-            "status": status,
-            "request_id": self.request_id,
-            "request_state": self.state.as_str(),
-            "source_count": self.progress.total_sources,
-            "last_run_at_ms": self.started_at_ms.unwrap_or(self.requested_at_ms),
-            "previous_generation": self.previous_generation,
-            "published_generation": self.published_generation,
-            "requested_explicit_source_catalog": self.requested_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "published_explicit_source_catalog": self.published_explicit_source_catalog
-                .as_ref()
-                .map(ExplicitSourceCatalogAuthority::to_json),
-            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
-            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
-            "coalesced_requests": self.coalesced_requests,
-            "progress": self.progress.to_json(),
-            "scanned_routes": self.scanned_routes,
-            "unsupported_routes": self.unsupported_routes,
-            "certified_source_count": self.certified_source_count,
-            "certified_source_bytes": self.certified_source_bytes,
-            "timings_us": self.timings.map(SourceBackedRefreshTimings::to_json),
-            "daemon_mode": self.daemon_mode.as_str(),
-            "trigger": self.trigger,
-            "trigger_provenance": self.trigger_provenance,
-            "error_code": self.failure_code(),
-            "reason": self.failure_reason(),
-            "last_error": self.last_error,
-            "post_publication_error": self.post_publication_error,
-        }))
-    }
-}
-
-impl SourceBackedRefreshTimings {
-    fn to_json(self) -> Value {
-        json!({
-            "discovery": self.discovery_us,
-            "scan_stage": self.scan_stage_us,
-            "commit": self.commit_us,
-        })
-    }
-}
-
 pub(super) struct SourceBackedRefreshCoordinatorState {
     active_request_id: Option<String>,
     pending_request_ids: VecDeque<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
     published_resolvers: HashMap<String, RetainedGenerationResolver>,
     current_published_generation: Option<String>,
-}
-
-struct RetainedGenerationResolver {
-    resolver: Arc<GenerationBoundSourceBackedResolver>,
-    retired_at: Option<StdInstant>,
-}
-
-impl SourceBackedRefreshCoordinatorState {
-    fn install_resolver(&mut self, resolver: Arc<GenerationBoundSourceBackedResolver>) {
-        let generation_id = resolver.generation_id.clone();
-        let now = StdInstant::now();
-        if let Some(previous) = self.current_published_generation.as_deref() {
-            if previous != generation_id {
-                if let Some(retained) = self.published_resolvers.get_mut(previous) {
-                    retained.retired_at.get_or_insert(now);
-                }
-            }
-        }
-        self.published_resolvers.insert(
-            generation_id.clone(),
-            RetainedGenerationResolver {
-                resolver,
-                retired_at: None,
-            },
-        );
-        self.current_published_generation = Some(generation_id);
-        self.prune_retired_resolvers(now, SOURCE_RESOLVER_RETIREMENT_GRACE);
-    }
-
-    fn prune_retired_resolvers(&mut self, now: StdInstant, grace: StdDuration) {
-        self.published_resolvers.retain(|_, retained| {
-            retained.retired_at.is_none_or(|retired_at| {
-                now.saturating_duration_since(retired_at) < grace
-                    || Arc::strong_count(&retained.resolver) > 1
-            })
-        });
-    }
 }
 
 pub(in crate::semantic) struct SourceBackedRefreshCoordinator {
@@ -347,45 +111,6 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) job: Value,
     pub(in crate::semantic) did_work: bool,
     pub(in crate::semantic) failed: bool,
-}
-
-/// One leaseable resolver whose identity is inseparable from the verified
-/// lexical generation that installed it.
-#[derive(Debug)]
-#[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
-pub(crate) struct GenerationBoundSourceBackedResolver {
-    generation_id: String,
-    source_manifest: Option<SourceManifest>,
-    resolver: Arc<SourceBackedResolverRegistry>,
-}
-
-#[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
-impl GenerationBoundSourceBackedResolver {
-    pub(crate) fn generation_id(&self) -> &str {
-        &self.generation_id
-    }
-
-    pub(crate) fn resolver(&self) -> &SourceBackedResolverRegistry {
-        self.resolver.as_ref()
-    }
-
-    pub(crate) fn source_manifest(&self) -> Option<&SourceManifest> {
-        self.source_manifest.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Eq, Error, PartialEq)]
-#[allow(dead_code)] // Query IPC exposes this typed failure in the hydration lane.
-pub(crate) enum SourceBackedResolverAccessError {
-    #[error("daemon has no resolver retained for source-backed generation {requested_generation}")]
-    Missing { requested_generation: String },
-    #[error(
-        "daemon resolver generation mismatch: requested {requested_generation}, retained {retained_generation}"
-    )]
-    GenerationMismatch {
-        requested_generation: String,
-        retained_generation: String,
-    },
 }
 
 impl SourceBackedRefreshCoordinator {
@@ -421,13 +146,62 @@ impl SourceBackedRefreshCoordinator {
     }
 
     pub(in crate::semantic) fn recover_published_resolver(&self, data_root: &Path) -> Result<()> {
-        let Some((generation_id, resolver)) = recover_capture_owned_resolver(data_root)? else {
-            return Ok(());
-        };
-        self.install_recovered_resolver(generation_id, resolver);
+        recovery::reconcile_persisted_refresh_job(data_root)?;
+        let retained_publication = recovery::persisted_verified_publication(data_root)?;
+        let current_catalog = load_explicit_source_catalog_authority(data_root).ok();
+        let recovered = retained_publication
+            .as_ref()
+            .map(|receipt| {
+                recover_capture_owned_resolver(
+                    data_root,
+                    &receipt.published_explicit_source_catalog,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let resolver_recovered = recovered.is_some();
+        if let Some(recovered) = recovered {
+            retain_daemon_cycle_verified_index(
+                &source_backed_index_root(data_root),
+                &recovered.verified_index,
+            );
+            let mut state = self.lock_state();
+            state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
+                generation_id: recovered.generation_id,
+                published_explicit_source_catalog: Some(
+                    recovered.published_explicit_source_catalog,
+                ),
+                source_manifest: Some(recovered.source_manifest),
+                resolver: recovered.resolver,
+                verified_index: Mutex::new(Some(recovered.verified_index)),
+            }));
+        }
+        self.recover_interrupted_request(data_root, retained_publication.as_ref())?;
+        let has_retained_generation = retained_generation_hint(data_root)?.is_some();
+        let catalog_matches = retained_publication
+            .as_ref()
+            .zip(current_catalog.as_ref())
+            .is_some_and(|(receipt, current)| {
+                &receipt.published_explicit_source_catalog == current
+            });
+        if has_retained_generation
+            && (!resolver_recovered || !catalog_matches)
+            && !self.has_pending_request()
+        {
+            self.enqueue_recovery_refresh(
+                data_root,
+                current_catalog.or_else(|| {
+                    retained_publication
+                        .as_ref()
+                        .map(|receipt| receipt.published_explicit_source_catalog.clone())
+                }),
+                retained_publication.as_ref(),
+            )?;
+        }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn install_recovered_resolver(
         &self,
         generation_id: String,
@@ -436,55 +210,125 @@ impl SourceBackedRefreshCoordinator {
         let mut state = self.lock_state();
         state.install_resolver(Arc::new(GenerationBoundSourceBackedResolver {
             generation_id,
+            published_explicit_source_catalog: None,
             source_manifest: None,
             resolver,
+            verified_index: Mutex::new(None),
         }));
     }
 
-    pub(in crate::semantic) fn retained_published_generation(
-        &self,
-    ) -> Option<Arc<GenerationBoundSourceBackedResolver>> {
-        let state = self.lock_state();
-        state
-            .current_published_generation
-            .as_deref()
-            .and_then(|generation_id| state.published_resolvers.get(generation_id))
-            .map(|retained| Arc::clone(&retained.resolver))
-    }
-
-    /// Returns the resolver only when it is bound to the caller's exact
-    /// lexical generation. Missing or stale daemon state queues the same
-    /// provider-wide refresh path and remains a typed failure.
-    #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
-    pub(crate) fn resolver_for_generation(
+    fn recover_interrupted_request(
         &self,
         data_root: &Path,
-        generation_id: &str,
-    ) -> std::result::Result<
-        Arc<GenerationBoundSourceBackedResolver>,
-        SourceBackedResolverAccessError,
-    > {
-        let result = {
-            let mut state = self.lock_state();
-            state.prune_retired_resolvers(StdInstant::now(), SOURCE_RESOLVER_RETIREMENT_GRACE);
-            if let Some(retained) = state.published_resolvers.get(generation_id) {
-                return Ok(Arc::clone(&retained.resolver));
-            }
-            match state.current_published_generation.as_ref() {
-                Some(retained_generation) => SourceBackedResolverAccessError::GenerationMismatch {
-                    requested_generation: generation_id.to_owned(),
-                    retained_generation: retained_generation.clone(),
-                },
-                None => SourceBackedResolverAccessError::Missing {
-                    requested_generation: generation_id.to_owned(),
-                },
-            }
+        retained_publication: Option<&SourceBackedRefreshReceipt>,
+    ) -> Result<()> {
+        let path = daemon_source_backed_refresh_job_path(data_root);
+        let Some(job) = read_daemon_job_status(&path) else {
+            return Ok(());
         };
-        self.enqueue_with_metadata(
-            Some(generation_id.to_owned()),
-            source_refresh_runtime_metadata(data_root),
-        );
-        Err(result)
+        if !recovery::persisted_job_needs_replay(&job) {
+            return Ok(());
+        }
+        let requested_catalog = job
+            .get("requested_explicit_source_catalog")
+            .map(ExplicitSourceCatalogAuthority::from_json)
+            .transpose()
+            .context("restore interrupted source refresh catalog authority")?;
+        let observed_generation = self.observed_published_generation(data_root)?;
+        let fallback = if requested_catalog.is_some() {
+            source_catalog_refresh_runtime_metadata(data_root)
+        } else {
+            source_refresh_runtime_metadata(data_root)
+        };
+        let metadata = SourceRefreshRuntimeMetadata {
+            daemon_mode: job
+                .get("daemon_mode")
+                .and_then(Value::as_str)
+                .and_then(DaemonMode::parse)
+                .unwrap_or(fallback.daemon_mode),
+            trigger: match job.get("trigger").and_then(Value::as_str) {
+                Some("import") => "import",
+                Some("periodic") => "periodic",
+                _ => "search",
+            },
+            trigger_provenance: match job.get("trigger_provenance").and_then(Value::as_str) {
+                Some("explicit_source_catalog") => "explicit_source_catalog",
+                Some("daemon_scheduler") => "daemon_scheduler",
+                Some("autostart") => "autostart",
+                _ => "manual",
+            },
+        };
+        let queued = self.enqueue_with_catalog_metadata(
+            observed_generation,
+            metadata,
+            requested_catalog,
+            false,
+        )?;
+        let request_id = queued
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("recovered source refresh has no request ID"))?;
+        self.retain_publication_for_attempt(request_id, retained_publication)?;
+        let queued_job = self
+            .job_status(request_id)
+            .ok_or_else(|| anyhow!("recovered source refresh has no job state"))?;
+        write_daemon_job_status(&path, &queued_job)
+    }
+
+    fn enqueue_recovery_refresh(
+        &self,
+        data_root: &Path,
+        requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+        retained_publication: Option<&SourceBackedRefreshReceipt>,
+    ) -> Result<()> {
+        let observed_generation = self.observed_published_generation(data_root)?;
+        let metadata = if requested_catalog.is_some() {
+            source_catalog_refresh_runtime_metadata(data_root)
+        } else {
+            source_refresh_runtime_metadata(data_root)
+        };
+        let queued = self.enqueue_with_catalog_metadata(
+            observed_generation,
+            metadata,
+            requested_catalog,
+            false,
+        )?;
+        let request_id = queued
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("recovery source refresh has no request ID"))?;
+        self.retain_publication_for_attempt(request_id, retained_publication)?;
+        let queued_job = self
+            .job_status(request_id)
+            .ok_or_else(|| anyhow!("recovery source refresh has no job state"))?;
+        write_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(data_root),
+            &queued_job,
+        )
+    }
+
+    fn retain_publication_for_attempt(
+        &self,
+        request_id: &str,
+        retained_publication: Option<&SourceBackedRefreshReceipt>,
+    ) -> Result<()> {
+        let Some(retained_publication) = retained_publication else {
+            return Ok(());
+        };
+        let mut state = self.lock_state();
+        let attempt = find_attempt_mut(&mut state, request_id)
+            .ok_or_else(|| anyhow!("recovered source refresh has no attempt state"))?;
+        if attempt
+            .retained_publication
+            .as_ref()
+            .is_some_and(|existing| existing != retained_publication)
+        {
+            bail!("recovered source refresh changed its retained publication authority");
+        }
+        attempt
+            .retained_publication
+            .get_or_insert_with(|| retained_publication.clone());
+        Ok(())
     }
 
     /// Preserves the capture resolver's typed failure while arranging for
@@ -570,22 +414,137 @@ impl SourceBackedRefreshCoordinator {
 
     pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
         let executor = Arc::clone(&self.executor);
-        self.run_next_with(
+        let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
+        let publication_probe_attempted = Cell::new(false);
+        let request_id_cell = RefCell::new(None::<String>);
+        let run = self.run_next_with(
             |request_id, coordinator| {
-                let requested_catalog = coordinator.requested_explicit_source_catalog(request_id);
+                request_id_cell.replace(Some(request_id.to_owned()));
+                let requested_catalog =
+                    coordinator.freeze_requested_explicit_source_catalog(data_root, request_id)?;
+                let running_job = coordinator
+                    .job_status(request_id)
+                    .ok_or_else(|| anyhow!("running source refresh has no job state"))?;
+                write_daemon_job_status(
+                    &daemon_source_backed_refresh_job_path(data_root),
+                    &running_job,
+                )?;
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
                     data_root,
                     request_id,
                     coordinator,
-                    requested_catalog.as_ref(),
+                    Some(&requested_catalog),
                 )?;
+                let probe_started = StdInstant::now();
+                publication_probe_attempted.set(true);
+                let pin = Arc::new(
+                    open_verified_index(&source_backed_index_root(data_root))
+                        .context("verify source-backed generation after publication")?,
+                );
+                let verification = verify_source_backed_publication(&publication, &pin);
+                coordinator.set_publication_probe_timing(
+                    request_id,
+                    nonzero_duration_micros(probe_started.elapsed()),
+                );
+                verified_index.replace(Some(pin));
+                verification?;
                 Ok(publication)
             },
-            || published_generation_id(data_root),
-            |generation_id| complete_verified_source_epoch(data_root, generation_id),
+            || {
+                if let Some(verified) = verified_index.borrow().as_ref() {
+                    return Ok(Some(verified.generation_id().to_owned()));
+                }
+                if publication_probe_attempted.get() {
+                    bail!(
+                        "post-publication verified-index probe already failed in this refresh cycle"
+                    );
+                }
+                let verified = open_published_generation(data_root)?.map(Arc::new);
+                let generation_id = verified
+                    .as_ref()
+                    .map(|index| index.generation_id().to_owned());
+                verified_index.replace(verified);
+                Ok(generation_id)
+            },
+            |generation_id| {
+                let retirement_started = StdInstant::now();
+                let result = request_id_cell
+                    .borrow()
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("published source refresh has no request ID"))
+                    .and_then(|request_id| {
+                        self.job_status(request_id)
+                            .ok_or_else(|| anyhow!("published source refresh has no job state"))
+                    })
+                    .and_then(|job| {
+                        write_daemon_job_status(
+                            &daemon_source_backed_refresh_job_path(data_root),
+                            &job,
+                        )
+                    })
+                    .and_then(|()| {
+                        verified_index
+                    .borrow()
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow!("verified source generation {generation_id} has no publication pin")
+                    })
+                    .and_then(|verified| {
+                        complete_verified_source_epoch_with(
+                            data_root,
+                            generation_id,
+                            verified.as_ref(),
+                        )
+                    })
+                    });
+                if let Some(request_id) = request_id_cell.borrow().as_deref() {
+                    self.set_retirement_timing(
+                        request_id,
+                        nonzero_duration_micros(retirement_started.elapsed()),
+                    );
+                }
+                result
+            },
             |_| Ok(()),
-        )
+        )?;
+        if !run.failed {
+            let pin = verified_index.into_inner();
+            let generation_id = run.job.get("published_generation").and_then(Value::as_str);
+            let binding = match (pin, generation_id) {
+                (Some(pin), Some(generation_id)) => {
+                    self.bind_verified_index(data_root, generation_id, pin)
+                }
+                _ => Err(anyhow!(
+                    "completed source publication has no exact verified generation pin"
+                )),
+            };
+            if let Err(error) = binding {
+                let mut job = run.job;
+                job["post_publication_error"] =
+                    Value::String(format!("bind exact verified publication pin: {error:#}"));
+                return Some(SourceBackedRefreshRun {
+                    job,
+                    did_work: run.did_work,
+                    failed: false,
+                });
+            }
+        }
+        Some(run)
+    }
+
+    fn set_retirement_timing(&self, request_id: &str, duration_us: u64) {
+        let mut state = self.lock_state();
+        if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
+            attempt.retirement_us = duration_us;
+        }
+    }
+
+    fn set_publication_probe_timing(&self, request_id: &str, duration_us: u64) {
+        let mut state = self.lock_state();
+        if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
+            attempt.publication_probe_us = duration_us;
+        }
     }
 
     pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
@@ -691,7 +650,10 @@ impl SourceBackedRefreshCoordinator {
             certified_source_count: None,
             certified_source_bytes: None,
             receipt: None,
+            retained_publication: None,
             timings: None,
+            publication_probe_us: 0,
+            retirement_us: 0,
             daemon_mode: metadata.daemon_mode,
             trigger: metadata.trigger,
             trigger_provenance: metadata.trigger_provenance,
@@ -728,6 +690,25 @@ impl SourceBackedRefreshCoordinator {
         let state = self.lock_state();
         find_attempt(&state, request_id)
             .and_then(|attempt| attempt.requested_explicit_source_catalog.clone())
+    }
+
+    fn freeze_requested_explicit_source_catalog(
+        &self,
+        data_root: &Path,
+        request_id: &str,
+    ) -> Result<ExplicitSourceCatalogAuthority> {
+        if let Some(catalog) = self.requested_explicit_source_catalog(request_id) {
+            return Ok(catalog);
+        }
+        let catalog = load_explicit_source_catalog_authority(data_root)?;
+        let mut state = self.lock_state();
+        let attempt = find_attempt_mut(&mut state, request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
+        if let Some(existing) = attempt.requested_explicit_source_catalog.as_ref() {
+            return Ok(existing.clone());
+        }
+        attempt.requested_explicit_source_catalog = Some(catalog.clone());
+        Ok(catalog)
     }
 
     fn job_status(&self, request_id: &str) -> Option<Value> {
@@ -795,11 +776,18 @@ impl SourceBackedRefreshCoordinator {
                     .source_manifest
                     .as_ref()
                     .is_none_or(|manifest| manifest.core_generation_id == observed);
+                let catalog_matches_request = requested_catalog.as_ref().is_none_or(|requested| {
+                    requested == &publication.published_explicit_source_catalog
+                });
                 let production_handoff_complete =
                     publication.resolver.is_some() && publication.source_manifest.is_some();
                 let verified = if !manifest_generation_matches {
                     Err(format!(
                         "source-backed refresh published generation {observed} with a source manifest for another generation"
+                    ))
+                } else if !catalog_matches_request {
+                    Err(format!(
+                        "source-backed refresh published generation {observed} with an explicit source catalog authority different from the requested authority"
                     ))
                 } else if production_handoff_complete || cfg!(test) {
                     Ok((observed.clone(), publication))
@@ -861,16 +849,27 @@ impl SourceBackedRefreshCoordinator {
                         previous_generation: previous_generation.clone(),
                         published_generation: observed.clone(),
                         generation_changed,
+                        published_explicit_source_catalog: publication
+                            .published_explicit_source_catalog
+                            .clone(),
                         current: publication.current,
                     });
+                    attempt.retained_publication = None;
                     attempt.timings = Some(publication.timings);
                     let source_manifest = publication.source_manifest;
-                    attempt.published_explicit_source_catalog = requested_catalog.clone();
+                    let published_explicit_source_catalog =
+                        publication.published_explicit_source_catalog.clone();
+                    attempt.published_explicit_source_catalog =
+                        Some(publication.published_explicit_source_catalog);
                     installed_resolver = publication.resolver.map(|resolver| {
                         Arc::new(GenerationBoundSourceBackedResolver {
                             generation_id: observed.clone(),
+                            published_explicit_source_catalog: Some(
+                                published_explicit_source_catalog,
+                            ),
                             source_manifest,
                             resolver,
+                            verified_index: Mutex::new(None),
                         })
                     });
                 }
@@ -921,19 +920,6 @@ impl SourceBackedRefreshCoordinator {
             did_work,
             failed: failed_run,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn prune_retired_resolvers_for_test(&self) {
-        self.lock_state()
-            .prune_retired_resolvers(StdInstant::now(), StdDuration::ZERO);
-    }
-
-    #[cfg(test)]
-    pub(super) fn has_retained_resolver_for_test(&self, generation_id: &str) -> bool {
-        self.lock_state()
-            .published_resolvers
-            .contains_key(generation_id)
     }
 
     pub(super) fn lock_state(

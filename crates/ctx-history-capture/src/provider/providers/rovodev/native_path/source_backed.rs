@@ -9,6 +9,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 #[cfg(test)]
@@ -79,7 +80,7 @@ const SOURCE_BACKED_MAX_RECORD_BYTES: usize = 6 * 1024 * 1024;
 const SOURCE_BACKED_MAX_JSON_DEPTH: usize = 128;
 const SOURCE_BACKED_MAX_COLLECTION_ELEMENTS: usize = 65_536;
 const SOURCE_BACKED_MAX_FAILURE_BYTES: usize = 4 * 1024;
-const LEAF_FINGERPRINT_DOMAIN: &[u8] = b"ctx.rovodev.document-leaf.v1\0";
+const LEAF_FINGERPRINT_DOMAIN: &[u8] = b"ctx.rovodev.document-leaf.v2\0";
 const TREE_FINGERPRINT_DOMAIN: &[u8] = b"ctx.rovodev.document-tree.v1\0";
 
 #[derive(Debug, Error)]
@@ -98,6 +99,8 @@ pub(crate) enum RovoDevSourceBackedError {
     DuplicateSession(String),
     #[error("Rovo Dev session lineage contains a cycle at provider thread {0:?}")]
     LineageCycle(String),
+    #[error("Rovo Dev lineage cache is unavailable")]
+    LineageCacheUnavailable,
     #[error("Rovo Dev source-backed scan counts do not reconcile")]
     CountMismatch,
     #[error("Rovo Dev source-backed event coordinate exceeds its supported range")]
@@ -107,6 +110,39 @@ pub(crate) enum RovoDevSourceBackedError {
 }
 
 pub(crate) type RovoDevSourceBackedResult<T> = Result<T, RovoDevSourceBackedError>;
+
+#[derive(Debug, Clone, Default)]
+struct RovoDevWorkCounters {
+    #[cfg(test)]
+    body_parses: Option<Arc<AtomicUsize>>,
+    #[cfg(test)]
+    ancestor_header_probes: Option<Arc<AtomicUsize>>,
+    #[cfg(test)]
+    lineage_visits: Option<Arc<AtomicUsize>>,
+}
+
+impl RovoDevWorkCounters {
+    fn record_body_parse(&self) {
+        #[cfg(test)]
+        if let Some(count) = self.body_parses.as_ref() {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_ancestor_header_probe(&self) {
+        #[cfg(test)]
+        if let Some(count) = self.ancestor_header_probes.as_ref() {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_lineage_visit(&self) {
+        #[cfg(test)]
+        if let Some(count) = self.lineage_visits.as_ref() {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 
 #[derive(Debug)]
 struct FileSnapshot {
@@ -122,7 +158,9 @@ impl FileSnapshot {
         retain_bytes: bool,
     ) -> RovoDevSourceBackedResult<Self> {
         if retain_bytes {
-            let bytes = source.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
+            let read_len =
+                usize::try_from(byte_len).map_err(|_| RovoDevSourceBackedError::CountMismatch)?;
+            let bytes = source.read_exact_range(0, read_len, MAX_PROVIDER_JSONL_LINE_BYTES)?;
             if u64::try_from(bytes.len()).ok() != Some(byte_len) {
                 return Err(CaptureError::SourceChangedDuringCapture.into());
             }
@@ -335,47 +373,28 @@ struct RovoDevSnapshot {
     source_sha256: [u8; 32],
     certified_bytes: u64,
     document: std::result::Result<PreparedDocument, String>,
-    context_file: OpenedProviderSourceFile,
-    metadata_file: Option<OpenedProviderSourceFile>,
 }
 
 impl RovoDevSnapshot {
     fn read(
-        source: &RovoDevSessionSource,
+        source: &RovoDevOpenedSource,
         context: &ProviderAdapterContext,
-        authority: &ProviderSourceRoot,
-        session_relative_path: &Path,
-        context_relative_path: &Path,
-        expected_metadata: Option<&Path>,
+        counters: &RovoDevWorkCounters,
     ) -> RovoDevSourceBackedResult<Self> {
-        let context_handle = authority.open_file(context_relative_path)?;
-        let metadata_relative_path = session_relative_path.join("metadata.json");
-        let metadata_handle = match authority.open_file(&metadata_relative_path) {
-            Ok(file) => Some(file),
-            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        if metadata_handle.is_some() != expected_metadata.is_some() {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        let frozen = RovoDevSessionObservation::from_admitted(
-            authority.named_path().join(context_relative_path),
-            source.context_path.clone(),
-            context_handle.metadata(),
-            metadata_handle.as_ref().map(|metadata| {
-                (
-                    source.session_dir.join("metadata.json"),
-                    metadata.metadata(),
-                )
-            }),
+        counters.record_body_parse();
+        let files = source.open_files()?;
+        let context_oversized =
+            source.opening.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64;
+        let context_file = FileSnapshot::read(
+            &files.context,
+            source.opening.context_length(),
+            !context_oversized,
         )?;
-        let context_oversized = frozen.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64;
-        let context_file =
-            FileSnapshot::read(&context_handle, frozen.context_length(), !context_oversized)?;
-        let metadata_oversized = frozen
+        let metadata_oversized = source
+            .opening
             .metadata_length()
             .is_some_and(|length| length > MAX_PROVIDER_JSONL_LINE_BYTES as u64);
-        let metadata_file = match (metadata_handle.as_ref(), frozen.metadata_length()) {
+        let metadata_file = match (files.metadata.as_ref(), source.opening.metadata_length()) {
             (Some(file), Some(length)) => {
                 Some(FileSnapshot::read(file, length, !metadata_oversized)?)
             }
@@ -395,7 +414,7 @@ impl RovoDevSnapshot {
                 )))
         } else {
             prepare_document(
-                source,
+                &source.source,
                 context,
                 context_file.bytes.as_deref().unwrap_or_default(),
                 metadata_file.as_ref().and_then(|file| file.bytes.as_deref()),
@@ -406,23 +425,14 @@ impl RovoDevSnapshot {
                 }),
             )
         };
+        files.revalidate()?;
         Ok(Self {
-            frozen,
+            frozen: source.opening.clone(),
             context_sha256: context_file.sha256,
             source_sha256,
             certified_bytes,
             document,
-            context_file: context_handle,
-            metadata_file: metadata_handle,
         })
-    }
-
-    fn revalidate_files(&self) -> RovoDevSourceBackedResult<()> {
-        self.context_file.revalidate()?;
-        if let Some(metadata) = &self.metadata_file {
-            metadata.revalidate()?;
-        }
-        Ok(())
     }
 
     fn observation(&self, source_key: SourceKey) -> RovoDevSourceBackedResult<SourceObservation> {
@@ -434,19 +444,6 @@ impl RovoDevSnapshot {
             SOURCE_REVISION_KIND,
             revision,
         )?)
-    }
-
-    fn proof(&self) -> RovoDevDocumentProof {
-        RovoDevDocumentProof {
-            frozen: self.frozen.clone(),
-            context_sha256: self.context_sha256,
-            source_sha256: self.source_sha256,
-            certified_bytes: self.certified_bytes,
-        }
-    }
-
-    fn matches(&self, proof: &RovoDevDocumentProof) -> bool {
-        self.proof() == *proof
     }
 }
 
@@ -468,49 +465,155 @@ fn compound_source_digest(context: &FileSnapshot, metadata: Option<&FileSnapshot
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RovoDevDocumentProof {
-    frozen: RovoDevSessionObservation,
-    context_sha256: [u8; 32],
-    source_sha256: [u8; 32],
+    opening: RovoDevSessionObservation,
     certified_bytes: u64,
+}
+
+#[derive(Debug)]
+struct RovoDevOpenedSource {
+    source: RovoDevSessionSource,
+    authority: ProviderSourceRoot,
+    context_relative_path: PathBuf,
+    metadata_candidate_relative_path: PathBuf,
+    metadata_relative_path: Option<PathBuf>,
+    opening: RovoDevSessionObservation,
+}
+
+#[derive(Debug)]
+struct RovoDevOpenedFiles {
+    context: OpenedProviderSourceFile,
+    metadata: Option<OpenedProviderSourceFile>,
+}
+
+impl RovoDevOpenedSource {
+    fn open_files(&self) -> RovoDevSourceBackedResult<RovoDevOpenedFiles> {
+        let context = self.authority.open_file(&self.context_relative_path)?;
+        let metadata = match self
+            .authority
+            .open_file(&self.metadata_candidate_relative_path)
+        {
+            Ok(file) => Some(file),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.is_some() != self.metadata_relative_path.is_some() {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        let current = RovoDevSessionObservation::from_opened(
+            self.authority
+                .named_path()
+                .join(&self.context_relative_path),
+            self.source.context_path.clone(),
+            &context,
+            metadata
+                .as_ref()
+                .map(|metadata| (self.source.session_dir.join("metadata.json"), metadata)),
+        );
+        if current != self.opening {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        Ok(RovoDevOpenedFiles { context, metadata })
+    }
+
+    fn revalidate_current(&self) -> RovoDevSourceBackedResult<()> {
+        self.open_files()?.revalidate()
+    }
+
+    fn proof(&self) -> RovoDevSourceBackedResult<RovoDevDocumentProof> {
+        let certified_bytes = self
+            .opening
+            .metadata_length()
+            .map_or(Some(self.opening.context_length()), |metadata| {
+                self.opening.context_length().checked_add(metadata)
+            })
+            .ok_or(RovoDevSourceBackedError::CountMismatch)?;
+        Ok(RovoDevDocumentProof {
+            opening: self.opening.clone(),
+            certified_bytes,
+        })
+    }
+}
+
+impl RovoDevOpenedFiles {
+    fn revalidate(&self) -> RovoDevSourceBackedResult<()> {
+        self.context.revalidate_leaf()?;
+        if let Some(metadata) = &self.metadata {
+            metadata.revalidate_leaf()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RovoDevDocumentLeaf {
-    source: RovoDevSessionSource,
-    session_relative_path: PathBuf,
-    context_relative_path: PathBuf,
-    metadata_relative_path: Option<PathBuf>,
+    source_index: usize,
+    proof: RovoDevDocumentProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RovoDevDocumentHeader {
     source_key: SourceKey,
     provider_session_id: String,
     parent_provider_session_id: Option<String>,
     session_id: StableEntityId,
+}
+
+#[derive(Debug)]
+struct RovoDevBoundDocument {
+    source_key: SourceKey,
+    provider_session_id: String,
+    session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
     unique_message_ids: HashSet<String>,
-    proof: RovoDevDocumentProof,
 }
 
-impl RovoDevDocumentLeaf {
-    fn provider_session_id(&self) -> &str {
-        &self.provider_session_id
+#[derive(Debug)]
+struct RovoDevLineageCache {
+    headers: Vec<Option<RovoDevDocumentHeader>>,
+    source_owners: HashMap<[u8; 32], usize>,
+    directory_owners: HashMap<String, Vec<usize>>,
+    roots: HashMap<String, StableEntityId>,
+    next_unprobed: usize,
+}
+
+impl RovoDevLineageCache {
+    fn new(sources: &[RovoDevOpenedSource]) -> Self {
+        let mut directory_owners = HashMap::<String, Vec<usize>>::new();
+        for (index, source) in sources.iter().enumerate() {
+            directory_owners
+                .entry(source.source.provider_session_id.clone())
+                .or_default()
+                .push(index);
+        }
+        Self {
+            headers: vec![None; sources.len()],
+            source_owners: HashMap::with_capacity(sources.len()),
+            directory_owners,
+            roots: HashMap::with_capacity(sources.len()),
+            next_unprobed: 0,
+        }
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct RovoDevTreeAuthority {
     authority: ProviderSourceRoot,
+    sources: Vec<RovoDevOpenedSource>,
+    lineage: Mutex<RovoDevLineageCache>,
+    counters: RovoDevWorkCounters,
 }
 
 type RovoDevDocumentTree = CompleteDocumentTree<RovoDevDocumentLeaf, RovoDevTreeAuthority>;
 
 enum RovoDevSourceBackedDisposition {
-    Complete(RovoDevDocumentTree),
+    Complete(Box<RovoDevDocumentTree>),
     Unavailable,
 }
 
 fn discover_rovodev_source_backed(
     sessions_root: &Path,
-    context: ProviderAdapterContext,
+    counters: RovoDevWorkCounters,
 ) -> RovoDevSourceBackedResult<RovoDevSourceBackedDisposition> {
     match fs::symlink_metadata(sessions_root) {
         Err(error)
@@ -526,16 +629,17 @@ fn discover_rovodev_source_backed(
     }
     let canonical_root = fs::canonicalize(sessions_root)?;
     let authority = ProviderSourceRoot::open(&canonical_root)?;
-    bind_document_tree(authority, &context).map(RovoDevSourceBackedDisposition::Complete)
+    bind_document_tree(authority, counters)
+        .map(Box::new)
+        .map(RovoDevSourceBackedDisposition::Complete)
 }
 
 fn bind_document_tree(
     authority: ProviderSourceRoot,
-    context: &ProviderAdapterContext,
+    counters: RovoDevWorkCounters,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentTree> {
     let discovery = authoritative_discovery(authority.named_path())?;
-    let mut source_ids = HashSet::with_capacity(discovery.sources().len());
-    let mut leaves = Vec::with_capacity(discovery.sources().len());
+    let mut sources = Vec::with_capacity(discovery.sources().len());
     for source in discovery.sources() {
         let session_relative_path = relative_to_rovodev_authority(&authority, &source.session_dir)?;
         let context_relative_path =
@@ -545,60 +649,55 @@ fn bind_document_tree(
             .as_deref()
             .map(|path| relative_to_rovodev_authority(&authority, path))
             .transpose()?;
-        let snapshot = RovoDevSnapshot::read(
-            source,
-            context,
-            &authority,
-            &session_relative_path,
-            &context_relative_path,
-            metadata_relative_path.as_deref(),
-        )?;
-        let (provider_session_id, parent_provider_session_id) = snapshot
-            .document
-            .as_ref()
-            .map(|document| {
-                (
-                    document.provider_session_id.clone(),
-                    document.parent_provider_session_id.clone(),
-                )
-            })
-            .unwrap_or_else(|_| (source.provider_session_id.clone(), None));
-        let source_key = rovodev_source_key(&provider_session_id)?;
-        if !source_ids.insert(source_key.identity().digest()) {
-            return Err(RovoDevSourceBackedError::DuplicateSession(
-                provider_session_id,
-            ));
+        let context_file = authority.open_file(&context_relative_path)?;
+        let discovered_metadata_relative_path = session_relative_path.join("metadata.json");
+        let metadata_file = match authority.open_file(&discovered_metadata_relative_path) {
+            Ok(file) => Some(file),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata_file.is_some() != metadata_relative_path.is_some() {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
         }
-        let session_id = rovodev_session_identity(&source_key, &provider_session_id)?;
-        let unique_message_ids = unique_message_ids(&snapshot);
-        let proof = snapshot.proof();
-        snapshot.revalidate_files()?;
-        leaves.push(RovoDevDocumentLeaf {
+        let opening = RovoDevSessionObservation::from_opened(
+            authority.named_path().join(&context_relative_path),
+            source.context_path.clone(),
+            &context_file,
+            metadata_file
+                .as_ref()
+                .map(|metadata| (source.session_dir.join("metadata.json"), metadata)),
+        );
+        let opened = RovoDevOpenedSource {
             source: source.clone(),
-            session_relative_path,
+            authority: authority.clone(),
             context_relative_path,
+            metadata_candidate_relative_path: discovered_metadata_relative_path,
             metadata_relative_path,
-            source_key,
-            provider_session_id,
-            parent_provider_session_id,
-            session_id,
-            parent_session_id: None,
-            root_session_id: session_id,
-            unique_message_ids,
-            proof,
-        });
+            opening,
+        };
+        context_file.revalidate_leaf()?;
+        if let Some(metadata) = &metadata_file {
+            metadata.revalidate_leaf()?;
+        }
+        sources.push(opened);
     }
     authority.revalidate()?;
-    bind_session_lineage(&mut leaves)?;
-    let observed = leaves
-        .into_iter()
-        .map(observed_rovodev_leaf)
-        .collect::<Vec<_>>();
+    let observed = sources
+        .iter()
+        .enumerate()
+        .map(|(source_index, source)| observed_rovodev_leaf(source_index, source))
+        .collect::<RovoDevSourceBackedResult<Vec<_>>>()?;
     let tree_fingerprint = rovodev_tree_fingerprint(&authority, &observed);
+    let lineage = RovoDevLineageCache::new(&sources);
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
         observed,
-        RovoDevTreeAuthority { authority },
+        RovoDevTreeAuthority {
+            authority,
+            sources,
+            lineage: Mutex::new(lineage),
+            counters,
+        },
     ))
 }
 
@@ -668,64 +767,30 @@ fn provider_thread_session_identity(
     rovodev_session_identity(&source_key, provider_session_id)
 }
 
-fn bind_session_lineage(leaves: &mut [RovoDevDocumentLeaf]) -> RovoDevSourceBackedResult<()> {
-    let parents = leaves
-        .iter()
-        .map(|leaf| {
-            (
-                leaf.provider_session_id().to_owned(),
-                leaf.parent_provider_session_id.clone(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let mut bound = Vec::with_capacity(leaves.len());
-    for leaf in leaves.iter() {
-        let provider_session_id = leaf.provider_session_id();
-        let parent_provider_session_id =
-            parents.get(provider_session_id).and_then(Option::as_deref);
-        let parent_session_id = parent_provider_session_id
-            .map(provider_thread_session_identity)
-            .transpose()?;
-        let mut root_session_id = leaf.session_id;
-        let mut cursor = parent_provider_session_id;
-        let mut visited = HashSet::new();
-        visited.insert(provider_session_id.to_owned());
-        while let Some(ancestor_provider_session_id) = cursor {
-            if !visited.insert(ancestor_provider_session_id.to_owned()) {
-                return Err(RovoDevSourceBackedError::LineageCycle(
-                    ancestor_provider_session_id.to_owned(),
-                ));
-            }
-            root_session_id = provider_thread_session_identity(ancestor_provider_session_id)?;
-            cursor = parents
-                .get(ancestor_provider_session_id)
-                .and_then(Option::as_deref);
-        }
-        bound.push((parent_session_id, root_session_id));
-    }
-    for (leaf, (parent_session_id, root_session_id)) in leaves.iter_mut().zip(bound) {
-        leaf.parent_session_id = parent_session_id;
-        leaf.root_session_id = root_session_id;
-    }
-    Ok(())
-}
-
-fn observed_rovodev_leaf(leaf: RovoDevDocumentLeaf) -> ObservedDocumentLeaf<RovoDevDocumentLeaf> {
+fn observed_rovodev_leaf(
+    source_index: usize,
+    source: &RovoDevOpenedSource,
+) -> RovoDevSourceBackedResult<ObservedDocumentLeaf<RovoDevDocumentLeaf>> {
+    let proof = source.proof()?;
     let mut digest = Sha256::new();
     digest.update(LEAF_FINGERPRINT_DOMAIN);
-    digest.update(leaf.source_key.exact_descriptor_digest());
-    hash_path(&mut digest, &leaf.context_relative_path);
-    match &leaf.metadata_relative_path {
+    hash_path(&mut digest, &source.context_relative_path);
+    match &source.metadata_relative_path {
         Some(path) => {
             digest.update([1]);
             hash_path(&mut digest, path);
         }
         None => digest.update([0]),
     }
-    digest.update(leaf.proof.context_sha256);
-    digest.update(leaf.proof.source_sha256);
-    digest.update(leaf.proof.certified_bytes.to_be_bytes());
-    ObservedDocumentLeaf::new(DocumentLeafFingerprint::new(digest.finalize().into()), leaf)
+    digest.update(proof.opening.revision_authority());
+    digest.update(proof.certified_bytes.to_be_bytes());
+    Ok(ObservedDocumentLeaf::new(
+        DocumentLeafFingerprint::new(digest.finalize().into()),
+        RovoDevDocumentLeaf {
+            source_index,
+            proof,
+        },
+    ))
 }
 
 fn rovodev_tree_fingerprint(
@@ -773,6 +838,7 @@ pub(crate) struct RovoDevDocumentTreeAdapter {
     hydration_scans: Option<Arc<AtomicUsize>>,
     #[cfg(test)]
     terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    counters: RovoDevWorkCounters,
 }
 
 impl RovoDevDocumentTreeAdapter {
@@ -786,6 +852,7 @@ impl RovoDevDocumentTreeAdapter {
             hydration_scans: None,
             #[cfg(test)]
             terminal_revalidation_hook: None,
+            counters: RovoDevWorkCounters::default(),
         }
     }
 
@@ -798,6 +865,24 @@ impl RovoDevDocumentTreeAdapter {
     #[cfg(test)]
     fn with_hydration_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
         self.hydration_scans = Some(scans);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_body_parses(mut self, count: Arc<AtomicUsize>) -> Self {
+        self.counters.body_parses = Some(count);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_ancestor_header_probes(mut self, count: Arc<AtomicUsize>) -> Self {
+        self.counters.ancestor_header_probes = Some(count);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_lineage_visits(mut self, count: Arc<AtomicUsize>) -> Self {
+        self.counters.lineage_visits = Some(count);
         self
     }
 
@@ -821,10 +906,10 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<RovoDevDocumentTree> {
-        match discover_rovodev_source_backed(&self.root, self.context.clone())
+        match discover_rovodev_source_backed(&self.root, self.counters.clone())
             .map_err(rovodev_route_error)?
         {
-            RovoDevSourceBackedDisposition::Complete(tree) => Ok(tree),
+            RovoDevSourceBackedDisposition::Complete(tree) => Ok(*tree),
             RovoDevSourceBackedDisposition::Unavailable => Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
                 "Rovo Dev selected sessions root is temporarily unavailable",
@@ -845,15 +930,15 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
         document::scan_rovodev_document(authority, leaf, &self.context, sink)
     }
 
-    fn revalidate_complete(
-        &self,
-        _tree: &RovoDevDocumentTree,
-    ) -> SourceBackedRouteResult<[u8; 32]> {
+    fn revalidate_complete(&self, tree: &RovoDevDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
         #[cfg(test)]
         if let Some(hook) = self.terminal_revalidation_hook.as_ref() {
             hook();
         }
-        match discover_rovodev_source_backed(&self.root, self.context.clone())
+        tree.authority
+            .revalidate_opening()
+            .map_err(rovodev_route_error)?;
+        match discover_rovodev_source_backed(&self.root, self.counters.clone())
             .map_err(rovodev_route_error)?
         {
             RovoDevSourceBackedDisposition::Complete(tree) => Ok(tree.tree_fingerprint),

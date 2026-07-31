@@ -3,7 +3,10 @@ use std::io;
 use anyhow::{bail, Result};
 use serde_json::Value;
 
-use super::{LocalProDataOutcome, ProManagePlan, UninstallDataDisposition, UNINSTALL_DATA_PROMPT};
+use super::{
+    LocalProDataOutcome, ProArgs, ProCommand, ProManageArgs, ProManagePlan,
+    UninstallDataDisposition, UNINSTALL_DATA_PROMPT,
+};
 use crate::{
     local_usage::UsageReport,
     pro::PRO_MONTHLY_PRICE_DISPLAY,
@@ -12,6 +15,14 @@ use crate::{
         OutcomeState, RenderContext, Ui,
     },
 };
+
+pub(super) fn human_retry_command(args: &ProArgs) -> &'static str {
+    match &args.command {
+        Some(ProCommand::Manage(ProManageArgs { no_open: true, .. })) => "ctx pro manage --no-open",
+        Some(ProCommand::Manage(_)) => "ctx pro manage",
+        None | Some(ProCommand::Setup(_)) | Some(ProCommand::Uninstall(_)) => "ctx pro",
+    }
+}
 
 pub(super) fn prompt_uninstall_data_disposition(
     input: &mut impl io::BufRead,

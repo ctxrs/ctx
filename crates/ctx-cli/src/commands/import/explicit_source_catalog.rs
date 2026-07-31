@@ -1,6 +1,8 @@
+mod codex_union;
 mod storage;
 
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -12,7 +14,7 @@ use ctx_history_capture::{
     register_forgecode_explicit_source_backed_route, register_goose_source_backed_route,
     register_hermes_explicit_source_backed_route,
     register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
-    register_nanoclaw_source_backed_route, register_warp_source_backed_route,
+    register_nanoclaw_source_backed_route_with_base_sources, register_warp_source_backed_route,
     source_backed_route_constructor, source_backed_route_inventory,
     validate_provider_source_roots_outside_data_root, DiscoveryReport, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
@@ -22,9 +24,9 @@ use ctx_history_capture::{
     SourceBackedSelectorAuthority,
 };
 use ctx_history_core::{
-    platform_security::establish_private_data_root, CaptureProvider, CertifiedSourceDeletion,
-    CertifiedSourceInventory, HydrationFailure, HydrationFailureKind, SourceAnchor,
-    SourceInventoryObservation, SourceKey, TypedKey,
+    platform_security::establish_private_data_root, CaptureProvider, CertifiedSource,
+    CertifiedSourceDeletion, CertifiedSourceInventory, HydrationFailure, HydrationFailureKind,
+    SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use fs2::FileExt;
@@ -93,6 +95,7 @@ impl ExplicitSourceCatalogAuthority {
         validate_explicit_source_catalog_snapshot_roots(data_root, &snapshot)
     }
 
+    #[cfg(test)]
     pub(crate) fn remove_shadowed_automatic_routes(
         &self,
         data_root: &Path,
@@ -103,14 +106,21 @@ impl ExplicitSourceCatalogAuthority {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn register_routes(
         &self,
         data_root: &Path,
-        index_root: &Path,
+        base_generation: Option<&VerifiedIndex>,
         build: &mut SourceBackedAutomaticRegistryBuild,
     ) -> Result<()> {
         let snapshot = load_catalog_for_authority(data_root, self)?;
-        register_explicit_source_catalog_snapshot_routes(data_root, index_root, build, &snapshot)
+        register_explicit_source_catalog_snapshot_routes(
+            data_root,
+            base_generation,
+            build,
+            &snapshot,
+            false,
+        )
     }
 
     pub(crate) fn from_json(value: &Value) -> Result<Self> {
@@ -363,56 +373,6 @@ pub(crate) fn upsert_explicit_source(
     })
 }
 
-#[allow(dead_code)] // The catalog management command consumes this narrow seam next.
-pub(crate) fn disable_explicit_source(
-    data_root: &Path,
-    provider: CaptureProvider,
-    source_format: &str,
-) -> Result<ExplicitSourceCatalogAuthority> {
-    let metadata = route_metadata(provider, source_format)?;
-    let catalog_root = catalog_root(data_root);
-    let lock = open_catalog_lock(&catalog_root, false)?;
-    FileExt::lock_exclusive(&lock).context("lock explicit source catalog for disable")?;
-    let mut snapshot = load_catalog_unlocked(&catalog_root)?;
-    let mut changed = false;
-    let mut found = false;
-    for entry in &mut snapshot.entries {
-        if entry.provider == provider.as_str()
-            && entry.certified_source_format()? == metadata.certified_source_format
-        {
-            if found {
-                bail!(
-                    "explicit source catalog contains duplicate {}/{} authority",
-                    provider.as_str(),
-                    metadata.certified_source_format
-                );
-            }
-            found = true;
-            if entry.enabled {
-                entry.enabled = false;
-                changed = true;
-            }
-        }
-    }
-    if !found {
-        bail!(
-            "explicit source catalog has no {}/{} entry to disable",
-            provider.as_str(),
-            metadata.certified_source_format
-        );
-    }
-    if changed {
-        let revision = snapshot
-            .authority
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("explicit source catalog revision overflow"))?;
-        snapshot.authority = authority_for(revision, &snapshot.entries)?;
-        write_catalog_snapshot(&catalog_root, &snapshot)?;
-    }
-    Ok(snapshot.authority)
-}
-
 pub(crate) fn load_explicit_source_catalog_authority(
     data_root: &Path,
 ) -> Result<ExplicitSourceCatalogAuthority> {
@@ -463,23 +423,34 @@ fn remove_automatic_routes_shadowed_by_snapshot(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn register_explicit_source_catalog_routes(
     data_root: &Path,
-    index_root: &Path,
+    base_generation: Option<&VerifiedIndex>,
     build: &mut SourceBackedAutomaticRegistryBuild,
 ) -> Result<ExplicitSourceCatalogAuthority> {
     let snapshot = load_catalog(data_root)?;
-    register_explicit_source_catalog_snapshot_routes(data_root, index_root, build, &snapshot)?;
+    register_explicit_source_catalog_snapshot_routes(
+        data_root,
+        base_generation,
+        build,
+        &snapshot,
+        false,
+    )?;
     Ok(snapshot.authority)
 }
 
 fn register_explicit_source_catalog_snapshot_routes(
     data_root: &Path,
-    index_root: &Path,
+    base_generation: Option<&VerifiedIndex>,
     build: &mut SourceBackedAutomaticRegistryBuild,
     snapshot: &ExplicitSourceCatalogSnapshot,
+    codex_session_roots_merged: bool,
 ) -> Result<()> {
     for entry in &snapshot.entries {
+        if codex_session_roots_merged && is_enabled_codex_session_tree(entry)? {
+            continue;
+        }
         let provider = entry.provider()?;
         let certified_format = entry.certified_source_format()?;
         if build.registry.routes().any(|route| {
@@ -498,31 +469,57 @@ fn register_explicit_source_catalog_snapshot_routes(
     }
 
     let needs_base_sources = snapshot.entries.iter().any(|entry| !entry.enabled);
-    let base_sources = if needs_base_sources && index_root.join("meta.json").is_file() {
-        let index = VerifiedIndex::open(index_root).with_context(|| {
-            format!(
-                "open source-backed generation for catalog reconciliation {}",
-                index_root.display()
-            )
-        })?;
-        index
+    let mut nanoclaw_lineages = HashSet::new();
+    for entry in snapshot.entries.iter().filter(|entry| entry.enabled) {
+        if entry.provider()? == CaptureProvider::NanoClaw {
+            nanoclaw_lineages.insert(entry.lineage()?);
+        }
+    }
+    let needs_nanoclaw_checkpoint = !nanoclaw_lineages.is_empty();
+    let (base_certificates, base_sources) = if let Some(index) =
+        base_generation.filter(|_| needs_base_sources || needs_nanoclaw_checkpoint)
+    {
+        let certificates = index
             .manifest()
             .sources
             .iter()
-            .map(|source| source.observation().source().clone())
-            .chain(
-                index
-                    .manifest()
-                    .removals
-                    .iter()
-                    .map(|removal| removal.source().clone()),
-            )
-            .collect::<Vec<_>>()
+            .filter(|certificate| {
+                let source = certificate.observation().source();
+                source.provider() == CaptureProvider::NanoClaw.as_str()
+                    && matches!(
+                        source.anchor(),
+                        SourceAnchor::CatalogLineage(lineage)
+                            if nanoclaw_lineages.contains(lineage)
+                    )
+            })
+            .cloned()
+            .collect();
+        let sources = if needs_base_sources {
+            index
+                .manifest()
+                .sources
+                .iter()
+                .map(|source| source.observation().source().clone())
+                .chain(
+                    index
+                        .manifest()
+                        .removals
+                        .iter()
+                        .map(|removal| removal.source().clone()),
+                )
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (certificates, sources)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     for entry in &snapshot.entries {
+        if codex_session_roots_merged && is_enabled_codex_session_tree(entry)? {
+            continue;
+        }
         if entry.enabled {
             let source = source_from_catalog_entry(entry, true)?;
             validate_explicit_source_root(data_root, &source)?;
@@ -531,6 +528,7 @@ fn register_explicit_source_catalog_snapshot_routes(
                 &mut build.registry,
                 source,
                 entry.lineage()?,
+                &base_certificates,
             )
             .with_context(|| {
                 format!(
@@ -552,11 +550,18 @@ fn register_explicit_source_catalog_snapshot_routes(
     Ok(())
 }
 
+fn is_enabled_codex_session_tree(entry: &CatalogEntry) -> Result<bool> {
+    Ok(entry.enabled
+        && entry.provider()? == CaptureProvider::Codex
+        && entry.source_format == "codex_session_jsonl_tree")
+}
+
 fn register_enabled_catalog_route(
     data_root: &Path,
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     lineage: [u8; 32],
+    base_certificates: &[CertifiedSource],
 ) -> Result<()> {
     let constructor = source_backed_route_constructor(source.provider).ok_or_else(|| {
         anyhow!(
@@ -570,7 +575,13 @@ fn register_enabled_catalog_route(
                 register_custom_history_source_backed_route(registry, source, lineage)?
             }
             CaptureProvider::NanoClaw => {
-                register_nanoclaw_source_backed_route(registry, source, data_root, lineage)?
+                register_nanoclaw_source_backed_route_with_base_sources(
+                    registry,
+                    source,
+                    data_root,
+                    lineage,
+                    base_certificates,
+                )?
             }
             provider => bail!(
                 "{} has an unknown catalog-lineage registration",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small real-product refresh/query/show sanity for the nightly test tier."""
+"""Real-product refresh, resource, and top-provider nightly sanity."""
 
 from __future__ import annotations
 
@@ -14,26 +14,50 @@ import tempfile
 import time
 import unittest
 
+from performance_family_fixtures import SourceFamilyTaxonomyTest
+from performance_sanity_support import (
+    COMMAND_TIMEOUT_SECONDS,
+    FORCE_SINGLE_CPU_ENV,
+    MAX_COMMAND_SECONDS,
+    MAX_PEAK_RSS_BYTES,
+    RefreshPerformanceSample,
+    RefreshSnapshot,
+    SourceWorkerCpu,
+    command_failure,
+    isolated_env,
+    published_file_state,
+    require_parallel_source_workers,
+    refresh_snapshot,
+    run_checked,
+    run_json,
+    run_json_timed,
+    run_refresh_measured,
+    start_daemon,
+    stop_daemon,
+    task_binary,
+)
+from performance_family_runtime_test import SourceFamilyColdRefreshPerformanceTest
+
 
 EVENT_COUNT = 64
 QUERY = "nightly performance sentinel"
 APPEND_QUERY = f"{QUERY} tiny append"
-COMMAND_TIMEOUT_SECONDS = 30.0
-MAX_COMMAND_SECONDS = 15.0
-MAX_PEAK_RSS_BYTES = 512 * 1024 * 1024
+TOP_PROVIDER_QUERY = "ctxtopproviderperfsentinel"
 SAMPLE_COUNT = 3
 
+# Normal CI keeps the small provider/scheduler contracts. Nightly and release
+# add enough independent leaves to require multiple source workers while
+# keeping the generated corpus bounded to tens of MiB.
+TOP_PROVIDER_FILE_COUNT = 64
+TOP_PROVIDER_EVENTS_PER_FILE = 64
+TOP_PROVIDER_TEXT_BYTES = 1_536
+TOP_PROVIDER_COUNT = 3
 
-def ctx_binary_argument() -> Path:
-    if len(sys.argv) < 2 or sys.argv[1].startswith("-"):
-        raise SystemExit("usage: performance_sanity_test.py PATH_TO_CTX")
-    path = Path(sys.argv.pop(1)).resolve()
-    if not path.is_file():
-        raise SystemExit(f"ctx binary does not exist: {path}")
-    return path
-
-
-CTX_BIN = ctx_binary_argument()
+# Process CPU divided by wall time has a physical single-CPU ceiling of 1.0.
+# This speed-independent margin rejects serialization while tolerating ordinary
+# scheduler/accounting noise over the complete multi-second cold refresh.
+MIN_COLD_CPU_PER_WALL = 1.10
+MIN_COLD_SPEEDUP_OVER_SERIAL = 1.20
 
 
 @dataclass(frozen=True)
@@ -44,26 +68,38 @@ class CommandSample:
 
 
 @dataclass(frozen=True)
-class PublishedFileState:
-    body: bytes
-    modified_ns: int
-    inode: int
+class RepresentativeCorpus:
+    codex_root: Path
+    claude_root: Path
+    cursor_root: Path
+    fixture_bytes: int
 
+    @property
+    def source_count(self) -> int:
+        return TOP_PROVIDER_COUNT * TOP_PROVIDER_FILE_COUNT
 
-@dataclass(frozen=True)
-class RefreshSnapshot:
-    request_id: str
-    previous_generation: str | None
-    generation_id: str
-    generation_changed: bool
-    indexed_documents: int
-    current: dict[str, object]
-    opstamp: int
-    segments: tuple[str, ...]
-    meta: PublishedFileState
-    manifest: PublishedFileState
-    manifest_names: tuple[str, ...]
-    index_bytes: int
+    @property
+    def retained_records(self) -> int:
+        return (
+            TOP_PROVIDER_COUNT
+            * TOP_PROVIDER_FILE_COUNT
+            * TOP_PROVIDER_EVENTS_PER_FILE
+        )
+
+    @property
+    def ignored_records(self) -> int:
+        return TOP_PROVIDER_FILE_COUNT
+
+    @property
+    def complete_records(self) -> int:
+        return self.retained_records + self.ignored_records
+
+    def root(self, provider: str) -> Path:
+        return {
+            "codex": self.codex_root,
+            "claude": self.claude_root,
+            "cursor": self.cursor_root,
+        }[provider]
 
 
 def json_line(value: object) -> str:
@@ -146,138 +182,166 @@ def append_codex_event(session_path: Path) -> int:
     return len(body)
 
 
-def isolated_env(root: Path, home: Path) -> dict[str, str]:
-    temp_root = root / "tmp"
-    temp_root.mkdir()
-    env = os.environ.copy()
-    env.update(
-        {
-            "HOME": str(home),
-            "CODEX_HOME": str(home / ".codex"),
-            "CTX_ANALYTICS_ENABLED": "false",
-            "CTX_DAEMON_MODE": "source-refresh-only",
-            "CTX_DATA_ROOT": str(root / "data"),
-            "CTX_UPGRADE_AUTO": "off",
-            "NO_COLOR": "1",
-            "TMPDIR": str(temp_root),
-            "XDG_CACHE_HOME": str(home / ".cache"),
-            "XDG_CONFIG_HOME": str(home / ".config"),
-            "XDG_DATA_HOME": str(home / ".local" / "share"),
-        }
-    )
-    env.pop("CODEX_THREAD_ID", None)
-    return env
+def representative_timestamp(event_index: int) -> str:
+    instant = dt.datetime(
+        2026, 7, 30, 12, tzinfo=dt.timezone.utc
+    ) + dt.timedelta(milliseconds=event_index)
+    return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def command_failure(
-    args: list[str], returncode: int, stdout: bytes, stderr: bytes
-) -> RuntimeError:
-    return RuntimeError(
-        f"{' '.join(args)} exited {returncode}\n"
-        f"stdout:\n{stdout.decode(errors='replace')}\n"
-        f"stderr:\n{stderr.decode(errors='replace')}"
-    )
-
-
-def run_checked(args: list[str], env: dict[str, str], cwd: Path) -> bytes:
-    completed = subprocess.run(
-        [str(CTX_BIN), *args],
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=COMMAND_TIMEOUT_SECONDS,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise command_failure(
-            args, completed.returncode, completed.stdout, completed.stderr
+def representative_text(label: str) -> str:
+    prefix = f"{label} "
+    if len(prefix) >= TOP_PROVIDER_TEXT_BYTES:
+        raise ValueError("representative fixture label exceeds its fixed body size")
+    filler = "0123456789abcdef"
+    text = prefix + (
+        filler
+        * (
+            (TOP_PROVIDER_TEXT_BYTES - len(prefix) + len(filler) - 1)
+            // len(filler)
         )
-    return completed.stdout
+    )[: TOP_PROVIDER_TEXT_BYTES - len(prefix)]
+    if len(text.encode("ascii")) != TOP_PROVIDER_TEXT_BYTES:
+        raise AssertionError("representative fixture text has the wrong byte count")
+    return text
 
 
-def run_json(args: list[str], env: dict[str, str], cwd: Path) -> dict[str, object]:
-    packet = json.loads(run_checked(args, env, cwd))
-    if not isinstance(packet, dict):
-        raise RuntimeError(f"{' '.join(args)} did not return a JSON object")
-    return packet
+def write_json_lines(path: Path, records: list[object]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as output:
+        for record in records:
+            output.write(json_line(record).encode("utf-8"))
+    return path.stat().st_size
 
 
-def run_json_timed(
-    args: list[str], env: dict[str, str], cwd: Path
-) -> tuple[dict[str, object], float]:
-    started = time.monotonic()
-    packet = run_json(args, env, cwd)
-    return packet, time.monotonic() - started
+def codex_session_id(file_index: int) -> str:
+    return f"019fb4a0-1111-7777-8888-{file_index:012x}"
 
 
-def published_file_state(path: Path) -> PublishedFileState:
-    metadata = path.stat()
-    return PublishedFileState(
-        body=path.read_bytes(),
-        modified_ns=metadata.st_mtime_ns,
-        inode=metadata.st_ino,
-    )
+def codex_message(file_index: int, event_index: int) -> object:
+    assistant = event_index % 2 == 1
+    return {
+        "timestamp": representative_timestamp(event_index + 1),
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant" if assistant else "user",
+            "content": [
+                {
+                    "type": "output_text" if assistant else "input_text",
+                    "text": representative_text(
+                        f"{TOP_PROVIDER_QUERY} provider=codex"
+                        f" file={file_index:03d} event={event_index:03d}"
+                    ),
+                }
+            ],
+            **({"phase": "commentary"} if assistant else {}),
+        },
+    }
 
 
-def directory_bytes(path: Path) -> int:
-    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+def claude_message(file_index: int, event_index: int) -> object:
+    role = "assistant" if event_index % 2 == 1 else "user"
+    return {
+        "sessionId": f"claude-perf-{file_index:03d}",
+        "timestamp": representative_timestamp(event_index + 1),
+        "cwd": "/workspace/claude",
+        "version": "test",
+        "type": role,
+        "message": {
+            "role": role,
+            "content": [
+                {
+                    "type": "text",
+                    "text": representative_text(
+                        f"{TOP_PROVIDER_QUERY} provider=claude"
+                        f" file={file_index:03d} event={event_index:03d}"
+                    ),
+                }
+            ],
+        },
+        "uuid": f"claude-perf-{file_index:03d}-{event_index:03d}",
+    }
 
 
-def refresh_snapshot(
-    search: dict[str, object], root: Path, env: dict[str, str]
-) -> RefreshSnapshot:
-    retrieval = search["retrieval"]
-    status = run_json(["status", "--format=json"], env, root)
-    daemon = status["daemon"]
-    job = daemon["jobs"]["source_backed_refresh"]
-    receipt = job["receipt"]
-    current = receipt["current"]
-    generation_id = retrieval["generation_id"]
-    indexed_documents = retrieval["indexed_documents"]
-    if (
-        daemon["mode"] != "source-refresh-only"
-        or job["owner"] != "daemon"
-        or job["status"] != "completed"
-        or job["request_state"] != "published"
-    ):
-        raise RuntimeError(f"refresh did not use the ready daemon product seam: {job!r}")
-    if (
-        job["published_generation"] != generation_id
-        or receipt["published_generation"] != generation_id
-        or status["lexical"]["generation_id"] != generation_id
-        or current["current_indexed_documents"] != indexed_documents
-    ):
-        raise RuntimeError(
-            "search, status, receipt, and lexical generation facts disagree: "
-            f"search={search!r}, status={status!r}"
+def cursor_message(file_index: int, event_index: int) -> object:
+    role = "assistant" if event_index % 2 == 1 else "user"
+    return {
+        "timestamp": representative_timestamp(event_index + 1),
+        "role": role,
+        "message": {
+            "role": role,
+            "content": [
+                {
+                    "type": "text",
+                    "text": representative_text(
+                        f"{TOP_PROVIDER_QUERY} provider=cursor"
+                        f" file={file_index:03d} event={event_index:03d}"
+                    ),
+                }
+            ],
+        },
+    }
+
+
+def write_representative_corpus(home: Path) -> RepresentativeCorpus:
+    codex_root = home / ".codex" / "sessions"
+    claude_root = home / ".claude" / "projects"
+    cursor_root = home / ".cursor" / "projects"
+    fixture_bytes = 0
+    for file_index in range(TOP_PROVIDER_FILE_COUNT):
+        session_id = codex_session_id(file_index)
+        codex_records = [
+            {
+                "timestamp": representative_timestamp(0),
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "timestamp": representative_timestamp(0),
+                    "cwd": "/workspace/codex",
+                    "originator": "codex-cli",
+                    "cli_version": "1.0.0-test",
+                    "source": "cli",
+                    "model_provider": "openai",
+                },
+            }
+        ]
+        codex_records.extend(
+            codex_message(file_index, event_index)
+            for event_index in range(TOP_PROVIDER_EVENTS_PER_FILE)
+        )
+        fixture_bytes += write_json_lines(
+            codex_root / "2026" / "07" / "30" / f"{session_id}.jsonl",
+            codex_records,
         )
 
-    index_root = Path(env["CTX_DATA_ROOT"]) / "search" / "lexical"
-    meta = published_file_state(index_root / "meta.json")
-    meta_packet = json.loads(meta.body)
-    segments = tuple(
-        sorted(segment["segment_id"] for segment in meta_packet["segments"])
-    )
-    manifest_directory = index_root / "ctx-generations"
-    manifest_path = manifest_directory / f"{generation_id}.json"
-    manifest = published_file_state(manifest_path)
-    manifest_names = tuple(
-        sorted(path.name for path in manifest_directory.iterdir() if path.is_file())
-    )
-    return RefreshSnapshot(
-        request_id=job["request_id"],
-        previous_generation=job.get("previous_generation"),
-        generation_id=generation_id,
-        generation_changed=job["generation_changed"],
-        indexed_documents=indexed_documents,
-        current=dict(current),
-        opstamp=meta_packet["opstamp"],
-        segments=segments,
-        meta=meta,
-        manifest=manifest,
-        manifest_names=manifest_names,
-        index_bytes=directory_bytes(index_root),
+        fixture_bytes += write_json_lines(
+            claude_root
+            / "-workspace"
+            / f"claude-perf-{file_index:03d}.jsonl",
+            [
+                claude_message(file_index, event_index)
+                for event_index in range(TOP_PROVIDER_EVENTS_PER_FILE)
+            ],
+        )
+
+        cursor_session = f"cursor-perf-{file_index:03d}"
+        fixture_bytes += write_json_lines(
+            cursor_root
+            / "workspace"
+            / "agent-transcripts"
+            / cursor_session
+            / f"{cursor_session}.jsonl",
+            [
+                cursor_message(file_index, event_index)
+                for event_index in range(TOP_PROVIDER_EVENTS_PER_FILE)
+            ],
+        )
+    return RepresentativeCorpus(
+        codex_root=codex_root,
+        claude_root=claude_root,
+        cursor_root=cursor_root,
+        fixture_bytes=fixture_bytes,
     )
 
 
@@ -305,7 +369,7 @@ def run_measured(
         tempfile.TemporaryFile(mode="w+b", dir=cwd)
     ) as stderr_file:
         process = subprocess.Popen(
-            [str(CTX_BIN), *args],
+            [task_binary(env), *args],
             cwd=cwd,
             env=env,
             stdout=stdout_file,
@@ -341,82 +405,47 @@ def run_measured(
     return CommandSample(packet, elapsed_seconds, peak_rss_bytes)
 
 
-def start_daemon(
-    root: Path, env: dict[str, str]
-) -> tuple[subprocess.Popen[bytes], object, object]:
-    stdout_file = (root / "daemon.stdout").open("w+b")
-    stderr_file = (root / "daemon.stderr").open("w+b")
-    process = subprocess.Popen(
-        [
-            str(CTX_BIN),
-            "daemon",
-            "run",
-            "--force",
-            "--idle-exit-seconds",
-            "60",
-            "--loop-interval-seconds",
-            "300",
-            "--format=json",
-        ],
-        cwd=root,
-        env=env,
-        stdout=stdout_file,
-        stderr=stderr_file,
-    )
-    deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
-    last_status: object = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            stdout_file.seek(0)
-            stderr_file.seek(0)
-            raise command_failure(
-                ["daemon", "run"],
-                process.returncode,
-                stdout_file.read(),
-                stderr_file.read(),
-            )
-        try:
-            status = run_json(["daemon", "status", "--format=json"], env, root)
-            last_status = status
-        except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            time.sleep(0.02)
-            continue
-        daemon = status.get("daemon", {})
-        endpoint = (
-            daemon.get("source_refresh_endpoint", {})
-            if isinstance(daemon, dict)
-            else {}
+class SourceWorkerParallelismOracleTest(unittest.TestCase):
+    @staticmethod
+    def sample(source_workers: tuple[SourceWorkerCpu, ...]) -> RefreshPerformanceSample:
+        return RefreshPerformanceSample(
+            packet={},
+            elapsed_seconds=2.0,
+            cpu_seconds=5.0,
+            cpu_per_wall=2.5,
+            baseline_open_fds=10,
+            peak_open_fds=20,
+            peak_rss_bytes=128 * 1024 * 1024,
+            source_workers=source_workers,
         )
-        if (
-            daemon.get("running") is True
-            and endpoint.get("available") is True
+
+    def test_repeated_single_scanner_cannot_borrow_tantivy_cpu(self) -> None:
+        sample = self.sample(
+            (
+                SourceWorkerCpu(101, "ctx-src-scan00", 12),
+                SourceWorkerCpu(102, "ctx-src-scan00", 9),
+                SourceWorkerCpu(103, "ctx-src-scan00", 7),
+            )
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, "at least two distinct named source-worker slots"
         ):
-            return process, stdout_file, stderr_file
-        time.sleep(0.02)
-    process.terminate()
-    process.wait(timeout=5)
-    stdout_file.seek(0)
-    stderr_file.seek(0)
-    raise TimeoutError(
-        "source-refresh daemon did not become ready\n"
-        f"last status:\n{json.dumps(last_status, indent=2, sort_keys=True)}\n"
-        f"stdout:\n{stdout_file.read().decode(errors='replace')}\n"
-        f"stderr:\n{stderr_file.read().decode(errors='replace')}"
-    )
+            require_parallel_source_workers(sample)
 
+    def test_two_scanners_with_meaningful_cpu_satisfy_the_oracle(self) -> None:
+        sample = self.sample(
+            (
+                SourceWorkerCpu(101, "ctx-src-scan00", 12),
+                SourceWorkerCpu(102, "ctx-src-scan01", 9),
+                SourceWorkerCpu(103, "ctx-src-scan02", 0),
+            )
+        )
 
-def stop_daemon(
-    process: subprocess.Popen[bytes], stdout_file: object, stderr_file: object
-) -> None:
-    if process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-    stdout_file.close()
-    stderr_file.close()
+        self.assertEqual(
+            require_parallel_source_workers(sample),
+            sample.source_workers[:2],
+        )
 
 
 class SmallQueryShowPerformanceTest(unittest.TestCase):
@@ -507,9 +536,18 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                 ):
                     self.assertLessEqual(refresh_seconds, MAX_COMMAND_SECONDS)
                 self.assertNotEqual(appended.request_id, noop.request_id)
-                self.assertTrue(appended.generation_changed)
-                self.assertEqual(appended.previous_generation, noop.generation_id)
                 self.assertNotEqual(appended.generation_id, noop.generation_id)
+                # The persistent filesystem watcher can win the append race
+                # before this explicit wait request. In that case the request
+                # is truthfully a no-op over the already-published successor.
+                self.assertEqual(
+                    appended.previous_generation,
+                    (
+                        noop.generation_id
+                        if appended.generation_changed
+                        else appended.generation_id
+                    ),
+                )
                 self.assertEqual(
                     appended.indexed_documents, noop.indexed_documents + 1
                 )
@@ -586,7 +624,13 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                     for _ in range(SAMPLE_COUNT)
                 ]
             finally:
-                stop_daemon(daemon, daemon_stdout, daemon_stderr)
+                stop_daemon(
+                    daemon,
+                    daemon_stdout,
+                    daemon_stderr,
+                    root,
+                    env,
+                )
 
         shown_id = show_samples[-1].packet.get(
             "ctx_session_id", show_samples[-1].packet.get("id")
@@ -627,6 +671,8 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             f" fixture_events={EVENT_COUNT + 1}"
             f" initial_fixture_bytes={fixture_bytes}"
             f" append_bytes={append_bytes}"
+            f" append_request_generation_changed="
+            f"{str(appended.generation_changed).lower()}"
             f" noop_generation_changed={str(noop.generation_changed).lower()}"
             f" noop_current_unchanged=true"
             f" noop_publication_unchanged=true"
@@ -648,6 +694,271 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             f" show_max_seconds={show_max:.3f}"
             f" peak_rss_bytes={rss_max}"
         )
+
+
+@unittest.skipUnless(
+    sys.platform.startswith("linux")
+    and hasattr(os, "sched_getaffinity")
+    and Path("/proc/self/stat").is_file(),
+    "top-provider CPU overlap evidence requires Linux /proc and affinity",
+)
+class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
+    MIN_AVAILABLE_CPUS = 12
+
+    def assert_representative_refresh(
+        self,
+        search: dict[str, object],
+        root: Path,
+        env: dict[str, str],
+        corpus: RepresentativeCorpus,
+    ) -> RefreshSnapshot:
+        self.assertEqual(
+            search["freshness"],
+            {
+                "mode": "wait",
+                "source_count": TOP_PROVIDER_COUNT,
+                "status": "completed",
+            },
+        )
+        snapshot = refresh_snapshot(search, root, env)
+        status = snapshot.status
+        job = snapshot.job
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["request_state"], "published")
+        self.assertEqual(job["source_count"], TOP_PROVIDER_COUNT)
+        self.assertEqual(job["scanned_routes"], TOP_PROVIDER_COUNT)
+        self.assertEqual(job["unsupported_routes"], 0)
+        self.assertEqual(
+            job["progress"],
+            {
+                "completed_sources": TOP_PROVIDER_COUNT,
+                "phase": "published",
+                "total_sources": TOP_PROVIDER_COUNT,
+            },
+        )
+        self.assertTrue(job["generation_changed"])
+        self.assertEqual(job["certified_source_count"], corpus.source_count)
+        self.assertEqual(job["certified_source_bytes"], corpus.fixture_bytes)
+        expected_current = {
+            "current_certified_source_bytes": corpus.fixture_bytes,
+            "current_complete_records": corpus.complete_records,
+            "current_ignored_records": corpus.ignored_records,
+            "current_indexed_documents": corpus.retained_records,
+            "current_rejected_records": 0,
+            "current_retained_records": corpus.retained_records,
+            "current_source_count": corpus.source_count,
+            "current_sources_with_rejections": 0,
+            "removed_source_count": 0,
+        }
+        self.assertEqual(snapshot.current, expected_current)
+        self.assertEqual(snapshot.indexed_documents, corpus.retained_records)
+        self.assertEqual(status["indexed_events"], corpus.retained_records)
+        self.assertEqual(status["indexed_items"], corpus.retained_records)
+        self.assertEqual(status["indexed_sources"], corpus.source_count)
+        self.assertEqual(
+            status["lexical"]["indexed_documents"], corpus.retained_records
+        )
+        self.assertEqual(
+            status["lexical"]["certified_sources"], corpus.source_count
+        )
+        self.assertEqual(
+            status["lexical"]["certified_source_bytes"],
+            corpus.fixture_bytes,
+        )
+        self.assertEqual(
+            status["lexical"]["generation_id"], snapshot.generation_id
+        )
+        self.assertGreater(job["timings_us"]["scan_stage"], 0)
+        self.assertTrue(snapshot.segments)
+        return snapshot
+
+    def assert_complete_hydration(
+        self,
+        root: Path,
+        env: dict[str, str],
+        corpus: RepresentativeCorpus,
+    ) -> None:
+        source_formats = {
+            "codex": "codex_session_jsonl",
+            "claude": "claude_projects_jsonl_tree",
+            "cursor": "cursor_agent_transcript_jsonl_tree",
+        }
+        for provider in ("codex", "claude", "cursor"):
+            search = run_json(
+                [
+                    "search",
+                    TOP_PROVIDER_QUERY,
+                    "--provider",
+                    provider,
+                    "--refresh",
+                    "off",
+                    "--format=json",
+                    "--limit",
+                    "1",
+                ],
+                env,
+                root,
+            )
+            results = search.get("results")
+            self.assertIsInstance(results, list)
+            self.assertEqual(len(results), 1)
+            result = results[0]
+            self.assertEqual(result["provider"], provider)
+            self.assertEqual(result["source_format"], source_formats[provider])
+            self.assertTrue(
+                Path(result["source_path"])
+                .resolve()
+                .is_relative_to(corpus.root(provider).resolve())
+            )
+            show = run_json(
+                [
+                    "show",
+                    "event",
+                    result["ctx_event_id"],
+                    "--content",
+                    "complete",
+                    "--format=json",
+                ],
+                env,
+                root,
+            )
+            self.assertEqual(show["payload_type"], "event_window")
+            self.assertEqual(show["content_policy"], "complete")
+            event = show["event"]
+            self.assertEqual(event["provider"], provider)
+            self.assertEqual(event["ctx_event_id"], result["ctx_event_id"])
+            self.assertEqual(
+                len(event["text"].encode("ascii")),
+                TOP_PROVIDER_TEXT_BYTES,
+            )
+            self.assertIn(TOP_PROVIDER_QUERY, event["text"])
+            self.assertIn(f"provider={provider}", event["text"])
+            self.assertEqual(
+                event["content"],
+                {
+                    "complete": True,
+                    "complete_content_available": True,
+                    "origin": "provider_source",
+                    "requested": "complete",
+                    "source_verified": True,
+                    "stored_truncated": False,
+                },
+            )
+
+    def test_representative_top_provider_cold_refresh_overlaps_work(self) -> None:
+        available_cpus = set(os.sched_getaffinity(0))
+        self.assertGreaterEqual(
+            len(available_cpus),
+            self.MIN_AVAILABLE_CPUS,
+            "nightly top-provider gate requires >=12 available CPUs: 8 Tantivy "
+            "indexers + 2 runtime threads + 2 source scanners",
+        )
+        forced_single_cpu = os.environ.get(FORCE_SINGLE_CPU_ENV) == "1"
+        cold, snapshot, corpus = self.run_representative_top_provider_refresh(
+            available_cpus,
+            force_single_cpu=forced_single_cpu,
+            verify_hydration=True,
+        )
+
+        source_workers = require_parallel_source_workers(cold)
+        source_worker_ticks = ",".join(
+            f"{worker.name}:{worker.cpu_ticks}" for worker in source_workers
+        )
+        self.assertGreaterEqual(
+            cold.cpu_per_wall,
+            MIN_COLD_CPU_PER_WALL,
+            "cold refresh did not use more than one CPU; "
+            f"set {FORCE_SINGLE_CPU_ENV}=1 to exercise the serialization control",
+        )
+        serial_seconds = None
+        speedup = None
+        if not forced_single_cpu:
+            serial, _, _ = self.run_representative_top_provider_refresh(
+                available_cpus,
+                force_single_cpu=True,
+                verify_hydration=False,
+            )
+            serial_seconds = serial.elapsed_seconds
+            speedup = serial.elapsed_seconds / cold.elapsed_seconds
+            self.assertGreaterEqual(
+                speedup,
+                MIN_COLD_SPEEDUP_OVER_SERIAL,
+                "parallel cold refresh did not improve wall time over the "
+                "same workload pinned to one CPU",
+            )
+        print(
+            "top-provider performance:"
+            f" fixture_files={corpus.source_count}"
+            f" fixture_events={corpus.retained_records}"
+            f" fixture_bytes={corpus.fixture_bytes}"
+            f" generation={snapshot.generation_id}"
+            f" refresh_seconds={cold.elapsed_seconds:.3f}"
+            f" serial_seconds={serial_seconds}"
+            f" speedup_over_serial={speedup}"
+            f" daemon_cpu_seconds={cold.cpu_seconds:.3f}"
+            f" cpu_per_wall={cold.cpu_per_wall:.3f}"
+            f" source_worker_slots="
+            f"{len({worker.name for worker in source_workers})}"
+            f" source_worker_cpu_ticks="
+            f"{source_worker_ticks}"
+            f" forced_single_cpu={forced_single_cpu}"
+        )
+
+    def run_representative_top_provider_refresh(
+        self,
+        available_cpus: set[int],
+        *,
+        force_single_cpu: bool,
+        verify_hydration: bool,
+    ) -> tuple[RefreshPerformanceSample, RefreshSnapshot, RepresentativeCorpus]:
+        daemon_affinity = {min(available_cpus)} if force_single_cpu else None
+        with tempfile.TemporaryDirectory(
+            prefix="ctx-top-provider-performance-"
+        ) as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir()
+            corpus = write_representative_corpus(home)
+            self.assertGreaterEqual(corpus.fixture_bytes, 20 * 1024 * 1024)
+            self.assertLessEqual(corpus.fixture_bytes, 64 * 1024 * 1024)
+            env = isolated_env(root, home)
+            run_checked(
+                ["setup", "--catalog-only", "--no-daemon", "--progress", "none"],
+                env,
+                root,
+            )
+            daemon, daemon_stdout, daemon_stderr = start_daemon(
+                root, env, daemon_affinity
+            )
+            try:
+                cold = run_refresh_measured(
+                    [
+                        "search",
+                        TOP_PROVIDER_QUERY,
+                        "--refresh",
+                        "wait",
+                        "--format=json",
+                        "--limit",
+                        "3",
+                    ],
+                    env,
+                    root,
+                    daemon.pid,
+                )
+                snapshot = self.assert_representative_refresh(
+                    cold.packet, root, env, corpus
+                )
+                if verify_hydration:
+                    self.assert_complete_hydration(root, env, corpus)
+            finally:
+                stop_daemon(
+                    daemon,
+                    daemon_stdout,
+                    daemon_stderr,
+                    root,
+                    env,
+                )
+        return cold, snapshot, corpus
 
 
 if __name__ == "__main__":
