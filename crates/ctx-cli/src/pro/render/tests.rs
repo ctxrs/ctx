@@ -11,7 +11,10 @@ use ctx_pro_host_protocol::{
 use unicode_width::UnicodeWidthStr as _;
 use uuid::Uuid;
 
-use super::render_blame_document;
+use super::{
+    layout::{enum_heading, enum_text},
+    render_blame_document,
+};
 use crate::ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Token};
 
 fn context(width: usize) -> RenderContext {
@@ -617,5 +620,14 @@ fn styled_output_strips_to_plain_and_plain_bytes_ignore_color() {
     assert_eq!(
         styled_document.render_plain().len(),
         plain_document.render_plain().len()
+    );
+}
+
+#[test]
+fn wire_enums_are_humanized_in_human_output() {
+    assert_eq!(enum_text(CommitPredicate::ReferencedBy), "referenced by");
+    assert_eq!(
+        enum_heading(PullRequestCommitRelationship::ContainsCommit),
+        "Contains commit"
     );
 }
