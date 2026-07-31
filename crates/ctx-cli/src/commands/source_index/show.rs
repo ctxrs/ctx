@@ -1,8 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::{CaptureProvider, CoreContentPolicyStatus, EventType};
-use ctx_history_index::{CoreEventRecord, SessionRecord, VerifiedIndex};
+use ctx_history_core::{
+    CaptureProvider, CoreContentPolicyStatus, EventType, MAX_CORE_CONTENT_BYTES,
+    MAX_ENCODED_CORE_RECORD_BYTES,
+};
+use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, SessionRecord, VerifiedIndex};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -26,6 +33,59 @@ use super::{
     },
 };
 
+const CLI_PRESENTATION_MAX_SESSION_EVENTS: usize = 4_096;
+const CORE_PRESENTATION_FETCH_MAX_EVENTS: usize = 200;
+const PRESENTATION_MAX_EVENT_WINDOW_EVENTS: usize = crate::MAX_EVENT_WINDOW * 2 + 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresentationEventLimitError {
+    actual_events: usize,
+    maximum_events: usize,
+}
+
+impl fmt::Display for PresentationEventLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Core presentation selected {} events; the presentation limit is {} events",
+            self.actual_events, self.maximum_events
+        )
+    }
+}
+
+impl std::error::Error for PresentationEventLimitError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EncodedCorePresentationLimitError {
+    pub(super) event_id: Uuid,
+    pub(super) actual_bytes: usize,
+    pub(super) maximum_bytes: usize,
+}
+
+impl fmt::Display for EncodedCorePresentationLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "stored Core encoding through ctx event {} requires {} bytes; the presentation retention limit is {} bytes",
+            self.event_id, self.actual_bytes, self.maximum_bytes
+        )
+    }
+}
+
+impl std::error::Error for EncodedCorePresentationLimitError {}
+
+#[cfg(test)]
+thread_local! {
+    static CORE_PRESENTATION_FETCH_IDS: std::cell::RefCell<Vec<Uuid>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+pub(super) fn take_core_presentation_fetch_ids() -> Vec<Uuid> {
+    CORE_PRESENTATION_FETCH_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
 pub(crate) fn run_show(
     args: ShowArgs,
     data_root: PathBuf,
@@ -38,7 +98,14 @@ pub(crate) fn run_show(
     match args.target {
         ShowTarget::Event(args) => {
             let selected = resolve_core_event(&index, &args.id)?;
-            let events = event_window(&index, &selected, args.before, args.after, args.window)?;
+            let events = event_window(
+                &index,
+                &selected,
+                args.before,
+                args.after,
+                args.window,
+                CLI_PRESENTATION_MAX_OUTPUT_BYTES,
+            )?;
             telemetry.events_returned = Some(count_bucket(events.len() as u64));
             let value = event_window_json(
                 &selected,
@@ -226,31 +293,48 @@ pub(crate) fn mcp_show_event(
 ) -> Result<Value> {
     let index = open_index(data_root)?;
     let selected = resolve_core_event(&index, id)?;
-    let events = event_window(&index, &selected, before, after, window)?;
+    let events = event_window(&index, &selected, before, after, window, output_limit_bytes)?;
     let value = event_window_json(&selected, &events, OutputFormat::Json, output_limit_bytes)?;
     enforce_json_output_limit(&value, output_limit_bytes, selected.event_id.as_uuid())?;
     Ok(value)
 }
 
-struct SessionJsonOptions {
-    mode: TranscriptMode,
-    format: OutputFormat,
-    max_events: Option<usize>,
-    output_limit_bytes: usize,
+pub(super) struct SessionJsonOptions {
+    pub(super) mode: TranscriptMode,
+    pub(super) format: OutputFormat,
+    pub(super) max_events: Option<usize>,
+    pub(super) output_limit_bytes: usize,
 }
 
-fn session_json(
+pub(super) fn session_json(
     index: &VerifiedIndex,
     session: &SessionRecord,
     options: SessionJsonOptions,
 ) -> Result<Value> {
-    // Bulk-Core integration seam: replace this ordered full-session read with
-    // metadata-first selection plus a bounded Core fetch when that API lands.
-    let mut events = index.core_events_for_session(session.session_id.as_uuid())?;
-    let truncated = options.max_events.is_some_and(|limit| events.len() > limit);
-    if let Some(limit) = options.max_events {
-        events.truncate(limit);
+    let coordinates = index.session_event_coordinates(session.session_id.as_uuid())?;
+    let maximum_events = options
+        .max_events
+        .unwrap_or(CLI_PRESENTATION_MAX_SESSION_EVENTS);
+    let truncated = options
+        .max_events
+        .is_some_and(|limit| coordinates.len() > limit);
+    if options.max_events.is_none() && coordinates.len() > maximum_events {
+        return Err(anyhow::Error::new(PresentationEventLimitError {
+            actual_events: coordinates.len(),
+            maximum_events,
+        }));
     }
+    let selected_coordinates = &coordinates[..coordinates.len().min(maximum_events)];
+    let selected_ids = selected_coordinates
+        .iter()
+        .map(|coordinate| coordinate.event_id)
+        .collect::<Vec<_>>();
+    let events = core_events_by_ids_with_presentation_budget(
+        index,
+        &selected_ids,
+        maximum_events,
+        options.output_limit_bytes,
+    )?;
     let selected = select_session_events(&events, options.mode);
     let rendered = render_event_values(&selected, options.output_limit_bytes)?;
     Ok(session_transcript_value(
@@ -407,19 +491,18 @@ pub(super) fn render_event_value(event: &CoreEventRecord) -> Value {
     }))
 }
 
-fn event_window(
+pub(super) fn event_window(
     index: &VerifiedIndex,
     selected: &CoreEventRecord,
     before: usize,
     after: usize,
     window: Option<usize>,
+    output_limit_bytes: usize,
 ) -> Result<Vec<CoreEventRecord>> {
-    // Bulk-Core integration seam: resolve the bounded sequence window from
-    // metadata, then fetch only that window once the limited API is available.
-    let events = index.core_events_for_session(selected.session_id.as_uuid())?;
-    let position = events
+    let coordinates = index.session_event_coordinates(selected.session_id.as_uuid())?;
+    let position = coordinates
         .iter()
-        .position(|event| event.event_id == selected.event_id)
+        .position(|coordinate| coordinate.event_id == selected.event_id.as_uuid())
         .ok_or_else(|| anyhow!("selected event is absent from its pinned Core session"))?;
     let (before, after) = window
         .map(|window| (window, window))
@@ -428,8 +511,119 @@ fn event_window(
     let end = position
         .saturating_add(after)
         .saturating_add(1)
-        .min(events.len());
-    Ok(events[start..end].to_vec())
+        .min(coordinates.len());
+    let selected_ids = coordinates[start..end]
+        .iter()
+        .map(|coordinate| coordinate.event_id)
+        .collect::<Vec<_>>();
+    core_events_by_ids_with_presentation_budget(
+        index,
+        &selected_ids,
+        PRESENTATION_MAX_EVENT_WINDOW_EVENTS,
+        output_limit_bytes,
+    )
+}
+
+fn core_events_by_ids_with_presentation_budget(
+    index: &VerifiedIndex,
+    event_ids: &[Uuid],
+    maximum_events: usize,
+    output_limit_bytes: usize,
+) -> Result<Vec<CoreEventRecord>> {
+    core_events_by_ids_with_presentation_limits(
+        index,
+        event_ids,
+        maximum_events,
+        output_limit_bytes,
+        MAX_ENCODED_CORE_RECORD_BYTES,
+    )
+}
+
+pub(super) fn core_events_by_ids_with_presentation_limits(
+    index: &VerifiedIndex,
+    event_ids: &[Uuid],
+    maximum_events: usize,
+    output_limit_bytes: usize,
+    encoded_core_limit_bytes: usize,
+) -> Result<Vec<CoreEventRecord>> {
+    if event_ids.len() > maximum_events {
+        return Err(anyhow::Error::new(PresentationEventLimitError {
+            actual_events: event_ids.len(),
+            maximum_events,
+        }));
+    }
+
+    let mut pending = VecDeque::new();
+    for chunk in event_ids.chunks(CORE_PRESENTATION_FETCH_MAX_EVENTS) {
+        pending.push_back(chunk);
+    }
+    let mut events = Vec::with_capacity(event_ids.len());
+    let mut retained_content_bytes = 0_usize;
+    let mut retained_encoded_core_bytes = 0_usize;
+    while let Some(ids) = pending.pop_front() {
+        let remaining_content_bytes = output_limit_bytes
+            .saturating_sub(retained_content_bytes)
+            .max(1)
+            .min(MAX_CORE_CONTENT_BYTES);
+        let remaining_encoded_core_bytes = encoded_core_limit_bytes
+            .saturating_sub(retained_encoded_core_bytes)
+            .max(1)
+            .min(MAX_ENCODED_CORE_RECORD_BYTES);
+        let budget =
+            CoreEventPageBudget::new(remaining_encoded_core_bytes, remaining_content_bytes);
+        #[cfg(test)]
+        CORE_PRESENTATION_FETCH_IDS.with(|fetched| {
+            fetched.borrow_mut().extend_from_slice(ids);
+        });
+        match index.core_events_by_ids_with_budget(
+            ids,
+            CORE_PRESENTATION_FETCH_MAX_EVENTS,
+            budget,
+        )? {
+            Some(batch) => {
+                let event_id = ids.last().copied().unwrap_or_else(Uuid::nil);
+                let actual_encoded_core_bytes =
+                    retained_encoded_core_bytes.saturating_add(batch.encoded_core_bytes);
+                if actual_encoded_core_bytes > encoded_core_limit_bytes {
+                    return Err(anyhow::Error::new(EncodedCorePresentationLimitError {
+                        event_id,
+                        actual_bytes: actual_encoded_core_bytes,
+                        maximum_bytes: encoded_core_limit_bytes,
+                    }));
+                }
+                retained_encoded_core_bytes = actual_encoded_core_bytes;
+                let actual_bytes = retained_content_bytes.saturating_add(batch.content_bytes);
+                enforce_presentation_output_limit(actual_bytes, output_limit_bytes, event_id)?;
+                retained_content_bytes = actual_bytes;
+                events.extend(batch.items);
+            }
+            None if ids.len() > 1 => {
+                let middle = ids.len() / 2;
+                let (left, right) = ids.split_at(middle);
+                pending.push_front(right);
+                pending.push_front(left);
+            }
+            None => {
+                return Err(anyhow!(
+                    "pinned Core generation could not resolve event {} within the remaining {} encoded-byte and {} content-byte presentation budgets",
+                    ids[0],
+                    encoded_core_limit_bytes.saturating_sub(retained_encoded_core_bytes),
+                    output_limit_bytes.saturating_sub(retained_content_bytes),
+                ));
+            }
+        }
+    }
+    if events.len() != event_ids.len()
+        || events
+            .iter()
+            .zip(event_ids)
+            .any(|(event, expected)| event.event_id.as_uuid() != *expected)
+    {
+        return Err(anyhow!(
+            "pinned Core generation did not return the exact requested presentation order"
+        ));
+    }
+    Ok(events)
 }
 
 fn select_session_events(

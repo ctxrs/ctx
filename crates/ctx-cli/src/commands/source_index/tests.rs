@@ -12,7 +12,9 @@ mod tests {
         EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
         SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
     };
-    use ctx_history_index::{EventSearchFilters, GenerationWriter, WriterOptions};
+    use ctx_history_index::{
+        EventSearchFilters, GenerationWriter, SessionRecord, WriterOptions,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -30,9 +32,10 @@ mod tests {
             NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow,
         },
         show::{
-            canonical_show_output_bytes, event_window_value, render_event_value,
-            render_event_values,
-            session_transcript_value, validate_show_target,
+            canonical_show_output_bytes, core_events_by_ids_with_presentation_limits,
+            event_window, event_window_value, render_event_value, render_event_values,
+            session_json, session_transcript_value, take_core_presentation_fetch_ids,
+            validate_show_target, EncodedCorePresentationLimitError, SessionJsonOptions,
         },
     };
 
@@ -217,6 +220,48 @@ mod tests {
                         complete_records: 1,
                         retained_records: 1,
                         indexed_documents: 1,
+                        certified_bytes: 1,
+                        ..ScannedSourceCounts::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+    }
+
+    fn append_fixture_session(
+        data_root: &Path,
+        events: &[CoreEventRecord],
+        revision: u8,
+    ) {
+        let source = events.first().unwrap().source.clone();
+        assert!(events.iter().all(|event| event.source == source));
+        let mut writer = GenerationWriter::open(
+            index_root(data_root),
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 32 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        for event in events {
+            writer.add_core_record(event.core_record.clone()).unwrap();
+        }
+        let observation =
+            SourceObservation::new(source, "fixture-session-revision-v1", vec![revision]).unwrap();
+        writer
+            .certify_source(
+                CertifiedSource::certify(
+                    observation.clone(),
+                    observation,
+                    "fixture-parser-v1",
+                    [revision; 32],
+                    ScannedSourceCounts {
+                        complete_records: events.len() as u64,
+                        retained_records: events.len() as u64,
+                        indexed_documents: events.len() as u64,
                         certified_bytes: 1,
                         ..ScannedSourceCounts::default()
                     },
@@ -956,6 +1001,139 @@ mod tests {
         assert_eq!(typed.event_id, event.event_id.as_uuid());
         assert_eq!(typed.maximum_bytes, 1024);
         assert!(typed.actual_bytes > 20 * 1024);
+    }
+
+    #[test]
+    fn bounded_show_selects_session_prefix_and_event_window_before_core_bodies() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let first = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 70, 1),
+            "selected-small-body",
+        );
+        let oversized = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 70, 2),
+            format!("NONSELECTED-LARGE-{}", "x".repeat(8 * 1024)),
+        );
+        append_fixture_session(temp.path(), &[first.clone(), oversized.clone()], 70);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&first.event);
+
+        take_core_presentation_fetch_ids();
+        let session_value = session_json(
+            &index,
+            &session,
+            SessionJsonOptions {
+                mode: TranscriptMode::Log,
+                format: OutputFormat::Json,
+                max_events: Some(1),
+                output_limit_bytes: 2 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(session_value["events"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            session_value["events"][0]["ctx_event_id"],
+            first.event_id.as_uuid().to_string()
+        );
+        assert_eq!(session_value["truncated"]["max_events"], 1);
+        assert_eq!(
+            take_core_presentation_fetch_ids(),
+            vec![first.event_id.as_uuid()],
+            "the nonselected large session body must never be requested for Core decode"
+        );
+
+        take_core_presentation_fetch_ids();
+        let window = event_window(&index, &first, 0, 0, None, 2 * 1024).unwrap();
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].event_id, first.event_id);
+        assert_eq!(
+            take_core_presentation_fetch_ids(),
+            vec![first.event_id.as_uuid()],
+            "the nonselected large window body must never be requested for Core decode"
+        );
+    }
+
+    #[test]
+    fn bounded_show_reports_the_first_oversized_selected_core_body_deterministically() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let first = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 71, 1),
+            "selected-small-body",
+        );
+        let oversized = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 71, 2),
+            format!("SELECTED-LARGE-{}", "y".repeat(8 * 1024)),
+        );
+        append_fixture_session(temp.path(), &[first.clone(), oversized.clone()], 71);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&first.event);
+
+        for error in (0..2).map(|_| {
+            session_json(
+                &index,
+                &session,
+                SessionJsonOptions {
+                    mode: TranscriptMode::Log,
+                    format: OutputFormat::Json,
+                    max_events: Some(2),
+                    output_limit_bytes: 2 * 1024,
+                },
+            )
+            .unwrap_err()
+        }) {
+            let typed = error
+                .downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
+                .expect("oversized selected Core body should preserve the presentation error");
+            assert_eq!(typed.event_id, oversized.event_id.as_uuid());
+            assert_eq!(typed.maximum_bytes, 2 * 1024);
+            assert!(typed.actual_bytes > typed.maximum_bytes);
+        }
+    }
+
+    #[test]
+    fn bounded_show_enforces_one_cumulative_encoded_core_budget_across_batches() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let first = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 72, 1),
+            format!("FIRST-ENCODED-{}", "a".repeat(1024)),
+        );
+        let second = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 72, 2),
+            format!("SECOND-ENCODED-{}", "b".repeat(1024)),
+        );
+        append_fixture_session(temp.path(), &[first.clone(), second.clone()], 72);
+        let index = open_index(temp.path()).unwrap();
+        let encoded_bytes = [&first, &second].map(|event| {
+            index
+                .core_events_by_ids_with_budget(
+                    &[event.event_id.as_uuid()],
+                    1,
+                    ctx_history_index::DEFAULT_CORE_EVENT_PAGE_BUDGET,
+                )
+                .unwrap()
+                .unwrap()
+                .encoded_core_bytes
+        });
+        let cumulative_encoded_bytes = encoded_bytes.iter().sum::<usize>();
+        let encoded_limit = cumulative_encoded_bytes - 1;
+
+        let error = core_events_by_ids_with_presentation_limits(
+            &index,
+            &[first.event_id.as_uuid(), second.event_id.as_uuid()],
+            2,
+            64 * 1024,
+            encoded_limit,
+        )
+        .unwrap_err();
+        let typed = error
+            .downcast_ref::<EncodedCorePresentationLimitError>()
+            .expect("cumulative encoded Core overflow should preserve its typed bound");
+        assert_eq!(typed.event_id, second.event_id.as_uuid());
+        assert_eq!(typed.actual_bytes, cumulative_encoded_bytes);
+        assert_eq!(typed.maximum_bytes, encoded_limit);
     }
 
     #[test]
