@@ -6,7 +6,8 @@ use crate::{
     config::AppConfig,
     semantic::{
         autostart_daemon_and_wait, converge_source_backed_relational_generation,
-        coordinate_source_backed_refresh, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+        coordinate_core_refresh_without_autostart, coordinate_source_backed_refresh,
+        SourceBackedRefreshMode, SourceBackedRefreshObservation,
     },
     DaemonTriggerCommandArg,
 };
@@ -34,6 +35,9 @@ pub(super) fn wait_for_import_core_refresh(
     }
 
     let refresh = match request {
+        ImportCoreRefreshRequest::Automatic if no_daemon => {
+            coordinate_core_refresh_without_autostart(data_root, SourceBackedRefreshMode::Wait)
+        }
         ImportCoreRefreshRequest::Automatic => {
             coordinate_source_backed_refresh(data_root, SourceBackedRefreshMode::Wait)
         }

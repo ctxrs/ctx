@@ -106,7 +106,8 @@ mod source_backed_refresh_coordinator;
 mod source_backed_relational_catch_up;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{
-    coordinate_source_backed_refresh, pin_active_verified_generation, PinnedSourceBackedGeneration,
+    coordinate_core_refresh_without_autostart, coordinate_source_backed_refresh,
+    pin_active_verified_generation, PinnedSourceBackedGeneration,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     SourceBackedRefreshPublication,

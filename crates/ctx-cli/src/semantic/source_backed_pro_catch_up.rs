@@ -21,7 +21,7 @@ use super::{
     paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
     source_backed_refresh_coordinator::{
         nonzero_duration_micros, open_verified_index, source_backed_index_root,
-        GenerationBoundSourceBackedResolver,
+        PinnedCorePublication,
     },
 };
 
@@ -180,11 +180,11 @@ pub(super) struct SourceBackedProCatchUpRun {
 pub(super) fn run_after_core_publication(
     data_root: &Path,
     core_generation_id: &str,
-    authority: Option<&GenerationBoundSourceBackedResolver>,
+    authority: Option<&PinnedCorePublication>,
 ) -> Result<SourceBackedProCatchUpRun> {
     if authority.is_some_and(|authority| authority.generation_id() != core_generation_id) {
         let supplied = authority
-            .map(GenerationBoundSourceBackedResolver::generation_id)
+            .map(PinnedCorePublication::generation_id)
             .unwrap_or_default();
         return record_preflight_error(
             data_root,
@@ -196,12 +196,12 @@ pub(super) fn run_after_core_publication(
             },
         );
     }
-    let verified_index = authority.and_then(GenerationBoundSourceBackedResolver::verified_index);
+    let verified_index = authority.and_then(PinnedCorePublication::verified_index);
     run_with(
         data_root,
         core_generation_id,
         ProCatchUpAuthority {
-            generation_id: authority.map(GenerationBoundSourceBackedResolver::generation_id),
+            generation_id: authority.map(PinnedCorePublication::generation_id),
             verified_index: verified_index.as_deref(),
         },
         preflight_core_materialization,

@@ -26,7 +26,7 @@ use crate::{
 use crate::analytics::DaemonRuntimeObservationV1;
 
 #[cfg(test)]
-use super::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
+use super::source_backed_refresh_coordinator::CoreRefreshEngine;
 
 use super::{
     daemon_autostart::{

@@ -10,7 +10,7 @@ use crate::semantic::{
     model_contract::semantic_model_key,
     model_runtime::SharedSemanticRuntime,
     paths_status::{daemon_source_backed_refresh_job_path, read_daemon_job_status},
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_refresh_coordinator::CoreRefreshEngine,
 };
 
 use super::super::transport::DaemonIpcService;
@@ -18,7 +18,7 @@ use super::super::transport::DaemonIpcService;
 pub(in crate::semantic) struct DaemonQueryDispatch<'a> {
     data_root: &'a Path,
     runtime: &'a SharedSemanticRuntime,
-    source_refresh: &'a SourceBackedRefreshCoordinator,
+    source_refresh: &'a CoreRefreshEngine,
     service: DaemonIpcService,
     token: &'a str,
     wakeup: Option<&'a DaemonWakeup>,
@@ -31,7 +31,7 @@ pub(in crate::semantic) struct DaemonQueryDispatch<'a> {
 pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
     data_root: &Path,
     runtime: &SharedSemanticRuntime,
-    source_refresh: &SourceBackedRefreshCoordinator,
+    source_refresh: &CoreRefreshEngine,
     service: DaemonIpcService,
     token: &str,
     mut stream: S,
