@@ -86,16 +86,17 @@ pub(super) fn tool_error_result(err: Error) -> Value {
         });
     }
     if let Some(error_code) = crate::pro::stable_error_code(&err) {
+        let diagnostic = crate::pro::stable_error_diagnostic(&err).unwrap_or(error_code);
         return json!({
             "isError": true,
             "content": [
                 {
                     "type": "text",
-                    "text": error_code,
+                    "text": diagnostic,
                 }
             ],
             "structuredContent": {
-                "error": error_code,
+                "error": diagnostic,
                 "error_code": error_code,
             }
         });

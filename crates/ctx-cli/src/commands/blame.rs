@@ -174,8 +174,12 @@ pub(crate) fn run(
     let target_kind = ProBlameTargetV1::from_protocol(&target);
     let mut telemetry = ProBlameTelemetryV1::new(Some(target_kind), ProSurfaceV1::Cli);
     let result = (|| {
-        let result = crate::pro::blame(&data_root, target, limit, cursor)
-            .map_err(crate::pro::actionable_error)?;
+        let result = crate::pro::human_blame_result(
+            crate::pro::blame(&data_root, target, limit, cursor)
+                .map_err(crate::pro::actionable_error),
+            !json,
+            ui,
+        )?;
         telemetry.complete(result.matches.len(), result.next.is_some());
         emit_blame_result(&result, json, local_usage, ui, print_blame_result)?;
         let eligible = referral_cta_eligible(&result, json, interactive_human);

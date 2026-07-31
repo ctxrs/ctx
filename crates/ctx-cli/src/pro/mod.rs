@@ -24,8 +24,8 @@ mod verified_executable;
 mod workos_device;
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
-    blame, preflight_source_manifest_materialization, stable_error_code,
-    sync_source_manifest_materialization,
+    blame, preflight_source_manifest_materialization, stable_error_code, stable_error_diagnostic,
+    sync_source_manifest_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
 pub(crate) use pricing::PRO_MONTHLY_PRICE_DISPLAY;
@@ -74,6 +74,28 @@ pub(crate) fn human_result<T>(
     let Some(document) =
         human_actionable_error_document(ui.stderr_context(), &error, retry_command)
     else {
+        return Err(error);
+    };
+    ui.write_stderr(&document)?;
+    Err(crate::dispatch::rendered_cli_error())
+}
+
+pub(crate) fn human_blame_result<T>(
+    result: Result<T>,
+    human_output: bool,
+    ui: &mut Ui,
+) -> Result<T> {
+    if !human_output {
+        return result;
+    }
+    let error = match result {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    if stable_error_code(&error) != Some("resource_not_found") {
+        return Err(error);
+    }
+    let Some(document) = human_actionable_error_document(ui.stderr_context(), &error, "") else {
         return Err(error);
     };
     ui.write_stderr(&document)?;
@@ -361,6 +383,12 @@ fn human_error_presentation<'a>(
             detail: Some("Index local agent history before using ctx blame."),
             hint: "Set up local history.",
             action: Some("ctx setup"),
+        },
+        "resource_not_found" => HumanErrorPresentation {
+            title: RESOURCE_NOT_FOUND_DIAGNOSTIC,
+            detail: Some("The target is valid but is not present in the materialized Pro graph."),
+            hint: "",
+            action: None,
         },
         _ => return None,
     };
