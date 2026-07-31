@@ -261,7 +261,10 @@ fn run_index_wait(
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "blocked"))?;
             } else if !quiet {
-                if selection.semantic && !bool_at(&status, &["semantic", "enabled"]) {
+                if selection.semantic
+                    && !bool_at(&status, &["semantic", "enabled"])
+                    && lexical_ready(&status)
+                {
                     let document = render_semantic_disabled_wait(&status, ui.stdout_context());
                     ui.write_stdout(&document)?;
                 } else {
