@@ -169,7 +169,9 @@ pub(super) fn valid_referral_codename(value: &str) -> bool {
 
 fn parse_country_code(value: &str) -> Result<CountryCode, String> {
     if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase()) {
-        return Err("country must be a two-letter uppercase ISO country code".to_owned());
+        return Err(
+            "country must be a two-letter uppercase ISO country code, for example US".to_owned(),
+        );
     }
     Ok(CountryCode(value.to_owned()))
 }
@@ -676,6 +678,14 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    #[test]
+    fn invalid_country_names_a_valid_copyable_example() {
+        assert_eq!(
+            parse_country_code("us").unwrap_err(),
+            "country must be a two-letter uppercase ISO country code, for example US"
+        );
     }
 
     #[test]
