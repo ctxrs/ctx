@@ -59,7 +59,16 @@ pub(super) fn recover_capture_owned_resolver(
     catalog.remove_shadowed_automatic_routes(data_root, &mut report)?;
     let mut build =
         build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
-    catalog.register_routes(data_root, &source_backed_index_root(data_root), &mut build)?;
+    let retained_generation = open_published_generation(data_root)?.ok_or_else(|| {
+        anyhow!("retained source-backed generation {generation_id} is unavailable")
+    })?;
+    if retained_generation.generation_id() != generation_id {
+        bail!(
+            "retained source-backed generation hint {generation_id} does not match verified generation {}",
+            retained_generation.generation_id()
+        );
+    }
+    catalog.register_routes(data_root, Some(&retained_generation), &mut build)?;
     Ok(Some((
         generation_id,
         Arc::new(build.registry.resolver_registry()),
@@ -145,12 +154,16 @@ pub(super) fn refresh_all_provider_sources(
     let mut build =
         build_automatic_source_backed_registry_from_report(discovery, data_root, report);
     build.discovery_duration = discovery_duration;
-    if let Some(authority) = explicit_source_catalog {
-        authority.register_routes(data_root, index_root, &mut build)?;
-    } else {
-        register_explicit_source_catalog_routes(data_root, index_root, &mut build)?;
-    }
     let retained_generation = open_published_generation(data_root)?;
+    if let Some(authority) = explicit_source_catalog {
+        authority.register_routes(data_root, retained_generation.as_ref(), &mut build)?;
+    } else {
+        register_explicit_source_catalog_routes(
+            data_root,
+            retained_generation.as_ref(),
+            &mut build,
+        )?;
+    }
     let retained_sources = retained_generation
         .as_ref()
         .map(|index| index.manifest().sources.clone())

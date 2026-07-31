@@ -107,11 +107,16 @@ impl ExplicitSourceCatalogAuthority {
     pub(crate) fn register_routes(
         &self,
         data_root: &Path,
-        index_root: &Path,
+        base_generation: Option<&VerifiedIndex>,
         build: &mut SourceBackedAutomaticRegistryBuild,
     ) -> Result<()> {
         let snapshot = load_catalog_for_authority(data_root, self)?;
-        register_explicit_source_catalog_snapshot_routes(data_root, index_root, build, &snapshot)
+        register_explicit_source_catalog_snapshot_routes(
+            data_root,
+            base_generation,
+            build,
+            &snapshot,
+        )
     }
 
     pub(crate) fn from_json(value: &Value) -> Result<Self> {
@@ -416,17 +421,17 @@ fn remove_automatic_routes_shadowed_by_snapshot(
 
 pub(crate) fn register_explicit_source_catalog_routes(
     data_root: &Path,
-    index_root: &Path,
+    base_generation: Option<&VerifiedIndex>,
     build: &mut SourceBackedAutomaticRegistryBuild,
 ) -> Result<ExplicitSourceCatalogAuthority> {
     let snapshot = load_catalog(data_root)?;
-    register_explicit_source_catalog_snapshot_routes(data_root, index_root, build, &snapshot)?;
+    register_explicit_source_catalog_snapshot_routes(data_root, base_generation, build, &snapshot)?;
     Ok(snapshot.authority)
 }
 
 fn register_explicit_source_catalog_snapshot_routes(
     data_root: &Path,
-    index_root: &Path,
+    base_generation: Option<&VerifiedIndex>,
     build: &mut SourceBackedAutomaticRegistryBuild,
     snapshot: &ExplicitSourceCatalogSnapshot,
 ) -> Result<()> {
@@ -456,15 +461,9 @@ fn register_explicit_source_catalog_snapshot_routes(
         }
     }
     let needs_nanoclaw_checkpoint = !nanoclaw_lineages.is_empty();
-    let (base_certificates, base_sources) = if (needs_base_sources || needs_nanoclaw_checkpoint)
-        && index_root.join("meta.json").is_file()
+    let (base_certificates, base_sources) = if let Some(index) =
+        base_generation.filter(|_| needs_base_sources || needs_nanoclaw_checkpoint)
     {
-        let index = VerifiedIndex::open(index_root).with_context(|| {
-            format!(
-                "open source-backed generation for catalog reconciliation {}",
-                index_root.display()
-            )
-        })?;
         let certificates = index
             .manifest()
             .sources

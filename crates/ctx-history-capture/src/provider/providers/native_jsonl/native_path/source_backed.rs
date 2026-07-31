@@ -449,6 +449,9 @@ fn bind_opened_leaf(
     source_file.revalidate_same_object()?;
     let route_key = relative_route_key(source_root, &path);
     if !rejections.is_empty() {
+        let rejected_records = u64::try_from(rejections.len()).map_err(|_| {
+            CaptureError::SystemInvariant("direct JSONL rejected-record count overflow")
+        })?;
         let proof = DirectJsonlRejectedLeafProof {
             route_key,
             physical_ordinal,
@@ -460,6 +463,7 @@ fn bind_opened_leaf(
             authority_path,
             TypedKey::bytes(serde_json::to_vec(&proof)?)
                 .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+            rejected_records,
         ));
         return Ok(());
     }
