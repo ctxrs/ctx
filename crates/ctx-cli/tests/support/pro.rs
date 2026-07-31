@@ -109,7 +109,7 @@ pub(crate) fn initialize_pro_installation_identity(data_root: &Path) {
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
 pub(crate) fn write_blame_helper(path: &Path) {
-    write_blame_helper_with_oversized_page(path, false);
+    write_blame_helper_with_options(path, false, None);
 }
 
 #[cfg(unix)]
@@ -177,14 +177,30 @@ send({
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
 pub(crate) fn write_oversized_blame_helper(path: &Path) {
-    write_blame_helper_with_oversized_page(path, true);
+    write_blame_helper_with_options(path, true, None);
 }
 
 #[cfg(all(
     unix,
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
-fn write_blame_helper_with_oversized_page(path: &Path, oversized_page: bool) {
+pub(crate) fn write_blame_error_helper(path: &Path, error_class: &str) {
+    assert!(matches!(
+        error_class,
+        "resource_not_found" | "missing_repository" | "ambiguous" | "invalid_request"
+    ));
+    write_blame_helper_with_options(path, false, Some(error_class));
+}
+
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
+fn write_blame_helper_with_options(
+    path: &Path,
+    oversized_page: bool,
+    blame_error_class: Option<&str>,
+) {
     let data_root = path
         .parent()
         .expect("fake Pro blame helper must live directly under its data root");
@@ -250,6 +266,17 @@ request = receive()
 body = request['message']['body']
 if request['message']['kind'] != 'blame':
     sys.exit(26)
+if __BLAME_ERROR_CLASS__ is not None:
+    send({
+      'sequence': request['sequence'],
+      'request_id': request['request_id'],
+      'message': {'kind':'error','body':{
+        'class':__BLAME_ERROR_CLASS__,
+        'message':'untrusted helper detail at /secret/graph/path',
+        'retryable':False
+      }}
+    })
+    sys.exit(0)
 target = body['target']
 if body['limit'] < 1 or body['limit'] > 100:
     sys.exit(23)
@@ -377,6 +404,10 @@ send({
         .replace(
             "__OVERSIZED_BLAME__",
             if oversized_page { "True" } else { "False" },
+        )
+        .replace(
+            "__BLAME_ERROR_CLASS__",
+            &blame_error_class.map_or_else(|| "None".to_owned(), |class| format!("'{class}'")),
         )
         .replace("__CORE_GENERATION_ID__", active_generation.generation_id());
     write_python_helper(path, &helper);

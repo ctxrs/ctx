@@ -1010,7 +1010,7 @@ CLI failures exit nonzero with a stable error token on stderr. MCP failures set
 Stable codes include `pro_not_installed`, `commercial_unavailable`,
 `entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
 `key_store_locked`, `not_materialized`, `protocol_mismatch`,
-`source_unavailable`, `repository_unavailable`, `line_out_of_range`,
+`source_unavailable`, `repository_unavailable`, `resource_not_found`, `line_out_of_range`,
 `stale_snapshot`, `stale_fact`, `ambiguous`, `corrupt_graph`,
 `invalid_request`, `invalid_response`, `cancelled`,
 `helper_crashed`, and `helper_timeout`.
