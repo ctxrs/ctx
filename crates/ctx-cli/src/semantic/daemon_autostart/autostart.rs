@@ -636,6 +636,7 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "CTX_HISTORY_PLUGIN_PATH",
     "CTX_LOCAL_USAGE_ENABLED",
     "CTX_MACHINE_ID",
+    "CTX_PRO_CHANNEL",
     "CTX_PRO_HELPER",
     "CTX_RUNTIME_DIR",
     "CTX_SEARCH_SEMANTIC",
@@ -684,6 +685,7 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "http_proxy",
     "no_proxy",
 ];
+const DAEMON_PRO_CHANNEL_ENV: &str = "CTX_PRO_CHANNEL";
 
 pub(super) fn configure_narrow_daemon_environment(command: &mut Command) {
     let inherited = DAEMON_CHILD_ENV_ALLOWLIST
@@ -695,8 +697,25 @@ pub(super) fn configure_narrow_daemon_environment(command: &mut Command) {
 }
 
 pub(super) fn spawn_daemon_child(command: &mut Command) -> io::Result<Child> {
+    validate_daemon_pro_channel_environment(command)?;
     crate::process_environment::sanitize_release_authority_env(command);
     command.spawn()
+}
+
+fn validate_daemon_pro_channel_environment(command: &Command) -> io::Result<()> {
+    let channel = command
+        .get_envs()
+        .find(|(name, _)| *name == std::ffi::OsStr::new(DAEMON_PRO_CHANNEL_ENV))
+        .and_then(|(_, value)| value);
+    if channel.is_none_or(|value| {
+        value == std::ffi::OsStr::new("stable") || value == std::ffi::OsStr::new("staging")
+    }) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("{DAEMON_PRO_CHANNEL_ENV} must be stable or staging"),
+    ))
 }
 
 pub(super) fn configured_daemon_autostart_command(

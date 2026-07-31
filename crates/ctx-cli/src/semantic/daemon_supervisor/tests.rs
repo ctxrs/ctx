@@ -519,6 +519,12 @@ fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
 fn native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls() -> Result<()> {
     let forbidden = [
         "CTX_PRO_HELPER",
+        "CTX_PRO_STAGING_ACCESS_CLIENT_ID",
+        "CTX_PRO_STAGING_ACCESS_CLIENT_SECRET",
+        "CTX_PRO_QUALIFICATION_HELPER_PATH",
+        "CTX_PRO_QUALIFICATION_HELPER_SHA256",
+        "CTX_PRO_QUALIFICATION_HELPER_CHANNEL",
+        "CTX_PRO_API_URL",
         "CTX_SEMANTIC_MODEL_ONNX",
         "CTX_RELEASE_CONFIGURED_AUTHORITY",
         "CTX_RELEASE_METADATA_URL",
@@ -533,7 +539,8 @@ fn native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls() -
         let mut child = Command::new(env::current_exe()?);
         child
             .args(["--exact", SUPERVISOR_ENV_ARTIFACT_PROBE_TEST, "--nocapture"])
-            .env(SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE, "final");
+            .env(SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE, "final")
+            .env("CTX_PRO_CHANNEL", "staging");
         for name in forbidden {
             child.env(name, format!("secret-value-for-{name}"));
         }
@@ -546,6 +553,13 @@ fn native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls() -
     let systemd = linux_systemd_unit(executable, data_root)?;
     let launchd = launch_agent_plist(executable, data_root)?;
     let windows = windows_sanitized_daemon_script(executable, data_root)?;
+    for artifact in [&systemd, &launchd, &windows] {
+        assert!(
+            artifact.contains("CTX_PRO_CHANNEL=staging")
+                || artifact.contains("['CTX_PRO_CHANNEL']='staging'"),
+            "staging Pro channel missing from {artifact}"
+        );
+    }
     for name in forbidden {
         let value = format!("secret-value-for-{name}");
         for artifact in [&systemd, &launchd, &windows] {
