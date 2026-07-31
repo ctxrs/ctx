@@ -19,7 +19,9 @@ mod unix {
 
     use super::super::{
         env_flag,
-        install::{classify_install_marker_at, ManagedInstallMarker},
+        install::{
+            classify_install_marker_at, discard_legacy_previous_binary, ManagedInstallMarker,
+        },
         platform_key, sha256_hex,
     };
 
@@ -208,6 +210,8 @@ mod unix {
                             &handoff_id,
                             None,
                         )?;
+                        discard_legacy_previous_binary(&target)
+                            .context("discard committed v0.25 executable backup")?;
                         finish_replacement_daemon_handoff(&data_root, &handoff_id)?;
                         return Ok(());
                     }

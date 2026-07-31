@@ -33,6 +33,11 @@ use self::lock::canonical_executable;
 pub(in crate::upgrade) use self::lock::InstallationLock;
 use super::UpgradePlan;
 
+#[cfg(unix)]
+pub(in crate::upgrade) fn discard_legacy_previous_binary(install_path: &Path) -> Result<()> {
+    transaction::discard_legacy_previous_binary(install_path)
+}
+
 /// The installed executable and marker observed under the executable-scoped
 /// lock while a plan is built.  The installed marker version, not this
 /// process's compile-time version, is the authority for update decisions.

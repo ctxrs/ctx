@@ -531,6 +531,20 @@ fn committed_retry_discards_durable_old_binary_after_transaction_backup_is_gone(
 
 #[cfg(unix)]
 #[test]
+fn legacy_bridge_discards_owner_regular_durable_old_binary() {
+    let temp = tempdir().unwrap();
+    let target = temp.path().join("ctx");
+    fs::write(&target, b"replacement").unwrap();
+    fs::write(temp.path().join("ctx.previous"), b"v0.25").unwrap();
+
+    super::discard_legacy_previous_binary(&target).unwrap();
+
+    assert_eq!(fs::read(target).unwrap(), b"replacement");
+    assert!(!temp.path().join("ctx.previous").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn unix_rollback_refuses_to_delete_replacement_target() {
     let temp = tempdir().unwrap();
     let target = temp.path().join("ctx");
