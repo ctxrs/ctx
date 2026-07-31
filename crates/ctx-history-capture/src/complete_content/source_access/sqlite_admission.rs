@@ -4,7 +4,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use super::{
-    bounded_sqlite_component_bytes, ctx_sqlite_snapshot_tempdir, map_capture_error,
+    accumulate_sqlite_snapshot_bytes, ctx_sqlite_snapshot_tempdir, map_capture_error,
     open_ctx_owned_sqlite_read_snapshot, sqlite_sidecar_path,
     validate_observed_snapshot_reservation, validate_source_snapshot, AuthorizedSourceRoute,
     BrokeredSqliteSource, CompleteContentError, CompleteContentErrorKind,
@@ -40,7 +40,7 @@ pub(super) fn admit(
         CompleteContentError::new(CompleteContentErrorKind::SourceUnreadable, event_id)
     })?;
     let mut sidecars = Vec::new();
-    let mut snapshot_bytes = bounded_sqlite_component_bytes(&metadata, event_id)?;
+    let mut snapshot_bytes = accumulate_sqlite_snapshot_bytes(0, &metadata, event_id)?;
     for suffix in ["-wal", "-shm", "-journal"] {
         let source_path = sqlite_sidecar_path(selected_path, suffix);
         match open_brokered_file(&source_path) {
@@ -48,14 +48,8 @@ pub(super) fn admit(
                 let metadata = file
                     .metadata()
                     .map_err(|cause| map_io_error(event_id, cause))?;
-                snapshot_bytes = snapshot_bytes
-                    .checked_add(bounded_sqlite_component_bytes(&metadata, event_id)?)
-                    .ok_or_else(|| {
-                        CompleteContentError::new(
-                            CompleteContentErrorKind::ContentTooLarge,
-                            event_id,
-                        )
-                    })?;
+                snapshot_bytes =
+                    accumulate_sqlite_snapshot_bytes(snapshot_bytes, &metadata, event_id)?;
                 let frozen = FrozenFile::from_metadata(&metadata)
                     .map_err(|cause| map_io_error(event_id, cause))?;
                 sidecars.push((suffix, source_path, file, frozen));
@@ -202,16 +196,10 @@ pub(super) fn admit(
             event_id,
         )?);
     }
-    let mut snapshot_bytes = bounded_sqlite_component_bytes(&database.metadata, event_id)?;
+    let mut snapshot_bytes = accumulate_sqlite_snapshot_bytes(0, &database.metadata, event_id)?;
     for admitted in sidecars.iter().flatten() {
-        snapshot_bytes = snapshot_bytes
-            .checked_add(bounded_sqlite_component_bytes(
-                &admitted.metadata,
-                event_id,
-            )?)
-            .ok_or_else(|| {
-                CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id)
-            })?;
+        snapshot_bytes =
+            accumulate_sqlite_snapshot_bytes(snapshot_bytes, &admitted.metadata, event_id)?;
     }
     validate_observed_snapshot_reservation(reserved_snapshot_bytes, snapshot_bytes, event_id)?;
     if sidecars[2].is_some() {

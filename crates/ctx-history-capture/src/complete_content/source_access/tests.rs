@@ -18,6 +18,8 @@ use crate::{
     },
     CODEX_SESSION_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
 };
+#[cfg(unix)]
+use rusqlite::Connection;
 
 fn admit_jsonl(
     provider: CaptureProvider,
@@ -136,6 +138,97 @@ fn sqlite_snapshot_reservation_counts_sidecars_and_rejects_a_changed_total() {
         .admit_prepared_for_source_locators(prepared, &[])
         .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sqlite_snapshot_budget_admits_valid_sparse_main_over_512_mib() {
+    use std::os::unix::fs::MetadataExt;
+
+    const FORMER_COMPONENT_LIMIT: u64 = 512 * 1024 * 1024;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("opencode.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "create table messages (body text not null);
+             insert into messages values ('large-valid-main');",
+        )
+        .unwrap();
+    drop(connection);
+    let expected_length = FORMER_COMPONENT_LIMIT + 4_096;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(expected_length)
+        .unwrap();
+    let metadata = fs::metadata(&path).unwrap();
+    assert_eq!(metadata.len(), expected_length);
+    assert!(
+        metadata.blocks().saturating_mul(512) < 1024 * 1024,
+        "the complete-content regression fixture must remain physically sparse"
+    );
+    let event_id = Uuid::new_v4();
+    let route = AuthorizedSourceRoute {
+        source_id: Uuid::new_v4(),
+        provider: CaptureProvider::OpenCode,
+        source_format: "opencode_sqlite".to_owned(),
+        family: CompleteContentSourceFamily::Sqlite,
+        raw_source_path: path,
+        source_root: Some(temp.path().to_path_buf()),
+        source_identity: Some("large-opencode-source".to_owned()),
+        source_snapshot: SourceSnapshot::default(),
+    };
+    let broker = SourceAccessBroker::new(crate::test_provider_sqlite_data_root());
+
+    let prepared = broker.prepare(route, event_id).unwrap();
+    assert_eq!(prepared.reserved_snapshot_bytes(), expected_length);
+    let access = broker
+        .admit_prepared_for_source_locators(prepared, &[])
+        .unwrap();
+    let snapshot = access.open_sqlite_snapshot(event_id).unwrap();
+    let body: String = snapshot
+        .query_row("select body from messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(body, "large-valid-main");
+    access.finish_sqlite_snapshot(snapshot, event_id).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn sqlite_snapshot_budget_rejects_cumulative_main_plus_wal_over_total() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("create table messages (body text not null);")
+        .unwrap();
+    drop(connection);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(super::SQLITE_SNAPSHOT_MAX_TOTAL_BYTES)
+        .unwrap();
+    fs::write(path.with_file_name("state.db-wal"), b"x").unwrap();
+    let event_id = Uuid::new_v4();
+    let route = AuthorizedSourceRoute {
+        source_id: Uuid::new_v4(),
+        provider: CaptureProvider::OpenCode,
+        source_format: "opencode_sqlite".to_owned(),
+        family: CompleteContentSourceFamily::Sqlite,
+        raw_source_path: path,
+        source_root: Some(temp.path().to_path_buf()),
+        source_identity: Some("over-budget-opencode-source".to_owned()),
+        source_snapshot: SourceSnapshot::default(),
+    };
+
+    let error = SourceAccessBroker::new(crate::test_provider_sqlite_data_root())
+        .prepare(route, event_id)
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
 }
 
 #[test]

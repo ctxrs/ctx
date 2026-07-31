@@ -45,7 +45,6 @@ use crate::{
 };
 
 const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v2\0";
-const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
 const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const SQLITE_COPY_BUFFER_BYTES: usize = 64 * 1024;
 const SQLITE_WAL_TOKEN_BYTES: usize = 64;
@@ -742,14 +741,16 @@ use family::{
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
+#[cfg(test)]
+use snapshot::{
+    certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
+    open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
+    open_root_handle_sqlite_source_snapshot_for_test,
+};
 pub(crate) use snapshot::{
     open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
     retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot,
-};
-#[cfg(test)]
-use snapshot::{
-    open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
-    open_root_handle_sqlite_source_snapshot_for_test,
 };
 
 #[cfg(test)]

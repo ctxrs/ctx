@@ -21,7 +21,6 @@ use std::cell::RefCell;
 use super::{
     map_capture_error, map_io_error, nanoclaw, sqlite_sidecar_path, AuthorizedSourceRoute,
     CompleteContentError, CompleteContentErrorKind, CompleteContentSourceLocator, NativeLocator,
-    SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
 };
 use crate::{
     complete_content::sqlite::{
@@ -33,7 +32,7 @@ use crate::{
 
 const SNAPSHOT_MAX_COMPONENT_DATABASES: usize = 256;
 const SNAPSHOT_MAX_FILES: usize = (SNAPSHOT_MAX_COMPONENT_DATABASES + 1) * 4;
-pub(super) const SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+pub(super) const SNAPSHOT_MAX_TOTAL_BYTES: u64 = super::SQLITE_SNAPSHOT_MAX_TOTAL_BYTES;
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(5);
 const SQLITE_SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
@@ -348,13 +347,14 @@ impl SnapshotBudget {
         file: &AdmittedFile,
         event_id: Uuid,
     ) -> Result<(), CompleteContentError> {
+        self.admit_length(file.frozen.length, event_id)
+    }
+
+    fn admit_length(&mut self, length: u64, event_id: Uuid) -> Result<(), CompleteContentError> {
         self.check(event_id)?;
         self.files = self.files.saturating_add(1);
-        self.bytes = self.bytes.saturating_add(file.frozen.length);
-        if self.files > SNAPSHOT_MAX_FILES
-            || self.bytes > SNAPSHOT_MAX_TOTAL_BYTES
-            || file.frozen.length > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES
-        {
+        self.bytes = self.bytes.saturating_add(length);
+        if self.files > SNAPSHOT_MAX_FILES || self.bytes > SNAPSHOT_MAX_TOTAL_BYTES {
             return Err(content_error(
                 event_id,
                 CompleteContentErrorKind::ContentTooLarge,
@@ -387,6 +387,33 @@ impl SnapshotBudget {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_budget_admits_component_over_512_mib_within_cumulative_limit() {
+        const FORMER_COMPONENT_LIMIT: u64 = 512 * 1024 * 1024;
+
+        let mut budget = SnapshotBudget::new(Instant::now() + Duration::from_secs(1));
+        budget
+            .admit_length(FORMER_COMPONENT_LIMIT + 1, Uuid::new_v4())
+            .unwrap();
+        assert_eq!(budget.bytes, FORMER_COMPONENT_LIMIT + 1);
+    }
+
+    #[test]
+    fn snapshot_budget_rejects_cumulative_files_over_total() {
+        let event_id = Uuid::new_v4();
+        let mut budget = SnapshotBudget::new(Instant::now() + Duration::from_secs(1));
+        budget
+            .admit_length(SNAPSHOT_MAX_TOTAL_BYTES - 1, event_id)
+            .unwrap();
+        let error = budget.admit_length(2, event_id).unwrap_err();
+        assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
     }
 }
 

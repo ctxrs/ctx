@@ -60,9 +60,9 @@ pub(crate) use nanoclaw_snapshot::set_before_source_set_revalidation as set_nano
 #[path = "source_access/windows.rs"]
 pub(crate) mod windows;
 
-const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
+const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 pub const COMPLETE_CONTENT_MAX_ADMITTED_SOURCES: usize = 8;
-pub const COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES: u64 = nanoclaw_snapshot::SNAPSHOT_MAX_TOTAL_BYTES;
+pub const COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES: u64 = SQLITE_SNAPSHOT_MAX_TOTAL_BYTES;
 
 /// Store-authorized route used only while admitting source access.
 ///
@@ -261,7 +261,8 @@ fn validate_observed_snapshot_reservation(
     validate_fixed_snapshot_reservation(reserved, observed, event_id)
 }
 
-fn bounded_sqlite_component_bytes(
+fn accumulate_sqlite_snapshot_bytes(
+    current: u64,
     metadata: &fs::Metadata,
     event_id: Uuid,
 ) -> Result<u64, CompleteContentError> {
@@ -271,13 +272,18 @@ fn bounded_sqlite_component_bytes(
             event_id,
         ));
     }
-    if metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
+    // The selected source total is authoritative. A main database may consume
+    // any share while it and every observed sidecar remain within that total.
+    let total = current.checked_add(metadata.len()).ok_or_else(|| {
+        CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id)
+    })?;
+    if total > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
         return Err(CompleteContentError::new(
             CompleteContentErrorKind::ContentTooLarge,
             event_id,
         ));
     }
-    Ok(metadata.len())
+    Ok(total)
 }
 
 #[cfg(unix)]
@@ -299,21 +305,14 @@ fn sqlite_snapshot_reservation_bytes(
         ));
     }
     validate_source_snapshot(&route.source_snapshot, &metadata, event_id)?;
-    let mut bytes = bounded_sqlite_component_bytes(&metadata, event_id)?;
+    let mut bytes = accumulate_sqlite_snapshot_bytes(0, &metadata, event_id)?;
     for suffix in ["-wal", "-shm", "-journal"] {
         match open_brokered_file(&sqlite_sidecar_path(selected_path, suffix)) {
             Ok(file) => {
                 let metadata = file
                     .metadata()
                     .map_err(|cause| map_io_error(event_id, cause))?;
-                bytes = bytes
-                    .checked_add(bounded_sqlite_component_bytes(&metadata, event_id)?)
-                    .ok_or_else(|| {
-                        CompleteContentError::new(
-                            CompleteContentErrorKind::ContentTooLarge,
-                            event_id,
-                        )
-                    })?;
+                bytes = accumulate_sqlite_snapshot_bytes(bytes, &metadata, event_id)?;
             }
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
             Err(cause) => return Err(map_io_error(event_id, cause)),
@@ -330,18 +329,14 @@ fn sqlite_snapshot_reservation_bytes(
 ) -> Result<u64, CompleteContentError> {
     let main = windows::admit_regular_file(selected_path, route.source_root.as_deref(), event_id)?;
     validate_source_snapshot(&route.source_snapshot, &main.metadata, event_id)?;
-    let mut bytes = bounded_sqlite_component_bytes(&main.metadata, event_id)?;
+    let mut bytes = accumulate_sqlite_snapshot_bytes(0, &main.metadata, event_id)?;
     for suffix in ["-wal", "-shm", "-journal"] {
         if let Some(file) = windows::admit_optional_regular_file(
             &sqlite_sidecar_path(selected_path, suffix),
             route.source_root.as_deref(),
             event_id,
         )? {
-            bytes = bytes
-                .checked_add(bounded_sqlite_component_bytes(&file.metadata, event_id)?)
-                .ok_or_else(|| {
-                    CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id)
-                })?;
+            bytes = accumulate_sqlite_snapshot_bytes(bytes, &file.metadata, event_id)?;
         }
     }
     Ok(bytes)
@@ -785,11 +780,11 @@ fn copy_bounded_handle(
         .metadata()
         .map_err(|cause| map_io_error(event_id, cause))?;
     if !metadata.file_type().is_file()
-        || metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES
+        || metadata.len() > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES
         || metadata.len() != expected_bytes
     {
         return Err(CompleteContentError::new(
-            if metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
+            if metadata.len() > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
                 CompleteContentErrorKind::ContentTooLarge
             } else if metadata.len() != expected_bytes {
                 CompleteContentErrorKind::SourceChanged

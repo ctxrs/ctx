@@ -17,12 +17,14 @@ use rusqlite::{config::DbConfig, params, Connection};
 use sha2::{Digest, Sha256};
 
 use super::{
+    certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
     open_root_handle_sqlite_source_snapshot,
+    open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
     SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceComponent,
     SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy,
-    SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
+    SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
 };
 
 fn create_database(path: &Path, value: &str) {
@@ -463,24 +465,94 @@ fn bounded_active_wal_copy_has_one_retained_snapshot_lifecycle() {
     assert_eq!(counters.active_snapshot_bytes(), 0);
 }
 
+#[cfg(unix)]
 #[test]
-fn oversized_snapshot_component_is_typed_unavailable_before_copy() {
+fn snapshot_budget_admits_sparse_main_over_512_mib_within_cumulative_limit() {
+    use std::os::unix::fs::MetadataExt;
+
+    const FORMER_COMPONENT_LIMIT: u64 = 512 * 1024 * 1024;
+
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
-    let file = File::create(&database).unwrap();
-    file.set_len(SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES + 1)
+    create_database(&database, "large-valid-main");
+    let expected_length = FORMER_COMPONENT_LIMIT + 4_096;
+    OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap()
+        .set_len(expected_length)
         .unwrap();
-    fs::write(
-        database.with_file_name("provider.sqlite-shm"),
-        b"force bounded copied-family acquisition",
+    let metadata = fs::metadata(&database).unwrap();
+    assert_eq!(metadata.len(), expected_length);
+    assert!(
+        metadata.blocks().saturating_mul(512) < 1024 * 1024,
+        "the regression fixture must remain physically sparse"
+    );
+    let parent = retain_parent(temp.path());
+
+    let admitted = certify_root_handle_sqlite_source_snapshot_copy_budget_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
     )
     .unwrap();
+    assert_eq!(admitted, expected_length);
+}
+
+#[test]
+fn snapshot_budget_rejects_cumulative_main_plus_wal_over_total() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "over-total");
+    OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap()
+        .set_len(SQLITE_SNAPSHOT_MAX_TOTAL_BYTES)
+        .unwrap();
+    fs::write(database.with_file_name("provider.sqlite-wal"), b"x").unwrap();
     let parent = retain_parent(temp.path());
 
     let result = open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"));
     assert!(matches!(
         result,
-        Err(SqliteSourceAccessError::SnapshotTooLarge { .. })
+        Err(SqliteSourceAccessError::SnapshotTooLarge {
+            length,
+            maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+            ..
+        }) if length == SQLITE_SNAPSHOT_MAX_TOTAL_BYTES + 1
+    ));
+    assert_eq!(parent.snapshot_counters().source_bytes_copied(), 0);
+}
+
+#[test]
+fn snapshot_copy_fails_closed_on_database_mutation_during_family_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    assert!(
+        fs::metadata(database.with_file_name("provider.sqlite-wal"))
+            .unwrap()
+            .len()
+            > 0
+    );
+    let original_length = fs::metadata(&database).unwrap().len();
+    let parent = retain_parent(temp.path());
+
+    let result = open_root_handle_sqlite_source_snapshot_after_database_copy_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        || {
+            let mut file = OpenOptions::new().write(true).open(&database).unwrap();
+            file.seek(SeekFrom::End(-8)).unwrap();
+            file.write_all(b"mutation").unwrap();
+            file.sync_all().unwrap();
+            assert_eq!(file.metadata().unwrap().len(), original_length);
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SourceChanged)
     ));
 }
 
