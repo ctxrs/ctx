@@ -166,6 +166,7 @@ pub(super) fn refresh_all_provider_sources(
         retained_generation.as_ref(),
         &mut build,
     )?;
+    let published_explicit_source_catalog = catalog.clone();
     let retained_sources = retained_generation
         .as_ref()
         .map(|index| index.manifest().sources.clone())
@@ -178,6 +179,7 @@ pub(super) fn refresh_all_provider_sources(
             index_root,
             retained_generation.as_ref(),
             discovery_duration,
+            published_explicit_source_catalog,
             report_progress,
         );
     }
@@ -211,6 +213,7 @@ pub(super) fn refresh_all_provider_sources(
     .map_err(|error| anyhow!("build Pro source manifest: {}", error.message))?;
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
+        published_explicit_source_catalog,
         source_manifest: Some(source_manifest),
         resolver: Some(resolver),
         scanned_routes: receipt.scanned_routes,
@@ -231,6 +234,7 @@ fn refresh_without_executable_routes(
     index_root: &Path,
     retained_generation: Option<&VerifiedIndex>,
     discovery_duration: StdDuration,
+    published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
@@ -269,6 +273,7 @@ fn refresh_without_executable_routes(
         .map_err(|error| anyhow!("build empty Pro source manifest: {}", error.message))?;
     Ok(SourceBackedRefreshPublication {
         generation_id: generation,
+        published_explicit_source_catalog,
         source_manifest: Some(source_manifest),
         resolver: Some(resolver),
         scanned_routes: 0,

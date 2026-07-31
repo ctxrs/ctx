@@ -70,6 +70,8 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         .unwrap();
     SourceBackedRefreshPublication {
         generation_id: receipt.generation_id.clone(),
+        published_explicit_source_catalog:
+            crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
         source_manifest: Some(
             ctx_pro_host_protocol::SourceManifest::new(
                 receipt.generation_id,
@@ -201,6 +203,8 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     let receipt = writer.commit(|_| true).unwrap();
     SourceBackedRefreshPublication {
         generation_id: receipt.generation_id,
+        published_explicit_source_catalog:
+            crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
         source_manifest: None,
         resolver: None,
         scanned_routes: 1,

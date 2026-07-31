@@ -6,6 +6,7 @@ pub(crate) struct SourceBackedRefreshReceipt {
     pub(crate) previous_generation: Option<String>,
     pub(crate) published_generation: String,
     pub(crate) generation_changed: bool,
+    pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     pub(crate) current: SourceBackedRefreshCurrent,
 }
 
@@ -15,6 +16,9 @@ impl SourceBackedRefreshReceipt {
             "previous_generation": self.previous_generation,
             "published_generation": self.published_generation,
             "generation_changed": self.generation_changed,
+            "published_explicit_source_catalog": self
+                .published_explicit_source_catalog
+                .to_json(),
             "current": self.current.to_json(),
         }))
     }

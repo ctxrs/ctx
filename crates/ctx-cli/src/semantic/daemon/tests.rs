@@ -264,6 +264,10 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
                     generation_id: receipt.generation_id,
+                    published_explicit_source_catalog:
+                        crate::commands::import::load_explicit_source_catalog_authority(
+                            execution.data_root,
+                        )?,
                     source_manifest: None,
                     resolver: None,
                     scanned_routes: 1,
@@ -322,6 +326,8 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
         "unsupported_routes",
         "certified_source_count",
         "certified_source_bytes",
+        "published_explicit_source_catalog",
+        "receipt",
     ] {
         assert_eq!(source_only[key], full[key], "{key}");
     }
@@ -368,6 +374,10 @@ fn daemon_run_once_publishes_core_without_entering_a_blocked_sidecar() -> Result
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: receipt.generation_id,
+                published_explicit_source_catalog:
+                    crate::commands::import::load_explicit_source_catalog_authority(
+                        execution.data_root,
+                    )?,
                 source_manifest: None,
                 resolver: None,
                 scanned_routes: 1,
@@ -433,6 +443,10 @@ fn daemon_run_once_publishes_core_without_entering_a_blocked_sidecar() -> Result
     assert_eq!(job["daemon_mode"], "full");
     assert_eq!(job["trigger"], "periodic");
     assert_eq!(job["trigger_provenance"], "daemon_scheduler");
+    assert_eq!(
+        job["published_explicit_source_catalog"],
+        job["receipt"]["published_explicit_source_catalog"]
+    );
     assert!(job.get("relational_projection").is_none());
     assert!(job.get("pro_projection").is_none());
     assert!(job.get("semantic_projection").is_none());
@@ -496,6 +510,10 @@ fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: receipt.generation_id,
+                published_explicit_source_catalog:
+                    crate::commands::import::load_explicit_source_catalog_authority(
+                        execution.data_root,
+                    )?,
                 source_manifest: None,
                 resolver: None,
                 scanned_routes: 0,

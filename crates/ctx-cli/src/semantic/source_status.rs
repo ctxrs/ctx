@@ -8,7 +8,7 @@ use ctx_history_relational::RelationalProjectionStatus;
 use serde_json::{json, Value};
 
 use crate::{
-    commands::import::load_explicit_source_catalog_authority,
+    commands::import::{load_explicit_source_catalog_authority, ExplicitSourceCatalogAuthority},
     compact_json,
     config::AppConfig,
     source_sql::{sql_compatibility_path, SqlCompatibility},
@@ -312,9 +312,25 @@ fn catalog_report(
             }))
         }
     };
-    let published_authority = refresh_job
+    let job_published_authority = refresh_job
         .and_then(|job| job.get("published_explicit_source_catalog"))
         .cloned();
+    let receipt_published_authority = refresh_job
+        .and_then(|job| job.get("receipt"))
+        .and_then(|receipt| receipt.get("published_explicit_source_catalog"))
+        .cloned();
+    let publication_verified = job_published_authority
+        .as_ref()
+        .zip(receipt_published_authority.as_ref())
+        .and_then(|(job, receipt)| {
+            ExplicitSourceCatalogAuthority::from_json(job)
+                .ok()
+                .zip(ExplicitSourceCatalogAuthority::from_json(receipt).ok())
+        })
+        .is_some_and(|(job, receipt)| job == receipt);
+    let published_authority = publication_verified
+        .then_some(job_published_authority)
+        .flatten();
     let published_generation = refresh_job
         .and_then(|job| job.get("published_generation"))
         .and_then(Value::as_str);
@@ -334,6 +350,8 @@ fn catalog_report(
         ("ready", None)
     } else if active_request || generation_id.is_none() {
         ("pending", Some("catalog_publication_pending"))
+    } else if !publication_verified {
+        ("unavailable", Some("catalog_publication_unverified"))
     } else if generation_mismatch {
         ("stale", Some("catalog_generation_mismatch"))
     } else if authority_mismatch {
@@ -346,6 +364,7 @@ fn catalog_report(
         "reason": reason,
         "authority": authority,
         "published_authority": published_authority,
+        "published_authority_present": publication_verified,
         "published_generation": published_generation,
         "generation_id": generation_id,
         "generation_matches": ready,

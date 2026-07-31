@@ -568,11 +568,18 @@ impl SourceBackedRefreshCoordinator {
                     .source_manifest
                     .as_ref()
                     .is_none_or(|manifest| manifest.core_generation_id == observed);
+                let catalog_matches_request = requested_catalog.as_ref().is_none_or(|requested| {
+                    requested == &publication.published_explicit_source_catalog
+                });
                 let production_handoff_complete =
                     publication.resolver.is_some() && publication.source_manifest.is_some();
                 let verified = if !manifest_generation_matches {
                     Err(format!(
                         "source-backed refresh published generation {observed} with a source manifest for another generation"
+                    ))
+                } else if !catalog_matches_request {
+                    Err(format!(
+                        "source-backed refresh published generation {observed} with an explicit source catalog authority different from the requested authority"
                     ))
                 } else if production_handoff_complete || cfg!(test) {
                     Ok((observed.clone(), publication))
@@ -634,11 +641,15 @@ impl SourceBackedRefreshCoordinator {
                         previous_generation: previous_generation.clone(),
                         published_generation: observed.clone(),
                         generation_changed,
+                        published_explicit_source_catalog: publication
+                            .published_explicit_source_catalog
+                            .clone(),
                         current: publication.current,
                     });
                     attempt.timings = Some(publication.timings);
                     let source_manifest = publication.source_manifest;
-                    attempt.published_explicit_source_catalog = requested_catalog.clone();
+                    attempt.published_explicit_source_catalog =
+                        Some(publication.published_explicit_source_catalog);
                     installed_resolver = publication.resolver.map(|resolver| {
                         Arc::new(GenerationBoundSourceBackedResolver {
                             generation_id: observed.clone(),
