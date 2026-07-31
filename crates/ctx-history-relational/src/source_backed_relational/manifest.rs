@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, ProjectionContractError,
-    IDENTITY_VERSION,
+    StableEntityId, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -51,6 +51,8 @@ pub(super) struct ValidatedManifest {
     pub(super) digest: [u8; 32],
     pub(super) sources: BTreeMap<String, ManifestSource>,
     pub(super) removal_ids: BTreeSet<String>,
+    active_source_digests: BTreeSet<[u8; 32]>,
+    removed_source_digests: BTreeSet<[u8; 32]>,
     pub(super) indexed_documents: u64,
     pub(super) policy_schema_hash: String,
 }
@@ -147,6 +149,7 @@ impl ValidatedManifest {
         }
         let mut prior_removal_digest = None;
         let mut removal_ids = BTreeSet::new();
+        let mut removed_source_digests = BTreeSet::new();
         for removal in manifest.removals {
             removal
                 .deletion
@@ -172,6 +175,7 @@ impl ValidatedManifest {
                 );
             }
             prior_removal_digest = Some(source_digest);
+            removed_source_digests.insert(source_digest);
             removal_ids.insert(source.identity().as_uuid().to_string());
         }
         if expected_events != manifest.indexed_documents
@@ -183,9 +187,20 @@ impl ValidatedManifest {
             digest,
             sources,
             removal_ids,
+            active_source_digests,
+            removed_source_digests,
             indexed_documents: manifest.indexed_documents,
             policy_schema_hash: manifest.policy_schema_hash,
         })
+    }
+
+    /// A relationship target can be unresolved only when its source is outside
+    /// this bounded generation. Selected and explicitly removed sources remain
+    /// strict so a malformed same-generation relationship cannot be hidden.
+    pub(super) fn permits_absent_relationship_target(&self, target: StableEntityId) -> bool {
+        let source_digest = target.source_digest();
+        !self.active_source_digests.contains(&source_digest)
+            && !self.removed_source_digests.contains(&source_digest)
     }
 }
 
