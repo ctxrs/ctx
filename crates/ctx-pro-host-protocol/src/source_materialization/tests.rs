@@ -138,6 +138,9 @@ fn source_record(content: &[u8], event_sequence: u64) -> SourceRecord {
             checkout_id: Some("checkout-1".to_owned()),
             worktree_id: Some("worktree-1".to_owned()),
             object_format: Some("sha1".to_owned()),
+            worktree_root: Some(
+                SourceWorktreeRootLocator::new("/workspace/repository".to_owned()).unwrap(),
+            ),
         }),
         SourceRecordMetadata {
             event_sequence,
@@ -168,6 +171,30 @@ fn source_record(content: &[u8], event_sequence: u64) -> SourceRecord {
         ],
     )
     .unwrap()
+}
+
+#[test]
+fn worktree_root_locator_requires_a_bounded_normalized_absolute_path() {
+    for invalid in [
+        "",
+        "relative/repository",
+        "/workspace/../repository",
+        "/workspace/./repository",
+        "/workspace/repository\nother",
+        r"C:relative\repository",
+    ] {
+        assert!(
+            SourceWorktreeRootLocator::new(invalid.to_owned()).is_err(),
+            "unexpectedly accepted {invalid:?}"
+        );
+    }
+    for valid in [
+        "/workspace/repository",
+        r"C:\workspace\repository",
+        r"\\server\share\repository",
+    ] {
+        SourceWorktreeRootLocator::new(valid.to_owned()).unwrap();
+    }
 }
 
 fn related_session_id() -> StableEntityId {

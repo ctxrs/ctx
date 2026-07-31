@@ -304,7 +304,8 @@ pub(super) fn inventory() -> Value {
                 &["occurred_at_unix_ms", "role", "workspace", "cwd"]),
             "SourceRemoval": fields(&["deletion", "inventory"], &[]),
             "SourceRepositoryContext": fields(
-                &["repository_id"], &["checkout_id", "worktree_id", "object_format"]),
+                &["repository_id"],
+                &["checkout_id", "worktree_id", "object_format", "worktree_root"]),
             "SourceResultFact": fields(
                 &["outcome", "content"], &["call_id", "exit_code", "duration_ms"]),
             "SourceSessionRelationships": fields(
@@ -317,6 +318,7 @@ pub(super) fn inventory() -> Value {
             "StatusRequest": fields(&[], &[]),
             "StatusResult": fields(
                 &["state", "authority"], &["source_receipt"]),
+            "SourceWorktreeRootLocator": fields(&["absolute_path"], &[]),
             "PrepareSourceRequest": fields(
                 &[
                     "core_generation_id", "source", "certified_revision_sha256",

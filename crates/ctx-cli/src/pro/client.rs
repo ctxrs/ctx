@@ -35,8 +35,8 @@ use super::authorization::{
 use super::credential_vault::CredentialVaultNamespace;
 use super::helper_command;
 use super::verified_executable::VerifiedHelperExecutable;
-pub(crate) use support::default_helper_path;
-use support::{git_executable, helper_executable, helper_path};
+pub(crate) use support::{default_helper_path, git_executable};
+use support::{helper_executable, helper_path};
 
 #[path = "client_errors.rs"]
 mod errors;

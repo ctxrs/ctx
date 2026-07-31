@@ -131,6 +131,10 @@ pub(super) fn source_record() -> SourceRecord {
             checkout_id: Some("checkout-1".to_owned()),
             worktree_id: Some("worktree-1".to_owned()),
             object_format: Some("sha1".to_owned()),
+            worktree_root: Some(
+                SourceWorktreeRootLocator::new("/workspace/ctx".to_owned())
+                    .expect("golden worktree root"),
+            ),
         }),
         SourceRecordMetadata {
             event_sequence: 1,
