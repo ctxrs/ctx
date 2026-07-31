@@ -417,6 +417,7 @@ fn finish_committed_transaction(
 
 fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result<Vec<String>> {
     let mut errors = Vec::new();
+    let durable_binary_backup = backup_path(&transaction.install_path);
     for path in &transaction.paths {
         match (
             path_matches_identity(&path.target, path.staged_identity.as_ref()),
@@ -435,6 +436,12 @@ fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result
     for path in &mut transaction.paths {
         match path_present(&path.backup) {
             Ok(false) => {
+                if path.label == "ctx binary" {
+                    if let Err(error) = remove_owner_regular_file(&durable_binary_backup) {
+                        errors.push(format!("{error:#}"));
+                        continue;
+                    }
+                }
                 path.state = JournalPathState::Cleaned;
                 continue;
             }
@@ -459,9 +466,7 @@ fn finish_committed_paths(transaction: &mut InstallTransactionJournal) -> Result
             .or(path.original_target_identity.as_ref());
         let result = remove_committed_backup(
             path,
-            (path.label == "ctx binary")
-                .then(|| backup_path(&transaction.install_path))
-                .as_deref(),
+            (path.label == "ctx binary").then_some(durable_binary_backup.as_path()),
             expected,
         );
         match result {
