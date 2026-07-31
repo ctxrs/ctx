@@ -5,7 +5,10 @@ use ctx_history_core::utc_now;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::analytics::{count_bucket, IntegrationResult, IntegrationTelemetry, TargetSelection};
+use crate::{
+    analytics::{count_bucket, IntegrationResult, IntegrationTelemetry, TargetSelection},
+    ui::{fields, outcome, section, Document, Field, Outcome, OutcomeState, RenderContext, Ui},
+};
 
 use super::{
     paths::{bundled_hash, ensure_path_inside, sha256_hex},
@@ -21,6 +24,7 @@ pub(super) fn run_install(
     args: SkillInstallArgs,
     context: &super::paths::PathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let selection = install_agent_selection(&args, context)?;
     insert_selection_analytics(telemetry, &selection);
@@ -57,7 +61,8 @@ pub(super) fn run_install(
             })
         );
     } else {
-        print_install_results(&results);
+        let document = render_install_results(ui.stdout_context(), &results);
+        ui.write_stdout(&document)?;
     }
     if fatal_failures > 0 {
         return Err(anyhow!(
@@ -71,6 +76,7 @@ pub(super) fn run_status(
     args: SkillStatusArgs,
     context: &super::paths::PathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut Ui,
 ) -> Result<()> {
     let selection = status_agent_selection(&args, context);
     insert_selection_analytics(telemetry, &selection);
@@ -113,7 +119,8 @@ pub(super) fn run_status(
             })
         );
     } else {
-        print_status_results(&results);
+        let document = render_status_results(ui.stdout_context(), &results);
+        ui.write_stdout(&document)?;
     }
     Ok(())
 }
@@ -372,7 +379,7 @@ fn remove_existing_target(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_install_results(results: &[InstallResult]) {
+fn render_install_results(context: &RenderContext, results: &[InstallResult]) -> Document {
     let all_success = !results.is_empty() && results.iter().all(|result| result.success);
     let all_current = all_success && results.iter().all(|result| result.already_installed);
     let any_updated = results
@@ -381,44 +388,164 @@ fn print_install_results(results: &[InstallResult]) {
     let any_installed = results
         .iter()
         .any(|result| result.success && !result.already_installed && !result.updated);
-    let heading = if all_current {
-        "Agent skill already installed"
+    let title = if all_current {
+        "Agent skill is already installed"
     } else if all_success && any_updated && !any_installed {
         "Agent skill updated"
     } else if all_success {
         "Agent skill installed"
     } else {
-        "Agent skill"
+        "Agent skill needs attention"
     };
-    println!("{heading}: {BUNDLED_SKILL_NAME}");
-    for result in results {
-        let verb = if result.already_installed {
-            "current"
-        } else if !result.success {
-            "skipped"
-        } else if result.updated {
-            "updated"
-        } else {
-            "installed"
-        };
-        let detail = result
-            .error
-            .as_deref()
-            .map(|error| format!(" - {error}"))
-            .unwrap_or_default();
-        println!("  {verb}: {}{}", result.target.agent.display_name(), detail);
-    }
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if all_success {
+                OutcomeState::Success
+            } else {
+                OutcomeState::Warning
+            },
+            title,
+            detail: None,
+        },
+    );
+    document.push_blank();
+    document.append(fields(context, &[Field::new("Skill", BUNDLED_SKILL_NAME)]));
+
+    let rows = results
+        .iter()
+        .map(|result| {
+            let status = if result.already_installed {
+                "current"
+            } else if !result.success {
+                "skipped"
+            } else if result.updated {
+                "updated"
+            } else {
+                "installed"
+            };
+            let mut detail = result.target.agent.display_name().to_owned();
+            if let Some(error) = &result.error {
+                detail.push_str(" - ");
+                detail.push_str(error);
+            }
+            (status, detail)
+        })
+        .collect::<Vec<_>>();
+    let target_fields = rows
+        .iter()
+        .map(|(status, detail)| Field::new(status, detail))
+        .collect::<Vec<_>>();
+    document.push_blank();
+    document.append(section("Targets", fields(context, &target_fields)));
+    document
 }
 
-fn print_status_results(results: &[StatusResult]) {
-    println!("ctx integrations status skills: {BUNDLED_SKILL_NAME}");
-    for result in results {
-        println!(
-            "  {}: {} ({}) -> {}",
-            result.status.as_str(),
-            result.target.agent.display_name(),
-            result.target.scope.as_str(),
-            result.target.skill_dir.display()
+fn render_status_results(context: &RenderContext, results: &[StatusResult]) -> Document {
+    let all_current = !results.is_empty()
+        && results
+            .iter()
+            .all(|result| result.status == SkillInstallStatus::Current);
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: if all_current {
+                OutcomeState::Success
+            } else {
+                OutcomeState::Warning
+            },
+            title: if all_current {
+                "Agent skill is current"
+            } else {
+                "Agent skill needs attention"
+            },
+            detail: None,
+        },
+    );
+    document.push_blank();
+    document.append(fields(context, &[Field::new("Skill", BUNDLED_SKILL_NAME)]));
+
+    let rows = results
+        .iter()
+        .map(|result| {
+            (
+                result.status.as_str(),
+                format!(
+                    "{} ({}) -> {}",
+                    result.target.agent.display_name(),
+                    result.target.scope.as_str(),
+                    result.target.skill_dir.display()
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let target_fields = rows
+        .iter()
+        .map(|(status, detail)| Field::new(status, detail))
+        .collect::<Vec<_>>();
+    document.push_blank();
+    document.append(section("Targets", fields(context, &target_fields)));
+    document
+}
+
+#[cfg(test)]
+mod render_tests {
+    use std::io::Write as _;
+
+    use super::*;
+    use crate::{
+        skill::agents::SkillAgentArg,
+        ui::{ColorMode, StreamKind, TestContext},
+    };
+
+    fn render_context(width: usize, color: ColorMode) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+    }
+
+    fn strip_ansi(rendered: &str) -> String {
+        let mut stream = anstream::StripStream::new(Vec::new());
+        stream.write_all(rendered.as_bytes()).unwrap();
+        String::from_utf8(stream.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn human_install_and_status_results_use_the_typed_ui() {
+        let temp = tempfile::tempdir().unwrap();
+        let path_context = super::super::paths::PathContext::for_tests(
+            temp.path().join("home"),
+            temp.path().join("repo"),
         );
+        let target = resolve_targets_for_agents(&[SkillAgentArg::Universal], false, &path_context)
+            .unwrap()
+            .remove(0);
+        let missing = status_target(&target).unwrap();
+        let installed = install_target(&target, false, true).unwrap();
+        let current = status_target(&target).unwrap();
+
+        for (document, expected) in [
+            (
+                render_install_results(&render_context(80, ColorMode::Never), &[installed]),
+                "Agent skill installed",
+            ),
+            (
+                render_status_results(&render_context(80, ColorMode::Never), &[missing]),
+                "Agent skill needs attention",
+            ),
+            (
+                render_status_results(&render_context(80, ColorMode::Never), &[current]),
+                "Agent skill is current",
+            ),
+        ] {
+            let plain = document.render_plain();
+            assert!(plain.contains(expected), "{plain}");
+            assert!(plain.contains("Skill"), "{plain}");
+            assert!(plain.contains("Targets"), "{plain}");
+        }
+
+        let color = render_context(80, ColorMode::Always);
+        let document = render_status_results(&color, &[status_target(&target).unwrap()]);
+        let styled = document.render(&color);
+        assert!(styled.as_bytes().contains(&0x1b), "{styled:?}");
+        assert_eq!(strip_ansi(&styled), document.render_plain());
     }
 }

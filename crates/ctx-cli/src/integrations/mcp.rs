@@ -103,14 +103,16 @@ pub(crate) fn run_install(
     args: McpInstallArgs,
     context: &McpPathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut crate::ui::Ui,
 ) -> Result<()> {
-    operation::run_install(args, context, telemetry)
+    operation::run_install(args, context, telemetry, ui)
 }
 
 pub(crate) fn run_status(
     args: McpStatusArgs,
     context: &McpPathContext,
     telemetry: &mut IntegrationTelemetry,
+    ui: &mut crate::ui::Ui,
 ) -> Result<()> {
-    operation::run_status(args, context, telemetry)
+    operation::run_status(args, context, telemetry, ui)
 }

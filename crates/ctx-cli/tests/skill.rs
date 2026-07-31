@@ -100,6 +100,69 @@ analysis.
 - Use typed IDs. Do not fall back to old ambiguous `ctx show <uuid>` behavior.
 "#;
 
+fn human_stdout(command: &mut assert_cmd::Command) -> String {
+    let output = command.assert().success().get_output().clone();
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert!(output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn skill_human_receipts_use_ui_and_json_stays_plain() {
+    let temp = tempdir();
+
+    let missing = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "status",
+        "skills",
+        "--agent",
+        "universal",
+    ]));
+    assert!(missing.contains("Agent skill needs attention"), "{missing}");
+    assert!(missing.contains("missing"), "{missing}");
+
+    let installed = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "install",
+        "skills",
+        "--agent",
+        "universal",
+    ]));
+    assert!(installed.contains("Agent skill installed"), "{installed}");
+    assert!(installed.contains("installed"), "{installed}");
+
+    let current = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "status",
+        "skills",
+        "--agent",
+        "universal",
+    ]));
+    assert!(current.contains("Agent skill is current"), "{current}");
+    assert!(current.contains("current"), "{current}");
+
+    let machine = ctx(&temp)
+        .args([
+            "--color=always",
+            "integrations",
+            "status",
+            "skills",
+            "--agent",
+            "universal",
+            "--format=json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(!machine.stdout.contains(&0x1b), "{:?}", machine.stdout);
+    let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(value["results"][0]["status"], "current");
+}
+
 fn bundled_skill_hash(body: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(body.as_bytes()))
 }
