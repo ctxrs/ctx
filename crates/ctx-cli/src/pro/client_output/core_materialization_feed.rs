@@ -2,23 +2,30 @@ use std::collections::BTreeSet;
 
 use anyhow::{anyhow, bail, Result};
 use ctx_history_core::CertifiedSource;
-use ctx_history_index::{GenerationManifest, SourceEventCursor, VerifiedIndex};
+use ctx_history_index::{
+    CoreEventPageBudget, GenerationManifest, SourceEventCursor, VerifiedIndex,
+};
 use ctx_pro_host_protocol::{
     ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, Capability,
     CoreGenerationHead, CoreMaterializationBegan, CoreMaterializationFinished,
     CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreRecordPage,
     CoreRecordPageMaterialized, CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageApplied,
     CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest, HelperMessage,
-    HostMessage, MaterializeCoreRecordPageRequest, StatusRequest, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+    HostMessage, MaterializeCoreRecordPageRequest, StatusRequest,
+    MAX_CORE_RECORD_PAGE_CONTENT_BYTES, MAX_CORE_RECORD_PAGE_ITEMS,
+    MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
 };
 use sha2::{Digest, Sha256};
 
 use super::*;
 
-// Conservative bridge until Core exposes its source-local address-first page API with a
-// caller-supplied byte bound. Keep the integration at `next_record_page`: request addresses
-// under MAX_CORE_RECORD_PAGE_CONTENT_BYTES, then materialize only that bounded address set.
-const CORE_RECORD_FETCH_ITEMS: usize = 1;
+// Keep retained Core payloads at the protocol's 16 MiB complete-content ceiling;
+// the larger wire bound remains reserved for JSON escaping and envelope overhead.
+const MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES: usize = MAX_CORE_RECORD_PAGE_CONTENT_BYTES;
+const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
+    MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES,
+    MAX_CORE_RECORD_PAGE_CONTENT_BYTES,
+);
 
 #[derive(Debug, Clone)]
 pub(super) struct CoreMaterializationSyncReport {
@@ -37,22 +44,22 @@ pub(super) struct CoreMaterializationSyncReport {
 trait CoreMaterializationConsumer {
     fn begin(
         &mut self,
-        request: &BeginCoreMaterializationRequest,
+        request: BeginCoreMaterializationRequest,
     ) -> Result<CoreMaterializationBegan>;
 
     fn apply_source_delta(
         &mut self,
-        request: &ApplyCoreSourceDeltaPageRequest,
+        request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied>;
 
     fn materialize_records(
         &mut self,
-        request: &MaterializeCoreRecordPageRequest,
+        request: MaterializeCoreRecordPageRequest,
     ) -> Result<CoreRecordPageMaterialized>;
 
     fn finish(
         &mut self,
-        request: &FinishCoreMaterializationRequest,
+        request: FinishCoreMaterializationRequest,
     ) -> Result<CoreMaterializationFinished>;
 }
 
@@ -69,12 +76,9 @@ impl ProtocolCoreMaterializationConsumer {
 impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
     fn begin(
         &mut self,
-        request: &BeginCoreMaterializationRequest,
+        request: BeginCoreMaterializationRequest,
     ) -> Result<CoreMaterializationBegan> {
-        request
-            .validate()
-            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-        match self.exchange(HostMessage::BeginCoreMaterialization(request.clone()))? {
+        match self.exchange(HostMessage::BeginCoreMaterialization(request))? {
             HelperMessage::CoreMaterializationBegan(response) => Ok(response),
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => bail!("invalid_response: helper returned a non-Core-begin response"),
@@ -83,12 +87,9 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
 
     fn apply_source_delta(
         &mut self,
-        request: &ApplyCoreSourceDeltaPageRequest,
+        request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied> {
-        request
-            .validate()
-            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-        match self.exchange(HostMessage::ApplyCoreSourceDeltaPage(request.clone()))? {
+        match self.exchange(HostMessage::ApplyCoreSourceDeltaPage(request))? {
             HelperMessage::CoreSourceDeltaPageApplied(response) => Ok(response),
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => bail!("invalid_response: helper returned a non-Core-delta response"),
@@ -97,12 +98,9 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
 
     fn materialize_records(
         &mut self,
-        request: &MaterializeCoreRecordPageRequest,
+        request: MaterializeCoreRecordPageRequest,
     ) -> Result<CoreRecordPageMaterialized> {
-        request
-            .validate()
-            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-        match self.exchange(HostMessage::MaterializeCoreRecordPage(request.clone()))? {
+        match self.exchange(HostMessage::MaterializeCoreRecordPage(request))? {
             HelperMessage::CoreRecordPageMaterialized(response) => Ok(response),
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => bail!("invalid_response: helper returned a non-Core-record response"),
@@ -111,12 +109,9 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
 
     fn finish(
         &mut self,
-        request: &FinishCoreMaterializationRequest,
+        request: FinishCoreMaterializationRequest,
     ) -> Result<CoreMaterializationFinished> {
-        request
-            .validate()
-            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-        match self.exchange(HostMessage::FinishCoreMaterialization(request.clone()))? {
+        match self.exchange(HostMessage::FinishCoreMaterialization(request))? {
             HelperMessage::CoreMaterializationFinished(response) => Ok(response),
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => bail!("invalid_response: helper returned a non-Core-finish response"),
@@ -174,9 +169,12 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
         head: head.clone(),
         expected_prior_receipt: expected_prior_receipt.clone(),
     };
-    let began = consumer.begin(&begin)?;
+    let begin_identity = begin
+        .acknowledgement_identity()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    let began = consumer.begin(begin)?;
     began
-        .validate_for(&begin)
+        .validate_for_identity(&begin_identity)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
 
     let mut source_delta_pages = 0_u32;
@@ -193,10 +191,11 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
             .map_err(|_| anyhow!("invalid_request: Core delta page count overflowed"))?;
         let mut materialize_sources = Vec::new();
         for page in delta_pages {
+            let acknowledgement_identity = page.acknowledgement_identity();
             let request = ApplyCoreSourceDeltaPageRequest { page };
-            let applied = consumer.apply_source_delta(&request)?;
+            let applied = consumer.apply_source_delta(request)?;
             applied
-                .validate_for(&request.page)
+                .validate_for_identity(&acknowledgement_identity)
                 .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
             changed_sources = changed_sources
                 .checked_add(applied.changed_sources)
@@ -218,7 +217,7 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
             let mut cursor = None;
             let mut page_index = 0_u32;
             loop {
-                let page = next_record_page(
+                let (page, next_cursor) = next_record_page(
                     index,
                     source,
                     cursor.as_ref(),
@@ -228,29 +227,24 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
                     page_index,
                 )?;
                 let terminal = page.terminal;
-                let last_event = page.records.last().map(|record| record.event_id);
                 materialized_records = materialized_records
                     .checked_add(u64::try_from(page.records.len()).unwrap_or(u64::MAX))
                     .ok_or_else(|| {
                         anyhow!("invalid_request: Core materialized record count overflowed")
                     })?;
+                let acknowledgement_identity = page.acknowledgement_identity();
                 let request = MaterializeCoreRecordPageRequest { page };
-                let response = consumer.materialize_records(&request)?;
+                let response = consumer.materialize_records(request)?;
                 response
-                    .validate_for(&request.page)
+                    .validate_for_identity(&acknowledgement_identity)
                     .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
                 record_pages = record_pages.saturating_add(1);
                 if terminal {
                     break;
                 }
-                let after = last_event.ok_or_else(|| {
+                cursor = Some(next_cursor.ok_or_else(|| {
                     anyhow!("invalid_response: nonterminal Core page has no event cursor")
-                })?;
-                cursor = Some(SourceEventCursor::new(
-                    index.generation_id(),
-                    source.source.clone(),
-                    after,
-                ));
+                })?);
                 page_index = page_index
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("invalid_request: Core page index overflowed"))?;
@@ -260,7 +254,7 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
 
     let finish = FinishCoreMaterializationRequest {
         materialization_id: began.materialization_id,
-        head,
+        head: head.clone(),
         expected_prior_receipt,
         source_delta_pages,
         changed_sources,
@@ -269,9 +263,13 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
             .map_err(|_| anyhow!("invalid_request: Core record page count overflowed"))?,
         materialized_records,
     };
-    let finished = consumer.finish(&finish)?;
+    finish
+        .validate()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    let finished = consumer.finish(finish)?;
     finished
-        .validate_for(&finish)
+        .receipt
+        .validate_for_head(&head)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
     if finished.receipt.materializer_revision != began.materializer_revision {
         bail!("invalid_response: terminal Core receipt changed materializer revision");
@@ -409,21 +407,41 @@ fn next_record_page(
     materialization_id: &str,
     source_index: u32,
     page_index: u32,
-) -> Result<CoreRecordPage> {
-    let source_page =
-        index.core_source_event_page(&source.source, cursor, CORE_RECORD_FETCH_ITEMS)?;
+) -> Result<(CoreRecordPage, Option<SourceEventCursor>)> {
+    let source_page = index.core_source_event_page_with_budget(
+        &source.source,
+        cursor,
+        MAX_CORE_RECORD_PAGE_ITEMS,
+        CORE_RECORD_PAGE_BUDGET,
+    )?;
     if source_page.generation_id != index.generation_id()
         || !source_page.source.exact_descriptor_eq(&source.source)
     {
         bail!("core_generation_mismatch: Core record page escaped its pinned generation");
     }
+    if source_page.items.len() > MAX_CORE_RECORD_PAGE_ITEMS {
+        bail!("invalid_request: Core record page exceeded its item bound");
+    }
+    if source_page.encoded_core_bytes > CORE_RECORD_PAGE_BUDGET.maximum_encoded_core_bytes {
+        bail!(
+            "invalid_request: one Core record exceeds the {}-byte Pro page encoded-payload bound",
+            CORE_RECORD_PAGE_BUDGET.maximum_encoded_core_bytes
+        );
+    }
+    if source_page.content_bytes > CORE_RECORD_PAGE_BUDGET.maximum_content_bytes {
+        bail!(
+            "invalid_request: one Core record exceeds the {}-byte Pro page content bound",
+            CORE_RECORD_PAGE_BUDGET.maximum_content_bytes
+        );
+    }
     let terminal = source_page.terminal;
+    let next_cursor = source_page.next_cursor;
     let records = source_page
         .items
         .into_iter()
         .map(|item| item.core_record)
         .collect::<Vec<_>>();
-    CoreRecordPage::new(
+    let page = CoreRecordPage::new(
         materialization_id,
         index.generation_id(),
         source.clone(),
@@ -432,7 +450,8 @@ fn next_record_page(
         terminal,
         records,
     )
-    .map_err(|error| anyhow!("invalid_request: {}", error.message))
+    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    Ok((page, next_cursor))
 }
 
 fn certified_source_revision_sha256(source: &CertifiedSource) -> Result<String> {

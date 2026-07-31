@@ -202,6 +202,46 @@ fn complete_core_record_page_transports_long_body_and_two_repository_scopes() {
 }
 
 #[test]
+fn record_page_acknowledgement_uses_compact_identity_after_request_moves() {
+    let source = source(1);
+    let source_state = state(source.clone(), 2, 1);
+    let page = CoreRecordPage::new(
+        "d".repeat(64),
+        "a".repeat(64),
+        source_state,
+        3,
+        7,
+        true,
+        vec![record(&source, 1, "x".repeat(1024 * 1024), false)],
+    )
+    .unwrap();
+    let identity = page.acknowledgement_identity();
+    let request = MaterializeCoreRecordPageRequest { page };
+    let mut acknowledgement = CoreRecordPageMaterialized {
+        materialization_id: request.page.materialization_id.clone(),
+        core_generation_id: request.page.core_generation_id.clone(),
+        source: request.page.source.source.clone(),
+        source_revision_sha256: request.page.source.source_revision_sha256.clone(),
+        source_index: request.page.source_index,
+        page_index: request.page.page_index,
+        accepted_records: 1,
+        terminal: true,
+        replayed: false,
+    };
+    drop(request);
+
+    acknowledgement.validate_for_identity(&identity).unwrap();
+    acknowledgement.page_index = 8;
+    assert_eq!(
+        acknowledgement
+            .validate_for_identity(&identity)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
 fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
     let unchanged = state(source(1), 1, 10_000);
     let changed = state(source(2), 2, 1);
@@ -216,6 +256,7 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         ],
     )
     .unwrap();
+    let identity = page.acknowledgement_identity();
     CoreSourceDeltaPageApplied {
         materialization_id: page.materialization_id.clone(),
         core_generation_id: page.core_generation_id.clone(),
@@ -225,7 +266,7 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         materialize_sources: vec![changed.clone()],
         replayed: false,
     }
-    .validate_for(&page)
+    .validate_for_identity(&identity)
     .unwrap();
 
     let mut stale = changed;
@@ -240,7 +281,7 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         replayed: false,
     };
     assert_eq!(
-        invalid.validate_for(&page).unwrap_err().class,
+        invalid.validate_for_identity(&identity).unwrap_err().class,
         ErrorClass::Sequence
     );
 }
@@ -292,6 +333,12 @@ fn generation_begin_and_finish_fail_closed_on_mismatched_cas() {
         expected_prior_receipt: None,
     };
     let revision = "materializer-v2";
+    let identity = request.acknowledgement_identity().unwrap();
+    let expected_materialization_id = canonical_sha256(
+        &(&request, revision),
+        "Core materialization ID encoding failed",
+    )
+    .unwrap();
     let mut began = CoreMaterializationBegan {
         materialization_id: core_materialization_id(&request, revision).unwrap(),
         core_generation_id: request.head.core_generation_id.clone(),
@@ -299,9 +346,11 @@ fn generation_begin_and_finish_fail_closed_on_mismatched_cas() {
         expected_prior_receipt: None,
         replayed: false,
     };
-    began.validate_for(&request).unwrap();
+    assert_eq!(began.materialization_id, expected_materialization_id);
+    drop(request);
+    began.validate_for_identity(&identity).unwrap();
     began.core_generation_id = "f".repeat(64);
-    assert!(began.validate_for(&request).is_err());
+    assert!(began.validate_for_identity(&identity).is_err());
 }
 
 #[test]
