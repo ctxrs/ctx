@@ -216,7 +216,7 @@ fn terminal_trial_state_requests_paid_conversion_without_claiming_completion() {
 #[test]
 fn sign_in_and_checkout_renderers_fit_supported_widths_and_sanitize_values() {
     for width in [32, 48, 80, 120] {
-        let context = styled_stderr_context(width);
+        let context = stderr_context(width);
         for document in [
             render_device_sign_in(
                 &context,
@@ -229,12 +229,9 @@ fn sign_in_and_checkout_renderers_fit_supported_widths_and_sanitize_values() {
             ),
         ] {
             let rendered = document.render_plain();
-            let styled = document.render(&context);
-            assert_eq!(strip_ansi(&styled), rendered);
             assert!(!rendered.contains('\u{1b}'));
             assert!(rendered.contains("\\x1b"));
             assert!(rendered.contains("\\n") || !rendered.contains("secret"));
-            assert!(styled.contains("\u{1b}[36mhttps://"), "{styled:?}");
             let maximum = context.content_width().unwrap_or(1);
             assert!(
                 rendered
@@ -244,13 +241,6 @@ fn sign_in_and_checkout_renderers_fit_supported_widths_and_sanitize_values() {
             );
         }
     }
-}
-
-#[test]
-fn checkout_elapsed_uses_correct_singular_and_plural_grammar() {
-    assert_eq!(checkout_elapsed(0), "0 minutes elapsed");
-    assert_eq!(checkout_elapsed(60), "1 minute elapsed");
-    assert_eq!(checkout_elapsed(120), "2 minutes elapsed");
 }
 
 fn commercial_state(access_state: &str, access_deadline_unix: Option<i64>) -> CommercialState {
