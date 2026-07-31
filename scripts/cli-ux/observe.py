@@ -586,6 +586,11 @@ def _reap_pid(pid: int) -> None:
         return
 
 
+def _reap_terminated_children(baseline_children: set[int]) -> None:
+    for pid in _direct_child_pids() - baseline_children:
+        _reap_pid(pid)
+
+
 def _terminate_pids(pids: list[int]) -> list[int]:
     for pid in pids:
         try:
@@ -845,6 +850,7 @@ def observe(
             profile=profile,
             identity=process_identity,
         )
+        _reap_terminated_children(baseline_children)
         leaked_pids = _pids_in_capture_scope(
             process_identity.get("session_id"), baseline_children
         )
@@ -863,6 +869,7 @@ def observe(
         cleanup_errors: list[str] = []
         cleanup_seen: set[int] = set()
         for _ in range(3):
+            _reap_terminated_children(baseline_children)
             scoped_pids = _pids_in_capture_scope(
                 process_identity.get("session_id"), baseline_children
             )

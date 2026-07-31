@@ -109,6 +109,15 @@ def orphan(pid_file: Path) -> None:
     print(f"spawned:{child}", flush=True)
 
 
+def exited_orphan() -> None:
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        os._exit(0)
+    time.sleep(0.05)
+    print(f"exited:{child}", flush=True)
+
+
 def main() -> None:
     mode = sys.argv[1]
     if mode == "controls":
@@ -135,6 +144,8 @@ def main() -> None:
         local_unix()
     elif mode == "orphan":
         orphan(Path(sys.argv[2]))
+    elif mode == "exited-orphan":
+        exited_orphan()
     else:
         raise SystemExit(f"unknown fixture mode: {mode}")
 
