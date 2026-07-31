@@ -430,7 +430,7 @@ fn shared_family_claude_hydrates_every_projected_compound_row_by_native_key() {
             "compound body",
             "tool call Read call-pure src/lib.rs",
             "summary body",
-            "notice",
+            "notice body",
             "message body",
         ]
     );
@@ -474,6 +474,78 @@ fn shared_family_claude_hydrates_every_projected_compound_row_by_native_key() {
         .hydrate_event(&EventHydrationRequest::new(first.event_id, mutated_locator).unwrap())
         .unwrap_err();
     assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+}
+
+#[test]
+fn shared_family_claude_hydrates_full_source_text_beyond_index_retention() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join(".claude/projects");
+    let path = session_path(&projects, "-project", "session-1");
+    let long_message = format!("{}ordinary-unique-tail", "m".repeat(20_000));
+    let long_compound = format!("{}compound-unique-tail", "c".repeat(20_000));
+    write_lines(
+        &path,
+        &[
+            message("session-1", "message-long", &long_message),
+            json!({
+                "sessionId": "session-1",
+                "type": "system",
+                "uuid": "notice-1",
+                "summary": "source-authored notice"
+            }),
+            json!({
+                "sessionId": "session-1",
+                "type": "assistant",
+                "uuid": "compound-long",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": long_compound},
+                        {
+                            "type": "tool_use",
+                            "id": "call-long",
+                            "name": "Read",
+                            "input": {"file_path": "src/long.rs"}
+                        }
+                    ]
+                }
+            }),
+        ],
+    );
+    let registry = registry(&projects);
+    let index_root = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let mut events = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .source_event_page(cold.sources[0].observation().source(), None, 8)
+        .unwrap()
+        .items;
+    events.sort_by_key(|event| event.event_sequence);
+    assert_eq!(events.len(), 4);
+    let hydrated = registry
+        .resolver_registry()
+        .hydrate_batch(
+            &BatchHydrationRequest::new(
+                events
+                    .iter()
+                    .map(|event| {
+                        EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .into_records()
+        .into_iter()
+        .map(|record| String::from_utf8(record.provider_bytes).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(hydrated[0], long_message);
+    assert!(hydrated[0].ends_with("ordinary-unique-tail"));
+    assert_eq!(hydrated[1], "source-authored notice");
+    assert_eq!(hydrated[2], long_compound);
+    assert!(hydrated[2].ends_with("compound-unique-tail"));
+    assert_eq!(hydrated[3], "tool call Read call-long src/long.rs");
 }
 
 #[test]
