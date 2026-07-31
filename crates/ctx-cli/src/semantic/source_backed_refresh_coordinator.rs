@@ -10,8 +10,8 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
     build_automatic_source_backed_registry_from_report, discover_provider_sources_with_context,
-    validate_provider_source_roots_outside_data_root, DiscoveryContext, DiscoveryReport,
-    ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
+    validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
+    DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
     SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
     SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress,
     SourceBackedResolverRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
@@ -671,9 +671,18 @@ fn wait_for_published_generation(
                     .or_else(|| response.get("previous_generation").and_then(Value::as_str))
                     .map(|generation| format!("; retained generation {generation}"))
                     .unwrap_or_default();
-                return Err(anyhow!(
-                    "daemon-owned source-backed refresh failed: {error}{retained}"
-                ));
+                let detail =
+                    format!("daemon-owned source-backed refresh failed: {error}{retained}");
+                match response.get("failure_type").and_then(Value::as_str) {
+                    Some("unsupported_schema") => {
+                        return Err(CaptureError::UnsupportedSchema(detail).into())
+                    }
+                    Some("malformed_source") => {
+                        return Err(CaptureError::InvalidPayload(detail).into())
+                    }
+                    _ => {}
+                }
+                return Err(anyhow!("{detail}"));
             }
             Some("queued" | "running") => {
                 std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);

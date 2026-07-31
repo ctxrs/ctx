@@ -1,4 +1,5 @@
 use super::*;
+use crate::ProviderSourceFailureKind;
 
 /// Registers Cursor's thin adapter over the shared replacement-only JSONL
 /// lifecycle.
@@ -189,7 +190,7 @@ pub fn register_custom_history_source_backed_route(
                     Ok(())
                 },
             )
-            .map_err(route_error)?;
+            .map_err(custom_history_route_error)?;
             let receipt = match outcome {
                 CustomHistorySourceBackedOutcome::Missing {
                     inventory,
@@ -310,4 +311,15 @@ pub fn register_custom_history_source_backed_route(
         driver,
     )?);
     Ok(())
+}
+
+fn custom_history_route_error(error: CustomHistorySourceBackedError) -> SourceBackedRouteError {
+    let kind = match &error {
+        CustomHistorySourceBackedError::Capture(CaptureError::ProviderSource {
+            kind: ProviderSourceFailureKind::SchemaIncompatible,
+            ..
+        }) => SourceBackedRouteErrorKind::Unsupported,
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }
