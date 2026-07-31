@@ -20,7 +20,7 @@ use crate::semantic::{
 
 pub(super) const CONTROL_FILE: &str = "state.sqlite";
 const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
-const CONTROL_SCHEMA_VERSION: i64 = 1;
+const CONTROL_SCHEMA_VERSION: i64 = 2;
 const MODEL_CONTRACT_STATE: &str = "projection_model_contract";
 
 pub(in crate::semantic) fn open_writable(root: &Path) -> Result<Connection> {
@@ -116,8 +116,26 @@ fn validate_control_file(path: &Path) -> Result<()> {
 }
 
 fn prepare_schema(connection: &Connection) -> Result<()> {
-    let application_id = pragma_i64(connection, "application_id")?;
-    let schema_version = pragma_i64(connection, "user_version")?;
+    let mut application_id = pragma_i64(connection, "application_id")?;
+    let mut schema_version = pragma_i64(connection, "user_version")?;
+    if application_id == CONTROL_APPLICATION_ID
+        && (1..CONTROL_SCHEMA_VERSION).contains(&schema_version)
+    {
+        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
+        transaction.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS semantic_dirty_events;
+            DROP TABLE IF EXISTS semantic_index_stats;
+            DROP TABLE IF EXISTS semantic_maintenance_state;
+            DROP TABLE IF EXISTS semantic_source_documents;
+            "#,
+        )?;
+        transaction.pragma_update(None, "application_id", 0)?;
+        transaction.pragma_update(None, "user_version", 0)?;
+        transaction.commit()?;
+        application_id = 0;
+        schema_version = 0;
+    }
     if application_id == 0 && schema_version == 0 && user_table_count(connection)? == 0 {
         let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
         transaction.execute_batch(
@@ -143,7 +161,6 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
             CREATE TABLE semantic_source_documents (
                 event_id TEXT PRIMARY KEY,
                 stable_event_identity BLOB NOT NULL UNIQUE,
-                locator_json BLOB NOT NULL,
                 source_text_sha256 TEXT NOT NULL,
                 core_generation_id TEXT NOT NULL,
                 consumer_build_id TEXT NOT NULL

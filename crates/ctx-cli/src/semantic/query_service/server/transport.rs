@@ -42,16 +42,10 @@ use super::{
 };
 
 fn source_refresh_coordinator(
-    data_root: &Path,
-    service: DaemonIpcService,
+    _data_root: &Path,
+    _service: DaemonIpcService,
 ) -> Result<Arc<SourceBackedRefreshCoordinator>> {
-    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
-    if service == DaemonIpcService::SourceRefresh {
-        coordinator
-            .recover_published_resolver(data_root)
-            .context("restore generation-bound source hydration resolver")?;
-    }
-    Ok(coordinator)
+    Ok(Arc::new(SourceBackedRefreshCoordinator::new()))
 }
 
 #[cfg(unix)]
