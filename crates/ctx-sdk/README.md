@@ -30,7 +30,7 @@ let results = client.search(SearchOptions {
 ## Public Operations
 
 `status`, `init`, `sources`, `import_history`, `sync`, `search`, `show_event`,
-`show_session`, `locate_event`, and `locate_session`.
+and `show_session`.
 
 The SDK returns `AgentHistoryEnvelope` values from `ctx-protocol` with stable
 `agent-history-v1` fields. CLI JSON remains an adapter detail.
