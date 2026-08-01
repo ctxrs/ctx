@@ -18,6 +18,29 @@ use crate::OutputOutcome;
 
 const MAX_EXACT_OUTCOME_OBJECTS: usize = 256;
 const MAX_LINKAGE_CALL_ID_BYTES: usize = 16 * 1024;
+const MAX_EXACT_OUTCOME_OUTPUT_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum UnscopedOutcomeObservation {
+    Exact(RepositoryOutcomeObservation),
+    DeferredCommit(DeferredCommitObservation),
+}
+
+impl From<RepositoryOutcomeObservation> for UnscopedOutcomeObservation {
+    fn from(value: RepositoryOutcomeObservation) -> Self {
+        Self::Exact(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct DeferredCommitObservation {
+    pub(crate) oid_prefix: String,
+    pub(crate) subject: String,
+    pub(crate) producer: BoundedCommitProducer,
+    pub(crate) rewrites_history: bool,
+    pub(crate) observed_at_unix_ms: i64,
+    pub(crate) linkage: RepositoryOutcomeLinkage,
+}
 
 pub(crate) struct LinkedOutcomeInput<'a> {
     pub(crate) provider: &'static str,
@@ -43,7 +66,7 @@ pub(crate) struct LinkedOutcomeEvidence {
     pub(crate) provider_native_repository_aliases: Vec<RepositoryAlias>,
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
-    pub(crate) outcomes: Vec<RepositoryOutcomeObservation>,
+    pub(crate) outcomes: Vec<UnscopedOutcomeObservation>,
     pub(crate) abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
@@ -143,8 +166,28 @@ pub(crate) fn linked_outcome_evidence(
             provider_native_repository_aliases: aliases,
             outcome_operation_repository_path: operation_path,
             outcome_output_repository_path: output_path,
-            outcomes: vec![*outcome],
+            outcomes: vec![(*outcome).into()],
             abstentions: Vec::new(),
+        }),
+        OperationResult::Deferred(deferred) => Some(LinkedOutcomeEvidence {
+            provider_native_repository_aliases: Vec::new(),
+            outcome_operation_repository_path: operation_path,
+            outcome_output_repository_path: output_path,
+            outcomes: vec![UnscopedOutcomeObservation::DeferredCommit(deferred)],
+            abstentions: if matches!(
+                plan.operation,
+                BoundedOutcomeOperation::Commit {
+                    rewrites_history: true,
+                    ..
+                }
+            ) {
+                vec![(
+                    RepositoryAbstentionReason::HistoryRewriteUnlinked,
+                    "rewrite_result_has_no_exact_nonbranching_replacement_lineage",
+                )]
+            } else {
+                Vec::new()
+            },
         }),
         OperationResult::RewriteUnlinked => Some(abstained(
             operation_path,
@@ -182,6 +225,7 @@ enum OperationResult {
         aliases: Vec<RepositoryAlias>,
     },
     RewriteUnlinked,
+    Deferred(DeferredCommitObservation),
     Inadmissible,
 }
 
@@ -208,14 +252,32 @@ fn parse_operation_result(
                     plan.machine_output_isolated,
                 )
             };
-            if rewrites_history
-                && !matches!(parsed, Some((_, ref replacements)) if !replacements.is_empty())
-            {
+            let Some((produced_object_ids, replacement_lineage)) = parsed else {
+                let deferred = structured_commit_oid
+                    .is_none()
+                    .then(|| deferred_commit_result(output, producer))
+                    .flatten();
+                return deferred.map_or(
+                    if rewrites_history {
+                        OperationResult::RewriteUnlinked
+                    } else {
+                        OperationResult::Inadmissible
+                    },
+                    |(oid_prefix, subject)| {
+                        OperationResult::Deferred(DeferredCommitObservation {
+                            oid_prefix,
+                            subject,
+                            producer,
+                            rewrites_history,
+                            observed_at_unix_ms,
+                            linkage,
+                        })
+                    },
+                );
+            };
+            if rewrites_history && replacement_lineage.is_empty() {
                 return OperationResult::RewriteUnlinked;
             }
-            let Some((produced_object_ids, replacement_lineage)) = parsed else {
-                return OperationResult::Inadmissible;
-            };
             if !rewrites_history && !replacement_lineage.is_empty() {
                 return OperationResult::Inadmissible;
             }
@@ -333,6 +395,93 @@ fn exact_commit_result(
     } else {
         None
     }
+}
+
+fn deferred_commit_result(
+    output: &Value,
+    producer: BoundedCommitProducer,
+) -> Option<(String, String)> {
+    if producer == BoundedCommitProducer::Rebase {
+        return None;
+    }
+    let output = exact_result_text(output)?;
+    let mut candidates = output
+        .lines()
+        .filter_map(canonical_short_commit_summary)
+        .collect::<Vec<_>>();
+    if producer == BoundedCommitProducer::Merge {
+        let merge_created = output.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("Merge made by the ") && line.ends_with(" strategy.")
+        });
+        if merge_created {
+            candidates.extend(output.lines().filter_map(canonical_graph_head_summary));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [candidate] => Some(candidate.clone()),
+        _ => None,
+    }
+}
+
+fn exact_result_text(output: &Value) -> Option<String> {
+    match output {
+        Value::String(value) if value.len() <= MAX_EXACT_OUTCOME_OUTPUT_BYTES => {
+            Some(value.clone())
+        }
+        Value::Array(items) if !items.is_empty() && items.len() <= MAX_EXACT_OUTCOME_OBJECTS => {
+            let mut combined = String::new();
+            for item in items {
+                let object = item.as_object()?;
+                if !exact_keys(object, &["type", "text"])
+                    || object.get("type")?.as_str()? != "input_text"
+                {
+                    return None;
+                }
+                let text = object.get("text")?.as_str()?;
+                if combined.len().saturating_add(text.len()) > MAX_EXACT_OUTCOME_OUTPUT_BYTES {
+                    return None;
+                }
+                combined.push_str(text);
+            }
+            Some(combined)
+        }
+        Value::Object(object) => {
+            let mut candidates = ["aggregated", "stdout", "output", "text", "content"]
+                .into_iter()
+                .filter_map(|key| object.get(key).and_then(Value::as_str))
+                .filter(|value| value.len() <= MAX_EXACT_OUTCOME_OUTPUT_BYTES);
+            let selected = candidates.next()?;
+            candidates.next().is_none().then(|| selected.to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn canonical_short_commit_summary(line: &str) -> Option<(String, String)> {
+    let line = line.strip_prefix('[')?;
+    let (identity, subject) = line.split_once("] ")?;
+    let (_, oid_prefix) = identity.rsplit_once(' ')?;
+    bounded_short_commit(oid_prefix, subject)
+}
+
+fn canonical_graph_head_summary(line: &str) -> Option<(String, String)> {
+    let line = line.strip_prefix("*   ")?;
+    let (oid_prefix, subject) = line.split_once(' ')?;
+    bounded_short_commit(oid_prefix, subject)
+}
+
+fn bounded_short_commit(oid_prefix: &str, subject: &str) -> Option<(String, String)> {
+    if !(7..=64).contains(&oid_prefix.len())
+        || !oid_prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || subject.is_empty()
+        || subject.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return None;
+    }
+    Some((oid_prefix.to_ascii_lowercase(), subject.to_owned()))
 }
 
 fn valid_lineage(lineage: &[RepositoryObjectReplacement]) -> bool {
@@ -543,6 +692,13 @@ fn plan_paths(plan: &BoundedOutcomePlan) -> (Option<String>, Option<String>) {
 mod tests {
     use super::*;
 
+    fn exact_outcome(value: &UnscopedOutcomeObservation) -> &RepositoryOutcomeObservation {
+        match value {
+            UnscopedOutcomeObservation::Exact(outcome) => outcome,
+            UnscopedOutcomeObservation::DeferredCommit(_) => panic!("expected exact outcome"),
+        }
+    }
+
     fn input<'a>(command: &'a str, output: &'a Value) -> LinkedOutcomeInput<'a> {
         LinkedOutcomeInput {
             provider: "fixture",
@@ -571,7 +727,10 @@ mod tests {
             &output,
         ))
         .unwrap();
-        assert_eq!(exact.outcomes[0].produced_object_ids[0].hex, oid);
+        assert_eq!(
+            exact_outcome(&exact.outcomes[0]).produced_object_ids[0].hex,
+            oid
+        );
 
         let mut short = input("git commit -m exact", &output);
         short.structured_commit_oid = Some("0123456");
@@ -579,6 +738,69 @@ mod tests {
         assert!(short.outcomes.is_empty());
         assert_eq!(
             short.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+    }
+
+    #[test]
+    fn canonical_cross_provider_short_commit_results_are_deferred_not_guessed() {
+        for (command, output, expected_prefix, expected_subject) in [
+            (
+                "git commit -m exact",
+                serde_json::json!([
+                    {"type": "input_text", "text": "Script completed\nOutput:\n"},
+                    {"type": "input_text", "text": "[main 9747be9] Fail closed on invalid retry headers\n 2 files changed, 24 insertions(+), 5 deletions(-)\n"},
+                    {"type": "input_text", "text": "exit=0"}
+                ]),
+                "9747be9",
+                "Fail closed on invalid retry headers",
+            ),
+            (
+                "git commit -m exact",
+                serde_json::json!({
+                    "status": "completed",
+                    "exitCode": 0,
+                    "aggregated": "## main\n M src/audit.js\n[main ee42c90] feat: summarize normalized delivery policies\n 2 files changed, 68 insertions(+), 1 deletion(-)",
+                    "cwd": "/repo"
+                }),
+                "ee42c90",
+                "feat: summarize normalized delivery policies",
+            ),
+            (
+                "git commit --amend --no-edit",
+                Value::String("[main 1791cb3] Add bounded retry jitter normalization\n Date: Sat Aug 1 11:17:51 2026 -0400\n 2 files changed, 26 insertions(+), 5 deletions(-)".to_owned()),
+                "1791cb3",
+                "Add bounded retry jitter normalization",
+            ),
+        ] {
+            let evidence = linked_outcome_evidence(input(command, &output)).unwrap();
+            let UnscopedOutcomeObservation::DeferredCommit(deferred) = &evidence.outcomes[0]
+            else {
+                panic!("expected deferred commit");
+            };
+            assert_eq!(deferred.oid_prefix, expected_prefix);
+            assert_eq!(deferred.subject, expected_subject);
+        }
+    }
+
+    #[test]
+    fn canonical_merge_graph_head_is_deferred_and_ambiguous_summaries_abstain() {
+        let output = Value::String(
+            "Merge made by the 'ort' strategy.\n README.md | 11 +++++++++++\n*   efdfa9e Merge retry validation documentation\n|\\  \n| * a69f7ff Document retry validation contract\n* | 9747be9 Fail closed on invalid retry headers\n"
+                .to_owned(),
+        );
+        let evidence = linked_outcome_evidence(input("git merge --no-ff docs", &output)).unwrap();
+        let UnscopedOutcomeObservation::DeferredCommit(deferred) = &evidence.outcomes[0] else {
+            panic!("expected deferred merge");
+        };
+        assert_eq!(deferred.oid_prefix, "efdfa9e");
+        assert_eq!(deferred.producer, BoundedCommitProducer::Merge);
+
+        let ambiguous = Value::String("[main 1111111] first\n[main 2222222] second\n".to_owned());
+        let evidence = linked_outcome_evidence(input("git commit -m exact", &ambiguous)).unwrap();
+        assert!(evidence.outcomes.is_empty());
+        assert_eq!(
+            evidence.abstentions[0].0,
             RepositoryAbstentionReason::OutcomeResultInadmissible
         );
     }
@@ -604,7 +826,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(stable.outcomes.len(), 1);
-        assert_eq!(stable.outcomes[0].produced_object_ids[0].hex, oid);
+        assert_eq!(
+            exact_outcome(&stable.outcomes[0]).produced_object_ids[0].hex,
+            oid
+        );
     }
 
     #[test]
@@ -622,7 +847,10 @@ mod tests {
         let created_output = Value::String(format!("Merge made by the 'ort' strategy.\n{oid}\n"));
         let created = linked_outcome_evidence(input(command, &created_output)).unwrap();
         assert_eq!(created.outcomes.len(), 1);
-        assert_eq!(created.outcomes[0].produced_object_ids[0].hex, oid);
+        assert_eq!(
+            exact_outcome(&created.outcomes[0]).produced_object_ids[0].hex,
+            oid
+        );
 
         let polluted = linked_outcome_evidence(input(
             "git log -1 && git merge --no-ff feature && git rev-parse HEAD",
@@ -655,11 +883,22 @@ mod tests {
         let rewrite =
             linked_outcome_evidence(input("git commit --amend --no-edit", &rewrite_output))
                 .unwrap();
-        assert_eq!(rewrite.outcomes[0].replacement_lineage.len(), 1);
+        assert_eq!(
+            exact_outcome(&rewrite.outcomes[0])
+                .replacement_lineage
+                .len(),
+            1
+        );
 
         let rebase = linked_outcome_evidence(input("git rebase main", &rewrite_output)).unwrap();
-        assert_eq!(rebase.outcomes[0].replacement_lineage.len(), 1);
-        assert_eq!(rebase.outcomes[0].produced_object_ids[0].hex, new);
+        assert_eq!(
+            exact_outcome(&rebase.outcomes[0]).replacement_lineage.len(),
+            1
+        );
+        assert_eq!(
+            exact_outcome(&rebase.outcomes[0]).produced_object_ids[0].hex,
+            new
+        );
 
         let raw_rebase_oid = Value::String(new.to_owned());
         let raw_rebase = linked_outcome_evidence(input(
@@ -677,7 +916,7 @@ mod tests {
         let created =
             linked_outcome_evidence(input("gh pr create --repo acme/repo", &create)).unwrap();
         assert_eq!(
-            created.outcomes[0].kind,
+            exact_outcome(&created.outcomes[0]).kind,
             RepositoryOutcomeKind::PullRequestCreated
         );
 
@@ -690,7 +929,7 @@ mod tests {
         let merged =
             linked_outcome_evidence(input("gh pr merge 42 --repo acme/repo", &merged)).unwrap();
         assert_eq!(
-            merged.outcomes[0].kind,
+            exact_outcome(&merged.outcomes[0]).kind,
             RepositoryOutcomeKind::PullRequestMerged
         );
     }

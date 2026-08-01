@@ -9,7 +9,8 @@ use ctx_history_core::{
     CoreRecordAnnotation, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
     RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidateKind,
     RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryFileObservationKind, RepositoryOutcomeObservation, RepositoryVcsObservationKind,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryOutcomeKind,
+    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
     CORE_BOUNDED_SHELL_SUBSET_REVISION, CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
     CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
@@ -20,14 +21,17 @@ use sha2::{Digest, Sha256};
 
 use git::{
     negative_route_geometry_state, CandidateKind, CertifiedCandidate, EventProbeBudget,
-    GitCertifier, ProbeFailure,
+    GitCertifier, ProbeFailure, ResolvedCommitProducer,
 };
-pub(crate) use outcome::{linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput};
+pub(crate) use outcome::{
+    linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput, UnscopedOutcomeObservation,
+};
 use scoping::{path_string, scope_files, scope_outcomes, scope_vcs};
 use shell::{analyze, command_too_large};
 pub(crate) use shell::{
     bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
-    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
+    BoundedCommitProducer, BoundedOutcomeOperation, BoundedOutcomePlan,
+    BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
 };
 
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
@@ -66,7 +70,7 @@ pub(crate) struct AttributionInput {
     pub(crate) vcs_observations: Vec<UnscopedVcsObservation>,
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
-    pub(crate) outcome_observations: Vec<RepositoryOutcomeObservation>,
+    pub(crate) outcome_observations: Vec<UnscopedOutcomeObservation>,
     pub(crate) outcome_abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
@@ -461,12 +465,15 @@ impl ProviderIdentityResolution {
         !matches!(self, Self::Absent)
     }
 
-    fn binds_all_outcomes(&self, outcomes: &[RepositoryOutcomeObservation]) -> bool {
+    fn binds_all_outcomes(&self, outcomes: &[UnscopedOutcomeObservation]) -> bool {
         let Self::Binding(binding) = self else {
             return false;
         };
         !outcomes.is_empty()
             && outcomes.iter().all(|outcome| {
+                let UnscopedOutcomeObservation::Exact(outcome) = outcome else {
+                    return false;
+                };
                 outcome.pull_request.as_ref().is_some_and(|pull_request| {
                     binding.aliases.contains(&pull_request.forge_repository)
                 })
@@ -823,6 +830,14 @@ fn attribute_with_attributor(
             .iter()
             .map(|certificate| certificate.binding.clone()),
     );
+    let outcome_observations = resolve_deferred_commit_observations(
+        &mut annotation,
+        &certified,
+        outcome_observations,
+        outcome_operation_path.as_deref(),
+        &attributor.certifier,
+        &mut probe_budget,
+    );
     scope_files(&mut annotation, &certified, file_inputs);
     scope_vcs(&mut annotation, &certified, vcs_inputs);
     scope_outcomes(
@@ -841,6 +856,144 @@ fn attribute_with_attributor(
         );
     }
     annotation
+}
+
+fn resolve_deferred_commit_observations(
+    annotation: &mut CoreRecordAnnotation,
+    certified: &[CertifiedCandidate],
+    observations: Vec<UnscopedOutcomeObservation>,
+    operation_path: Option<&std::path::Path>,
+    certifier: &GitCertifier,
+    budget: &mut EventProbeBudget,
+) -> Vec<RepositoryOutcomeObservation> {
+    let mut exact = Vec::new();
+    for observation in observations {
+        let deferred = match observation {
+            UnscopedOutcomeObservation::Exact(outcome) => {
+                exact.push(outcome);
+                continue;
+            }
+            UnscopedOutcomeObservation::DeferredCommit(deferred) => deferred,
+        };
+        let Some(operation_path) = operation_path else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "deferred_commit_has_no_operation_route",
+            );
+            continue;
+        };
+        let Some(certificate) = certified
+            .iter()
+            .filter(|certificate| operation_path.starts_with(&certificate.repository_root))
+            .max_by_key(|certificate| certificate.repository_root.components().count())
+        else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "deferred_commit_route_has_no_certified_binding",
+            );
+            continue;
+        };
+        let producer = match (deferred.producer, deferred.rewrites_history) {
+            (_, true) => ResolvedCommitProducer::Rewrite,
+            (BoundedCommitProducer::Commit, false) => ResolvedCommitProducer::Commit,
+            (BoundedCommitProducer::Merge, false) => ResolvedCommitProducer::Merge,
+            (BoundedCommitProducer::Rebase, false) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeResultInadmissible,
+                    "deferred_rebase_result_is_not_supported",
+                );
+                continue;
+            }
+        };
+        let resolved = match certifier.resolve_commit(
+            certificate,
+            &deferred.oid_prefix,
+            &deferred.subject,
+            producer,
+            budget,
+        ) {
+            Ok(resolved) => resolved,
+            Err(ProbeFailure::BudgetExceeded) => {
+                push_probe_failure(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    ProbeFailure::BudgetExceeded,
+                    false,
+                );
+                continue;
+            }
+            Err(ProbeFailure::ConcurrentDrift | ProbeFailure::Missing) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::ConcurrentDrift,
+                    "deferred_commit_repository_changed_during_resolution",
+                );
+                continue;
+            }
+            Err(ProbeFailure::PlatformUnsupported) => {
+                push_probe_failure(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    ProbeFailure::PlatformUnsupported,
+                    false,
+                );
+                continue;
+            }
+            Err(_) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeResultInadmissible,
+                    "deferred_commit_did_not_resolve_exactly",
+                );
+                continue;
+            }
+        };
+
+        let binding_id = certificate.binding.binding_id.clone();
+        annotation
+            .repository_vcs_observations
+            .push(RepositoryVcsObservation {
+                repository_binding_id: binding_id.clone(),
+                kind: RepositoryVcsObservationKind::Commit,
+                object_id: Some(resolved.object_id.clone()),
+                parent_object_ids: resolved.parent_object_ids.clone(),
+                reference: None,
+                relative_path: None,
+            });
+        annotation
+            .repository_file_observations
+            .extend(
+                resolved
+                    .files
+                    .into_iter()
+                    .map(|file| RepositoryFileObservation {
+                        repository_binding_id: binding_id.clone(),
+                        relative_path: file.path,
+                        kind: file.kind,
+                        prior_relative_path: file.prior_path,
+                    }),
+            );
+        if !deferred.rewrites_history {
+            exact.push(RepositoryOutcomeObservation {
+                kind: RepositoryOutcomeKind::Commit,
+                produced_object_ids: vec![resolved.object_id],
+                replacement_lineage: Vec::new(),
+                pull_request: None,
+                observed_at_unix_ms: deferred.observed_at_unix_ms,
+                linkage: deferred.linkage,
+                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            });
+        }
+    }
+    exact
 }
 
 fn bounded_absolute(
