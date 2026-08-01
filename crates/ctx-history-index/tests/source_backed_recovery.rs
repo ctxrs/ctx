@@ -23,7 +23,7 @@ use ctx_history_core::{
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, IndexError, VerifiedIndex, WriterOptions,
 };
-use tantivy::Index;
+use tantivy::{store::Compressor, Index};
 use tempfile::{tempdir, TempDir};
 
 const CHILD_MODE_ENV: &str = "CTX_SOURCE_RECOVERY_CHILD_MODE";
@@ -291,7 +291,7 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
 }
 
 #[test]
-fn pre_settings_generation_rebuilds_from_sources_without_cloning_the_slot() {
+fn incompatible_zstd_generation_rebuilds_from_sources_without_cloning_the_slot() {
     let fixture = RecoveryFixture::new();
     let pointer_path = fixture.root.join("active-generation.json");
     let pointer_before = fs::read(&pointer_path).unwrap();
@@ -299,11 +299,9 @@ fn pre_settings_generation_rebuilds_from_sources_without_cloning_the_slot() {
     let meta_path = old_generation_path.join("meta.json");
     let mut meta: serde_json::Value =
         serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
-    assert!(meta
-        .as_object_mut()
-        .unwrap()
-        .remove("index_settings")
-        .is_some());
+    meta["index_settings"]["docstore_compression"] =
+        serde_json::Value::String("zstd(compression_level=1)".to_owned());
+    meta["index_settings"]["docstore_blocksize"] = serde_json::Value::from(64 * 1024);
     fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
     assert!(matches!(
         VerifiedIndex::open(&fixture.root),
@@ -317,7 +315,8 @@ fn pre_settings_generation_rebuilds_from_sources_without_cloning_the_slot() {
     assert_eq!(candidates.len(), 1);
     let candidate = Index::open_in_dir(&candidates[0]).unwrap();
     assert!(candidate.load_metas().unwrap().segments.is_empty());
-    assert_ne!(candidate.settings(), &tantivy::IndexSettings::default());
+    assert_eq!(candidate.settings().docstore_compression, Compressor::Lz4);
+    assert_eq!(candidate.settings().docstore_blocksize, 16 * 1024);
     drop(candidate);
 
     let source = source();

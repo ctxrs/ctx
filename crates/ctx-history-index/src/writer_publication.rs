@@ -233,11 +233,11 @@ impl GenerationWriter {
             hook(&candidate_path);
         }
         let retained_generation_ids = std::iter::once(next_pointer.active())
-            .chain(next_pointer.previous().into_iter())
+            .chain(next_pointer.previous())
             .map(|slot| slot.generation_id().to_owned())
             .collect::<Vec<_>>();
         let retained_generation_directories = std::iter::once(next_pointer.active())
-            .chain(next_pointer.previous().into_iter())
+            .chain(next_pointer.previous())
             .map(|slot| slot.directory().to_owned())
             .collect::<Vec<_>>();
         if let Err(error) = clear_active_generation_rebuild_marker(&root)
