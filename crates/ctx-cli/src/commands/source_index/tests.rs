@@ -35,7 +35,13 @@ mod tests {
     use super::*;
     use super::{
         render::{render_show_document, search_json},
-        search::{NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow},
+        search::{
+            core_records_for_search_hits_with_budget, NormalizedSearchQuery, SearchCollection,
+            SearchCoreHydrationBudget, SearchCoreHydrationBudgetExceeded,
+            SearchCoreHydrationBudgetStage, SearchHit, SearchResultWindow,
+            SEARCH_CORE_BODY_PREFIX_CHARS, SEARCH_CORE_HYDRATION_BUDGET,
+            SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
+        },
         show::{
             canonical_show_output_bytes, core_events_by_ids_with_presentation_limits, event_window,
             event_window_value, render_event_value, render_event_values, session_json,
@@ -893,6 +899,132 @@ mod tests {
         assert_eq!(index.generation_id(), generation);
         assert_eq!(value["retrieval"]["generation_id"], generation);
         assert_eq!(collection.result_window.hits.len(), 1);
+    }
+
+    #[test]
+    fn limit_200_search_retains_only_bounded_core_snippet_projections() {
+        let temp = tempdir().unwrap();
+        let body = format!(
+            "{} {TEST_QUERY}",
+            "🦀".repeat(SEARCH_CORE_BODY_PREFIX_CHARS)
+        );
+        let body_bytes = body.len();
+        let events = (1..=crate::MAX_SEARCH_LIMIT)
+            .map(|sequence| {
+                let event = fixture_event(
+                    CaptureProvider::Codex,
+                    "codex_session_jsonl",
+                    91,
+                    sequence as u64,
+                );
+                fixture_core_event(&event, body.clone())
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 91);
+
+        let mut source_request = request(RefreshArg::Off);
+        source_request.events = true;
+        source_request.limit = crate::MAX_SEARCH_LIMIT;
+        let index = open_index(temp.path()).unwrap();
+        let filters = index_search_filters(&source_request, &index).unwrap();
+        let collection = collect_search_hits_with_backend(
+            &source_request,
+            &index,
+            temp.path(),
+            source_request.semantic_weight,
+            &filters,
+        )
+        .unwrap();
+        assert_eq!(collection.result_window.hits.len(), crate::MAX_SEARCH_LIMIT);
+        assert!(!collection.result_window.more_available);
+
+        let core_records = core_records_for_search_hits_with_budget(
+            &index,
+            &collection.result_window.hits,
+            SEARCH_CORE_HYDRATION_BUDGET,
+        )
+        .unwrap();
+        let retained_body_bytes = core_records
+            .values()
+            .map(|record| {
+                record
+                    .core_record
+                    .content
+                    .normalized_body
+                    .as_ref()
+                    .map_or(0, String::len)
+            })
+            .sum::<usize>();
+        assert_eq!(
+            retained_body_bytes, SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
+            "200 maximum-width UTF-8 lookahead prefixes should exactly reach the retained-body budget"
+        );
+        assert!(core_records.values().all(|record| {
+            record.core_record.content.structured_content.is_none()
+                && record.core_record.metadata.is_empty()
+                && record.core_record.repository_bindings.is_empty()
+                && record.core_record.repository_file_observations.is_empty()
+                && record.core_record.repository_vcs_observations.is_empty()
+        }));
+
+        let value = search_json(
+            &source_request,
+            temp.path(),
+            &index,
+            &collection,
+            &filters,
+            &core_records,
+            "existing_generation",
+            1,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), crate::MAX_SEARCH_LIMIT);
+        assert!(results.iter().all(|result| {
+            result["snippet"].as_str().unwrap().chars().count() == 2_048
+                && result["snippet_truncated"] == true
+        }));
+        assert_eq!(value["result_window"]["returned"], crate::MAX_SEARCH_LIMIT);
+        assert_eq!(value["result_window"]["more_available"], false);
+
+        let decode_error = core_records_for_search_hits_with_budget(
+            &index,
+            &collection.result_window.hits,
+            SearchCoreHydrationBudget {
+                maximum_encoded_core_bytes: SEARCH_CORE_HYDRATION_BUDGET.maximum_encoded_core_bytes,
+                maximum_content_bytes: body_bytes.checked_mul(crate::MAX_SEARCH_LIMIT).unwrap() - 1,
+                maximum_retained_body_bytes: SEARCH_CORE_HYDRATION_BUDGET
+                    .maximum_retained_body_bytes,
+            },
+        )
+        .unwrap_err();
+        let typed = decode_error
+            .downcast_ref::<SearchCoreHydrationBudgetExceeded>()
+            .expect("aggregate decode failure must stay typed");
+        assert_eq!(typed.stage, SearchCoreHydrationBudgetStage::Decode);
+        assert_eq!(
+            typed.maximum_content_bytes,
+            body_bytes * crate::MAX_SEARCH_LIMIT - 1
+        );
+
+        let retention_error = core_records_for_search_hits_with_budget(
+            &index,
+            &collection.result_window.hits,
+            SearchCoreHydrationBudget {
+                maximum_retained_body_bytes: SEARCH_CORE_MAX_RETAINED_BODY_BYTES - 1,
+                ..SEARCH_CORE_HYDRATION_BUDGET
+            },
+        )
+        .unwrap_err();
+        let typed = retention_error
+            .downcast_ref::<SearchCoreHydrationBudgetExceeded>()
+            .expect("aggregate retention failure must stay typed");
+        assert_eq!(typed.stage, SearchCoreHydrationBudgetStage::Retention);
+        assert_eq!(
+            typed.retained_body_bytes,
+            SEARCH_CORE_MAX_RETAINED_BODY_BYTES
+        );
     }
 
     #[test]
