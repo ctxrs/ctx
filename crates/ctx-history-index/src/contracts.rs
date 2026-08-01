@@ -86,6 +86,8 @@ pub enum IndexError {
     GenerationPolicyMismatch { expected: String, actual: String },
     #[error("lexical index schema does not match ctx schema version {0}")]
     SchemaMismatch(u32),
+    #[error("lexical index settings do not match ctx schema version {0}")]
+    IndexSettingsMismatch(u32),
     #[error("a nonempty lexical index has no ctx generation payload")]
     UnboundIndexState,
     #[error("the lexical generation changed while a verified reader was opening")]

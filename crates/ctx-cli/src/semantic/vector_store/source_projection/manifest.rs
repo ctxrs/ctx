@@ -18,7 +18,7 @@ pub(super) const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "core_semantic_acknowledge
 pub(super) const SOURCE_CONTRACT_VERSION: u16 = 4;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
-pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 11;
+pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 13;
 const SHA256_HEX_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,4 +228,17 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_input_revision_exactly_mirrors_core_schema() {
+        assert_eq!(
+            SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+            ctx_history_index::LEXICAL_SCHEMA_VERSION
+        );
+    }
 }
