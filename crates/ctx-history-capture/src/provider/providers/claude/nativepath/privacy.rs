@@ -4,7 +4,7 @@ use crate::{OutputOutcome, OutputOutcomeMetadata};
 
 mod outcome;
 
-use outcome::{combine_outcome_evidence, scan_outcome_range};
+use outcome::{combine_outcome_evidence, scan_direct_output_range, scan_outcome_range};
 
 const MAX_ESCAPED_LABEL_BYTES: usize = 256;
 const MAX_SCAN_DEPTH: usize = 128;
@@ -65,6 +65,15 @@ impl RawOutputDescriptor {
         })
         .ok()?;
         Some(decoded)
+    }
+
+    pub(super) fn decode_outcome(
+        self,
+        bytes: &[u8],
+    ) -> Result<OutputOutcomeMetadata, serde_json::Error> {
+        let evidence =
+            scan_direct_output_range(bytes, self.value.map(|range| range.start..range.end))?;
+        Ok(combine_outcome_evidence(evidence, Default::default()))
     }
 }
 
@@ -226,6 +235,7 @@ impl<'a> ResultScanner<'a> {
 
     fn object(&mut self, kind: ObjectKind, depth: usize) -> Result<(), ()> {
         self.check_depth(depth)?;
+        let object_start = self.index;
         self.expect(b'{')?;
         self.whitespace();
         if self.consume(b'}') {
@@ -234,8 +244,6 @@ impl<'a> ResultScanner<'a> {
         let mut seen_critical = 0_u16;
         let mut block_primary_output = false;
         let mut block_call_id = None;
-        let mut block_content = None;
-        let mut block_text = None;
         let mut block_result_values = [RawValueRange::default(); MAX_PREFLIGHT_OUTPUT_DESCRIPTORS];
         let mut block_result_value_count = 0_usize;
         loop {
@@ -321,18 +329,6 @@ impl<'a> ResultScanner<'a> {
                 (ObjectKind::Message, Field::ToolUseResult) => {
                     self.message_tool_use_result = Some(value_range.clone());
                 }
-                (ObjectKind::Block, Field::Content) => {
-                    block_content = Some(RawValueRange {
-                        start: value_range.start,
-                        end: value_range.end,
-                    });
-                }
-                (ObjectKind::Block, Field::BlockText) => {
-                    block_text = Some(RawValueRange {
-                        start: value_range.start,
-                        end: value_range.end,
-                    });
-                }
                 (ObjectKind::Block, Field::ResultLike)
                     if raw_label_is_result(&self.bytes[key.clone()]) =>
                 {
@@ -361,7 +357,13 @@ impl<'a> ResultScanner<'a> {
             if self.consume(b'}') {
                 if matches!(kind, ObjectKind::Block) {
                     if block_primary_output {
-                        self.push_output_descriptor(block_call_id, block_content.or(block_text));
+                        self.push_output_descriptor(
+                            block_call_id,
+                            Some(RawValueRange {
+                                start: object_start,
+                                end: self.index,
+                            }),
+                        );
                     }
                     for value in block_result_values
                         .iter()
