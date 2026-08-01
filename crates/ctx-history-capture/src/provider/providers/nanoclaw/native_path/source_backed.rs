@@ -45,7 +45,6 @@ mod replay;
 
 use replay::{
     NanoClawCertifiedReplayCheckpoint, NanoClawPreparedAuthority, NanoClawReplayFrontier,
-    NanoClawWorkCounters,
 };
 
 #[derive(Debug, Error)]
@@ -84,7 +83,6 @@ pub(crate) struct NanoClawDocumentTreeAdapter {
     path: PathBuf,
     source: SourceKey,
     certified_checkpoint: Option<NanoClawCertifiedReplayCheckpoint>,
-    work: Arc<Mutex<NanoClawWorkCounters>>,
     replay_frontier: Arc<Mutex<Option<NanoClawReplayFrontier>>>,
 }
 
@@ -95,46 +93,6 @@ struct NanoClawPreparedProjection {
     content_digest: [u8; 32],
     counts: ScannedSourceCounts,
 }
-
-#[cfg(test)]
-std::thread_local! {
-    static BEFORE_SOURCE_BACKED_FINISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) struct NanoClawSourceBackedFinishHook;
-
-#[cfg(test)]
-impl Drop for NanoClawSourceBackedFinishHook {
-    fn drop(&mut self) {
-        BEFORE_SOURCE_BACKED_FINISH.with(|installed| {
-            installed.borrow_mut().take();
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn set_before_source_backed_finish_hook(
-    hook: impl FnOnce() + 'static,
-) -> NanoClawSourceBackedFinishHook {
-    BEFORE_SOURCE_BACKED_FINISH.with(|installed| {
-        *installed.borrow_mut() = Some(Box::new(hook));
-    });
-    NanoClawSourceBackedFinishHook
-}
-
-#[cfg(test)]
-fn run_before_source_backed_finish_hook() {
-    BEFORE_SOURCE_BACKED_FINISH.with(|installed| {
-        if let Some(hook) = installed.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
-#[cfg(not(test))]
-fn run_before_source_backed_finish_hook() {}
 
 impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
     type Leaf = NanoClawDocumentLeaf;
@@ -155,7 +113,6 @@ impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
             .map_err(|_| nanoclaw_internal("NanoClaw replay frontier lock was poisoned"))?
             .clone();
         let authority = if let Some(frontier) = replay {
-            self.record_revision_precheck(&frontier)?;
             if frontier
                 .snapshot
                 .revalidate()
@@ -216,13 +173,6 @@ impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
             }
             *prepared = current;
         }
-        {
-            let mut work = self
-                .work
-                .lock()
-                .map_err(|_| nanoclaw_internal("NanoClaw work counter lock was poisoned"))?;
-            work.projection_passes = work.projection_passes.saturating_add(1);
-        }
         let projection = prepared
             .projection
             .as_mut()
@@ -239,7 +189,6 @@ impl ReplacementDocumentTree for NanoClawDocumentTreeAdapter {
             .prepared
             .lock()
             .map_err(|_| nanoclaw_internal("NanoClaw document authority lock was poisoned"))?;
-        run_before_source_backed_finish_hook();
         if !prepared
             .frontier
             .snapshot
@@ -340,7 +289,6 @@ fn prepare_nanoclaw_project(
         .map_err(CaptureError::from)
         .map_err(nanoclaw_route_capture_error)?;
     drop(spool_writer);
-    run_before_source_backed_finish_hook();
     project.finish().map_err(nanoclaw_route_capture_error)?;
     let classified = retained_records
         .checked_add(rejected_records)

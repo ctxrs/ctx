@@ -8,21 +8,6 @@ pub(super) struct NanoClawCertifiedReplayCheckpoint {
     logical_fingerprint: [u8; 32],
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct NanoClawWorkCounters {
-    pub(super) central_snapshot_opens: u64,
-    pub(super) component_snapshot_opens: u64,
-    pub(super) revision_precheck_passes: u64,
-    pub(super) logical_observation_passes: u64,
-    pub(super) logical_row_visits: u64,
-    pub(super) spooled_units: u64,
-    pub(super) projection_passes: u64,
-    pub(super) hydration_central_snapshot_opens: u64,
-    pub(super) hydration_component_snapshot_opens: u64,
-    pub(super) hydration_central_set_reads: u64,
-    pub(super) hydration_component_set_reads: u64,
-}
-
 pub(super) struct NanoClawPreparedAuthority {
     pub(super) frontier: NanoClawReplayFrontier,
     pub(super) projection: Option<NanoClawPreparedProjection>,
@@ -50,64 +35,22 @@ impl NanoClawDocumentTreeAdapter {
             path,
             source,
             certified_checkpoint,
-            work: Arc::default(),
             replay_frontier: Arc::default(),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn work_counters(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) {
-        let work = match self.work.lock() {
-            Ok(work) => *work,
-            Err(poisoned) => *poisoned.into_inner(),
-        };
-        (
-            work.central_snapshot_opens,
-            work.component_snapshot_opens,
-            work.revision_precheck_passes,
-            work.logical_observation_passes,
-            work.logical_row_visits,
-            work.spooled_units,
-            work.projection_passes,
-            work.hydration_central_snapshot_opens,
-            work.hydration_component_snapshot_opens,
-            work.hydration_central_set_reads,
-            work.hydration_component_set_reads,
-        )
     }
 
     pub(super) fn prepare_authority(&self) -> SourceBackedRouteResult<NanoClawPreparedAuthority> {
         let project = NanoClawSourceBackedProject::open(&self.data_root, &self.path)
             .map_err(nanoclaw_route_project_open_error)?;
-        self.prepare_open_project(project, true)
+        self.prepare_open_project(project)
     }
 
     fn prepare_open_project(
         &self,
         mut project: NanoClawSourceBackedProject,
-        record_snapshot_open: bool,
     ) -> SourceBackedRouteResult<NanoClawPreparedAuthority> {
         let projection = prepare_nanoclaw_project(&self.data_root, &mut project, &self.source)?;
         let snapshot = project.snapshot().clone();
-        {
-            let mut work = self
-                .work
-                .lock()
-                .map_err(|_| nanoclaw_internal("NanoClaw work counter lock was poisoned"))?;
-            if record_snapshot_open {
-                work.central_snapshot_opens = work.central_snapshot_opens.saturating_add(1);
-                work.component_snapshot_opens = work
-                    .component_snapshot_opens
-                    .saturating_add(snapshot.selected_component_count());
-            }
-            work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
-            work.logical_row_visits = work
-                .logical_row_visits
-                .saturating_add(projection.counts.complete_records);
-            work.spooled_units = work
-                .spooled_units
-                .saturating_add(projection.counts.complete_records);
-        }
         Ok(NanoClawPreparedAuthority {
             frontier: NanoClawReplayFrontier {
                 physical_fingerprint: snapshot.physical_fingerprint(),
@@ -130,31 +73,14 @@ impl NanoClawDocumentTreeAdapter {
             logical_fingerprint: checkpoint.logical_fingerprint,
             snapshot,
         };
-        self.record_revision_precheck(&frontier)?;
         if frontier.physical_fingerprint != checkpoint.physical_fingerprint {
-            return self.prepare_open_project(project, false);
+            return self.prepare_open_project(project);
         }
         project.finish().map_err(nanoclaw_route_capture_error)?;
         Ok(NanoClawPreparedAuthority {
             frontier,
             projection: None,
         })
-    }
-
-    pub(super) fn record_revision_precheck(
-        &self,
-        frontier: &NanoClawReplayFrontier,
-    ) -> SourceBackedRouteResult<()> {
-        let mut work = self
-            .work
-            .lock()
-            .map_err(|_| nanoclaw_internal("NanoClaw work counter lock was poisoned"))?;
-        work.central_snapshot_opens = work.central_snapshot_opens.saturating_add(1);
-        work.component_snapshot_opens = work
-            .component_snapshot_opens
-            .saturating_add(frontier.snapshot.selected_component_count());
-        work.revision_precheck_passes = work.revision_precheck_passes.saturating_add(1);
-        Ok(())
     }
 }
 
