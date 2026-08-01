@@ -1,7 +1,7 @@
 use std::{
     fs::Metadata,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use ctx_history_core::EventType;
@@ -48,25 +48,6 @@ impl OpenClawFrozenFileMetadata {
             inode,
         })
     }
-
-    fn revision_component(&self) -> String {
-        let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        format!(
-            "length={};modified={side}{seconds}.{nanos:09};readonly={};device={};inode={}",
-            self.length,
-            self.readonly,
-            self.device
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            self.inode
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,19 +88,6 @@ impl OpenClawSessionObservation {
             index,
             index_revision,
         })
-    }
-
-    pub(super) fn source_revision(&self) -> String {
-        let index_file = self
-            .index_file
-            .as_ref()
-            .map(OpenClawFrozenFileMetadata::revision_component)
-            .unwrap_or_else(|| "absent".to_owned());
-        format!(
-            "openclaw-jsonl-metadata-v1:transcript={};index={index_file};index-entry={:016x}",
-            self.transcript.revision_component(),
-            self.index_revision,
-        )
     }
 }
 
