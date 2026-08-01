@@ -2,7 +2,7 @@
 
 use crate::provider::normalization::provider_local_preview;
 
-use super::{complete_content, normalization, openclaw_output_metadata};
+use super::{normalization, openclaw_output_metadata};
 
 mod routes;
 mod source_backed;

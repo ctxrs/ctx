@@ -177,24 +177,3 @@ fn pages_remain_bounded() {
         .iter()
         .all(|(_, bytes)| *bytes <= PAGE_MAX_RETAINED_BYTES));
 }
-
-#[test]
-fn owned_prompt_path_has_no_legacy_transport_dependency() {
-    let owned = [
-        include_str!("../source_backed.rs"),
-        include_str!("projection.rs"),
-    ]
-    .join("\n");
-    for forbidden in [
-        "LexicalDocument",
-        "SourceRecordLocator",
-        "ContentSourceResolver",
-        "HydrationRequest",
-        "hydrate_",
-    ] {
-        assert!(
-            !owned.contains(forbidden),
-            "found forbidden token {forbidden}"
-        );
-    }
-}

@@ -49,50 +49,6 @@ const CHECKPOINT_VERSION: u32 = 1;
 const PAGE_MAX_DOCUMENTS: usize = 64;
 const PAGE_MAX_RETAINED_BYTES: usize = 1024 * 1024;
 
-#[cfg(test)]
-std::thread_local! {
-    static FULL_SCAN_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static PREFIX_HASH_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static AFTER_PREFIX_HASH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn reset_prompt_history_work_counters() {
-    FULL_SCAN_BYTES.set(0);
-    PREFIX_HASH_BYTES.set(0);
-}
-
-#[cfg(test)]
-fn prompt_history_full_scan_bytes() -> u64 {
-    FULL_SCAN_BYTES.get()
-}
-
-#[cfg(test)]
-fn prompt_history_prefix_hash_bytes() -> u64 {
-    PREFIX_HASH_BYTES.get()
-}
-
-#[cfg(test)]
-fn set_after_prompt_history_prefix_hash_hook(hook: impl FnOnce() + 'static) {
-    AFTER_PREFIX_HASH_HOOK.with(|slot| {
-        assert!(
-            slot.borrow().is_none(),
-            "prompt-history prefix-hash hook is already installed"
-        );
-        *slot.borrow_mut() = Some(Box::new(hook));
-    });
-}
-
-#[cfg(test)]
-fn run_after_prompt_history_prefix_hash_hook() {
-    AFTER_PREFIX_HASH_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
 #[derive(Debug, Error)]
 pub(crate) enum CodexPromptHistorySourceBackedErrorV0 {
     #[error(transparent)]
@@ -152,7 +108,6 @@ impl CodexPromptHistorySourceBackedInputV0 {
 /// One retained capability for an explicitly selected Codex prompt-history file.
 #[derive(Debug, Clone)]
 pub(crate) struct CodexPromptHistorySourceBackedSourceV0 {
-    input: CodexPromptHistorySourceBackedInputV0,
     source: SourceKey,
     opened: Arc<OpenedProviderSourceFile>,
 }
@@ -160,10 +115,6 @@ pub(crate) struct CodexPromptHistorySourceBackedSourceV0 {
 impl CodexPromptHistorySourceBackedSourceV0 {
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        self.input.path()
     }
 }
 
@@ -311,10 +262,6 @@ pub(crate) fn observe_codex_prompt_history_source_backed_explicit_v0(
     let opened = Arc::new(open_provider_source_file(&path)?);
     opened.revalidate()?;
     Ok(CodexPromptHistorySourceBackedSourceV0 {
-        input: CodexPromptHistorySourceBackedInputV0 {
-            path,
-            catalog_lineage: input.catalog_lineage,
-        },
         source: input.source_key()?,
         opened,
     })
@@ -570,14 +517,6 @@ fn walk_complete_records(
                 .position(|byte| *byte == b'\n')
                 .map_or(available.len(), |index| index.saturating_add(1));
             let chunk = &available[..take];
-            #[cfg(test)]
-            FULL_SCAN_BYTES.with(|bytes| {
-                bytes.set(
-                    bytes
-                        .get()
-                        .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX)),
-                );
-            });
             whole.update(chunk);
             complete.update(chunk);
             observed = observed
@@ -706,10 +645,6 @@ fn hash_opened_prefix(
         }
 
         let digest = read_opened_prefix(source, target, observed_len)?;
-        if digest.is_some() {
-            #[cfg(test)]
-            run_after_prompt_history_prefix_hash_hook();
-        }
         let confirmation = read_opened_prefix(source, target, observed_len)?;
         if digest != confirmation {
             return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
@@ -746,14 +681,6 @@ fn read_opened_prefix(
         if count == 0 {
             return Ok(None);
         }
-        #[cfg(test)]
-        PREFIX_HASH_BYTES.with(|hashed| {
-            hashed.set(
-                hashed
-                    .get()
-                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX)),
-            );
-        });
         digest.update(&bytes[..count]);
         remaining = remaining.saturating_sub(
             u64::try_from(count)

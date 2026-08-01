@@ -57,14 +57,6 @@ use revalidation::{
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct JsonlFamilyWork {
-    pub(crate) discoveries: usize,
-    pub(crate) leaf_opens: usize,
-    pub(crate) provider_projections: usize,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct JsonlFamilyScannerActivity {
     pub(crate) worker_count: usize,
     pub(crate) sources_started: usize,
@@ -74,10 +66,6 @@ pub(crate) struct JsonlFamilyScannerActivity {
 
 #[cfg(test)]
 thread_local! {
-    static FAMILY_DISCOVERIES: Cell<usize> = const { Cell::new(0) };
-    static FAMILY_LEAF_OPENS: Cell<usize> = const { Cell::new(0) };
-    static FAMILY_PROVIDER_PROJECTIONS: Cell<usize> = const { Cell::new(0) };
-    static FAMILY_PROVIDER_PROJECTION_BYTES: Cell<usize> = const { Cell::new(0) };
     static FAMILY_SCANNER_WORKERS_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static FAMILY_SCANNER_ACTIVITY: Cell<JsonlFamilyScannerActivity> =
         const { Cell::new(JsonlFamilyScannerActivity {
@@ -86,28 +74,6 @@ thread_local! {
             sources_completed: 0,
             peak_active_scanners: 0,
         }) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_jsonl_family_work() {
-    FAMILY_DISCOVERIES.set(0);
-    FAMILY_LEAF_OPENS.set(0);
-    FAMILY_PROVIDER_PROJECTIONS.set(0);
-    FAMILY_PROVIDER_PROJECTION_BYTES.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn jsonl_family_work() -> JsonlFamilyWork {
-    JsonlFamilyWork {
-        discoveries: FAMILY_DISCOVERIES.get(),
-        leaf_opens: FAMILY_LEAF_OPENS.get(),
-        provider_projections: FAMILY_PROVIDER_PROJECTIONS.get(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn jsonl_family_projection_bytes() -> usize {
-    FAMILY_PROVIDER_PROJECTION_BYTES.get()
 }
 
 #[cfg(test)]
@@ -399,8 +365,6 @@ impl JsonlFamilyLeaf {
     }
 
     pub(crate) fn open_verified(&self) -> Result<Arc<OpenedProviderSourceFile>> {
-        #[cfg(test)]
-        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
         if observe_opened_file(&self.source_path, &opened)? != self.observation {
             return Err(CaptureError::SourceChangedDuringCapture);
@@ -411,8 +375,6 @@ impl JsonlFamilyLeaf {
     fn open_for_revalidation(
         &self,
     ) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
-        #[cfg(test)]
-        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
         let current = observe_opened_file(&self.source_path, &opened)?;
         if current != self.observation {
@@ -433,8 +395,6 @@ impl JsonlFamilyLeaf {
     }
 
     fn open_for_scan(&self) -> Result<(Self, Arc<OpenedProviderSourceFile>)> {
-        #[cfg(test)]
-        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
         let current = observe_opened_file(&self.source_path, &opened)?;
         if current == self.observation {
@@ -673,7 +633,9 @@ fn capture(
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<()> {
     reset_terminal(resident)?;
-    let opening = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
+    let opening = adapter
+        .discover(root)
+        .map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing() {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::Unavailable,
@@ -737,7 +699,9 @@ fn capture(
     let bases_by_descriptor = bases_by_descriptor(&bases)?;
     let terminal_sources = scan_leaves(adapter, opening.leaves(), &bases_by_descriptor, sink)?;
 
-    let closing = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
+    let closing = adapter
+        .discover(root)
+        .map_err(|error| route_discovery(adapter, error))?;
     let inventory = opening.certify_against(&closing).map_err(route_invalid)?;
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_internal)?;
@@ -795,12 +759,6 @@ fn with_family_scanner_workers<T>(workers: usize, run: impl FnOnce() -> T) -> T 
     let _restore = Restore(previous);
     FAMILY_SCANNER_ACTIVITY.set(JsonlFamilyScannerActivity::default());
     run()
-}
-
-fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamilyInventory> {
-    #[cfg(test)]
-    FAMILY_DISCOVERIES.with(|count| count.set(count.get().saturating_add(1)));
-    adapter.discover(root)
 }
 
 fn route_invalid(error: impl std::fmt::Display) -> SourceBackedRouteError {

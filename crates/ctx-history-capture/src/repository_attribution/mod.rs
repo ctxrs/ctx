@@ -202,6 +202,7 @@ impl RepositoryAttributor {
         self.certifier.full_certification_probe_count()
     }
 
+    #[cfg(test)]
     pub(crate) fn git_subprocess_count(&self) -> usize {
         self.certifier.git_subprocess_count()
     }

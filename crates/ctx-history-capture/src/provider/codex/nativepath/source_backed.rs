@@ -300,8 +300,6 @@ mod cold;
 mod identity;
 mod ingestion;
 
-#[allow(unused_imports)]
-pub(crate) use catalog::CodexExplicitSessionInventoryV0;
 pub(crate) use catalog::{
     discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0, discover_codex_session_tree_inventory_v0,

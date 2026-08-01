@@ -15,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use super::{complete_content, discover_inventory, normalization, openclaw_output_metadata};
+use super::{discover_inventory, normalization, openclaw_output_metadata};
 use crate::repository_attribution::{
     apply_annotation, linked_outcome_evidence, AttributionInput, LinkedOutcomeInput,
     RepositoryAttributor, UnscopedFileObservation,
@@ -23,7 +23,6 @@ use crate::repository_attribution::{
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
-        file_touches::visit_all_file_touch_drafts,
         normalization::provider_timestamp_value,
         source_backed::family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
@@ -43,6 +42,7 @@ const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
 const PARSER_REVISION: &str = "openclaw-source-backed-v1";
+const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-source-revision-v1\0";
 
 #[derive(Debug, Clone, Copy, Default)]
 struct OpenClawJsonlAdapter;
@@ -182,7 +182,6 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         )?;
         Ok(Box::new(OpenClawProjector {
             source: leaf.source().clone(),
-            binding,
             session_id,
             session,
             index_file: compound.index_file,
@@ -196,7 +195,6 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
 
 struct OpenClawProjector {
     source: SourceKey,
-    binding: Binding,
     session_id: StableEntityId,
     session: SessionState,
     index_file: Option<OpenedProviderSourceFile>,
@@ -554,8 +552,7 @@ fn admit_compound(
             .zip(index_bytes.as_deref())
             .map(|(index, bytes)| (index.metadata(), bytes)),
     )?;
-    let revision_digest =
-        complete_content::exact_source_revision_digest(&observation.source_revision());
+    let revision_digest = source_revision_digest(&observation.source_revision());
     let (parent_native_session_id, root_native_session_id) = index_bytes
         .as_deref()
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
@@ -819,13 +816,12 @@ fn explicit_branch(value: &Value) -> Option<String> {
         .map(super::capped_text)
 }
 
-fn touched_files(value: &Value) -> Result<Vec<String>> {
-    let mut paths = BTreeSet::new();
-    visit_all_file_touch_drafts(value, |draft| {
-        paths.insert(draft.path);
-        Ok::<(), CaptureError>(())
-    })?;
-    Ok(paths.into_iter().collect())
+fn source_revision_digest(source_revision: &str) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(SOURCE_REVISION_DIGEST_DOMAIN);
+    digest.update((source_revision.len() as u64).to_be_bytes());
+    digest.update(source_revision.as_bytes());
+    digest.finalize().into()
 }
 
 fn contract(error: impl std::fmt::Display) -> CaptureError {

@@ -61,7 +61,7 @@ pub(super) fn revalidate_complete_inventory(
     // callbacks only bind writer targets; this callback rediscovers membership
     // and verifies every admitted leaf. Framed JSONL may grow only when its
     // exact certified prefix remains unchanged.
-    let current = discover(adapter, root)?;
+    let current = adapter.discover(root)?;
     if current.root_missing() || current.leaves().len() != expected_sources.len() {
         return Ok(false);
     }

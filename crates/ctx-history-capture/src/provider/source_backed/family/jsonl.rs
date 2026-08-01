@@ -28,11 +28,6 @@ pub(crate) use route::{
     jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
     JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
 };
-#[cfg(test)]
-pub(crate) use route::{
-    jsonl_family_projection_bytes, jsonl_family_work, reset_jsonl_family_work, JsonlFamilyWork,
-};
-
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-direct-jsonl-nativepath-prefix-v1\0";
 const PAGE_MAX_RECORDS: usize = 64;
 const PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;

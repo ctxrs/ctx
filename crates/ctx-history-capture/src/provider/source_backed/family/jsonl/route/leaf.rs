@@ -374,14 +374,6 @@ fn prepare_leaf(
         let page = reader.visit_page(&mut |record| -> Result<()> {
             physical_records = checked_increment(physical_records)?;
             let before = documents;
-            #[cfg(test)]
-            {
-                super::FAMILY_PROVIDER_PROJECTIONS
-                    .with(|count| count.set(count.get().saturating_add(1)));
-                super::FAMILY_PROVIDER_PROJECTION_BYTES.with(|bytes| {
-                    bytes.set(bytes.get().saturating_add(record.bytes().len()));
-                });
-            }
             projector.project(record, &mut |core_record| {
                 if !core_record.source.exact_descriptor_eq(leaf.source()) {
                     return Err(CaptureError::InvalidPayload(

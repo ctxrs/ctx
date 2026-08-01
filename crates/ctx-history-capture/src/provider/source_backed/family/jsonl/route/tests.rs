@@ -1,11 +1,9 @@
 use std::{fs, path::Path, sync::Arc};
 
-use ctx_history_core::{CoreRecord, SourceAnchor};
-use ctx_history_index::{CommitReceipt, GenerationWriter, WriterOptions};
-use sha2::{Digest, Sha256};
-
 use super::super::JsonlReader;
 use super::*;
+use ctx_history_core::{CoreRecord, SourceAnchor};
+use ctx_history_index::{CommitReceipt, GenerationWriter, WriterOptions};
 
 const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
 const TEST_SCHEMA: &str = "terminal-witness-v1";
