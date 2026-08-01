@@ -16,6 +16,7 @@ export type RefreshMode = "background" | "off" | "wait";
 export type ProgressMode = "auto" | "plain" | "json" | "none";
 export type TranscriptMode = "lite" | "full" | "log";
 export type SearchBackendMode = "hybrid" | "semantic" | "lexical";
+export type CoreContentPolicyStatus = "selected" | "redacted" | "omitted";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -225,6 +226,7 @@ export interface SearchHit {
   resultType?: string | null;
   resultScope: string;
   provider?: string | null;
+  sourceFormat?: string | null;
   timestamp?: string | null;
   cwd?: string | null;
   whyMatched?: string[];
@@ -277,8 +279,21 @@ export interface AgentHistoryEvent {
   role?: string | null;
   occurredAt?: string | null;
   text?: string | null;
-  preview?: string | null;
+  content?: CoreContentMetadata;
   citations?: Citation[];
+}
+
+export interface CoreContentMetadata extends JsonObject {
+  complete: boolean;
+  policyStatus: CoreContentPolicyStatus;
+  policyReason?: string | null;
+}
+
+export interface SessionSummary extends JsonObject {
+  ctxSessionId?: string | null;
+  provider?: string | null;
+  providerSessionId?: string | null;
+  sourceFormat?: string | null;
 }
 
 export interface EventResult {
@@ -287,7 +302,7 @@ export interface EventResult {
 }
 
 export interface SessionResult {
-  session?: JsonObject | null;
+  session?: SessionSummary | null;
   events?: AgentHistoryEvent[];
   mode?: string | null;
   format?: string | null;

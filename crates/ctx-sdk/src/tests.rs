@@ -30,6 +30,112 @@ fn reads_shared_search_fixture() {
         search.results[0].ctx_event_id.as_deref(),
         Some("11111111-1111-4111-8111-111111111111")
     );
+    assert_eq!(
+        search.results[0].provider_session_id.as_deref(),
+        Some("codex-fixture-session")
+    );
+    assert_eq!(
+        search.results[0].source_format.as_deref(),
+        Some("codex_session_jsonl")
+    );
+}
+
+#[test]
+fn show_normalization_exposes_core_identity_and_content() {
+    let event = normalize_event(&json!({
+        "event": {
+            "ctx_event_id": "event-1",
+            "ctx_session_id": "session-1",
+            "provider": "codex",
+            "provider_session_id": "codex-resume-uuid",
+            "source_format": "codex_session_jsonl",
+            "text": "complete body",
+            "content": {
+                "complete": true,
+                "policy_status": "selected"
+            }
+        },
+        "events": []
+    }))
+    .unwrap();
+    let selected = event.event.expect("selected event");
+    assert_eq!(selected.provider.as_deref(), Some("codex"));
+    assert_eq!(
+        selected.provider_session_id.as_deref(),
+        Some("codex-resume-uuid")
+    );
+    assert_eq!(
+        selected.source_format.as_deref(),
+        Some("codex_session_jsonl")
+    );
+    assert_eq!(selected.text.as_deref(), Some("complete body"));
+    let content = selected.content.expect("typed Core content metadata");
+    assert!(content.complete);
+    assert_eq!(content.policy_status, CoreContentPolicyStatus::Selected);
+
+    let session = normalize_session(&json!({
+        "session": {
+            "ctx_session_id": "session-1",
+            "provider": "codex",
+            "provider_session_id": "codex-resume-uuid",
+            "source_format": "codex_session_jsonl"
+        },
+        "events": [],
+        "mode": "lite",
+        "format": "json"
+    }))
+    .unwrap();
+    let summary = session.session.expect("typed session summary");
+    assert_eq!(summary.provider.as_deref(), Some("codex"));
+    assert_eq!(
+        summary.provider_session_id.as_deref(),
+        Some("codex-resume-uuid")
+    );
+    assert_eq!(
+        summary.source_format.as_deref(),
+        Some("codex_session_jsonl")
+    );
+}
+
+#[test]
+fn sources_and_import_preserve_legitimate_nested_source_semantics() {
+    let sources = normalize(
+        AgentHistoryOperation::Sources,
+        BackendInfo::local(None),
+        json!({
+            "sources": [{
+                "provider": "codex",
+                "path": "/configured/root",
+                "status": "available",
+                "importable": true,
+                "acquisition": {
+                    "source": "local_scan",
+                    "cursor": "opaque-checkpoint"
+                }
+            }]
+        }),
+    )
+    .unwrap();
+    let source = &sources.sources.as_ref().unwrap()[0];
+    assert_eq!(source.extra["acquisition"]["source"], "local_scan");
+    assert_eq!(source.extra["acquisition"]["cursor"], "opaque-checkpoint");
+
+    let imported = normalize_import(&json!({
+        "resume": false,
+        "totals": {},
+        "sources": [{
+            "source": {
+                "provider": "codex",
+                "cursor": "provider-checkpoint"
+            }
+        }]
+    }))
+    .unwrap();
+    assert_eq!(imported.sources[0]["source"]["provider"], "codex");
+    assert_eq!(
+        imported.sources[0]["source"]["cursor"],
+        "provider-checkpoint"
+    );
 }
 
 #[test]
@@ -71,6 +177,10 @@ fn init_normalizes_real_setup_json_into_status_contract() {
             "mode": "ready",
             "indexed_items": 12,
             "network_required": false,
+            "acquisition_status": {
+                "source": "catalog_scan",
+                "cursor": "status-checkpoint"
+            },
             "catalog": {"cataloged_sessions": 4},
             "import": {"resume": false, "totals": {}}
         }),
@@ -85,6 +195,11 @@ fn init_normalizes_real_setup_json_into_status_contract() {
     assert_eq!(status.indexed_items, Some(12));
     assert!(status.extra.contains_key("mode"));
     assert!(status.extra.contains_key("networkRequired"));
+    assert_eq!(status.extra["acquisitionStatus"]["source"], "catalog_scan");
+    assert_eq!(
+        status.extra["acquisitionStatus"]["cursor"],
+        "status-checkpoint"
+    );
 }
 
 #[test]

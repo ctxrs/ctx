@@ -13,6 +13,7 @@ import {
   LocalCliAdapter,
   createHostedAgentHistoryClient,
   createLocalAgentHistoryClient,
+  toAgentHistoryEnvelope,
 } from "../src/index.js";
 import { runDogfoodToy } from "../examples/dogfood-toy.js";
 
@@ -135,6 +136,8 @@ test("builds search flags and normalizes nested CLI search output", async () => 
           ctx_event_id: "00000000-0000-0000-0000-000000000101",
           ctx_session_id: "00000000-0000-0000-0000-000000000102",
           provider_session_id: "codex-session",
+          provider: "codex",
+          source_format: "codex_session_jsonl",
           event_seq: 7,
           result_type: "event",
           result_scope: "event",
@@ -179,6 +182,8 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   assert.equal(result.search.results[0].ctxEventId, "00000000-0000-0000-0000-000000000101");
   assert.equal(result.search.results[0].ctxSessionId, "00000000-0000-0000-0000-000000000102");
   assert.equal(result.search.results[0].providerSessionId, "codex-session");
+  assert.equal(result.search.results[0].provider, "codex");
+  assert.equal(result.search.results[0].sourceFormat, "codex_session_jsonl");
   assert.equal(result.search.results[0].eventSeq, 7);
   assert.equal(result.search.results[0].resultType, "event");
   assert.equal(result.search.results[0].resultScope, "event");
@@ -302,6 +307,60 @@ test("wraps show commands by ctx id and provider session id", async () => {
       ],
     ],
   );
+});
+
+test("normalizes typed Core show metadata", () => {
+  const event = toAgentHistoryEnvelope("showEvent", {
+    event: {
+      ctx_event_id: "event-1",
+      ctx_session_id: "session-1",
+      provider: "codex",
+      provider_session_id: "codex-resume-uuid",
+      source_format: "codex_session_jsonl",
+      text: "complete body",
+      content: {
+        complete: true,
+        policy_status: "selected",
+      },
+    },
+    events: [],
+  });
+  assert.equal(event.event.event.providerSessionId, "codex-resume-uuid");
+  assert.equal(event.event.event.sourceFormat, "codex_session_jsonl");
+  assert.deepEqual(event.event.event.content, {
+    complete: true,
+    policyStatus: "selected",
+  });
+
+  const session = toAgentHistoryEnvelope("showSession", {
+    session: {
+      ctx_session_id: "session-1",
+      provider: "codex",
+      provider_session_id: "codex-resume-uuid",
+      source_format: "codex_session_jsonl",
+    },
+    events: [],
+  });
+  assert.equal(session.session.session.providerSessionId, "codex-resume-uuid");
+  assert.equal(session.session.session.sourceFormat, "codex_session_jsonl");
+});
+
+test("preserves legitimate source semantics in sources and import payloads", () => {
+  const acquisition = {
+    source: "local_scan",
+    cursor: "opaque-checkpoint",
+  };
+  const sources = toAgentHistoryEnvelope("sources", {
+    sources: [{ provider: "codex", path: "/configured/root", acquisition }],
+  });
+  assert.deepEqual(sources.sources[0].acquisition, acquisition);
+
+  const imported = toAgentHistoryEnvelope("import", {
+    resume: false,
+    totals: {},
+    sources: [{ source: acquisition }],
+  });
+  assert.deepEqual(imported.import.sources[0].source, acquisition);
 });
 
 test("reports versioning metadata", async () => {
@@ -442,6 +501,11 @@ function assertFixturePayload(entry, fixture) {
         );
         assert.equal(fixture.search.results[0].rank, 1, `${entry} search.results[0].rank`);
         assert.equal(
+          fixture.search.results[0].sourceFormat,
+          "codex_session_jsonl",
+          `${entry} search.results[0].sourceFormat`,
+        );
+        assert.equal(
           fixture.search.results[0].retrievalScore,
           0.98,
           `${entry} search.results[0].retrievalScore`,
@@ -451,10 +515,22 @@ function assertFixturePayload(entry, fixture) {
     case "showEvent":
       assert.ok(Array.isArray(fixture.event.events), `${entry} event.events`);
       assert.equal(typeof fixture.event.events[0].ctxEventId, "string", `${entry} event id`);
+      assert.equal(fixture.event.events[0].content.complete, true, `${entry} content complete`);
+      assert.equal(fixture.event.events[0].content.policyStatus, "selected", `${entry} policy`);
       break;
     case "showSession":
       assert.ok(Array.isArray(fixture.session.events), `${entry} session.events`);
       assert.equal(typeof fixture.session.mode, "string", `${entry} session.mode`);
+      assert.equal(
+        fixture.session.session.providerSessionId,
+        "codex-fixture-session",
+        `${entry} resume id`,
+      );
+      assert.equal(
+        fixture.session.session.sourceFormat,
+        "codex_session_jsonl",
+        `${entry} session source format`,
+      );
       break;
     case "error":
       assert.equal(typeof fixture.error.code, "string", `${entry} error.code`);

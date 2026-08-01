@@ -15,6 +15,7 @@ public final class AgentHistoryClientTest {
         camelizesSearchRetrievalJson();
         decodesAllCanonicalFixturesThroughTypedResponses();
         normalizesRawShowResponses();
+        preservesLegitimateNestedSourceSemantics();
         buildsSearchCommand();
         localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment();
         searchRequiresIntent();
@@ -97,6 +98,8 @@ public final class AgentHistoryClientTest {
         assertEquals(Double.valueOf(0.98), hit.getRetrievalScore());
         assertEquals("event", hit.getResultType());
         assertEquals("event", hit.getResultScope());
+        assertEquals("codex-fixture-session", hit.getProviderSessionId());
+        assertEquals("codex_session_jsonl", hit.getSourceFormat());
         assertEquals("event", hit.getCitations().get(0).getTargetType());
         assertEquals("codex event", hit.getCitations().get(0).getLabel());
     }
@@ -148,8 +151,9 @@ public final class AgentHistoryClientTest {
         responses.put("showEvent", "{"
                 + "\"event\":{\"ctx_event_id\":\"event-1\",\"ctx_session_id\":\"session-1\","
                 + "\"provider\":\"codex\",\"provider_session_id\":\"provider-session\","
+                + "\"source_format\":\"codex_session_jsonl\","
                 + "\"sequence\":7,\"event_type\":\"message\",\"role\":\"assistant\","
-                + "\"text\":\"hello\"},"
+                + "\"text\":\"hello\",\"content\":{\"complete\":true,\"policy_status\":\"selected\"}},"
                 + "\"events\":[{\"ctx_event_id\":\"event-1\",\"ctx_session_id\":\"session-1\",\"sequence\":7}]"
                 + "}");
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport("local-cli", responses));
@@ -159,6 +163,36 @@ public final class AgentHistoryClientTest {
         assertEquals("event-1", shown.getEvent().getEvent().getCtxEventId());
         assertEquals(Integer.valueOf(7), shown.getEvent().getEvents().get(0).getSequence());
         assertEquals("provider-session", shown.getEvent().getEvent().getProviderSessionId());
+        assertEquals("codex_session_jsonl", shown.getEvent().getEvent().getSourceFormat());
+        assertEquals(Boolean.TRUE, shown.getEvent().getEvent().getContent().getComplete());
+        assertEquals(CoreContentPolicyStatus.SELECTED, shown.getEvent().getEvent().getContent().getPolicyStatus());
+    }
+
+    private static void preservesLegitimateNestedSourceSemantics() {
+        Map<String, Object> sourceRaw = Json.parseObject("{"
+                + "\"sources\":[{\"provider\":\"codex\",\"path\":\"/configured/root\","
+                + "\"status\":\"available\",\"importable\":true,"
+                + "\"acquisition\":{\"source\":\"local_scan\",\"cursor\":\"opaque-checkpoint\"}}]}");
+        Map<String, Object> sources = AgentHistoryEnvelope.normalize(
+                "sources", new Backend("local", null, null), sourceRaw);
+        List<Object> sourceList = AgentHistoryValue.rawList(sources.get("sources"));
+        Map<String, Object> acquisition = AgentHistoryValue.objectAt(
+                AgentHistoryValue.objectOrNull(sourceList.get(0)), "acquisition");
+        assertEquals("local_scan", acquisition.get("source"));
+        assertEquals("opaque-checkpoint", acquisition.get("cursor"));
+
+        Map<String, Object> importRaw = Json.parseObject("{"
+                + "\"resume\":false,\"totals\":{},"
+                + "\"sources\":[{\"source\":{\"source\":\"provider\","
+                + "\"cursor\":\"provider-checkpoint\"}}]}");
+        Map<String, Object> imported = AgentHistoryEnvelope.normalize(
+                "import", new Backend("local", null, null), importRaw);
+        Map<String, Object> importPayload = AgentHistoryValue.objectAt(imported, "import");
+        Map<String, Object> importSource = AgentHistoryValue.objectAt(
+                AgentHistoryValue.objectOrNull(AgentHistoryValue.rawList(importPayload.get("sources")).get(0)),
+                "source");
+        assertEquals("provider", importSource.get("source"));
+        assertEquals("provider-checkpoint", importSource.get("cursor"));
     }
 
     private static void decodesAllCanonicalFixturesThroughTypedResponses() throws Exception {
@@ -188,10 +222,15 @@ public final class AgentHistoryClientTest {
                                     new SearchResponse(canonical).getSearch().getResults();
                                     break;
                                 case "showEvent":
-                                    new ShowEventResponse(canonical).getEvent().getEvents();
+                                    Event event = new ShowEventResponse(canonical).getEvent().getEvent();
+                                    assertEquals("codex-fixture-session", event.getProviderSessionId());
+                                    assertEquals("codex_session_jsonl", event.getSourceFormat());
+                                    assertEquals(CoreContentPolicyStatus.SELECTED, event.getContent().getPolicyStatus());
                                     break;
                                 case "showSession":
-                                    new ShowSessionResponse(canonical).getSession().getEvents();
+                                    SessionSummary summary = new ShowSessionResponse(canonical).getSession().getSession();
+                                    assertEquals("codex-fixture-session", summary.getProviderSessionId());
+                                    assertEquals("codex_session_jsonl", summary.getSourceFormat());
                                     break;
                                 case "error":
                                     ErrorResponse error = new ErrorResponse(canonical);

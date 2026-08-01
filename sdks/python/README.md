@@ -53,6 +53,12 @@ The package includes PEP 561 type metadata and exports operation-specific
 `ShowEventResponse`, and `ShowSessionResponse`. These are hand-written to
 match the shared `agent-history-v1` contract while keeping runtime dependencies empty.
 
+Search hits, shown events, and `SessionSummary` expose `provider`,
+`providerSessionId`, and `sourceFormat`; for Codex, `providerSessionId` is the
+resume UUID. Event `content` is typed completeness/policy metadata and `text` is
+the only body. Per-event source paths, cursors, source locations, and `preview`
+are not part of the SDK contract.
+
 `sync()` is an alias for import because the current local agent-history-v1
 implementation syncs by importing local provider history into the ctx index.
 

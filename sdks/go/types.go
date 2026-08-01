@@ -7,15 +7,15 @@ type Object map[string]any
 type OperationName string
 
 const (
-	OperationStatus        OperationName = "status"
-	OperationInit          OperationName = "init"
-	OperationSources       OperationName = "sources"
-	OperationImport        OperationName = "import"
-	OperationSync          OperationName = "sync"
-	OperationSearch        OperationName = "search"
-	OperationShowEvent     OperationName = "showEvent"
-	OperationShowSession   OperationName = "showSession"
-	OperationError         OperationName = "error"
+	OperationStatus      OperationName = "status"
+	OperationInit        OperationName = "init"
+	OperationSources     OperationName = "sources"
+	OperationImport      OperationName = "import"
+	OperationSync        OperationName = "sync"
+	OperationSearch      OperationName = "search"
+	OperationShowEvent   OperationName = "showEvent"
+	OperationShowSession OperationName = "showSession"
+	OperationError       OperationName = "error"
 )
 
 // BackendKind identifies whether a response came from local or hosted ctx.
@@ -79,6 +79,15 @@ type ResultScope string
 const (
 	ResultScopeEvent   ResultScope = "event"
 	ResultScopeSession ResultScope = "session"
+)
+
+// CoreContentPolicyStatus reports how Core selected event content.
+type CoreContentPolicyStatus string
+
+const (
+	CoreContentPolicyStatusSelected CoreContentPolicyStatus = "selected"
+	CoreContentPolicyStatusRedacted CoreContentPolicyStatus = "redacted"
+	CoreContentPolicyStatusOmitted  CoreContentPolicyStatus = "omitted"
 )
 
 // Envelope contains the fields common to every agent-history-v1 response.
@@ -261,6 +270,7 @@ type SearchHit struct {
 	ResultType            string      `json:"resultType,omitempty"`
 	ResultScope           ResultScope `json:"resultScope"`
 	Provider              string      `json:"provider,omitempty"`
+	SourceFormat          string      `json:"sourceFormat,omitempty"`
 	Timestamp             string      `json:"timestamp,omitempty"`
 	CWD                   string      `json:"cwd,omitempty"`
 	WhyMatched            []string    `json:"whyMatched,omitempty"`
@@ -313,6 +323,7 @@ type SessionRecord struct {
 	CtxSessionID      string `json:"ctxSessionId,omitempty"`
 	Provider          string `json:"provider,omitempty"`
 	ProviderSessionID string `json:"providerSessionId,omitempty"`
+	SourceFormat      string `json:"sourceFormat,omitempty"`
 	Title             string `json:"title,omitempty"`
 	StartedAt         string `json:"startedAt,omitempty"`
 	UpdatedAt         string `json:"updatedAt,omitempty"`
@@ -322,18 +333,25 @@ type SessionRecord struct {
 
 // Event is the agent-history-v1 event shape.
 type Event struct {
-	CtxEventID       string     `json:"ctxEventId,omitempty"`
-	CtxSessionID     string     `json:"ctxSessionId,omitempty"`
-	Provider         string     `json:"provider,omitempty"`
-	ProviderSessionID string    `json:"providerSessionId,omitempty"`
-	SourceFormat     string     `json:"sourceFormat,omitempty"`
-	Sequence         int        `json:"sequence,omitempty"`
-	EventType        string     `json:"eventType,omitempty"`
-	Role             string     `json:"role,omitempty"`
-	OccurredAt       string     `json:"occurredAt,omitempty"`
-	Text             string     `json:"text,omitempty"`
-	Preview          string     `json:"preview,omitempty"`
-	Citations        []Citation `json:"citations,omitempty"`
+	CtxEventID        string               `json:"ctxEventId,omitempty"`
+	CtxSessionID      string               `json:"ctxSessionId,omitempty"`
+	Provider          string               `json:"provider,omitempty"`
+	ProviderSessionID string               `json:"providerSessionId,omitempty"`
+	SourceFormat      string               `json:"sourceFormat,omitempty"`
+	Sequence          int                  `json:"sequence,omitempty"`
+	EventType         string               `json:"eventType,omitempty"`
+	Role              string               `json:"role,omitempty"`
+	OccurredAt        string               `json:"occurredAt,omitempty"`
+	Text              string               `json:"text,omitempty"`
+	Content           *CoreContentMetadata `json:"content,omitempty"`
+	Citations         []Citation           `json:"citations,omitempty"`
+}
+
+// CoreContentMetadata describes completeness and Core policy for shown content.
+type CoreContentMetadata struct {
+	Complete     bool                    `json:"complete"`
+	PolicyStatus CoreContentPolicyStatus `json:"policyStatus"`
+	PolicyReason *string                 `json:"policyReason,omitempty"`
 }
 
 // ErrorResponse is the agent-history-v1 structured error envelope.

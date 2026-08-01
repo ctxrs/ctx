@@ -7,10 +7,12 @@ import java.util.Map;
 public final class Event {
     private final Map<String, Object> fields;
     private final List<Citation> citations;
+    private final CoreContentMetadata content;
 
     Event(Map<String, Object> fields) {
         this.fields = AgentHistoryValue.copyObject(fields);
         this.citations = AgentHistoryValue.objectList(fields.get("citations"), Citation::new);
+        this.content = CoreContentMetadata.from(fields.get("content"));
     }
 
     public String getCtxEventId() {
@@ -43,6 +45,14 @@ public final class Event {
 
     public String providerSessionId() {
         return getProviderSessionId();
+    }
+
+    public String getSourceFormat() {
+        return AgentHistoryValue.string(fields.get("sourceFormat"));
+    }
+
+    public String sourceFormat() {
+        return getSourceFormat();
     }
 
     public Integer getSequence() {
@@ -85,12 +95,12 @@ public final class Event {
         return getText();
     }
 
-    public String getPreview() {
-        return AgentHistoryValue.string(fields.get("preview"));
+    public CoreContentMetadata getContent() {
+        return content;
     }
 
-    public String preview() {
-        return getPreview();
+    public CoreContentMetadata content() {
+        return content;
     }
 
     public List<Citation> getCitations() {

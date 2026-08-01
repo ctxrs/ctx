@@ -53,6 +53,13 @@ The public client mirrors the `agent-history-v1` operations:
 Swift reserves `init` for initializers, so the agent-history-v1 `init` operation is
 exposed as `initialize()`. Returned envelopes still use `operation: "init"`.
 
+Search hits, shown events, and `AgentHistorySessionSummary` expose provider
+identity, including `providerSessionId` and `sourceFormat`; Codex uses
+`providerSessionId` as its resume UUID. Event `content` carries typed Core
+completeness and selected/redacted/omitted policy metadata. `text` is the sole
+body, and per-event source paths, cursors, source locations, and previews are
+not exposed.
+
 ## Local CLI Adapter
 
 `AgentHistoryClient.local(...)` shells out to a local `ctx` binary and never performs

@@ -185,6 +185,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
     public var resultType: String?
     public var resultScope: String
     public var provider: String?
+    public var sourceFormat: String?
     public var timestamp: String?
     public var cwd: String?
     public var whyMatched: [String]
@@ -204,6 +205,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         resultType: String? = nil,
         resultScope: String,
         provider: String? = nil,
+        sourceFormat: String? = nil,
         timestamp: String? = nil,
         cwd: String? = nil,
         whyMatched: [String] = [],
@@ -222,6 +224,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         self.resultType = resultType
         self.resultScope = resultScope
         self.provider = provider
+        self.sourceFormat = sourceFormat
         self.timestamp = timestamp
         self.cwd = cwd
         self.whyMatched = whyMatched
@@ -242,6 +245,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         case resultType
         case resultScope
         case provider
+        case sourceFormat
         case timestamp
         case cwd
         case whyMatched
@@ -263,6 +267,7 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         resultType = try container.decodeIfPresent(String.self, forKey: .resultType)
         resultScope = try container.decodeIfPresent(String.self, forKey: .resultScope) ?? "unknown"
         provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        sourceFormat = try container.decodeIfPresent(String.self, forKey: .sourceFormat)
         timestamp = try container.decodeIfPresent(String.self, forKey: .timestamp)
         cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
         whyMatched = try container.decodeIfPresent([String].self, forKey: .whyMatched) ?? []
@@ -338,7 +343,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var role: String?
     public var occurredAt: String?
     public var text: String?
-    public var preview: String?
+    public var content: CoreContentMetadata?
     public var citations: [AgentHistoryCitation]?
 
     public init(
@@ -352,7 +357,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         role: String? = nil,
         occurredAt: String? = nil,
         text: String? = nil,
-        preview: String? = nil,
+        content: CoreContentMetadata? = nil,
         citations: [AgentHistoryCitation]? = nil
     ) {
         self.ctxEventId = ctxEventId
@@ -365,8 +370,30 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         self.role = role
         self.occurredAt = occurredAt
         self.text = text
-        self.preview = preview
+        self.content = content
         self.citations = citations
+    }
+}
+
+public enum CoreContentPolicyStatus: String, Codable, Equatable, Sendable {
+    case selected
+    case redacted
+    case omitted
+}
+
+public struct CoreContentMetadata: Codable, Equatable, Sendable {
+    public var complete: Bool
+    public var policyStatus: CoreContentPolicyStatus
+    public var policyReason: String?
+
+    public init(
+        complete: Bool,
+        policyStatus: CoreContentPolicyStatus,
+        policyReason: String? = nil
+    ) {
+        self.complete = complete
+        self.policyStatus = policyStatus
+        self.policyReason = policyReason
     }
 }
 
@@ -374,12 +401,20 @@ public struct AgentHistorySessionSummary: Codable, Equatable, Sendable {
     public var ctxSessionId: String?
     public var provider: String?
     public var providerSessionId: String?
+    public var sourceFormat: String?
     public var title: String?
 
-    public init(ctxSessionId: String? = nil, provider: String? = nil, providerSessionId: String? = nil, title: String? = nil) {
+    public init(
+        ctxSessionId: String? = nil,
+        provider: String? = nil,
+        providerSessionId: String? = nil,
+        sourceFormat: String? = nil,
+        title: String? = nil
+    ) {
         self.ctxSessionId = ctxSessionId
         self.provider = provider
         self.providerSessionId = providerSessionId
+        self.sourceFormat = sourceFormat
         self.title = title
     }
 }

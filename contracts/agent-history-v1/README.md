@@ -68,10 +68,17 @@ Important reusable records:
   weight, semantic coverage, optional fallback code/message, and optional
   diagnostics. The CLI adapter camel-cases raw CLI retrieval fields for this
   contract.
-- `Citation`: stable ctx event/session citation fields.
-- Search and show results expose `providerSessionId` when Core retained the
-  provider-owned session identity. For Codex, this is the resume UUID used by
-  Codex tooling.
+- `Citation`: stable ctx event/session citation fields. Public search/show
+  records do not expose provider source paths, cursors, or source-location
+  objects.
+- `CoreContentMetadata`: whether a shown event has complete Core content, the
+  selected/redacted/omitted policy status, and an optional policy reason. `text`
+  is the only textual body; there is no alternate `preview` body.
+- `SessionSummary`: typed Core session identity, including `provider`,
+  `providerSessionId`, and `sourceFormat`.
+- Search hits, shown events, and session summaries expose `providerSessionId`
+  when Core retained the provider-owned session identity. For Codex, this is
+  the resume UUID used by Codex tooling.
 - Structured error: `code`, `message`, `retryable`, optional `details`, and
   optional `cause`.
 
