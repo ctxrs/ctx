@@ -1,6 +1,6 @@
 use std::fmt;
 
-use ctx_history_core::RepositoryFileObservationKind;
+use ctx_history_core::{RepositoryFileObservationKind, MAX_CORE_CONTENT_BYTES};
 use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
@@ -89,8 +89,8 @@ struct SafeMessage {
 
 #[derive(Debug, Default)]
 struct SafeContent {
-    direct_text: Option<String>,
-    blocks: Vec<SafeBlock>,
+    body: Option<String>,
+    calls: Vec<ToolCallRequest>,
 }
 
 impl<'de> Deserialize<'de> for SafeContent {
@@ -115,32 +115,42 @@ impl<'de> Visitor<'de> for SafeContentVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut blocks = Vec::new();
+        let mut content = SafeContent::default();
         while let Some(block) = sequence.next_element::<SafeBlock>()? {
-            if blocks.len() > super::rows::CLAUDE_MAX_RECORD_ROWS {
-                return Err(serde::de::Error::custom(
-                    "Claude content exceeds the bounded block count",
-                ));
-            }
-            blocks.push(block);
+            content
+                .push_block(block)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(content)
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if value.len() > MAX_CORE_CONTENT_BYTES {
+            return Err(serde::de::Error::custom(
+                "Claude message body exceeds the Core content limit",
+            ));
         }
         Ok(SafeContent {
-            direct_text: None,
-            blocks,
+            body: (!value.trim().is_empty()).then(|| value.to_owned()),
+            calls: Vec::new(),
         })
     }
 
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if value.len() > MAX_CORE_CONTENT_BYTES {
+            return Err(serde::de::Error::custom(
+                "Claude message body exceeds the Core content limit",
+            ));
+        }
         Ok(SafeContent {
-            direct_text: Some(value.to_owned()),
-            blocks: Vec::new(),
-        })
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(SafeContent {
-            direct_text: Some(value),
-            blocks: Vec::new(),
+            body: (!value.trim().is_empty()).then_some(value),
+            calls: Vec::new(),
         })
     }
 
@@ -191,6 +201,65 @@ struct SafeBlock {
     input: Value,
 }
 
+impl SafeContent {
+    fn push_block(&mut self, block: SafeBlock) -> Result<(), &'static str> {
+        match block.kind.as_deref() {
+            Some("tool_use") | Some("server_tool_use") => {
+                let represented_rows = self.calls.len() + usize::from(self.body.is_some());
+                if represented_rows >= super::rows::CLAUDE_MAX_RECORD_ROWS {
+                    return Err("Claude content exceeds the representable row limit");
+                }
+                self.calls.push(ToolCallRequest {
+                    call_id: block.id,
+                    tool_name: block.name.clone(),
+                    command: bounded_input_string(&block.input, &["command"], 1024 * 1024),
+                    declared_workdir: bounded_input_string(
+                        &block.input,
+                        &["workdir", "cwd"],
+                        16 * 1024,
+                    ),
+                    file_touches: safe_file_touches(&block.input, block.name.as_deref()),
+                    input: block.input,
+                });
+            }
+            Some("text") => {
+                if let Some(text) = block.text.filter(|value| !value.trim().is_empty()) {
+                    self.push_text(text)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn push_text(&mut self, text: String) -> Result<(), &'static str> {
+        let additional = text.len() + usize::from(self.body.is_some());
+        let normalized_len = self
+            .body
+            .as_ref()
+            .map_or(0, String::len)
+            .checked_add(additional)
+            .ok_or("Claude normalized message body length overflowed")?;
+        if normalized_len > MAX_CORE_CONTENT_BYTES {
+            return Err("Claude normalized message body exceeds the Core content limit");
+        }
+        if let Some(body) = self.body.as_mut() {
+            body.push('\n');
+            body.push_str(&text);
+        } else {
+            if self.calls.len() >= super::rows::CLAUDE_MAX_RECORD_ROWS {
+                return Err("Claude content exceeds the representable row limit");
+            }
+            self.body = Some(text);
+        }
+        Ok(())
+    }
+
+    fn into_parts(self) -> (Option<String>, Vec<ToolCallRequest>) {
+        (self.body, self.calls)
+    }
+}
+
 fn retain_safe_record(
     mut record: SafeRecord,
     raw_ordinal: u64,
@@ -212,7 +281,7 @@ fn retain_safe_record(
     let content = message
         .map(|value| value.content)
         .unwrap_or_else(|| std::mem::take(&mut record.content));
-    let (body, calls) = split_safe_content(content);
+    let (body, calls) = content.into_parts();
     let mut rows = Vec::new();
 
     let kind = match entry_type.as_str() {
@@ -294,42 +363,6 @@ fn push_body_row(
         tool_result: None,
         locator: locator.clone(),
     });
-}
-
-fn split_safe_content(content: SafeContent) -> (Option<String>, Vec<ToolCallRequest>) {
-    let mut text_parts = Vec::new();
-    if let Some(text) = content.direct_text.filter(|value| !value.trim().is_empty()) {
-        text_parts.push(text);
-    }
-    let mut calls = Vec::new();
-    for block in content.blocks {
-        match block.kind.as_deref() {
-            Some("tool_use") | Some("server_tool_use") => calls.push(ToolCallRequest {
-                call_id: block.id,
-                tool_name: block.name.clone(),
-                command: bounded_input_string(&block.input, &["command"], 1024 * 1024),
-                declared_workdir: bounded_input_string(
-                    &block.input,
-                    &["workdir", "cwd"],
-                    16 * 1024,
-                ),
-                file_touches: safe_file_touches(&block.input, block.name.as_deref()),
-                input: block.input,
-            }),
-            Some("text") => {
-                if let Some(text) = block.text.filter(|value| !value.trim().is_empty()) {
-                    text_parts.push(text);
-                }
-            }
-            _ => {}
-        }
-    }
-    let body = match text_parts.len() {
-        0 => None,
-        1 => text_parts.pop(),
-        _ => Some(text_parts.join("\n")),
-    };
-    (body, calls)
 }
 
 fn bounded_input_string(input: &Value, fields: &[&str], limit: usize) -> Option<String> {
@@ -490,9 +523,9 @@ struct MetadataOnlyRecord {
     git_branch: Option<String>,
 }
 
-/// The allocation-free raw inspection first selects and bounds the semantic
-/// shape. Result records are then retained completely for direct Core output
-/// and exact native call/result linkage.
+/// The body-allocation-free raw inspection first selects and bounds the
+/// semantic shape. Result records are then retained completely for direct Core
+/// output and exact native call/result linkage.
 pub(super) fn parse_native_record(
     bytes: &[u8],
     raw_ordinal: u64,
@@ -522,6 +555,7 @@ fn parse_native_record_inner(
             &outputs,
             &value,
         );
+        validate_row_count(&rows)?;
         return Ok(ParsedClaudeRecord {
             session_id: metadata.session_id,
             timestamp: metadata.timestamp,
@@ -539,6 +573,7 @@ fn parse_native_record_inner(
     let version = record.version.clone();
     let git_branch = record.git_branch.clone();
     let rows = retain_safe_record(record, raw_ordinal, locator);
+    validate_row_count(&rows)?;
     Ok(ParsedClaudeRecord {
         session_id,
         timestamp,
@@ -547,6 +582,16 @@ fn parse_native_record_inner(
         git_branch,
         rows,
     })
+}
+
+fn validate_row_count(rows: &[ClaudeRetainedRow]) -> Result<(), serde_json::Error> {
+    if rows.len() > super::rows::CLAUDE_MAX_RECORD_ROWS {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Claude record exceeds the representable row limit",
+        )));
+    }
+    Ok(())
 }
 
 fn output_descriptors(

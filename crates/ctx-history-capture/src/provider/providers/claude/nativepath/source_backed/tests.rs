@@ -230,8 +230,107 @@ fn test_projector() -> ClaudeProjector {
         attributor: RepositoryAttributor::default(),
         pending_calls: HashMap::new(),
         linkage_capacity_exceeded: false,
+        rejected_records: 0,
         fallback_identities: FallbackEventIdentityState::default(),
     }
+}
+
+#[test]
+fn sixty_five_small_result_blocks_are_all_emitted() {
+    let content = (0..65)
+        .map(|index| {
+            serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": format!("call-{index}"),
+                "content": format!("result-{index}"),
+                "is_error": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "sixty-five-results",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "message": {"role": "user", "content": content},
+    }))
+    .unwrap();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(emitted.len(), 65);
+    assert_eq!(projector.rejected_records(), 0);
+    assert_eq!(
+        emitted.first().unwrap().content.normalized_body.as_deref(),
+        Some("result-0")
+    );
+    assert_eq!(
+        emitted.last().unwrap().content.normalized_body.as_deref(),
+        Some("result-64")
+    );
+}
+
+#[test]
+fn malformed_empty_and_row_overflow_records_are_counted_rejections() {
+    let malformed = b"{\"type\":\"user\",\"sessionId\":\"test-session\",\"message\":";
+    let empty =
+        br#"{"type":"user","sessionId":"test-session","message":{"role":"user","content":[]}}"#;
+    let overflow_content = (0..=CLAUDE_MAX_RECORD_ROWS)
+        .map(|_| serde_json::json!({"type": "tool_result"}))
+        .collect::<Vec<_>>();
+    let overflow = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "overflow-results",
+        "sessionId": "test-session",
+        "message": {"role": "user", "content": overflow_content},
+    }))
+    .unwrap();
+    assert!(overflow.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("overflow-results.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: overflow.len() as u64,
+        line_number: 1,
+        record_sha256: Sha256::digest(&overflow).into(),
+    };
+    let overflow_error = parse_native_record(&overflow, 0, &locator).unwrap_err();
+    assert!(overflow_error
+        .to_string()
+        .contains("Claude result exceeds the representable row limit"));
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(malformed, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(projector.rejected_records(), 1);
+    projector
+        .project(JsonlRecordRef::for_test(empty, 1), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(projector.rejected_records(), 2);
+    projector
+        .project(JsonlRecordRef::for_test(&overflow, 2), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(emitted.is_empty());
+    assert_eq!(projector.rejected_records(), 3);
 }
 
 #[test]
@@ -442,6 +541,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         attributor: RepositoryAttributor::default(),
         pending_calls,
         linkage_capacity_exceeded,
+        rejected_records: 0,
         fallback_identities: FallbackEventIdentityState::default(),
     };
     let checkpoint = encode_projector_checkpoint(&projector).unwrap();
