@@ -23,10 +23,14 @@ fn status(coverage: MaterializedCoverage) -> StatusResult {
         ProOperation::CommitBlame,
         ProOperation::PullRequestBlame,
     ]);
+    let mut core_receipt = receipt('a');
+    if coverage == MaterializedCoverage::Empty {
+        core_receipt.event_count = 0;
+    }
     StatusResult {
         currentness: CoreProjectionCurrentness::Current,
         requested_core_generation_id: Some("a".repeat(64)),
-        core_receipt: Some(receipt('a')),
+        core_receipt: Some(core_receipt),
         coverage,
         repository_coverage: if coverage == MaterializedCoverage::Complete {
             RepositoryCoverage {
@@ -152,33 +156,99 @@ fn stale_core_receipt_fails_closed() {
 
 #[test]
 fn default_blame_policy_reads_latest_committed_without_waiting() {
-    let latest_calls = AtomicUsize::new(0);
-    let generation = prepare_blame_generation_with(
+    let wake_calls = AtomicUsize::new(0);
+    let expected_active_generation = prepare_blame_freshness_with(
         BlameFreshnessPolicy::LatestCommitted,
         || {
-            latest_calls.fetch_add(1, Ordering::SeqCst);
-            Ok("a".repeat(64))
+            wake_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         },
         || panic!("ordinary blame must not synchronously wait"),
     )
     .unwrap();
+    assert_eq!(expected_active_generation, None);
+    assert_eq!(wake_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn latest_committed_blame_ignores_a_failed_background_wake() {
+    let expected_active_generation = prepare_blame_freshness_with(
+        BlameFreshnessPolicy::LatestCommitted,
+        || bail!("source_unavailable: daemon is unavailable"),
+        || panic!("ordinary blame must not synchronously wait"),
+    )
+    .unwrap();
+    assert_eq!(expected_active_generation, None);
+}
+
+#[test]
+fn latest_committed_blame_uses_the_helpers_trailing_receipt() {
+    let status = status(MaterializedCoverage::Complete);
+    let generation = blame_core_generation(&status, None).unwrap();
     assert_eq!(generation, "a".repeat(64));
-    assert_eq!(latest_calls.load(Ordering::SeqCst), 1);
+    support::current_blame_request(
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &status,
+        &generation,
+    )
+    .unwrap();
 }
 
 #[test]
 fn explicit_wait_policy_uses_the_wait_path() {
-    let generation = prepare_blame_generation_with(
+    let generation = prepare_blame_freshness_with(
         BlameFreshnessPolicy::WaitForCurrent,
         || panic!("wait policy must not read latest-only state"),
         || Ok("b".repeat(64)),
     )
     .unwrap();
-    assert_eq!(generation, "b".repeat(64));
+    assert_eq!(generation, Some("b".repeat(64)));
 }
 
 #[test]
 fn core_advance_during_blame_returns_typed_stale_source() {
-    let error = ensure_blame_generation_is_current(&"a".repeat(64), &"b".repeat(64)).unwrap_err();
+    let error =
+        ensure_active_core_generation_is_unchanged(&"a".repeat(64), &"b".repeat(64)).unwrap_err();
     assert_eq!(stable_error_code(&error), Some("stale_source"));
+}
+
+#[test]
+fn pro_receipt_advance_during_blame_returns_typed_stale_source() {
+    let mut advanced = status(MaterializedCoverage::Complete);
+    advanced.requested_core_generation_id = None;
+    advanced.core_receipt = Some(receipt('b'));
+    let error = ensure_committed_pro_receipt_is_unchanged(&receipt('a'), &advanced).unwrap_err();
+    assert_eq!(stable_error_code(&error), Some("stale_source"));
+}
+
+#[test]
+fn unchanged_pro_receipt_after_blame_is_accepted() {
+    let status = status(MaterializedCoverage::Complete);
+    ensure_committed_pro_receipt_is_unchanged(&receipt('a'), &status).unwrap();
+}
+
+#[test]
+fn missing_pro_receipt_after_blame_fails_closed() {
+    let mut missing = status(MaterializedCoverage::Complete);
+    missing.currentness = CoreProjectionCurrentness::NotMaterialized;
+    missing.requested_core_generation_id = None;
+    missing.core_receipt = None;
+    missing.coverage = MaterializedCoverage::NotMaterialized;
+    missing.repository_coverage = RepositoryCoverage::default();
+    missing.available_operations.clear();
+    let error = ensure_committed_pro_receipt_is_unchanged(&receipt('a'), &missing).unwrap_err();
+    assert_eq!(stable_error_code(&error), Some("stale_source"));
+}
+
+#[test]
+fn incoherent_pro_receipt_after_blame_fails_closed() {
+    let mut incoherent = status(MaterializedCoverage::Complete);
+    incoherent.core_receipt = None;
+    let error = ensure_committed_pro_receipt_is_unchanged(&receipt('a'), &incoherent).unwrap_err();
+    assert_eq!(stable_error_code(&error), Some("invalid_response"));
 }
