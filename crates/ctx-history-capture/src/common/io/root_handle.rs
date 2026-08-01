@@ -216,6 +216,28 @@ impl ProviderSourceRoot {
         }
         Ok(())
     }
+
+    /// Confirms that both the retained directory handle and its named route
+    /// still identify the same root while allowing metadata changes caused by
+    /// children being added, removed, or updated. Inventory owners use
+    /// [`Self::revalidate`] separately when they require an exact tree fence.
+    pub(crate) fn revalidate_same_object(&self) -> Result<()> {
+        let current_metadata = self.inner.directory.metadata()?;
+        let current = platform::object_stamp(&self.inner.directory, &current_metadata)?;
+        if !platform::same_object(&current, &self.inner.opened) {
+            return Err(changed_path(&self.inner.named_path));
+        }
+        let reopened = platform::open_absolute(&self.inner.named_path)
+            .map_err(|error| map_changed_open_error(&self.inner.named_path, error))?;
+        let platform::OpenedPath::Directory { file, metadata, .. } = reopened else {
+            return Err(changed_path(&self.inner.named_path));
+        };
+        let named = platform::object_stamp(&file, &metadata)?;
+        if !platform::same_object(&named, &self.inner.opened) {
+            return Err(changed_path(&self.inner.named_path));
+        }
+        Ok(())
+    }
 }
 
 #[allow(
@@ -520,7 +542,7 @@ impl OpenedProviderSourceFile {
     pub(crate) fn revalidate_same_object(&self) -> Result<()> {
         self.revalidate_same_object_leaf()?;
         if let ProviderSourceFileRoute::Relative { root, .. } = &self.route {
-            root.revalidate()?;
+            root.revalidate_same_object()?;
         }
         Ok(())
     }
@@ -819,11 +841,13 @@ mod tests {
             .unwrap()
             .write_all(b"second\n")
             .unwrap();
+        fs::write(temp.path().join("new-sibling.jsonl"), b"sibling\n").unwrap();
         assert_eq!(
             source.read_exact_range_allow_append(0, 6, 6).unwrap(),
             b"first\n"
         );
         assert!(source.revalidate_same_object().is_ok());
+        assert!(root.revalidate_same_object().is_ok());
         assert!(source.revalidate().is_err());
 
         fs::rename(&path, &moved).unwrap();
@@ -849,7 +873,9 @@ mod tests {
         fs::rename(&replacement, &root).unwrap();
 
         source.revalidate_leaf().unwrap();
+        assert!(authority.revalidate_same_object().is_err());
         assert!(authority.revalidate().is_err());
+        assert!(source.revalidate_same_object().is_err());
         assert!(source.revalidate().is_err());
     }
 

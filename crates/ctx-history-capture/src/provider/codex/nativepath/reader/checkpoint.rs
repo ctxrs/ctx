@@ -5,6 +5,8 @@ use super::*;
 std::thread_local! {
     static AFTER_CODEX_PREFIX_HASH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static AFTER_CODEX_SECOND_PREFIX_HASH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -19,8 +21,28 @@ pub(crate) fn install_after_codex_prefix_hash_hook(hook: impl FnOnce() + 'static
 }
 
 #[cfg(test)]
+pub(crate) fn install_after_codex_second_prefix_hash_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_SECOND_PREFIX_HASH_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex second prefix-hash hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
 fn run_after_codex_prefix_hash_hook() {
     AFTER_CODEX_PREFIX_HASH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_second_prefix_hash_hook() {
+    AFTER_CODEX_SECOND_PREFIX_HASH_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
             hook();
         }
@@ -518,30 +540,30 @@ pub(crate) fn revalidate_codex_source_observation(
         return Err(source_changed_during_scan());
     }
     if current != *certified {
-        let mut before = current;
-        for attempt in 0..2 {
-            revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
-            if attempt == 0 {
-                #[cfg(test)]
-                run_after_codex_prefix_hash_hook();
-            }
-            let middle = opened_file_observation(&source.source_path, opened.file())?;
-            opened.revalidate_same_object()?;
-            if !before.admits_append_only_growth(&middle) {
-                return Err(source_changed_during_scan());
-            }
-            revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
-            let after = opened_file_observation(&source.source_path, opened.file())?;
-            opened.revalidate_same_object()?;
-            if middle == after {
-                return Ok(());
-            }
-            if !middle.admits_append_only_growth(&after) {
-                return Err(source_changed_during_scan());
-            }
-            before = after;
+        revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
+        #[cfg(test)]
+        run_after_codex_prefix_hash_hook();
+        let middle = opened_file_observation(&source.source_path, opened.file())?;
+        opened.revalidate_same_object()?;
+        if !current.admits_append_only_growth(&middle) {
+            return Err(source_changed_during_scan());
         }
-        return Err(source_changed_during_scan());
+        // Hash the certified prefix again after observing the object. Exact
+        // prefix equality plus monotonic same-object observations is enough to
+        // admit a continuously appended JSONL file; waiting for a quiescent
+        // metadata window makes an active session impossible to import.
+        revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
+        #[cfg(test)]
+        run_after_codex_second_prefix_hash_hook();
+        let after = opened_file_observation(&source.source_path, opened.file())?;
+        opened.revalidate_same_object()?;
+        if !middle.admits_append_only_growth(&after) {
+            return Err(source_changed_during_scan());
+        }
+        // End on content proof. The preceding observation establishes
+        // monotonic same-object growth and this final hash rejects a
+        // rewrite-plus-append that raced after the prior proof.
+        revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
     }
     Ok(())
 }

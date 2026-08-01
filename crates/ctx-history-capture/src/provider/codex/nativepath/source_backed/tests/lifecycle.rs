@@ -1299,3 +1299,65 @@ fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_hash_r
     .unwrap_err();
     assert!(matches!(error, CaptureError::InvalidPayload(_)));
 }
+
+#[test]
+fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_second_hash_rewrite_and_append(
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000050";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "secondprefixoriginalmarker")],
+    );
+    let path = session_path(&sessions, native_session_id);
+    let original = fs::read(&path).unwrap();
+    let (summary, catalog) = discover_codex_session_catalog(&sessions).unwrap();
+    assert_eq!(summary.failed_sessions, 0);
+    let discovery = discover_codex_catalog_sources(&catalog);
+    assert!(discovery.rejections.is_empty());
+    let source = discovery.sources.into_iter().next().unwrap();
+    let opened = crate::provider::codex::nativepath::open_codex_source_capability(&source).unwrap();
+    let certified_observation =
+        opened_codex_file_observation(&source.source_path, opened.file()).unwrap();
+    let certified_digest = Sha256::digest(&original).into();
+
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(format!("{}\n", message("assistant", "first append")).as_bytes())
+        .unwrap();
+
+    let marker = b"secondprefixoriginalmarker";
+    let marker_offset = original
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .unwrap();
+    let rewrite_path = path.clone();
+    crate::provider::codex::nativepath::reader::install_after_codex_second_prefix_hash_hook(
+        move || {
+            let mut file = OpenOptions::new().write(true).open(&rewrite_path).unwrap();
+            file.seek(SeekFrom::Start(marker_offset as u64)).unwrap();
+            file.write_all(b"Secondprefixoriginalmarker").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let mut appended = OpenOptions::new().append(true).open(rewrite_path).unwrap();
+            appended
+                .write_all(format!("{}\n", message("assistant", "racing append")).as_bytes())
+                .unwrap();
+            appended.sync_all().unwrap();
+        },
+    );
+
+    let error = revalidate_codex_source_observation(
+        &source,
+        &certified_observation,
+        original.len() as u64,
+        certified_digest,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CaptureError::InvalidPayload(_)));
+}

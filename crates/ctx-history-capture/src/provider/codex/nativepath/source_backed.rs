@@ -45,7 +45,7 @@ use crate::{
         PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
     },
     provider::codex::{
-        catalog::{catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained},
+        catalog::catalog_codex_explicit_session_opened,
         nativepath::{opened_codex_file_observation, revalidate_codex_source_observation},
     },
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
@@ -309,15 +309,16 @@ mod lineage;
 
 use lineage::{CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
 
-pub(crate) use catalog::{
-    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
-    managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
-    writer_base_sources, CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
-};
 #[cfg(test)]
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
-    discover_codex_session_tree_inventory_from_plans_v0, CodexCatalogWorkV0,
+    discover_codex_session_tree_inventory_from_plans_v0, install_after_codex_directory_visit_hook,
+    install_after_codex_metadata_inventory_hook, CodexCatalogWorkV0,
+};
+pub(crate) use catalog::{
+    discover_codex_session_tree_inventory_v0, managed_codex_session_source,
+    observe_codex_explicit_session_source_backed_v0, writer_base_sources,
+    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
 };
 use cold::{
     cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdIngestionTargetV0,
