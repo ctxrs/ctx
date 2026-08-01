@@ -511,7 +511,7 @@ fn parse_native_record_inner(
 
     if result.is_result() {
         let metadata: MetadataOnlyRecord = serde_json::from_slice(bytes)?;
-        let outputs = output_descriptors(&preflight, bytes, &record_outcome);
+        let outputs = output_descriptors(&preflight, bytes, &record_outcome)?;
         let value: Value = serde_json::from_slice(bytes)?;
         let rows = complete_output_rows(
             raw_ordinal,
@@ -552,17 +552,25 @@ fn output_descriptors(
     preflight: &RawRecordPreflight,
     bytes: &[u8],
     record_outcome: &OutputOutcomeMetadata,
-) -> Vec<ClaudeOutputDescriptor> {
+) -> Result<Vec<ClaudeOutputDescriptor>, serde_json::Error> {
+    let one_output = preflight.output_descriptors().len() == 1;
     let mut outputs = preflight
         .output_descriptors()
         .iter()
         .enumerate()
-        .map(|(index, descriptor)| ClaudeOutputDescriptor {
-            subrecord_index: u32::try_from(index).unwrap_or(u32::MAX),
-            call_id: descriptor.decode_call_id(bytes),
-            outcome: record_outcome.clone(),
+        .map(|(index, descriptor)| {
+            let exact = descriptor.decode_outcome(bytes)?;
+            Ok(ClaudeOutputDescriptor {
+                subrecord_index: u32::try_from(index).unwrap_or(u32::MAX),
+                call_id: descriptor.decode_call_id(bytes),
+                outcome: if one_output {
+                    merge_output_outcome(exact, record_outcome)
+                } else {
+                    exact
+                },
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
     if outputs.is_empty() {
         outputs.push(ClaudeOutputDescriptor {
             subrecord_index: 0,
@@ -570,7 +578,23 @@ fn output_descriptors(
             outcome: record_outcome.clone(),
         });
     }
-    outputs
+    Ok(outputs)
+}
+
+fn merge_output_outcome(
+    exact: OutputOutcomeMetadata,
+    record: &OutputOutcomeMetadata,
+) -> OutputOutcomeMetadata {
+    let outcome = match (exact.outcome, record.outcome) {
+        (OutputOutcome::Unknown, outcome) | (outcome, OutputOutcome::Unknown) => outcome,
+        (left, right) if left == right => left,
+        _ => OutputOutcome::Unknown,
+    };
+    OutputOutcomeMetadata {
+        outcome,
+        exit_code: exact.exit_code.or(record.exit_code),
+        duration_ms: exact.duration_ms.or(record.duration_ms),
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +654,25 @@ mod tests {
                 .and_then(|value| value.pointer("/gitOperation/commit/sha"))
                 .and_then(Value::as_str),
             Some("abcdef1")
+        );
+    }
+
+    #[test]
+    fn multiple_native_results_keep_independent_exact_outcomes() {
+        let bytes = br#"{"type":"user","uuid":"result-2","sessionId":"claude-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-ok","is_error":false,"content":"ok"},{"type":"tool_result","tool_use_id":"toolu-fail","is_error":true,"content":"failed"}]}}"#;
+        let record = parse_native_record(bytes, 2, &locator()).unwrap();
+        let outcomes = record
+            .rows
+            .iter()
+            .filter_map(|row| row.tool_result.as_ref())
+            .map(|result| (result.call_id.as_deref(), result.outcome))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes,
+            vec![
+                (Some("toolu-ok"), ClaudeOutputOutcome::Success),
+                (Some("toolu-fail"), ClaudeOutputOutcome::Failure),
+            ]
         );
     }
 }
