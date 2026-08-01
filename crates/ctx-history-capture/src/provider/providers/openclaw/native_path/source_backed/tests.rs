@@ -568,3 +568,52 @@ fn successful_textual_result_over_16k_remains_in_native_core_body() {
     assert!(body.contains(tail));
     assert_eq!(result.message["content"][0]["text"], output);
 }
+
+#[test]
+fn over_8_mib_tool_result_is_admitted_complete_without_structured_body_duplication() {
+    let tail = "openclaw_large_result_tail_complete";
+    let full_result = format!("{} {tail}", "x".repeat(9 * 1024 * 1024));
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "message",
+        "id": "large-result-record",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "message": {
+            "role": "toolResult",
+            "toolCallId": "large-result-call",
+            "toolName": "exec",
+            "content": [{"type": "text", "text": full_result}],
+            "details": {"status": "completed", "exitCode": 0}
+        }
+    }))
+    .unwrap();
+    assert!(bytes.len() > 8 * 1024 * 1024);
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let (_temp, mut projector) = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one OpenClaw result record");
+    };
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(full_result.as_str())
+    );
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(structured["result_content_location"], "normalized_body");
+    assert_eq!(structured["result_content_complete"], true);
+    assert_eq!(structured["result_metadata"]["status"], "completed");
+    let encoded_structured = serde_json::to_vec(structured).unwrap();
+    assert!(encoded_structured.len() < 4 * 1024);
+    assert!(!String::from_utf8(encoded_structured)
+        .unwrap()
+        .contains(tail));
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}

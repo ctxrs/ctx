@@ -263,6 +263,91 @@ fn exact_linked_unknown_tool_result_is_emitted_without_outcome_evidence() {
 }
 
 #[test]
+fn over_8_mib_tool_result_is_admitted_complete_without_structured_body_duplication() {
+    let tail = "claude_large_result_tail_complete";
+    let full_result = format!("{} {tail}", "x".repeat(9 * 1024 * 1024));
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "large-result-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "large-result-call",
+                "content": full_result,
+                "is_error": false
+            }]
+        }
+    }))
+    .unwrap();
+    assert!(bytes.len() > 8 * 1024 * 1024);
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude result record");
+    };
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(full_result.as_str())
+    );
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(structured["result_content_location"], "normalized_body");
+    assert_eq!(structured["result_content_complete"], true);
+    let encoded_structured = serde_json::to_vec(structured).unwrap();
+    assert!(encoded_structured.len() < 4 * 1024);
+    assert!(!String::from_utf8(encoded_structured)
+        .unwrap()
+        .contains(tail));
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
+fn source_storage_project_path_never_becomes_core_workspace() {
+    let source_storage = "/home/private-user/.claude/projects/-home-private-user-secret-project";
+    let logical_workspace = "/workspace/provider-native-project";
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "privacy-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "cwd": logical_workspace,
+        "message": {"role": "user", "content": "privacy-safe message"}
+    }))
+    .unwrap();
+    let mut projector = test_projector();
+    projector.binding.project_dir = PathBuf::from(source_storage);
+    projector.source_path = format!("{source_storage}/test-session.jsonl");
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude message record");
+    };
+    assert_eq!(record.workspace, None);
+    assert_eq!(record.cwd.as_deref(), Some(logical_workspace));
+    let encoded = String::from_utf8(record.encode_stored().unwrap()).unwrap();
+    assert!(!encoded.contains(source_storage));
+    assert!(!encoded.contains("/home/private-user/.claude/projects"));
+}
+
+#[test]
 fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
     let mut projector = test_projector();
     projector.remember_pending_call(

@@ -33,6 +33,7 @@ use crate::OutputOutcome;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
+        normalization::provider_explicit_result_value_text,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
@@ -50,8 +51,9 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v3";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v4-result-content";
 const MAX_PENDING_CALLS: usize = 4096;
+const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
 mod checkpoint;
 
@@ -456,7 +458,6 @@ fn core_record(
     .map_err(contract)?;
     let native_event_id = native_event_typed_key(&row, fallback_identity)?;
     let event_sequence = row_event_sequence(&row)?;
-    let structured_content = row_structured_content(&row);
     let mut record = CoreRecord::new_selected(
         event_id,
         identities.session_id,
@@ -479,10 +480,8 @@ fn core_record(
         .and_then(|value| value.parse::<DateTime<Utc>>().ok())
         .map(|value| value.timestamp_millis());
     record.role = row.role;
-    record.workspace = binding.project_dir.to_str().map(str::to_owned);
     record.branch = session.git_branch.clone();
     record.cwd = session.cwd.clone();
-    record.content.structured_content = structured_content;
     record.validate_contract().map_err(contract)?;
     Ok(record)
 }
@@ -510,17 +509,88 @@ fn row_structured_content(row: &ClaudeRetainedRow) -> Option<serde_json::Value> 
         })
         .or_else(|| {
             row.tool_result.as_ref().map(|result| {
-                serde_json::json!({
+                let mut structured = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": result.call_id,
-                    "content": result.content,
-                    "toolUseResult": result.tool_use_result,
+                    "result_content_location": "normalized_body",
+                    "result_content_complete": true,
                     "outcome": result.outcome,
                     "exit_code": result.exit_code,
                     "duration_ms": result.duration_ms,
-                })
+                });
+                if let (Some(object), Some(metadata)) = (
+                    structured.as_object_mut(),
+                    claude_tool_result_metadata(result),
+                ) {
+                    object.insert("result_metadata".to_owned(), metadata);
+                }
+                structured
             })
         })
+}
+
+fn claude_tool_result_metadata(
+    result: &super::rows::ClaudeToolResult,
+) -> Option<serde_json::Value> {
+    let tool_use_result = result.tool_use_result.as_ref()?;
+    let content_selected = explicit_result_text(&result.content).is_some();
+    let tool_body_selected = claude_tool_use_result_explicit_text(tool_use_result).is_some();
+    if !content_selected && !tool_body_selected {
+        return None;
+    }
+    let serde_json::Value::Object(object) = tool_use_result else {
+        return None;
+    };
+    let mut metadata = object.clone();
+    metadata.retain(|key, _| {
+        ![
+            "stdout", "stderr", "output", "outputs", "content", "result", "results",
+        ]
+        .iter()
+        .any(|body_key| key.eq_ignore_ascii_case(body_key))
+    });
+    if metadata.is_empty() {
+        return None;
+    }
+    let metadata = serde_json::Value::Object(metadata);
+    let encoded_len = serde_json::to_vec(&metadata).ok()?.len();
+    (encoded_len <= MAX_RESULT_METADATA_BYTES).then_some(metadata)
+}
+
+fn claude_tool_result_body(result: &super::rows::ClaudeToolResult) -> String {
+    explicit_result_text(&result.content)
+        .or_else(|| {
+            result
+                .tool_use_result
+                .as_ref()
+                .and_then(claude_tool_use_result_explicit_text)
+        })
+        .or_else(|| {
+            result
+                .tool_use_result
+                .as_ref()
+                .and_then(provider_explicit_result_value_text)
+                .filter(|text| !text.trim().is_empty())
+        })
+        .unwrap_or_else(|| "tool output".to_owned())
+}
+
+fn explicit_result_text(value: &serde_json::Value) -> Option<String> {
+    provider_explicit_result_value_text(value).filter(|text| !text.trim().is_empty())
+}
+
+fn claude_tool_use_result_explicit_text(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    let streams = ["stdout", "stderr"]
+        .into_iter()
+        .filter_map(|key| object.get(key).and_then(explicit_result_text))
+        .collect::<Vec<_>>();
+    if !streams.is_empty() {
+        return Some(streams.join("\n"));
+    }
+    ["output", "content", "result"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(explicit_result_text))
 }
 
 fn claude_output_outcome(outcome: ClaudeOutputOutcome) -> OutputOutcome {
@@ -846,20 +916,7 @@ fn lexical_body(row: &ClaudeRetainedRow) -> String {
                 .ok()
             })
         })
-        .or_else(|| {
-            row.tool_result.as_ref().and_then(|output| {
-                serde_json::to_string(&serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": output.call_id,
-                    "content": output.content,
-                    "toolUseResult": output.tool_use_result,
-                    "outcome": output.outcome,
-                    "exit_code": output.exit_code,
-                    "duration_ms": output.duration_ms,
-                }))
-                .ok()
-            })
-        })
+        .or_else(|| row.tool_result.as_ref().map(claude_tool_result_body))
         .unwrap_or_else(|| event_kind(row.kind).to_owned());
     if text.trim().is_empty() {
         event_kind(row.kind).to_owned()
