@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 4;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 9;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 10;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
@@ -214,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "67ba61cbfc8d992b57d32ac1214cb4d43a6dfde8a59326457b0691e9ab1e4111"
+            "b5caaf2850a3f88433fd03f8b84fb7077eee63e463bd550635a308bae31ba22c"
         );
     }
 

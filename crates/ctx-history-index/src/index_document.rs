@@ -9,6 +9,7 @@ use ctx_history_core::{
     CoreContent, CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey,
     MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
+use sha2::{Digest, Sha256};
 
 use crate::{Fields, IndexError, Result};
 
@@ -25,10 +26,12 @@ const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 /// the Core record ceiling, not a narrower escape-sensitive JSON limit.
 pub(crate) const MAX_QUERY_METADATA_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
 pub(crate) const QUERY_METADATA_CHUNK_BYTES: usize = 60 * 1024;
-pub(crate) const QUERY_METADATA_CHUNK_HEADER_BYTES: usize = 12;
+pub(crate) const QUERY_METADATA_CHUNK_DIGEST_BYTES: usize = 32;
+pub(crate) const QUERY_METADATA_CHUNK_HEADER_BYTES: usize = 12 + QUERY_METADATA_CHUNK_DIGEST_BYTES;
 pub(crate) const QUERY_METADATA_CHUNK_PAYLOAD_BYTES: usize =
     QUERY_METADATA_CHUNK_BYTES - QUERY_METADATA_CHUNK_HEADER_BYTES;
-pub(crate) const QUERY_METADATA_CHUNK_MAGIC: [u8; 4] = *b"QMD1";
+pub(crate) const QUERY_METADATA_CHUNK_MAGIC: [u8; 4] = *b"QMD2";
+pub(crate) const QUERY_METADATA_DIGEST_DOMAIN: &[u8] = b"ctx-query-metadata-v2\0";
 
 pub(crate) const SESSION_EVENT_ORDER_SESSION_PREFIX_LEN: usize = StableEntityId::CANONICAL_LEN;
 pub(crate) const SESSION_EVENT_ORDER_KEY_LEN: usize =
@@ -108,6 +111,7 @@ fn encode_query_metadata_chunks(encoded: &[u8]) -> Result<Vec<Vec<u8>>> {
         .map_err(|_| IndexError::WriterInvariant("query metadata chunk count overflowed"))?;
     let encoded_len = u32::try_from(encoded.len())
         .map_err(|_| IndexError::WriterInvariant("query metadata size did not fit u32"))?;
+    let encoded_digest = query_metadata_digest(encoded);
     let mut chunks = Vec::with_capacity(usize::from(chunk_count));
     for (index, payload) in encoded
         .chunks(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
@@ -120,10 +124,18 @@ fn encode_query_metadata_chunks(encoded: &[u8]) -> Result<Vec<Vec<u8>>> {
         chunk.extend_from_slice(&index.to_be_bytes());
         chunk.extend_from_slice(&chunk_count.to_be_bytes());
         chunk.extend_from_slice(&encoded_len.to_be_bytes());
+        chunk.extend_from_slice(&encoded_digest);
         chunk.extend_from_slice(payload);
         chunks.push(chunk);
     }
     Ok(chunks)
+}
+
+fn query_metadata_digest(encoded: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(QUERY_METADATA_DIGEST_DOMAIN);
+    digest.update(encoded);
+    digest.finalize().into()
 }
 
 /// Exact session-coordinate term used for bounded forward traversal.

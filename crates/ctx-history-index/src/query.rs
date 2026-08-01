@@ -4,7 +4,7 @@ mod verification;
 pub(super) use verification::{stored_verification_record, validate_verification_projection};
 
 #[cfg(test)]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BTreeSet},
@@ -16,6 +16,7 @@ use ctx_history_core::{
     MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tantivy::{
     collector::{Collector, Count, DocSetCollector, SegmentCollector, TopDocs},
     query::{
@@ -23,17 +24,19 @@ use tantivy::{
         TermQuery, TermSetQuery,
     },
     schema::{IndexRecordOption, Value as TantivyValue},
+    termdict::TermMerger,
     tokenizer::TokenStream,
-    DocAddress, DocId, DocSet, Score, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
-    TERMINATED,
+    DocAddress, DocId, DocSet, InvertedIndexReader, Score, SegmentOrdinal, SegmentReader,
+    TantivyDocument, Term, TERMINATED,
 };
 use uuid::Uuid;
 
 use super::{fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex};
 use crate::index_document::{
     core_content_bytes, SessionEventOrderKey, SourceEventOrderKey, StoredQueryMetadata,
-    MAX_QUERY_METADATA_BYTES, QUERY_METADATA_CHUNK_HEADER_BYTES, QUERY_METADATA_CHUNK_MAGIC,
-    QUERY_METADATA_CHUNK_PAYLOAD_BYTES,
+    MAX_QUERY_METADATA_BYTES, QUERY_METADATA_CHUNK_BYTES, QUERY_METADATA_CHUNK_DIGEST_BYTES,
+    QUERY_METADATA_CHUNK_HEADER_BYTES, QUERY_METADATA_CHUNK_MAGIC,
+    QUERY_METADATA_CHUNK_PAYLOAD_BYTES, QUERY_METADATA_DIGEST_DOMAIN,
 };
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
@@ -57,6 +60,9 @@ thread_local! {
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
+    static SESSION_EVENT_ORDER_VISITED_SEQUENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    static QUERY_METADATA_CHUNK_READS: Cell<usize> = const { Cell::new(0) };
+    static QUERY_METADATA_EXACT_ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -92,11 +98,33 @@ pub(crate) fn source_event_order_term_visits() -> usize {
 #[cfg(test)]
 pub(crate) fn reset_session_event_order_term_visits() {
     SESSION_EVENT_ORDER_TERM_VISITS.set(0);
+    SESSION_EVENT_ORDER_VISITED_SEQUENCES.with(|sequences| sequences.borrow_mut().clear());
 }
 
 #[cfg(test)]
 pub(crate) fn session_event_order_term_visits() -> usize {
     SESSION_EVENT_ORDER_TERM_VISITS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn session_event_order_visited_sequences() -> Vec<u64> {
+    SESSION_EVENT_ORDER_VISITED_SEQUENCES.with(|sequences| sequences.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_query_metadata_decode_work() {
+    QUERY_METADATA_CHUNK_READS.set(0);
+    QUERY_METADATA_EXACT_ALLOCATED_BYTES.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn query_metadata_chunk_reads() -> usize {
+    QUERY_METADATA_CHUNK_READS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn query_metadata_exact_allocated_bytes() -> usize {
+    QUERY_METADATA_EXACT_ALLOCATED_BYTES.get()
 }
 
 /// Maximum number of complete semantic event records retained in one page.
@@ -478,6 +506,75 @@ impl SessionEventCoordinate {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueryMetadataChunkHeader {
+    chunk_index: usize,
+    chunk_count: usize,
+    total_bytes: usize,
+    payload_bytes: usize,
+    encoded_digest: [u8; QUERY_METADATA_CHUNK_DIGEST_BYTES],
+}
+
+fn query_metadata_chunk_header(chunk: &[u8]) -> Result<QueryMetadataChunkHeader> {
+    const HEADER_PREFIX_BYTES: usize = 12;
+    if chunk.len() < QUERY_METADATA_CHUNK_HEADER_BYTES
+        || chunk.len() > QUERY_METADATA_CHUNK_BYTES
+        || chunk[..4] != QUERY_METADATA_CHUNK_MAGIC
+    {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let chunk_index = usize::from(u16::from_be_bytes([chunk[4], chunk[5]]));
+    let chunk_count = usize::from(u16::from_be_bytes([chunk[6], chunk[7]]));
+    let total_bytes = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]) as usize;
+    let calculated_chunk_count = total_bytes.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
+    if total_bytes == 0
+        || total_bytes > MAX_QUERY_METADATA_BYTES
+        || chunk_count == 0
+        || chunk_count != calculated_chunk_count
+        || chunk_index >= chunk_count
+    {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let start = chunk_index
+        .checked_mul(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
+        .ok_or(IndexError::CountOverflow)?;
+    let end = start
+        .checked_add(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
+        .ok_or(IndexError::CountOverflow)?
+        .min(total_bytes);
+    let payload_bytes = chunk.len() - QUERY_METADATA_CHUNK_HEADER_BYTES;
+    if payload_bytes != end.saturating_sub(start) {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+    let encoded_digest: [u8; QUERY_METADATA_CHUNK_DIGEST_BYTES] = chunk
+        [HEADER_PREFIX_BYTES..QUERY_METADATA_CHUNK_HEADER_BYTES]
+        .try_into()
+        .map_err(|_| IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    Ok(QueryMetadataChunkHeader {
+        chunk_index,
+        chunk_count,
+        total_bytes,
+        payload_bytes,
+        encoded_digest,
+    })
+}
+
+fn note_query_metadata_chunk_read() {
+    #[cfg(test)]
+    QUERY_METADATA_CHUNK_READS.set(QUERY_METADATA_CHUNK_READS.get().saturating_add(1));
+}
+
+fn note_query_metadata_exact_allocation(bytes: usize) {
+    #[cfg(test)]
+    QUERY_METADATA_EXACT_ALLOCATED_BYTES.set(
+        QUERY_METADATA_EXACT_ALLOCATED_BYTES
+            .get()
+            .saturating_add(bytes),
+    );
+    #[cfg(not(test))]
+    let _ = bytes;
+}
+
 pub(super) fn stored_event_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
@@ -495,74 +592,109 @@ pub(super) fn stored_event_record(
         .bytes(QUERY_METADATA_FIELD)?
         .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
     let maximum_chunks = MAX_QUERY_METADATA_BYTES.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
-    let mut encoded = None;
-    let mut seen = Vec::new();
-    let mut expected_chunk_count = None;
+    let mut chunks_by_index = BTreeMap::new();
+    let mut expected_layout = None;
+    let mut observed_payload_bytes = 0_usize;
     let mut chunk = Vec::new();
     for (observed_chunks, term_ord) in column.term_ords(address.doc_id).enumerate() {
         if observed_chunks >= maximum_chunks {
             return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
         }
         chunk.clear();
-        if !column.ord_to_bytes(term_ord, &mut chunk)?
-            || chunk.len() < QUERY_METADATA_CHUNK_HEADER_BYTES
-            || chunk[..4] != QUERY_METADATA_CHUNK_MAGIC
-        {
+        note_query_metadata_chunk_read();
+        if !column.ord_to_bytes(term_ord, &mut chunk)? {
             return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
         }
-        let chunk_index = usize::from(u16::from_be_bytes([chunk[4], chunk[5]]));
-        let chunk_count = usize::from(u16::from_be_bytes([chunk[6], chunk[7]]));
-        let total_bytes = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]) as usize;
-        let calculated_chunk_count = total_bytes.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
-        if total_bytes == 0
-            || total_bytes > MAX_QUERY_METADATA_BYTES
-            || chunk_count == 0
-            || chunk_count != calculated_chunk_count
-            || chunk_index >= chunk_count
-        {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        match expected_chunk_count {
+        let header = query_metadata_chunk_header(&chunk)?;
+        match expected_layout {
             None => {
-                expected_chunk_count = Some(chunk_count);
-                encoded = Some(vec![0_u8; total_bytes]);
-                seen = vec![false; chunk_count];
+                expected_layout = Some((
+                    header.chunk_count,
+                    header.total_bytes,
+                    header.encoded_digest,
+                ));
             }
-            Some(expected) if expected != chunk_count => {
-                return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-            }
-            Some(_)
-                if encoded
-                    .as_ref()
-                    .is_none_or(|value| value.len() != total_bytes) =>
+            Some(expected)
+                if expected
+                    != (
+                        header.chunk_count,
+                        header.total_bytes,
+                        header.encoded_digest,
+                    ) =>
             {
                 return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
             }
             Some(_) => {}
         }
-        if seen[chunk_index] {
+        if chunks_by_index
+            .insert(header.chunk_index, term_ord)
+            .is_some()
+        {
             return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
         }
-        let start = chunk_index
-            .checked_mul(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
+        observed_payload_bytes = observed_payload_bytes
+            .checked_add(header.payload_bytes)
             .ok_or(IndexError::CountOverflow)?;
-        let end = start
-            .checked_add(chunk.len() - QUERY_METADATA_CHUNK_HEADER_BYTES)
-            .ok_or(IndexError::CountOverflow)?;
-        let expected_end = start
-            .saturating_add(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
-            .min(total_bytes);
-        if end != expected_end {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        encoded
-            .as_mut()
-            .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?[start..end]
-            .copy_from_slice(&chunk[QUERY_METADATA_CHUNK_HEADER_BYTES..]);
-        seen[chunk_index] = true;
     }
-    let encoded = encoded.ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    if seen.iter().any(|present| !present) {
+    let (chunk_count, total_bytes, expected_digest) =
+        expected_layout.ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    if chunks_by_index.len() != chunk_count || observed_payload_bytes != total_bytes {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+
+    // Authenticate the complete ordered payload before trusting the declared
+    // total for its one exact allocation.
+    let mut payload_digest = Sha256::new();
+    payload_digest.update(QUERY_METADATA_DIGEST_DOMAIN);
+    for (expected_index, (chunk_index, term_ord)) in chunks_by_index.iter().enumerate() {
+        if *chunk_index != expected_index {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        chunk.clear();
+        note_query_metadata_chunk_read();
+        if !column.ord_to_bytes(*term_ord, &mut chunk)? {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        let header = query_metadata_chunk_header(&chunk)?;
+        if header.chunk_index != expected_index
+            || header.chunk_count != chunk_count
+            || header.total_bytes != total_bytes
+            || header.encoded_digest != expected_digest
+        {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        payload_digest.update(&chunk[QUERY_METADATA_CHUNK_HEADER_BYTES..]);
+    }
+    let actual_digest: [u8; QUERY_METADATA_CHUNK_DIGEST_BYTES] = payload_digest.finalize().into();
+    if actual_digest != expected_digest {
+        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    }
+
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(total_bytes)
+        .map_err(|_| IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    note_query_metadata_exact_allocation(total_bytes);
+    for (expected_index, (chunk_index, term_ord)) in chunks_by_index.into_iter().enumerate() {
+        if chunk_index != expected_index {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        chunk.clear();
+        note_query_metadata_chunk_read();
+        if !column.ord_to_bytes(term_ord, &mut chunk)? {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        let header = query_metadata_chunk_header(&chunk)?;
+        if header.chunk_index != expected_index
+            || header.chunk_count != chunk_count
+            || header.total_bytes != total_bytes
+            || header.encoded_digest != expected_digest
+        {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        encoded.extend_from_slice(&chunk[QUERY_METADATA_CHUNK_HEADER_BYTES..]);
+    }
+    if encoded.len() != total_bytes {
         return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
     }
     let event = query_metadata_event_record(&encoded)?;

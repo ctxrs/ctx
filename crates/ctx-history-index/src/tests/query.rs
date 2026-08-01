@@ -143,6 +143,229 @@ fn core_valid_escape_heavy_query_metadata_indexes_without_a_narrower_json_bound(
 }
 
 #[test]
+fn query_metadata_rejects_valid_json_after_equal_sized_chunk_payloads_are_swapped() {
+    use tantivy::schema::Document as _;
+
+    fn encoded_query_metadata(record: &CoreRecord) -> Vec<u8> {
+        let encoded_core = record.encode_stored().unwrap();
+        crate::index_document::StoredQueryMetadata::encode(record, encoded_core.len()).unwrap()
+    }
+
+    fn string_content_offset(encoded: &[u8], field: &str) -> usize {
+        let marker = format!("\"{field}\":\"");
+        encoded
+            .windows(marker.len())
+            .position(|window| window == marker.as_bytes())
+            .unwrap()
+            + marker.len()
+    }
+
+    let temp = tempdir().unwrap();
+    let source = source("authenticated-query-metadata.jsonl");
+    let payload_bytes = crate::index_document::QUERY_METADATA_CHUNK_PAYLOAD_BYTES;
+    let mut event = document(&source, 1, "query metadata authentication");
+    event.provider_session_id = Some("p".to_owned());
+    event.branch = Some("A".repeat(payload_bytes));
+    event.role = Some("r".to_owned());
+    event.workspace = Some("B".repeat(payload_bytes));
+
+    let encoded = encoded_query_metadata(&event);
+    let branch_offset = string_content_offset(&encoded, "branch");
+    let branch_padding = (payload_bytes - branch_offset % payload_bytes) % payload_bytes;
+    event.provider_session_id = Some("p".repeat(1 + branch_padding));
+    let encoded = encoded_query_metadata(&event);
+    assert_eq!(string_content_offset(&encoded, "branch") % payload_bytes, 0);
+
+    let workspace_offset = string_content_offset(&encoded, "workspace");
+    let workspace_padding = (payload_bytes - workspace_offset % payload_bytes) % payload_bytes;
+    event.role = Some("r".repeat(1 + workspace_padding));
+    event.validate_contract().unwrap();
+    let encoded = encoded_query_metadata(&event);
+    let branch_offset = string_content_offset(&encoded, "branch");
+    let workspace_offset = string_content_offset(&encoded, "workspace");
+    assert_eq!(branch_offset % payload_bytes, 0);
+    assert_eq!(workspace_offset % payload_bytes, 0);
+    assert!(encoded[branch_offset..branch_offset + payload_bytes]
+        .iter()
+        .all(|byte| *byte == b'A'));
+    assert!(encoded[workspace_offset..workspace_offset + payload_bytes]
+        .iter()
+        .all(|byte| *byte == b'B'));
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(event.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let original: TantivyDocument = searcher.doc(address).unwrap();
+    let mut chunks = original
+        .get_all(fields.query_metadata)
+        .map(|value| value.as_bytes().unwrap().to_vec())
+        .collect::<Vec<_>>();
+    let branch_chunk = branch_offset / payload_bytes;
+    let workspace_chunk = workspace_offset / payload_bytes;
+    assert_ne!(branch_chunk, workspace_chunk);
+    let chunk_index = |chunk: &[u8]| usize::from(u16::from_be_bytes([chunk[4], chunk[5]]));
+    let branch_position = chunks
+        .iter()
+        .position(|chunk| chunk_index(chunk) == branch_chunk)
+        .unwrap();
+    let workspace_position = chunks
+        .iter()
+        .position(|chunk| chunk_index(chunk) == workspace_chunk)
+        .unwrap();
+    let branch_payload = chunks[branch_position]
+        [crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
+        .to_vec();
+    let workspace_payload = chunks[workspace_position]
+        [crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
+        .to_vec();
+    assert_eq!(branch_payload.len(), payload_bytes);
+    assert_eq!(workspace_payload.len(), payload_bytes);
+    chunks[branch_position][crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
+        .copy_from_slice(&workspace_payload);
+    chunks[workspace_position][crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
+        .copy_from_slice(&branch_payload);
+
+    let mut ordered_chunks = chunks.iter().collect::<Vec<_>>();
+    ordered_chunks.sort_by_key(|chunk| chunk_index(chunk));
+    let altered_encoded = ordered_chunks
+        .into_iter()
+        .flat_map(|chunk| {
+            chunk[crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
+                .iter()
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    let altered: crate::index_document::StoredQueryMetadata =
+        serde_json::from_slice(&altered_encoded).unwrap();
+    assert_eq!(altered.event_id, event.event_id);
+    assert_eq!(altered.session_id, event.session_id);
+    assert!(altered.source.exact_descriptor_eq(&event.source));
+    assert_eq!(
+        altered.branch.as_deref(),
+        Some("B".repeat(payload_bytes).as_str())
+    );
+    assert_eq!(
+        altered.workspace.as_deref(),
+        Some("A".repeat(payload_bytes).as_str())
+    );
+
+    let mut forged = TantivyDocument::default();
+    for (field, value) in original.iter_fields_and_values() {
+        if field != fields.query_metadata {
+            forged.add_field_value(field, value);
+        }
+    }
+    for chunk in chunks {
+        forged.add_bytes(fields.query_metadata, &chunk);
+    }
+    drop(searcher);
+    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    let error = match VerifiedIndex::open(temp.path()) {
+        Ok(_) => panic!("swapped query metadata payloads unexpectedly verified"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        IndexError::InvalidStoredDocumentField("query_metadata")
+    ));
+}
+
+#[test]
+fn query_metadata_tiny_declared_maximum_header_fails_before_exact_allocation() {
+    use tantivy::schema::Document as _;
+
+    let temp = tempdir().unwrap();
+    let source = source("tiny-query-metadata-header.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "bounded malformed metadata"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let original: TantivyDocument = searcher.doc(address).unwrap();
+    let total_bytes = crate::index_document::MAX_QUERY_METADATA_BYTES;
+    let chunk_count =
+        total_bytes.div_ceil(crate::index_document::QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
+    let mut tiny_header =
+        Vec::with_capacity(crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES);
+    tiny_header.extend_from_slice(&crate::index_document::QUERY_METADATA_CHUNK_MAGIC);
+    tiny_header.extend_from_slice(&0_u16.to_be_bytes());
+    tiny_header.extend_from_slice(&u16::try_from(chunk_count).unwrap().to_be_bytes());
+    tiny_header.extend_from_slice(&u32::try_from(total_bytes).unwrap().to_be_bytes());
+    tiny_header
+        .extend_from_slice(&[0_u8; crate::index_document::QUERY_METADATA_CHUNK_DIGEST_BYTES]);
+    assert_eq!(
+        tiny_header.len(),
+        crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES
+    );
+
+    let mut forged = TantivyDocument::default();
+    for (field, value) in original.iter_fields_and_values() {
+        if field != fields.query_metadata {
+            forged.add_field_value(field, value);
+        }
+    }
+    forged.add_bytes(fields.query_metadata, &tiny_header);
+    drop(searcher);
+    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    let (searcher, _) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    crate::query::reset_query_metadata_decode_work();
+    let error = crate::query::stored_event_record(&searcher, address, fields).unwrap_err();
+    assert!(matches!(
+        error,
+        IndexError::InvalidStoredDocumentField("query_metadata")
+    ));
+    assert_eq!(crate::query::query_metadata_chunk_reads(), 1);
+    assert_eq!(crate::query::query_metadata_exact_allocated_bytes(), 0);
+}
+
+#[test]
 fn semantic_pairing_many_user_turns_uses_bounded_direct_session_pages() {
     const TURNS: u64 = 256;
     const PAIRING_PAGE_ITEMS: usize = 4;
@@ -249,6 +472,135 @@ fn semantic_pairing_crosses_more_than_sixty_four_tool_events_body_free() {
         term_visits <= 2 * 64 * crate::LEXICAL_SEGMENT_MERGE_FAN_IN,
         "tool-heavy pairing must remain page bounded: {term_visits}"
     );
+}
+
+#[test]
+fn semantic_pairing_many_segments_merges_each_order_term_once_across_pages_and_reopen() {
+    const SEGMENTS: u64 = 6;
+    const EVENTS_PER_SEGMENT: u64 = 6;
+    const TOTAL_EVENTS: u64 = SEGMENTS * EVENTS_PER_SEGMENT;
+    const FIRST_ASSISTANT_SEQUENCE: u64 = TOTAL_EVENTS - EVENTS_PER_SEGMENT * 2 + 1;
+    const LAST_ASSISTANT_SEQUENCE: u64 = TOTAL_EVENTS - EVENTS_PER_SEGMENT;
+    const PAGE_ITEMS: usize = 3;
+    const ASSISTANT_EVENTS: usize = SEGMENTS as usize;
+
+    let temp = tempdir().unwrap();
+    let source = source("many-segment-semantic-turn.jsonl");
+    let mut anchor_id = None;
+    let mut latest_assistant = None;
+    for segment_index in 0..SEGMENTS {
+        let revision = (segment_index + 1) as u8;
+        let retained_events = (segment_index + 1) * EVENTS_PER_SEGMENT;
+        let retained_bytes = retained_events * 10;
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer
+            .writer_mut()
+            .unwrap()
+            .set_merge_policy(Box::<NoMergePolicy>::default());
+        let append_base = if segment_index == 0 {
+            writer.begin_source(source.clone()).unwrap();
+            None
+        } else {
+            Some(writer.begin_source_append(source.clone()).unwrap().clone())
+        };
+
+        // Interleave every segment's sequence range and insert each run in
+        // reverse so only the indexed key can define global traversal order.
+        for sequence in (0..EVENTS_PER_SEGMENT)
+            .rev()
+            .map(|event_index| segment_index + 1 + event_index * SEGMENTS)
+        {
+            let is_next_user = sequence == TOTAL_EVENTS;
+            let is_assistant =
+                (FIRST_ASSISTANT_SEQUENCE..=LAST_ASSISTANT_SEQUENCE).contains(&sequence);
+            let mut event = document(
+                &source,
+                sequence,
+                if sequence == 1 {
+                    "many-segment question".to_owned()
+                } else if is_next_user {
+                    "next question".to_owned()
+                } else if is_assistant {
+                    format!("answer {sequence}")
+                } else {
+                    format!("tool body {sequence}")
+                }
+                .as_str(),
+            );
+            if sequence == 1 {
+                anchor_id = Some(event.event_id.as_uuid());
+            } else if is_assistant {
+                event.role = Some("assistant".to_owned());
+                if sequence == LAST_ASSISTANT_SEQUENCE {
+                    latest_assistant = Some((
+                        format!("answer {sequence}"),
+                        event.occurred_at_unix_ms.unwrap(),
+                    ));
+                }
+            } else if !is_next_user {
+                event.event_type = "tool_output".to_owned();
+                event.role = Some("tool".to_owned());
+            }
+            writer.add_core_record(event).unwrap();
+        }
+
+        let certified = appendable_certificate(&source, revision, retained_events, retained_bytes);
+        if let Some(base) = append_base {
+            writer
+                .certify_source_append(
+                    CertifiedSourceAppend::certify(
+                        &base,
+                        certified,
+                        retained_bytes - EVENTS_PER_SEGMENT * 10,
+                        [revision - 1; 32],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        } else {
+            writer.certify_source(certified).unwrap();
+        }
+        writer.commit(|_| true).unwrap();
+    }
+
+    let anchor_id = anchor_id.unwrap();
+    let expected_latest = latest_assistant.unwrap();
+    let assert_traversal = |index: &VerifiedIndex| {
+        assert!(
+            index.searcher.segment_readers().len() >= SEGMENTS as usize,
+            "test requires one live segment per append"
+        );
+        let anchor = index.core_event_by_id(anchor_id).unwrap().unwrap();
+        crate::query::reset_stored_core_event_record_materializations();
+        crate::query::reset_session_event_order_term_visits();
+        let paired = index
+            .semantic_lite_turn_assistant(&anchor, PAGE_ITEMS, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(paired, expected_latest);
+        assert_eq!(
+            crate::query::stored_core_event_record_materializations(),
+            ASSISTANT_EVENTS,
+            "tool records must remain body-free and no assistant may be skipped or decoded twice"
+        );
+        assert_eq!(
+            crate::query::session_event_order_term_visits(),
+            (TOTAL_EVENTS - 1) as usize,
+            "each globally considered order term must be decoded exactly once"
+        );
+        assert_eq!(
+            crate::query::session_event_order_visited_sequences(),
+            (2..=TOTAL_EVENTS).collect::<Vec<_>>(),
+            "merged pages must preserve exact order without skips or duplicates"
+        );
+    };
+
+    let first_pin = VerifiedIndex::open(temp.path()).unwrap();
+    assert_traversal(&first_pin);
+    drop(first_pin);
+    let reopened = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert_traversal(&reopened);
 }
 
 #[test]
