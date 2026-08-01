@@ -216,7 +216,7 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
     if !index_root.join("meta.json").is_file() {
         if let Some(generation_id) = published_generation_receipt(data_root)? {
             bail!(
-                "verified source-backed lexical generation {generation_id} is missing from {}",
+                "verified Core generation {generation_id} is missing from {}",
                 index_root.display()
             );
         }
@@ -234,12 +234,9 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
         {
             Ok(None)
         }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "open verified source-backed lexical index {}",
-                index_root.display()
-            )
-        }),
+        Err(error) => {
+            Err(error).with_context(|| format!("open verified Core index {}", index_root.display()))
+        }
     }
 }
 

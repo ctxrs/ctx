@@ -50,9 +50,9 @@ ctx daemon enable
 
 - `setup` creates the data root, discovers known provider history locations,
   inventories current sources, builds and atomically publishes the
-  source-backed lexical generation, catches up the relational projection, and
+  self-contained Core generation, catches up the relational projection, and
   prints next steps. It never opens or migrates pre-v0.26 history. After a
-  source-backed Tantivy generation is verified and active, setup deletes old
+  Tantivy Core generation is verified and active, setup deletes old
   history artifacts; a failed build leaves cleanup for the next successful
   fix-forward setup.
   Setup does not write `config.toml` for implicit defaults or execute
