@@ -106,6 +106,26 @@ use writer_support::{
     reclaim_generation_integrity_receipts, ExactReplayInventoryWitness, PendingSource,
 };
 
+/// Returns whether an active disposable generation is structurally incompatible
+/// with this build and therefore must be replaced from source authority.
+///
+/// These errors describe versioned schema, policy, or physical index settings,
+/// not damaged control metadata. Callers must not read, clone, migrate, or
+/// otherwise interpret the incompatible generation.
+pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
+    matches!(
+        error,
+        IndexError::UnsupportedCommitPayload(_)
+            | IndexError::UnsupportedManifest(_)
+            | IndexError::GenerationContractMismatch { .. }
+            | IndexError::CoreRecordContractMismatch { .. }
+            | IndexError::CoreRecordPolicyRevisionMismatch { .. }
+            | IndexError::GenerationPolicyMismatch { .. }
+            | IndexError::SchemaMismatch(_)
+            | IndexError::IndexSettingsMismatch(_)
+    )
+}
+
 pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
@@ -168,7 +188,7 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let mut active_pointer = load_active_generation_pointer(&root)?;
+        let active_pointer = load_active_generation_pointer(&root)?;
         reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
         let retained_generation_ids = active_pointer
             .iter()
@@ -187,7 +207,7 @@ impl GenerationWriter {
         reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
         reclaim_generation_integrity_receipts(&root, &retained_generation_directories)?;
 
-        if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
+        let rebuild_marked = if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
             if active_pointer.as_ref().is_some_and(|pointer| {
                 pointer.active().generation_id() == marker.generation_id
                     && pointer.active().directory() == marker.directory
@@ -196,45 +216,79 @@ impl GenerationWriter {
                 // old pointer until a fresh source-authoritative candidate is
                 // verified and atomically replaces it, but do not expose the
                 // corrupt generation as reusable base state.
-                active_pointer = None;
+                true
             } else {
                 // Publication completed after the marker was written but before
                 // its cleanup. It no longer applies to the active generation.
                 clear_active_generation_rebuild_marker(&root)?;
+                false
             }
-        }
+        } else {
+            false
+        };
 
-        let (index, candidate_directory_name) = if let Some(pointer) = &active_pointer {
-            (open_slot_index(&root, pointer.active())?, None)
+        let reusable_generation = if !rebuild_marked {
+            active_pointer
+                .as_ref()
+                .map(|pointer| {
+                    let index = open_slot_index(&root, pointer.active())?;
+                    validate_schema(&index.schema())?;
+                    let fields = fields_from_schema(&index.schema())?;
+                    let metas = index.load_metas()?;
+                    let (manifest, searcher) = if metas.payload.is_some() {
+                        let manifest = load_manifest_for_metas(&root, &metas)?;
+                        if pointer.active().generation_id() != manifest.generation_id()? {
+                            return Err(IndexError::InvalidActiveGenerationPointer);
+                        }
+                        let reader = index
+                            .reader_builder()
+                            .reload_policy(ReloadPolicy::Manual)
+                            .try_into()?;
+                        let searcher = reader.searcher();
+                        if searcher_generation(&searcher) != meta_generation(&metas) {
+                            return Err(IndexError::ConcurrentGenerationChange);
+                        }
+                        verify_searcher_structure(&searcher, &manifest)?;
+                        (Some(manifest), Some(searcher))
+                    } else if metas.segments.is_empty() {
+                        (None, None)
+                    } else {
+                        return Err(IndexError::UnboundIndexState);
+                    };
+                    Ok((index, fields, manifest, metas.opstamp, searcher))
+                })
+                .transpose()
+                .or_else(|error| {
+                    if generation_incompatibility_requires_rebuild(&error) {
+                        Ok(None)
+                    } else {
+                        Err(error)
+                    }
+                })?
         } else {
-            let candidate = create_candidate_generation(&root, None)?;
-            (candidate.index, Some(candidate.directory_name))
+            None
         };
-        let fields = fields_from_schema(&index.schema())?;
-        validate_schema(&index.schema())?;
-        let base_metas = index.load_metas()?;
-        let (base_manifest, base_searcher) = if base_metas.payload.is_some() {
-            let manifest = load_manifest_for_metas(&root, &base_metas)?;
-            if let Some(pointer) = &active_pointer {
-                if pointer.active().generation_id() != manifest.generation_id()? {
-                    return Err(IndexError::InvalidActiveGenerationPointer);
-                }
-            }
-            let reader = index
-                .reader_builder()
-                .reload_policy(ReloadPolicy::Manual)
-                .try_into()?;
-            let searcher = reader.searcher();
-            if searcher_generation(&searcher) != meta_generation(&base_metas) {
-                return Err(IndexError::ConcurrentGenerationChange);
-            }
-            verify_searcher_structure(&searcher, &manifest)?;
-            (Some(manifest), Some(searcher))
-        } else if base_metas.segments.is_empty() {
-            (None, None)
-        } else {
-            return Err(IndexError::UnboundIndexState);
-        };
+
+        let (index, candidate_directory_name, fields, base_manifest, base_opstamp, base_searcher) =
+            if let Some((index, fields, manifest, opstamp, searcher)) = reusable_generation {
+                (index, None, fields, manifest, opstamp, searcher)
+            } else {
+                // The active slot is absent, physically rejected, or belongs to
+                // an incompatible disposable generation. Build an empty current
+                // candidate and retain only the pointer as publication authority.
+                let candidate = create_candidate_generation(&root, None)?;
+                validate_schema(&candidate.index.schema())?;
+                let fields = fields_from_schema(&candidate.index.schema())?;
+                let metas = candidate.index.load_metas()?;
+                (
+                    candidate.index,
+                    Some(candidate.directory_name),
+                    fields,
+                    None,
+                    metas.opstamp,
+                    None,
+                )
+            };
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {
@@ -267,7 +321,7 @@ impl GenerationWriter {
             },
             fields,
             base_manifest,
-            base_opstamp: base_metas.opstamp,
+            base_opstamp,
             base_searcher,
             complete_inventories: Vec::new(),
             pending: HashMap::new(),

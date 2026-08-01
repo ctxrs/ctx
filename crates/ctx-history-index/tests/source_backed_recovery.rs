@@ -291,6 +291,54 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
 }
 
 #[test]
+fn pre_settings_generation_rebuilds_from_sources_without_cloning_the_slot() {
+    let fixture = RecoveryFixture::new();
+    let pointer_path = fixture.root.join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let old_generation_path = active_generation_path(&fixture.root);
+    let meta_path = old_generation_path.join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    assert!(meta
+        .as_object_mut()
+        .unwrap()
+        .remove("index_settings")
+        .is_some());
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    assert!(matches!(
+        VerifiedIndex::open(&fixture.root),
+        Err(IndexError::IndexSettingsMismatch(_))
+    ));
+
+    let mut rebuild = GenerationWriter::open(&fixture.root, writer_options()).unwrap();
+    assert!(rebuild.base_manifest().is_none());
+    assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
+    let candidates = inactive_generation_directories(&fixture.root);
+    assert_eq!(candidates.len(), 1);
+    let candidate = Index::open_in_dir(&candidates[0]).unwrap();
+    assert!(candidate.load_metas().unwrap().segments.is_empty());
+    assert_ne!(candidate.settings(), &tantivy::IndexSettings::default());
+    drop(candidate);
+
+    let source = source();
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, CANDIDATE_BODY))
+        .unwrap();
+    rebuild.certify_source(certificate(&source, 2)).unwrap();
+    let receipt = rebuild.commit(|_| true).unwrap();
+
+    assert_ne!(fs::read(&pointer_path).unwrap(), pointer_before);
+    assert!(!old_generation_path.exists());
+    assert_generation(
+        &fixture.root,
+        &receipt.generation_id,
+        "candidate",
+        "previous",
+    );
+}
+
+#[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
 fn inactive_generation_and_atomic_pointer_process_death_matrix() {
     let shim = required_fault_shim();
@@ -585,9 +633,8 @@ fn retry_republishes_a_reclaimed_manifest_before_pointer_publication() {
     fixture.kill_at_marker(&mut child);
     let baseline_manifest = format!("{}.json", fixture.baseline.generation_id);
     let manifest_directory = fixture.root.join("ctx-generations");
-    let candidate_manifests = fs::read_dir(&manifest_directory)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
+    let candidate_manifests = canonical_generation_manifests(&manifest_directory)
+        .into_iter()
         .filter(|entry| entry.file_name() != OsStr::new(&baseline_manifest))
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
@@ -911,6 +958,62 @@ fn inactive_generation_directories(root: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     inactive.sort();
     inactive
+}
+
+fn canonical_generation_manifests(directory: &Path) -> Vec<fs::DirEntry> {
+    let mut manifests = fs::read_dir(directory)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let Some(generation_id) = name.strip_suffix(".json") else {
+                return false;
+            };
+            generation_id.len() == 64
+                && generation_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .collect::<Vec<_>>();
+    manifests.sort_by_key(fs::DirEntry::file_name);
+    manifests
+}
+
+#[test]
+fn recovery_manifest_selector_excludes_integrity_receipts_and_temporaries() {
+    let directory = tempdir().unwrap();
+    let generation_id = "ab".repeat(32);
+    let canonical = directory.path().join(format!("{generation_id}.json"));
+    fs::write(&canonical, b"manifest").unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(format!("generation-{generation_id}.integrity.json")),
+        b"receipt",
+    )
+    .unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(format!(".{generation_id}.json.temporary")),
+        b"temporary",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join(format!("{generation_id}.JSON")),
+        b"wrong case",
+    )
+    .unwrap();
+
+    let manifests = canonical_generation_manifests(directory.path())
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests, vec![canonical]);
 }
 
 fn directory_file_bytes(directory: &Path) -> u64 {
