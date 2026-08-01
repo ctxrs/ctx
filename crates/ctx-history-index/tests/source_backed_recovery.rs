@@ -118,7 +118,7 @@ fn stale_writer_lock_after_sigkill_is_recoverable() {
     let mut child = fixture.spawn_stopped_child("pause_after_writer_open", None);
     fixture.kill_at_marker(&mut child);
 
-    let stale_lock = fixture.root.join(".tantivy-writer.lock");
+    let stale_lock = fixture.root.join(".ctx-generation-writer.lock");
     assert!(
         stale_lock.is_file(),
         "SIGKILL did not leave the lock witness"
@@ -227,7 +227,11 @@ fn torn_manifest_and_meta_fail_closed_without_damaging_the_previous_root() {
         "torn manifest was accepted"
     );
 
-    fs::write(meta_copy.join("meta.json"), b"{\"index_settings\":").unwrap();
+    fs::write(
+        active_generation_path(&meta_copy).join("meta.json"),
+        b"{\"index_settings\":",
+    )
+    .unwrap();
     assert!(
         VerifiedIndex::open(&meta_copy).is_err(),
         "torn meta.json was accepted"
@@ -258,7 +262,7 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
         VerifiedIndex::open(&corrupt_copy).is_err(),
         "verified open admitted a malformed active document"
     );
-    let damaged = Index::open_in_dir(&corrupt_copy)
+    let damaged = Index::open_in_dir(active_generation_path(&corrupt_copy))
         .unwrap()
         .validate_checksum()
         .unwrap();
@@ -1033,7 +1037,8 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn corrupt_active_store(root: &Path) -> PathBuf {
-    let path = fs::read_dir(root)
+    let active = active_generation_path(root);
+    let path = fs::read_dir(&active)
         .unwrap()
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
@@ -1055,6 +1060,17 @@ fn corrupt_active_store(root: &Path) -> PathBuf {
     file.write_all(&byte).unwrap();
     file.sync_all().unwrap();
     path.file_name().unwrap().into()
+}
+
+fn active_generation_path(root: &Path) -> PathBuf {
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("active-generation.json")).unwrap()).unwrap();
+    let directory = pointer
+        .get("active")
+        .and_then(|active| active.get("directory"))
+        .and_then(serde_json::Value::as_str)
+        .expect("active generation pointer has no directory");
+    root.join("index-generations").join(directory)
 }
 
 fn atomic_temporary_files(directory: &Path) -> Vec<PathBuf> {

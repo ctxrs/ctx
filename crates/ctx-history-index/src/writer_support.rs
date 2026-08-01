@@ -19,42 +19,38 @@ impl std::ops::DerefMut for PendingSource {
     }
 }
 
-pub(super) fn reclaim_orphaned_managed_files(
-    index: &mut Index,
-    base_metas: &IndexMeta,
-) -> Result<()> {
-    let mut living_files = base_metas
-        .segments
-        .iter()
-        .flat_map(|segment| segment.list_files())
-        .collect::<HashSet<_>>();
-    living_files.insert(PathBuf::from("meta.json"));
-
-    let has_orphaned_managed_files = index
-        .directory()
-        .list_managed_files()
-        .iter()
-        .any(|path| !living_files.contains(path));
-    if !has_orphaned_managed_files {
-        return Ok(());
-    }
-
-    // Use Tantivy's managed-file ledger so an interrupted or failed cleanup is
-    // retried safely. The live set comes only from the verified active
-    // meta.json, so recovery cannot remove any file in the pinned generation.
-    let _ = index.directory_mut().garbage_collect(|| living_files)?;
-    Ok(())
-}
-
 const WRITER_HANDOFF_RETRY_WINDOW: Duration = Duration::from_millis(500);
 const WRITER_HANDOFF_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 pub(super) fn acquire_preflight_writer_lock_with_retry(
     directory: &impl Directory,
 ) -> Result<DirectoryLock> {
+    acquire_lock_with_retry(
+        directory,
+        &INDEX_WRITER_LOCK,
+        "failed to acquire the index preflight lock",
+    )
+}
+
+pub(super) fn acquire_generation_writer_lock_with_retry(
+    directory: &impl Directory,
+    lock: &Lock,
+) -> Result<DirectoryLock> {
+    acquire_lock_with_retry(
+        directory,
+        lock,
+        "failed to acquire the generation writer lock",
+    )
+}
+
+fn acquire_lock_with_retry(
+    directory: &impl Directory,
+    lock: &Lock,
+    context: &'static str,
+) -> Result<DirectoryLock> {
     let deadline = Instant::now() + WRITER_HANDOFF_RETRY_WINDOW;
     loop {
-        match directory.acquire_lock(&INDEX_WRITER_LOCK) {
+        match directory.acquire_lock(lock) {
             Ok(lock) => return Ok(lock),
             Err(error @ LockError::LockBusy) if Instant::now() >= deadline => {
                 return Err(tantivy::TantivyError::LockFailure(
@@ -72,11 +68,9 @@ pub(super) fn acquire_preflight_writer_lock_with_retry(
                 std::thread::sleep(WRITER_HANDOFF_RETRY_INTERVAL);
             }
             Err(error) => {
-                return Err(tantivy::TantivyError::LockFailure(
-                    error,
-                    Some("failed to acquire the index preflight lock".to_owned()),
-                )
-                .into());
+                return Err(
+                    tantivy::TantivyError::LockFailure(error, Some(context.to_owned())).into(),
+                );
             }
         }
     }

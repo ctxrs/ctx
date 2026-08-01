@@ -269,6 +269,81 @@ pub(super) fn stored_core_event_record_with_size(
     stored_core_event_record_from_document(&document, fields, event)
 }
 
+pub(super) fn stored_core_verification_record(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<(CoreEventRecord, [u8; 32])> {
+    let event = stored_event_record(searcher, address, fields)?;
+    let document: TantivyDocument = searcher.doc(address)?;
+    let encoded_core_record = unique_required_bytes(&document, fields.core_record, "core_record")?;
+    let leaf = crate::staging::core_record_leaf(event.event_id, encoded_core_record)?;
+    let (record, _) = stored_core_event_record_from_document(&document, fields, event)?;
+    verify_identity_field(
+        &document,
+        fields.event_identity,
+        Some(record.event_id),
+        "event_identity",
+    )?;
+    verify_identity_field(
+        &document,
+        fields.session_identity,
+        Some(record.session_id),
+        "session_identity",
+    )?;
+    verify_identity_field(
+        &document,
+        fields.parent_session_identity,
+        record.parent_session_id,
+        "parent_session_identity",
+    )?;
+    verify_identity_field(
+        &document,
+        fields.root_session_identity,
+        Some(record.root_session_id),
+        "root_session_identity",
+    )?;
+    Ok((record, leaf))
+}
+
+fn unique_required_bytes<'a>(
+    document: &'a TantivyDocument,
+    field: tantivy::schema::Field,
+    field_name: &'static str,
+) -> Result<&'a [u8]> {
+    let mut values = document.get_all(field);
+    let value = values
+        .next()
+        .and_then(|value| value.as_bytes())
+        .ok_or(IndexError::InvalidStoredDocumentField(field_name))?;
+    if values.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    Ok(value)
+}
+
+fn verify_identity_field(
+    document: &TantivyDocument,
+    field: tantivy::schema::Field,
+    expected: Option<StableEntityId>,
+    field_name: &'static str,
+) -> Result<()> {
+    let mut values = document.get_all(field);
+    let actual = values
+        .next()
+        .map(|value| {
+            value
+                .as_bytes()
+                .ok_or(IndexError::InvalidStoredDocumentField(field_name))
+                .and_then(|encoded| StableEntityId::decode_canonical(encoded).map_err(Into::into))
+        })
+        .transpose()?;
+    if values.next().is_some() || actual != expected {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    Ok(())
+}
+
 fn note_stored_core_event_record_materialization() {
     #[cfg(test)]
     STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.set(

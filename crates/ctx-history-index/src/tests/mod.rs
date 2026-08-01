@@ -253,17 +253,21 @@ fn publish_unchecked_generation(
     prepared.set_payload(
         &serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
-            generation_id,
+            generation_id: generation_id.clone(),
         })
         .unwrap(),
     );
     prepared.commit().unwrap();
     writer.wait_merging_threads().unwrap();
-    sync_directory(root).unwrap();
+    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
+    let active =
+        GenerationSlot::new(generation_id, pointer.active().directory().to_owned()).unwrap();
+    publish_active_generation_pointer(root, &ActiveGenerationPointer::new(active, None).unwrap())
+        .unwrap();
 }
 
 fn open_unverified_generation(root: &Path) -> (Searcher, GenerationManifest) {
-    let directory = DurableMmapDirectory::open(root).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(root)).unwrap();
     let index = Index::open(directory).unwrap();
     let metas = index.load_metas().unwrap();
     let manifest = load_manifest_for_metas(root, &metas).unwrap();
@@ -273,6 +277,12 @@ fn open_unverified_generation(root: &Path) -> (Searcher, GenerationManifest) {
         .try_into()
         .unwrap();
     (reader.searcher(), manifest)
+}
+
+fn active_generation_path(root: &Path) -> PathBuf {
+    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
+    root.join(INDEX_GENERATIONS_DIRECTORY)
+        .join(pointer.active().directory())
 }
 
 fn multisegment_fixture(
