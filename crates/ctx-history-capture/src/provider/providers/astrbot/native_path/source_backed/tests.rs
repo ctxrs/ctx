@@ -575,11 +575,33 @@ fn tantivy_round_trip_is_complete_locator_free_and_replacement_lifecycle_is_exac
         .is_none());
 
     fs::remove_file(&database).unwrap();
+    let first_missing =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(
+        first_missing.commit.generation_id,
+        deleted.commit.generation_id
+    );
+    assert!(VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .is_some());
+    let second_missing =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(
+        second_missing.commit.generation_id,
+        first_missing.commit.generation_id
+    );
+    assert!(VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .is_some());
     let source_deleted =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_ne!(
         source_deleted.commit.generation_id,
-        deleted.commit.generation_id
+        second_missing.commit.generation_id
     );
     assert!(VerifiedIndex::open(&index_root)
         .unwrap()

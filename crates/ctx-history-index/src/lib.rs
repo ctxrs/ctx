@@ -22,8 +22,10 @@ pub(crate) use contracts::{
     MAX_DOCUMENT_METADATA_BYTES,
 };
 pub use contracts::{
-    CommitReceipt, GenerationManifest, GenerationRemoval, IndexError, Result, RevalidationTarget,
-    SourceCoreRecordAggregate, WriterOptions, GENERATION_MANIFEST_VERSION,
+    CommitReceipt, ConsecutiveSourceMissingCount, GenerationManifest, GenerationRemoval,
+    IndexError, Result, RevalidationTarget, SourceCatalogCheckpoint, SourceCatalogMissingState,
+    SourceCoreRecordAggregate, SourceMissingObservationPoint, WriterOptions,
+    GENERATION_MANIFEST_VERSION,
     LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
 pub use ctx_history_core::CoreRecord;
@@ -180,6 +182,7 @@ pub struct GenerationWriter {
     complete_inventories: Vec<CertifiedSourceInventory>,
     pending: HashMap<String, PendingSource>,
     deletions: HashMap<SourceKey, GenerationRemoval>,
+    observed_missing: HashMap<SourceKey, SourceCatalogMissingState>,
     source_identities: HashMap<Uuid, [u8; 32]>,
     checked_base_sessions: HashSet<Uuid>,
     staged_event_identities: HashMap<Uuid, [u8; 32]>,
@@ -349,6 +352,7 @@ impl GenerationWriter {
             complete_inventories: Vec::new(),
             pending: HashMap::new(),
             deletions: HashMap::new(),
+            observed_missing: HashMap::new(),
             source_identities,
             checked_base_sessions: HashSet::new(),
             staged_event_identities: HashMap::new(),
@@ -451,6 +455,11 @@ impl GenerationWriter {
         let Some(base) = self.base_manifest.as_ref() else {
             return Ok(None);
         };
+        if !self.observed_missing.is_empty() || !base.source_catalog().is_empty() {
+            // Missing-state creation, advancement, and reset are manifest
+            // mutations even though last-good Core documents stay untouched.
+            return Ok(None);
+        }
 
         // A no-work candidate is a full-inventory claim. Do not silently turn
         // an omitted prior source into an unchanged Tantivy publication.
@@ -821,6 +830,63 @@ impl GenerationWriter {
         Ok(())
     }
 
+    /// Records one automatic-acquisition complete inventory that omitted a
+    /// retained source, deleting only after the configured consecutive bound.
+    ///
+    /// The source remains in the generation while deferred. Its live source
+    /// certificate is intentionally not revalidated; the current complete
+    /// inventory is the terminal evidence for this refresh.
+    pub fn observe_automatic_source_missing(
+        &mut self,
+        proof: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+        observed_at_unix_ms: u64,
+        delete_after_consecutive_inventories: u32,
+    ) -> Result<bool> {
+        if delete_after_consecutive_inventories < 2 {
+            return Err(IndexError::InvalidSourceDeletionGraceThreshold);
+        }
+        GenerationRemoval::new(proof.clone(), inventory.clone())?;
+        let source = proof.source().clone();
+        let source_id = source.identity().to_string();
+        let token = source_token(&source);
+        if self.pending.contains_key(&token)
+            || self.deletions.contains_key(&source)
+            || self.observed_missing.contains_key(&source)
+        {
+            return Err(IndexError::DuplicateSourceMissingObservation(source_id));
+        }
+        let (base_generation, previous) = {
+            let base = self.base_manifest.as_ref().ok_or_else(|| {
+                IndexError::SourceMissingObservationNotRetained(source_id.clone())
+            })?;
+            let retained = base.sources.iter().any(|candidate| {
+                candidate
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(&source)
+            });
+            if !retained {
+                return Err(IndexError::SourceMissingObservationNotRetained(source_id));
+            }
+            (
+                base.generation_id()?,
+                base.source_catalog().missing_source(&source).cloned(),
+            )
+        };
+        let observation = SourceMissingObservationPoint::new(base_generation, observed_at_unix_ms)?;
+        let state = match previous {
+            Some(previous) => previous.advance(proof.clone(), observation)?,
+            None => SourceCatalogMissingState::first(proof.clone(), observation),
+        };
+        if state.consecutive_missing().get() >= delete_after_consecutive_inventories {
+            self.delete_source(proof, inventory)?;
+            return Ok(true);
+        }
+        self.observed_missing.insert(source, state);
+        Ok(false)
+    }
+
     /// Publishes one atomic lexical generation.
     ///
     /// `revalidate` runs after Tantivy has flushed all staged indexing workers
@@ -976,6 +1042,7 @@ impl GenerationWriter {
     fn next_manifest(&self) -> Result<GenerationManifest> {
         let mut sources = HashMap::<SourceKey, CertifiedSource>::new();
         let mut removals = HashMap::<SourceKey, GenerationRemoval>::new();
+        let mut missing_sources = HashMap::<SourceKey, SourceCatalogMissingState>::new();
         if let Some(base) = &self.base_manifest {
             for source in &base.sources {
                 sources.insert(source.observation().source().clone(), source.clone());
@@ -983,10 +1050,14 @@ impl GenerationWriter {
             for removal in &base.removals {
                 removals.insert(removal.source().clone(), removal.clone());
             }
+            for missing in base.source_catalog().missing_sources() {
+                missing_sources.insert(missing.source().clone(), missing.clone());
+            }
         }
         for (source, removal) in &self.deletions {
             sources.remove(source);
             removals.insert(source.clone(), removal.clone());
+            missing_sources.remove(source);
         }
         for pending in self.pending.values() {
             let certificate = pending.certificate.as_ref().ok_or_else(|| {
@@ -994,13 +1065,18 @@ impl GenerationWriter {
             })?;
             sources.insert(pending.source.clone(), certificate.clone());
             removals.remove(&pending.source);
+            missing_sources.remove(&pending.source);
+        }
+        for (source, missing) in &self.observed_missing {
+            missing_sources.insert(source.clone(), missing.clone());
         }
         let sources = sources.into_values().collect::<Vec<_>>();
         let record_aggregates = staging::manifest_record_aggregates(self, &sources)?;
-        GenerationManifest::from_parts_with_record_aggregates(
+        GenerationManifest::from_catalog_parts_with_record_aggregates(
             sources,
             record_aggregates,
             removals.into_values().collect(),
+            SourceCatalogCheckpoint::from_missing_sources(missing_sources.into_values().collect())?,
         )
     }
 }

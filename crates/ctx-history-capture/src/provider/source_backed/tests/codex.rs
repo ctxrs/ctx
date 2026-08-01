@@ -194,6 +194,18 @@ fn codex_history_and_sessions_publish_self_contained_core_across_lifecycle() {
     );
 
     fs::remove_file(&session_path).unwrap();
+    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
+        let grace = refresh_source_backed_generation(&index_path, &build.registry, options.clone())
+            .unwrap();
+        assert!(grace.removals.is_empty());
+        let missing = grace.commit.manifest().source_catalog().missing_sources();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].consecutive_missing().get(), expected_missing);
+        assert_eq!(
+            VerifiedIndex::open(&index_path).unwrap().document_count(),
+            4
+        );
+    }
     refresh_source_backed_generation(&index_path, &build.registry, options).unwrap();
     let index = VerifiedIndex::open(&index_path).unwrap();
     assert_eq!(index.document_count(), 2);

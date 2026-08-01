@@ -375,6 +375,40 @@ fn delete_b_then_discover_c_recertifies_replay_and_restart() {
     assert!(initial.removals.is_empty());
 
     *current.lock().unwrap() = vec![source_a.clone()];
+    let first_missing =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert!(first_missing.removals.is_empty());
+    assert_eq!(first_missing.sources.len(), 2);
+    assert_eq!(
+        first_missing
+            .commit
+            .manifest()
+            .source_catalog()
+            .missing_source(&source_b)
+            .unwrap()
+            .consecutive_missing()
+            .get(),
+        1
+    );
+
+    drop(registry);
+    let registry = inventory_replay_registry(Arc::clone(&current));
+    let second_missing =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert!(second_missing.removals.is_empty());
+    assert_eq!(second_missing.sources.len(), 2);
+    assert_eq!(
+        second_missing
+            .commit
+            .manifest()
+            .source_catalog()
+            .missing_source(&source_b)
+            .unwrap()
+            .consecutive_missing()
+            .get(),
+        2
+    );
+
     let deleted =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
     let deleted_b = deleted
