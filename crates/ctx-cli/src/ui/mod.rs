@@ -21,7 +21,7 @@ pub(crate) use components::{
 };
 pub(crate) use context::{ColorMode, RenderContext, StreamKind, TestContext};
 pub(crate) use document::{Document, Line, Span};
-pub(crate) use style::{Token, CLAP_STYLES};
+pub(crate) use style::{trim_terminal_line_ends, Token, CLAP_STYLES};
 pub(crate) use writer::Ui;
 
 /// Estimates one logical human result in a fixed, unbounded plain context.
