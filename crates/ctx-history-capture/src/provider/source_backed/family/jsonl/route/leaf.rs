@@ -14,8 +14,7 @@ use super::super::{
 use super::{
     binding_digest, contract_error, route_internal, route_invalid, FamilyCheckpoint,
     JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, TerminalSourceEvidence,
-    FAMILY_FRONTIER_KIND, FAMILY_PARSER_REVISION, FAMILY_POLICY_REVISION,
-    FAMILY_SOURCE_REVISION_KIND,
+    FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION, FAMILY_SOURCE_REVISION_KIND,
 };
 #[cfg(test)]
 use super::{jsonl_family_scanner_probe, record_jsonl_family_scanner_activity};
@@ -526,7 +525,7 @@ fn certify(
     CertifiedSource::certify_with_frontier(
         source_observation(&leaf.source, &leaf.observation).map_err(route_invalid)?,
         source_observation(&leaf.source, &leaf.observation).map_err(route_invalid)?,
-        FAMILY_PARSER_REVISION,
+        adapter.parser_revision(),
         *checkpoint.physical.complete_prefix_sha256(),
         ScannedSourceCounts {
             complete_records,
@@ -550,7 +549,7 @@ fn decode_checkpoint(
     leaf.source
         .validate_exact_descriptor(certificate.observation().source())
         .map_err(contract_error)?;
-    if certificate.parser_revision() != FAMILY_PARSER_REVISION {
+    if certificate.parser_revision() != adapter.parser_revision() {
         return Err(CaptureError::InvalidPayload(
             "JSONL base parser revision changed".to_owned(),
         ));
