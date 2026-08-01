@@ -76,7 +76,6 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("custom_source_id", STRING);
     builder.add_text_field("provider_session_id", STRING | STORED);
     builder.add_text_field("branch", STRING | STORED);
-    builder.add_text_field("source_path", STORED);
     builder.add_text_field("agent_type", STRING | STORED);
     builder.add_u64_field("is_primary", STORED | INDEXED);
     builder.add_u64_field("event_sequence", FAST | STORED | INDEXED);

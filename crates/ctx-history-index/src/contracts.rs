@@ -14,7 +14,7 @@ use crate::{
     sha256_hex, source_sort_key,
 };
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 4;
+pub const GENERATION_MANIFEST_VERSION: u32 = 5;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
@@ -265,6 +265,14 @@ pub enum IndexError {
         stage: &'static str,
         detail: String,
     },
+    #[error("source {source_id} Core-record aggregate count mismatch: manifest {manifest}, index {index}")]
+    CoreRecordAggregateCountMismatch {
+        source_id: String,
+        manifest: u64,
+        index: u64,
+    },
+    #[error("manifest Core-record aggregate is invalid for source {0}")]
+    CoreRecordAggregateMismatch(String),
 }
 
 #[derive(Debug, Clone)]
@@ -342,7 +350,59 @@ pub struct GenerationManifest {
     pub indexed_documents: u64,
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
+    pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
     pub removals: Vec<GenerationRemoval>,
+}
+
+/// Incrementally composable commitment to one source's exact stored Core
+/// records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCoreRecordAggregate {
+    source_identity_digest: String,
+    indexed_documents: u64,
+    core_record_accumulator: String,
+}
+
+impl SourceCoreRecordAggregate {
+    pub(crate) fn new(
+        source_identity_digest: String,
+        indexed_documents: u64,
+        core_record_accumulator: String,
+    ) -> Result<Self> {
+        let aggregate = Self {
+            source_identity_digest,
+            indexed_documents,
+            core_record_accumulator,
+        };
+        aggregate.validate_contract()?;
+        Ok(aggregate)
+    }
+
+    pub fn source_identity_digest(&self) -> &str {
+        &self.source_identity_digest
+    }
+
+    pub fn indexed_documents(&self) -> u64 {
+        self.indexed_documents
+    }
+
+    pub fn core_record_accumulator(&self) -> &str {
+        &self.core_record_accumulator
+    }
+
+    pub(crate) fn accumulator_bytes(&self) -> Result<[u8; 32]> {
+        decode_sha256_hex(&self.core_record_accumulator)
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if !is_sha256_hex(&self.source_identity_digest)
+            || !is_sha256_hex(&self.core_record_accumulator)
+        {
+            return Err(IndexError::InvalidGenerationId);
+        }
+        Ok(())
+    }
 }
 
 impl GenerationManifest {
@@ -351,8 +411,27 @@ impl GenerationManifest {
         Self::from_parts(sources, Vec::new())
     }
 
+    #[cfg(test)]
     pub(crate) fn from_parts(
+        sources: Vec<CertifiedSource>,
+        removals: Vec<GenerationRemoval>,
+    ) -> Result<Self> {
+        let aggregates = sources
+            .iter()
+            .map(|source| {
+                SourceCoreRecordAggregate::new(
+                    crate::source_token(source.observation().source()),
+                    source.counts().indexed_documents,
+                    "00".repeat(32),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_parts_with_record_aggregates(sources, aggregates, removals)
+    }
+
+    pub(crate) fn from_parts_with_record_aggregates(
         mut sources: Vec<CertifiedSource>,
+        mut core_record_aggregates: Vec<SourceCoreRecordAggregate>,
         mut removals: Vec<GenerationRemoval>,
     ) -> Result<Self> {
         sources.sort_by(|left, right| {
@@ -374,6 +453,10 @@ impl GenerationManifest {
         {
             return Err(IndexError::NonCanonicalManifestRemovals);
         }
+        core_record_aggregates.sort_by(|left, right| {
+            left.source_identity_digest
+                .cmp(&right.source_identity_digest)
+        });
         let mut indexed_documents = 0_u64;
         let mut certified_source_bytes = 0_u64;
         for source in &sources {
@@ -395,6 +478,7 @@ impl GenerationManifest {
             indexed_documents,
             certified_source_bytes,
             sources,
+            core_record_aggregates,
             removals,
         };
         manifest.validate_contract()?;
@@ -419,6 +503,15 @@ impl GenerationManifest {
         {
             return Err(IndexError::NonCanonicalManifestRemovals);
         }
+        if self
+            .core_record_aggregates
+            .windows(2)
+            .any(|pair| pair[0].source_identity_digest >= pair[1].source_identity_digest)
+        {
+            return Err(IndexError::CoreRecordAggregateMismatch(
+                "non-canonical aggregate ordering".to_owned(),
+            ));
+        }
         let mut source_index = 0;
         for removal in &self.removals {
             removal.validate_contract()?;
@@ -442,14 +535,35 @@ impl GenerationManifest {
         }
         let mut expected_documents = 0_u64;
         let mut expected_bytes = 0_u64;
-        for source in &self.sources {
+        for (source_index, source) in self.sources.iter().enumerate() {
             source.validate_contract()?;
+            let source_id = crate::source_token(source.observation().source());
+            let aggregate = self
+                .core_record_aggregates
+                .get(source_index)
+                .ok_or_else(|| IndexError::CoreRecordAggregateMismatch(source_id.clone()))?;
+            aggregate.validate_contract()?;
+            if aggregate.source_identity_digest != source_id {
+                return Err(IndexError::CoreRecordAggregateMismatch(source_id));
+            }
+            if aggregate.indexed_documents != source.counts().indexed_documents {
+                return Err(IndexError::CoreRecordAggregateCountMismatch {
+                    source_id: aggregate.source_identity_digest.clone(),
+                    manifest: source.counts().indexed_documents,
+                    index: aggregate.indexed_documents,
+                });
+            }
             expected_documents = expected_documents
                 .checked_add(source.counts().indexed_documents)
                 .ok_or(IndexError::CountOverflow)?;
             expected_bytes = expected_bytes
                 .checked_add(source.counts().certified_bytes)
                 .ok_or(IndexError::CountOverflow)?;
+        }
+        if self.core_record_aggregates.len() != self.sources.len() {
+            return Err(IndexError::CoreRecordAggregateMismatch(
+                "manifest aggregate cardinality".to_owned(),
+            ));
         }
         if self.indexed_documents != expected_documents
             || self.certified_source_bytes != expected_bytes
@@ -462,6 +576,34 @@ impl GenerationManifest {
             });
         }
         Ok(())
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn decode_sha256_hex(value: &str) -> Result<[u8; 32]> {
+    if !is_sha256_hex(value) {
+        return Err(IndexError::InvalidGenerationId);
+    }
+    let mut decoded = [0_u8; 32];
+    for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        let high = hex_nibble(pair[0]).ok_or(IndexError::InvalidGenerationId)?;
+        let low = hex_nibble(pair[1]).ok_or(IndexError::InvalidGenerationId)?;
+        *output = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
     }
 }
 

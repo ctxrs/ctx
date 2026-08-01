@@ -1,10 +1,15 @@
 use super::*;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+
+const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 
 pub(super) struct PendingSource {
     pub(super) source: SourceKey,
     pub(super) mode: PendingSourceMode,
     pub(super) staged_documents: u64,
     pub(super) certificate: Option<CertifiedSource>,
+    pub(super) core_record_accumulator: [u8; 32],
 }
 
 // Keep the append base inline to avoid allocation and indirection.
@@ -55,6 +60,7 @@ impl GenerationWriter {
                     mode: PendingSourceMode::Retain { base },
                     staged_documents: 0,
                     certificate: Some(certificate),
+                    core_record_accumulator: [0; 32],
                 },
             },
         );
@@ -62,29 +68,135 @@ impl GenerationWriter {
     }
 }
 
-pub(super) fn verify_published_mutations(
+pub(super) fn core_record_leaf(
+    event_id: ctx_history_core::StableEntityId,
+    encoded_core_record: &[u8],
+) -> Result<[u8; 32]> {
+    let identity = event_id.encode_canonical()?;
+    let encoded_len =
+        u64::try_from(encoded_core_record.len()).map_err(|_| IndexError::CountOverflow)?;
+    let mut digest = Sha256::new();
+    digest.update(CORE_RECORD_LEAF_DOMAIN);
+    digest.update(identity);
+    digest.update(encoded_len.to_be_bytes());
+    digest.update(encoded_core_record);
+    Ok(digest.finalize().into())
+}
+
+/// Adds a domain-separated record leaf to the source's commutative 256-bit
+/// accumulator modulo 2^256. This lets append publication combine the prior
+/// commitment with its staged delta without reading the retained prefix.
+pub(super) fn accumulate_core_record(accumulator: &mut [u8; 32], record_leaf_or_delta: &[u8; 32]) {
+    let mut carry = 0_u16;
+    for (current, addend) in accumulator
+        .iter_mut()
+        .rev()
+        .zip(record_leaf_or_delta.iter().rev())
+    {
+        let sum = u16::from(*current) + u16::from(*addend) + carry;
+        *current = sum as u8;
+        carry = sum >> 8;
+    }
+}
+
+fn source_record_aggregate(
+    source: &SourceKey,
+    indexed_documents: u64,
+    core_record_accumulator: [u8; 32],
+) -> Result<SourceCoreRecordAggregate> {
+    SourceCoreRecordAggregate::new(
+        source_token(source),
+        indexed_documents,
+        hex(&core_record_accumulator),
+    )
+}
+
+pub(super) fn manifest_record_aggregates(
     generation: &GenerationWriter,
-    verified: &VerifiedIndex,
-) -> Result<()> {
+    sources: &[CertifiedSource],
+) -> Result<Vec<SourceCoreRecordAggregate>> {
+    let mut base_aggregates = generation
+        .base_manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .core_record_aggregates
+                .iter()
+                .cloned()
+                .map(|aggregate| (aggregate.source_identity_digest().to_owned(), aggregate))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for removal in generation.deletions.values() {
+        base_aggregates.remove(&source_token(removal.source()));
+    }
+
     for pending in generation.pending.values() {
         let certificate = pending
             .certificate
             .as_ref()
             .ok_or_else(|| IndexError::SourceNotCertified(pending.source.identity().to_string()))?;
-        let changed = match &pending.mode {
-            PendingSourceMode::Replace => true,
-            PendingSourceMode::Append { base } | PendingSourceMode::Retain { base } => {
-                certificate != base
+        let aggregate = match &pending.mode {
+            PendingSourceMode::Replace => source_record_aggregate(
+                &pending.source,
+                pending.staged_documents,
+                pending.core_record_accumulator,
+            )?,
+            PendingSourceMode::Retain { .. } => base_aggregates
+                .get(&source_token(&pending.source))
+                .cloned()
+                .ok_or(IndexError::WriterInvariant(
+                    "retained source is missing its base Core-record aggregate",
+                ))?,
+            PendingSourceMode::Append { base } => {
+                let base_aggregate = base_aggregates
+                    .get(&source_token(&pending.source))
+                    .cloned()
+                    .ok_or(IndexError::WriterInvariant(
+                        "append source is missing its base Core-record aggregate",
+                    ))?;
+                if base_aggregate.indexed_documents() != base.counts().indexed_documents {
+                    return Err(IndexError::CoreRecordAggregateCountMismatch {
+                        source_id: source_token(&pending.source),
+                        manifest: base.counts().indexed_documents,
+                        index: base_aggregate.indexed_documents(),
+                    });
+                }
+                let indexed_documents = base_aggregate
+                    .indexed_documents()
+                    .checked_add(pending.staged_documents)
+                    .ok_or(IndexError::CountOverflow)?;
+                let mut accumulator = base_aggregate.accumulator_bytes()?;
+                accumulate_core_record(&mut accumulator, &pending.core_record_accumulator);
+                source_record_aggregate(&pending.source, indexed_documents, accumulator)?
             }
         };
-        if changed {
-            crate::publication::verify_source_document_count(&verified.searcher, certificate)?;
+        if aggregate.indexed_documents() != certificate.counts().indexed_documents {
+            return Err(IndexError::CoreRecordAggregateCountMismatch {
+                source_id: source_token(&pending.source),
+                manifest: certificate.counts().indexed_documents,
+                index: aggregate.indexed_documents(),
+            });
         }
+        base_aggregates.insert(source_token(&pending.source), aggregate);
     }
-    for removal in generation.deletions.values() {
-        crate::publication::verify_source_absent(&verified.searcher, removal.source())?;
+
+    let aggregates = sources
+        .iter()
+        .map(|source| {
+            base_aggregates
+                .remove(&source_token(source.observation().source()))
+                .ok_or(IndexError::WriterInvariant(
+                    "published source is missing its Core-record aggregate",
+                ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !base_aggregates.is_empty() {
+        return Err(IndexError::WriterInvariant(
+            "Core-record aggregate exists for an unpublished source",
+        ));
     }
-    Ok(())
+    Ok(aggregates)
 }
 
 /// Discards a completed one-pass staging run when it reproduced the full

@@ -23,8 +23,8 @@ pub(crate) use contracts::{
 };
 pub use contracts::{
     CommitReceipt, GenerationManifest, GenerationRemoval, IndexError, Result, RevalidationTarget,
-    WriterOptions, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
-    LEXICAL_SEGMENT_MERGE_FAN_IN,
+    SourceCoreRecordAggregate, WriterOptions, GENERATION_MANIFEST_VERSION,
+    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
@@ -68,6 +68,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use ctx_history_core::{
@@ -80,7 +81,7 @@ use ctx_history_core::{StableEntityId, IDENTITY_VERSION};
 use tantivy::TantivyDocument;
 use tantivy::{
     collector::Count,
-    directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
+    directory::{error::LockError, Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     indexer::LogMergePolicy,
     query::TermQuery,
     schema::{Field, IndexRecordOption},
@@ -133,6 +134,32 @@ fn reclaim_orphaned_managed_files(index: &mut Index, base_metas: &IndexMeta) -> 
     // meta.json, so recovery cannot remove any file in the pinned generation.
     let _ = index.directory_mut().garbage_collect(|| living_files)?;
     Ok(())
+}
+
+const WRITER_HANDOFF_RETRY_WINDOW: Duration = Duration::from_millis(500);
+const WRITER_HANDOFF_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+fn construct_index_writer_with_retry(
+    index: &Index,
+    options: &WriterOptions,
+) -> Result<IndexWriter<IndexDocument>> {
+    let deadline = Instant::now() + WRITER_HANDOFF_RETRY_WINDOW;
+    loop {
+        match index
+            .writer_with_num_threads::<IndexDocument>(options.indexer_threads, options.memory_bytes)
+        {
+            Ok(writer) => return Ok(writer),
+            Err(error @ tantivy::TantivyError::LockFailure(LockError::LockBusy, _))
+                if Instant::now() >= deadline =>
+            {
+                return Err(error.into());
+            }
+            Err(tantivy::TantivyError::LockFailure(LockError::LockBusy, _)) => {
+                std::thread::sleep(WRITER_HANDOFF_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 /// Exact replay plus current inventories; the prior manifest is comparison state only.
@@ -271,11 +298,6 @@ impl GenerationWriter {
             if searcher_generation(&searcher) != meta_generation(&base_metas) {
                 return Err(IndexError::ConcurrentGenerationChange);
             }
-            // The immutable generation passed the exhaustive audit before its
-            // publication receipt was returned. Reopening a base only needs
-            // to bind its manifest, Tantivy generation, and aggregate count;
-            // repeating the O(document-count) identity audit would make an
-            // exact no-op refresh scale with corpus size.
             verify_searcher_structure(&searcher, &manifest)?;
             (Some(manifest), Some(searcher))
         } else if base_metas.segments.is_empty() {
@@ -384,10 +406,7 @@ impl GenerationWriter {
                 hook();
             }
 
-            let writer = self.index.writer_with_num_threads::<IndexDocument>(
-                self.writer_options.indexer_threads,
-                self.writer_options.memory_bytes,
-            )?;
+            let writer = construct_index_writer_with_retry(&self.index, &self.writer_options)?;
             #[cfg(test)]
             self.index_writer_constructions
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -543,6 +562,7 @@ impl GenerationWriter {
                     mode: PendingSourceMode::Replace,
                     staged_documents: 0,
                     certificate: None,
+                    core_record_accumulator: [0; 32],
                 },
             },
         );
@@ -590,6 +610,7 @@ impl GenerationWriter {
                     mode: PendingSourceMode::Append { base },
                     staged_documents: 0,
                     certificate: None,
+                    core_record_accumulator: [0; 32],
                 },
             },
         );
@@ -643,6 +664,7 @@ impl GenerationWriter {
                 }
             }
         }
+        let record_leaf = staging::core_record_leaf(record.event_id, &core_record_bytes)?;
         let core_content_bytes = core_content_bytes(&record.content)?;
         let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
@@ -702,6 +724,7 @@ impl GenerationWriter {
             .pending
             .get_mut(token)
             .ok_or(IndexError::DocumentSourceNotActive)?;
+        staging::accumulate_core_record(&mut pending.core_record_accumulator, &record_leaf);
         pending.staged_documents = pending
             .staged_documents
             .checked_add(1)
@@ -946,31 +969,6 @@ impl GenerationWriter {
                 detail: error.to_string(),
             });
         }
-        let verified = (|| -> Result<VerifiedIndex> {
-            // Every document admitted by this writer has already been checked
-            // against the audited base and the current staging identities.
-            // Rewalking the immutable base made tiny appends O(total documents).
-            // Bind the generation structurally, then verify changed postings;
-            // the previously audited base remains byte-immutable.
-            let verified = VerifiedIndex::open_pinned(&root)?;
-            staging::verify_published_mutations(&self, &verified)?;
-            Ok(verified)
-        })()
-        .map_err(|error| IndexError::CommittedGenerationNeedsRecovery {
-            generation_id: generation_id.clone(),
-            stage: "generation verification",
-            detail: error.to_string(),
-        })?;
-        if verified.generation_id() != generation_id {
-            return Err(IndexError::CommittedGenerationNeedsRecovery {
-                generation_id: generation_id.clone(),
-                stage: "generation verification",
-                detail: format!(
-                    "visible generation changed to {} before the commit receipt",
-                    verified.generation_id()
-                ),
-            });
-        }
 
         CommitReceipt::from_manifest(opstamp, manifest)
     }
@@ -997,8 +995,11 @@ impl GenerationWriter {
             sources.insert(pending.source.clone(), certificate.clone());
             removals.remove(&pending.source);
         }
-        GenerationManifest::from_parts(
-            sources.into_values().collect(),
+        let sources = sources.into_values().collect::<Vec<_>>();
+        let record_aggregates = staging::manifest_record_aggregates(self, &sources)?;
+        GenerationManifest::from_parts_with_record_aggregates(
+            sources,
+            record_aggregates,
             removals.into_values().collect(),
         )
     }

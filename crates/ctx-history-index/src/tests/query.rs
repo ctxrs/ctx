@@ -2359,7 +2359,6 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     assert_eq!(child.root_session_id, root_session_id);
     assert_eq!(child.provider_session_id.as_deref(), Some("child-thread"));
     assert_eq!(child.branch.as_deref(), Some("feature/query-seam"));
-    assert!(child.source_path.is_none());
     assert_eq!(child.agent_type, "subagent");
     assert!(!child.is_primary);
 }

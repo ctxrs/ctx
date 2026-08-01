@@ -354,8 +354,6 @@ fn pinned_zed_core_survives_source_movement_and_change() {
         page.items[0].core_record.content.meaningful_text(),
         full_body
     );
-    assert_eq!(page.items[0].source_path, None);
-
     fs::rename(&database, &moved).unwrap();
     assert_pinned_core(&pinned, event_id, &full_body);
     fs::rename(&moved, &database).unwrap();

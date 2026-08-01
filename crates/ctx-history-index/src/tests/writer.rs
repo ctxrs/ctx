@@ -472,6 +472,40 @@ fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
 }
 
 #[test]
+fn record_only_change_with_identical_source_certificate_publishes_a_new_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("record-only-change.sqlite");
+    let certificate = certificate(&source, 1, 1);
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "old exact Core record"))
+        .unwrap();
+    initial.certify_source(certificate.clone()).unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    replacement.begin_source(source.clone()).unwrap();
+    replacement
+        .add_core_record(document(&source, 1, "changed exact Core record"))
+        .unwrap();
+    replacement.certify_source(certificate).unwrap();
+    let replacement_receipt = replacement.commit(|_| true).unwrap();
+
+    assert_ne!(
+        replacement_receipt.generation_id,
+        initial_receipt.generation_id
+    );
+    assert_ne!(
+        replacement_receipt.manifest().core_record_aggregates,
+        initial_receipt.manifest().core_record_aggregates
+    );
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.count_term("changed").unwrap(), 1);
+    assert_eq!(verified.count_term("old").unwrap(), 0);
+}
+
+#[test]
 fn exact_replay_omission_fails_with_typed_incomplete_coverage() {
     let temp = tempdir().unwrap();
     let replayed_source = source("replayed.jsonl");
@@ -1024,6 +1058,56 @@ fn lazy_writer_handoff_rejects_a_generation_published_in_the_lock_gap() {
     let current = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(current.count_term("competing").unwrap(), 1);
     assert_eq!(current.count_term("stale").unwrap(), 0);
+}
+
+#[test]
+fn lazy_writer_handoff_retries_a_short_lived_inherited_lock() {
+    let temp = tempdir().unwrap();
+    let source = source("inherited-lock.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "base"))
+        .unwrap();
+    initial
+        .certify_source(appendable_certificate(&source, 1, 1, 10))
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let base = append.begin_source_append(source.clone()).unwrap().clone();
+    let release_thread = Arc::new(std::sync::Mutex::new(None));
+    let release_thread_for_hook = Arc::clone(&release_thread);
+    let root = temp.path().to_path_buf();
+    append.before_writer_handoff = Some(Box::new(move || {
+        let directory = DurableMmapDirectory::open(&root).unwrap();
+        let inherited = directory.acquire_lock(&INDEX_WRITER_LOCK).unwrap();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(inherited);
+        });
+        *release_thread_for_hook.lock().unwrap() = Some(thread);
+    }));
+
+    append
+        .add_core_record(document(&source, 2, "delta after inherited lock"))
+        .unwrap();
+    if let Some(thread) = release_thread.lock().unwrap().take() {
+        thread.join().unwrap();
+    }
+    let proof = CertifiedSourceAppend::certify(
+        &base,
+        appendable_certificate(&source, 2, 2, 20),
+        10,
+        [1; 32],
+    )
+    .unwrap();
+    append.certify_source_append(proof).unwrap();
+    append.commit(|_| true).unwrap();
+
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.count_term("inherited").unwrap(), 1);
+    assert_eq!(verified.document_count(), 2);
 }
 
 #[test]
