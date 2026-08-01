@@ -594,7 +594,7 @@ fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
 }
 
 #[test]
-fn human_wait_timeout_renders_the_final_active_snapshot() {
+fn human_wait_timeout_renders_unchanged_active_snapshot_once() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
     fs::write(
@@ -622,7 +622,12 @@ fn human_wait_timeout_renders_the_final_active_snapshot() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert!(stdout.matches("Semantic search").count() >= 2, "{stdout}");
+    assert_eq!(stdout.matches("Semantic search").count(), 1, "{stdout}");
+    assert_eq!(
+        stdout.matches("Your history is searchable").count(),
+        1,
+        "{stdout}"
+    );
     assert!(stdout.contains("Your history is searchable"), "{stdout}");
     assert!(stdout.contains("Embedded"));
     assert!(stdout.contains("Throughput"));
