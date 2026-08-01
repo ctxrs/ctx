@@ -225,7 +225,7 @@ fn semantic_generation_mirrors_the_persisted_core_eligible_count() -> Result<()>
 
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
     assert_eq!(SOURCE_CONTRACT_VERSION, 5);
-    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 14);
+    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 15);
     assert_eq!(index.manifest().semantic_eligible_documents, 1);
     assert_eq!(generation.semantic_documents, 1);
     assert_eq!(generation.core_generation_id, index.generation_id());
