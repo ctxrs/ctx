@@ -88,7 +88,7 @@ fn search_refresh_off_requires_existing_store_without_creating_one() {
 #[test]
 fn file_only_search_returns_touched_file_matches() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-rich-sessions");
+    let fixture = repository_backed_rich_fixture(&temp);
     json_output(ctx(&temp).args([
         "import",
         "--provider",
@@ -133,7 +133,7 @@ fn search_rejects_whitespace_only_filters() {
 #[test]
 fn search_trims_whitespace_padded_workspace_and_file_filters() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-rich-sessions");
+    let fixture = repository_backed_rich_fixture(&temp);
     json_output(ctx(&temp).args([
         "import",
         "--provider",
@@ -175,4 +175,40 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
     );
     assert_eq!(results[0]["provider"], "codex");
     assert!(results[0].get("source_path").is_none());
+}
+
+fn repository_backed_rich_fixture(temp: &TempDir) -> String {
+    let fixture = provider_history_fixture("codex-rich-sessions");
+    let repository = temp.path().join("ctx-rich-fixture");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(repository.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let initialized = StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repository)
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let remote = StdCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/ctxrs/ctx.git",
+        ])
+        .current_dir(&repository)
+        .status()
+        .unwrap();
+    assert!(remote.success());
+
+    let transcript = Path::new(&fixture).join("2026/06/24/rich.jsonl");
+    let original = fs::read_to_string(&transcript).unwrap();
+    fs::write(
+        transcript,
+        original.replace(
+            "/workspace/ctx-rich-fixture",
+            &repository.display().to_string(),
+        ),
+    )
+    .unwrap();
+    fixture
 }

@@ -944,7 +944,7 @@ mod native {
         loop {
             let last = harness.daemon_status();
             if last["running"] == true
-                && last["source_refresh_endpoint"]["available"] == true
+                && last["core_refresh_endpoint"]["available"] == true
                 && previous_pid.is_none_or(|previous| live_pid(&last) != previous)
             {
                 return last;

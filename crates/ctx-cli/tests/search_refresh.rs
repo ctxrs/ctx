@@ -136,7 +136,7 @@ fn launch_source_refresh_daemon(
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             return daemon;
         }

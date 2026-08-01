@@ -306,7 +306,7 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
             &[("path", "path"), ("active", "active"), ("pid", "pid")],
         );
     }
-    if let Some(endpoint) = daemon.get("source_refresh_endpoint") {
+    if let Some(endpoint) = daemon.get("core_refresh_endpoint") {
         push_object_summary(
             out,
             "daemon_endpoint",
