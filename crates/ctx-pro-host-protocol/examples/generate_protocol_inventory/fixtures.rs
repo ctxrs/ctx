@@ -142,17 +142,47 @@ pub(super) fn record() -> CoreRecord {
     }
 }
 
-pub(super) fn record_page() -> CoreRecordPage {
-    CoreRecordPage::new(
-        materialization_id(),
-        "a".repeat(64),
-        source_state(1, 1, 1),
-        0,
-        0,
-        true,
-        vec![record()],
-    )
-    .expect("golden record page")
+pub(super) fn reconciliation() -> CoreSourceReconciliation {
+    CoreSourceReconciliation {
+        source_index: 0,
+        delta: CoreSourceDelta::Present(source_state(1, 1, 1)),
+    }
+}
+
+pub(super) fn event_state_request() -> CoreEventStatePageRequest {
+    CoreEventStatePageRequest {
+        materialization_id: materialization_id(),
+        core_generation_id: "a".repeat(64),
+        reconciliation: reconciliation(),
+        page_index: 0,
+        after_event_id: None,
+        maximum_items: MAX_CORE_EVENT_STATE_PAGE_ITEMS as u32,
+    }
+}
+
+pub(super) fn event_state_page() -> CoreEventStatePage {
+    let request = event_state_request();
+    CoreEventStatePage {
+        materialization_id: request.materialization_id,
+        core_generation_id: request.core_generation_id,
+        reconciliation: request.reconciliation,
+        page_index: request.page_index,
+        after_event_id: request.after_event_id,
+        states: Vec::new(),
+        terminal: true,
+        replayed: false,
+    }
+}
+
+pub(super) fn event_delta_page() -> CoreEventDeltaPage {
+    CoreEventDeltaPage {
+        materialization_id: materialization_id(),
+        core_generation_id: "a".repeat(64),
+        reconciliation: reconciliation(),
+        page_index: 0,
+        terminal: true,
+        deltas: vec![CoreEventDelta::Added(record())],
+    }
 }
 
 pub(super) fn finish_request() -> FinishCoreMaterializationRequest {
@@ -163,8 +193,8 @@ pub(super) fn finish_request() -> FinishCoreMaterializationRequest {
         source_delta_pages: 1,
         changed_sources: 1,
         removed_sources: 1,
-        record_pages: 1,
-        materialized_records: 1,
+        event_delta_pages: 2,
+        event_mutations: 2,
     }
 }
 

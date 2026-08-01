@@ -159,29 +159,34 @@ fn head(sources: &[CoreSourceState]) -> CoreGenerationHead {
 }
 
 #[test]
-fn complete_core_record_page_transports_long_body_and_two_repository_scopes() {
+fn complete_core_event_delta_page_transports_long_body_and_two_repository_scopes() {
     let source = source(1);
     let source_state = state(source.clone(), 2, 1);
     let body = format!("{}tail-marker", "x".repeat(20 * 1024));
     let record = record(&source, 1, body.clone(), true);
-    let page = CoreRecordPage::new(
-        "d".repeat(64),
-        "a".repeat(64),
-        source_state,
-        0,
-        0,
-        true,
-        vec![record],
-    )
-    .unwrap();
+    let page = CoreEventDeltaPage {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        reconciliation: CoreSourceReconciliation {
+            source_index: 0,
+            delta: CoreSourceDelta::Present(source_state),
+        },
+        page_index: 0,
+        terminal: true,
+        deltas: vec![CoreEventDelta::Added(record)],
+    };
+    page.validate().unwrap();
 
+    let CoreEventDelta::Added(record) = &page.deltas[0] else {
+        panic!("expected added event");
+    };
     assert_eq!(
-        page.records[0].content.normalized_body.as_deref(),
+        record.content.normalized_body.as_deref(),
         Some(body.as_str())
     );
-    assert_eq!(page.records[0].repository_bindings.len(), 2);
-    assert_eq!(page.records[0].repository_file_observations.len(), 2);
-    assert_eq!(page.records[0].repository_vcs_observations.len(), 1);
+    assert_eq!(record.repository_bindings.len(), 2);
+    assert_eq!(record.repository_file_observations.len(), 2);
+    assert_eq!(record.repository_vcs_observations.len(), 1);
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(encoded.contains("tail-marker"));
     assert!(!encoded.contains("source_locator"));
@@ -190,7 +195,7 @@ fn complete_core_record_page_transports_long_body_and_two_repository_scopes() {
     let envelope = HostEnvelope {
         sequence: 1,
         request_id: uuid::Uuid::from_u128(1),
-        message: HostMessage::MaterializeCoreRecordPage(MaterializeCoreRecordPageRequest { page }),
+        message: HostMessage::ApplyCoreEventDeltaPage(ApplyCoreEventDeltaPageRequest { page }),
     };
     let mut frame = Vec::new();
     write_frame(&mut frame, &envelope).unwrap();
@@ -202,39 +207,45 @@ fn complete_core_record_page_transports_long_body_and_two_repository_scopes() {
 }
 
 #[test]
-fn record_page_acknowledgement_uses_compact_identity_after_request_moves() {
+fn event_delta_acknowledgement_uses_compact_identity_after_request_moves() {
     let source = source(1);
     let source_state = state(source.clone(), 2, 1);
-    let page = CoreRecordPage::new(
-        "d".repeat(64),
-        "a".repeat(64),
-        source_state,
-        3,
-        7,
-        true,
-        vec![record(&source, 1, "x".repeat(1024 * 1024), false)],
-    )
-    .unwrap();
-    let identity = page.acknowledgement_identity();
-    let request = MaterializeCoreRecordPageRequest { page };
-    let mut acknowledgement = CoreRecordPageMaterialized {
+    let page = CoreEventDeltaPage {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        reconciliation: CoreSourceReconciliation {
+            source_index: 3,
+            delta: CoreSourceDelta::Present(source_state),
+        },
+        page_index: 7,
+        terminal: true,
+        deltas: vec![CoreEventDelta::Added(record(
+            &source,
+            1,
+            "x".repeat(1024 * 1024),
+            false,
+        ))],
+    };
+    let request = ApplyCoreEventDeltaPageRequest { page };
+    let mut acknowledgement = CoreEventDeltaPageApplied {
         materialization_id: request.page.materialization_id.clone(),
         core_generation_id: request.page.core_generation_id.clone(),
-        source: request.page.source.source.clone(),
-        source_revision_sha256: request.page.source.source_revision_sha256.clone(),
-        source_index: request.page.source_index,
+        source_index: request.page.reconciliation.source_index,
         page_index: request.page.page_index,
-        accepted_records: 1,
+        additions: 1,
+        replacements: 0,
+        tombstones: 0,
         terminal: true,
         replayed: false,
     };
+    let expected_page = request.page.clone();
     drop(request);
 
-    acknowledgement.validate_for_identity(&identity).unwrap();
+    acknowledgement.validate_for(&expected_page).unwrap();
     acknowledgement.page_index = 8;
     assert_eq!(
         acknowledgement
-            .validate_for_identity(&identity)
+            .validate_for(&expected_page)
             .unwrap_err()
             .class,
         ErrorClass::Sequence
@@ -263,7 +274,10 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         page_index: 0,
         changed_sources: 1,
         removed_sources: 0,
-        materialize_sources: vec![changed.clone()],
+        reconcile_sources: vec![CoreSourceReconciliation {
+            source_index: 1,
+            delta: CoreSourceDelta::Present(changed.clone()),
+        }],
         replayed: false,
     }
     .validate_for_identity(&identity)
@@ -277,7 +291,10 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         page_index: 0,
         changed_sources: 1,
         removed_sources: 0,
-        materialize_sources: vec![stale],
+        reconcile_sources: vec![CoreSourceReconciliation {
+            source_index: 1,
+            delta: CoreSourceDelta::Present(stale),
+        }],
         replayed: false,
     };
     assert_eq!(
@@ -307,12 +324,16 @@ fn source_delta_pages_require_stable_order_and_exact_page_cas() {
         page_index: 0,
         changed_sources: 2,
         removed_sources: 0,
-        materialize_sources: page
+        reconcile_sources: page
             .deltas
             .iter()
+            .enumerate()
             .filter_map(|delta| match delta {
-                CoreSourceDelta::Present(state) => Some(state.clone()),
-                CoreSourceDelta::Removed(_) => None,
+                (source_index, CoreSourceDelta::Present(state)) => Some(CoreSourceReconciliation {
+                    source_index: u32::try_from(source_index).unwrap(),
+                    delta: CoreSourceDelta::Present(state.clone()),
+                }),
+                (_, CoreSourceDelta::Removed(_)) => None,
             })
             .collect(),
         replayed: false,

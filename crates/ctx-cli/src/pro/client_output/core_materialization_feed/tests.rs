@@ -46,8 +46,7 @@ fn record(source: &SourceKey, sequence: u64, body: String) -> CoreRecord {
     let session_id = derive_session_id(SessionIdentityInput {
         source,
         logical_session_kind: "thread",
-        native_session_key: &NativeSessionKey::native_id("session", native_session.clone())
-            .unwrap(),
+        native_session_key: &NativeSessionKey::native_id("session", native_session).unwrap(),
     })
     .unwrap();
     let event_id = derive_event_id(EventIdentityInput {
@@ -82,7 +81,7 @@ fn record(source: &SourceKey, sequence: u64, body: String) -> CoreRecord {
     record
 }
 
-fn add_source_with_count(
+fn add_source(
     writer: &mut GenerationWriter,
     source: &SourceKey,
     revision: u8,
@@ -124,17 +123,21 @@ fn receipt_for(index: &VerifiedIndex, revision: &str) -> CoreMaterializationRece
     }
 }
 
+type EventStates = BTreeMap<[u8; 32], BTreeMap<[u8; 32], CoreEventState>>;
+
 #[derive(Default)]
 struct Consumer {
     revision: String,
     known_revisions: BTreeMap<[u8; 32], String>,
+    known_events: EventStates,
     replay_begin: bool,
     replay_pages: bool,
     wrong_delta_generation: bool,
-    wrong_record_page_index: bool,
-    record_exchanges: u64,
+    wrong_event_page_index: bool,
+    event_exchanges: u64,
+    state_exchanges: u64,
     delta_pages: Vec<CoreSourceDeltaPage>,
-    record_pages: Vec<CoreRecordPage>,
+    event_pages: Vec<CoreEventDeltaPage>,
     finish: Option<FinishCoreMaterializationRequest>,
 }
 
@@ -144,6 +147,12 @@ impl Consumer {
             revision: "test-core-materializer-v1".to_owned(),
             ..Self::default()
         }
+    }
+
+    fn source_events_mut(&mut self, source: &SourceKey) -> &mut BTreeMap<[u8; 32], CoreEventState> {
+        self.known_events
+            .entry(source.identity().digest())
+            .or_default()
     }
 }
 
@@ -170,23 +179,36 @@ impl CoreMaterializationConsumer for Consumer {
         request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied> {
         let page = request.page;
-        let mut materialize_sources = Vec::new();
+        let mut reconcile_sources = Vec::new();
+        let mut changed_sources = 0_u32;
         let mut removed_sources = 0_u32;
-        for delta in &page.deltas {
-            match delta {
+        for (source_index, delta) in page.deltas.iter().enumerate() {
+            let identity = delta.source().identity().digest();
+            let reconcile = match delta {
                 CoreSourceDelta::Present(state) => {
-                    let identity = state.source.identity().digest();
-                    if self.known_revisions.get(&identity) != Some(&state.source_revision_sha256) {
-                        materialize_sources.push(state.clone());
-                    }
+                    let changed =
+                        self.known_revisions.get(&identity) != Some(&state.source_revision_sha256);
                     self.known_revisions
                         .insert(identity, state.source_revision_sha256.clone());
+                    if changed {
+                        changed_sources = changed_sources.saturating_add(1);
+                    }
+                    changed
                 }
-                CoreSourceDelta::Removed(removal) => {
-                    self.known_revisions
-                        .remove(&removal.source.identity().digest());
-                    removed_sources = removed_sources.saturating_add(1);
+                CoreSourceDelta::Removed(_) => {
+                    let existed = self.known_revisions.remove(&identity).is_some()
+                        || self.known_events.contains_key(&identity);
+                    if existed {
+                        removed_sources = removed_sources.saturating_add(1);
+                    }
+                    existed
                 }
+            };
+            if reconcile {
+                reconcile_sources.push(CoreSourceReconciliation {
+                    source_index: u32::try_from(source_index).unwrap(),
+                    delta: delta.clone(),
+                });
             }
         }
         let response = CoreSourceDeltaPageApplied {
@@ -197,37 +219,109 @@ impl CoreMaterializationConsumer for Consumer {
                 page.core_generation_id.clone()
             },
             page_index: page.page_index,
-            changed_sources: u32::try_from(materialize_sources.len()).unwrap(),
+            changed_sources,
             removed_sources,
-            materialize_sources,
+            reconcile_sources,
             replayed: self.replay_pages,
         };
         self.delta_pages.push(page);
         Ok(response)
     }
 
-    fn materialize_records(
+    fn event_states(&mut self, request: CoreEventStatePageRequest) -> Result<CoreEventStatePage> {
+        self.state_exchanges = self.state_exchanges.saturating_add(1);
+        let source = request.reconciliation.delta.source();
+        let after = request.after_event_id.map(|event| event.digest());
+        let maximum = usize::try_from(request.maximum_items).unwrap();
+        let all = self
+            .known_events
+            .get(&source.identity().digest())
+            .into_iter()
+            .flat_map(|events| events.values())
+            .filter(|state| after.is_none_or(|after| state.event_id.digest() > after))
+            .cloned()
+            .collect::<Vec<_>>();
+        let terminal = all.len() <= maximum;
+        Ok(CoreEventStatePage {
+            materialization_id: request.materialization_id,
+            core_generation_id: request.core_generation_id,
+            reconciliation: request.reconciliation,
+            page_index: request.page_index,
+            after_event_id: request.after_event_id,
+            states: all.into_iter().take(maximum).collect(),
+            terminal,
+            replayed: self.replay_pages,
+        })
+    }
+
+    fn apply_event_delta(
         &mut self,
-        request: MaterializeCoreRecordPageRequest,
-    ) -> Result<CoreRecordPageMaterialized> {
-        self.record_exchanges = self.record_exchanges.saturating_add(1);
+        request: ApplyCoreEventDeltaPageRequest,
+    ) -> Result<CoreEventDeltaPageApplied> {
+        self.event_exchanges = self.event_exchanges.saturating_add(1);
         let page = request.page;
-        let response = CoreRecordPageMaterialized {
+        let source = page.reconciliation.delta.source().clone();
+        let mut additions = 0_u32;
+        let mut replacements = 0_u32;
+        let mut tombstones = 0_u32;
+        for delta in &page.deltas {
+            match delta {
+                CoreEventDelta::Added(record) => {
+                    let state = CoreEventState {
+                        event_id: record.event_id,
+                        core_record_sha256: core_record_sha256(record).unwrap(),
+                        requires_replacement: false,
+                    };
+                    self.source_events_mut(&source)
+                        .insert(state.event_id.digest(), state);
+                    additions = additions.saturating_add(1);
+                }
+                CoreEventDelta::Replaced(replacement) => {
+                    let state = CoreEventState {
+                        event_id: replacement.record.event_id,
+                        core_record_sha256: core_record_sha256(&replacement.record).unwrap(),
+                        requires_replacement: false,
+                    };
+                    let prior = self
+                        .source_events_mut(&source)
+                        .insert(state.event_id.digest(), state);
+                    assert_eq!(
+                        prior.map(|state| state.core_record_sha256),
+                        Some(replacement.prior_core_record_sha256.clone())
+                    );
+                    replacements = replacements.saturating_add(1);
+                }
+                CoreEventDelta::Tombstoned(tombstone) => {
+                    let prior = self
+                        .source_events_mut(&source)
+                        .remove(&tombstone.event_id.digest());
+                    assert_eq!(
+                        prior.map(|state| state.core_record_sha256),
+                        Some(tombstone.prior_core_record_sha256.clone())
+                    );
+                    tombstones = tombstones.saturating_add(1);
+                }
+            }
+        }
+        if page.terminal && matches!(page.reconciliation.delta, CoreSourceDelta::Removed(_)) {
+            self.known_events.remove(&source.identity().digest());
+        }
+        let response = CoreEventDeltaPageApplied {
             materialization_id: page.materialization_id.clone(),
             core_generation_id: page.core_generation_id.clone(),
-            source: page.source.source.clone(),
-            source_revision_sha256: page.source.source_revision_sha256.clone(),
-            source_index: page.source_index,
-            page_index: if self.wrong_record_page_index {
+            source_index: page.reconciliation.source_index,
+            page_index: if self.wrong_event_page_index {
                 page.page_index.saturating_add(1)
             } else {
                 page.page_index
             },
-            accepted_records: u32::try_from(page.records.len()).unwrap(),
+            additions,
+            replacements,
+            tombstones,
             terminal: page.terminal,
             replayed: self.replay_pages,
         };
-        self.record_pages.push(page);
+        self.event_pages.push(page);
         Ok(response)
     }
 
@@ -255,17 +349,61 @@ impl CoreMaterializationConsumer for Consumer {
 }
 
 #[test]
+fn one_event_change_emits_one_atomic_replacement_without_source_wide_sweep() {
+    let temp = tempdir().unwrap();
+    let source = source("changed.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source(
+        &mut writer,
+        &source,
+        1,
+        vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+    );
+    writer.commit(|_| true).unwrap();
+    let first = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let prior = receipt_for(&first, "test-core-materializer-v1");
+    let mut consumer = Consumer::new();
+    sync_core_feed(&first, None, &mut consumer).unwrap();
+    drop(first);
+    consumer.event_pages.clear();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source(
+        &mut writer,
+        &source,
+        2,
+        vec![
+            "one".to_owned(),
+            "two revised".to_owned(),
+            "three".to_owned(),
+        ],
+    );
+    writer.commit(|_| true).unwrap();
+    let second = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let report = sync_core_feed(&second, Some(&prior), &mut consumer).unwrap();
+
+    assert_eq!(report.changed_sources, 1);
+    assert_eq!(report.event_mutations, 1);
+    assert_eq!(consumer.event_pages.len(), 1);
+    assert!(consumer.event_pages[0].terminal);
+    assert!(matches!(
+        consumer.event_pages[0].deltas.as_slice(),
+        [CoreEventDelta::Replaced(replacement)]
+            if replacement.record.content.normalized_body.as_deref() == Some("two revised")
+    ));
+}
+
+#[test]
 fn unchanged_large_source_is_not_resent_when_another_source_changes() {
     let temp = tempdir().unwrap();
     let large = source("large.jsonl");
     let changed = source("changed.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &large, 1, vec!["L".repeat(32 * 1024)]);
-    add_source_with_count(&mut writer, &changed, 2, vec!["changed body".to_owned()]);
+    add_source(&mut writer, &large, 1, vec!["L".repeat(32 * 1024)]);
+    add_source(&mut writer, &changed, 2, vec!["changed body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let states = core_source_states(index.manifest()).unwrap();
-
     let mut consumer = Consumer::new();
     let large_state = states
         .iter()
@@ -281,31 +419,27 @@ fn unchanged_large_source_is_not_resent_when_another_source_changes() {
 
     let report = sync_core_feed(&index, None, &mut consumer).unwrap();
     assert_eq!(report.changed_sources, 1);
-    assert_eq!(report.materialized_records, 1);
-    assert!(consumer.record_pages.iter().all(|page| {
-        page.source.source.exact_descriptor_eq(&changed)
-            && page
-                .records
-                .iter()
-                .all(|record| record.content.normalized_body.as_deref() == Some("changed body"))
-    }));
-    assert!(!consumer.record_pages.iter().any(|page| {
-        page.records.iter().any(|record| {
-            record
-                .content
-                .normalized_body
-                .as_deref()
-                .is_some_and(|body| body.len() > 16 * 1024)
-        })
+    assert_eq!(report.event_mutations, 1);
+    assert!(consumer.event_pages.iter().all(|page| {
+        page.reconciliation
+            .delta
+            .source()
+            .exact_descriptor_eq(&changed)
+            && page.deltas.iter().all(|delta| match delta {
+                CoreEventDelta::Added(record) => {
+                    record.content.normalized_body.as_deref() == Some("changed body")
+                }
+                _ => false,
+            })
     }));
 }
 
 #[test]
-fn exact_replay_is_a_no_op_with_no_delta_or_record_pages() {
+fn exact_replay_is_a_no_op_with_no_delta_or_event_pages() {
     let temp = tempdir().unwrap();
     let source = source("replay.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &source, 1, vec!["body".to_owned()]);
+    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let prior = receipt_for(&index, "test-core-materializer-v1");
@@ -315,82 +449,23 @@ fn exact_replay_is_a_no_op_with_no_delta_or_record_pages() {
     let report = sync_core_feed(&index, Some(&prior), &mut consumer).unwrap();
     assert!(report.replayed);
     assert!(consumer.delta_pages.is_empty());
-    assert!(consumer.record_pages.is_empty());
+    assert!(consumer.event_pages.is_empty());
     let finish = consumer.finish.unwrap();
     assert_eq!(finish.changed_sources, 0);
     assert_eq!(finish.removed_sources, 0);
-    assert_eq!(finish.materialized_records, 0);
+    assert_eq!(finish.event_mutations, 0);
 }
 
 #[test]
-fn restarted_staging_replays_pages_and_still_finishes_with_actual_counts() {
-    let temp = tempdir().unwrap();
-    let source = source("restart.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &source, 1, vec!["body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-    consumer.replay_pages = true;
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    assert!(!report.replayed);
-    assert_eq!(report.changed_sources, 1);
-    assert_eq!(report.materialized_records, 1);
-    assert_eq!(consumer.delta_pages.len(), 1);
-    assert_eq!(consumer.record_pages.len(), 1);
-    let finish = consumer.finish.unwrap();
-    assert_eq!(finish.changed_sources, 1);
-    assert_eq!(finish.materialized_records, 1);
-    assert_eq!(
-        finish.materialization_id,
-        consumer.record_pages[0].materialization_id
-    );
-}
-
-#[test]
-fn multi_item_records_share_one_bounded_exchange() {
-    let temp = tempdir().unwrap();
-    let source = source("large-progress.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(
-        &mut writer,
-        &source,
-        1,
-        vec![
-            "a".repeat(1024 * 1024),
-            "b".repeat(1024 * 1024),
-            "c".repeat(1024 * 1024),
-        ],
-    );
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    assert_eq!(report.changed_sources, 1);
-    assert_eq!(report.materialized_records, 3);
-    assert_eq!(report.record_pages, 1);
-    assert_eq!(consumer.record_exchanges, 1);
-    assert_eq!(consumer.record_pages.len(), 1);
-    assert_eq!(consumer.record_pages[0].records.len(), 3);
-    assert_eq!(
-        consumer.record_pages[0].content_bytes().unwrap(),
-        3 * 1024 * 1024
-    );
-    assert!(consumer.record_pages[0].terminal);
-}
-
-#[test]
-fn record_page_item_boundary_uses_one_exchange_per_page() {
+fn event_item_boundary_uses_one_exchange_per_bounded_page() {
     let temp = tempdir().unwrap();
     let source = source("item-boundary.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(
+    add_source(
         &mut writer,
         &source,
         1,
-        (0..=MAX_CORE_RECORD_PAGE_ITEMS)
+        (0..=MAX_CORE_EVENT_DELTA_PAGE_ITEMS)
             .map(|index| format!("body {index}"))
             .collect(),
     );
@@ -400,19 +475,18 @@ fn record_page_item_boundary_uses_one_exchange_per_page() {
 
     let report = sync_core_feed(&index, None, &mut consumer).unwrap();
     assert_eq!(
-        report.materialized_records,
-        u64::try_from(MAX_CORE_RECORD_PAGE_ITEMS + 1).unwrap()
+        report.event_mutations,
+        u64::try_from(MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1).unwrap()
     );
-    assert_eq!(report.record_pages, 2);
-    assert_eq!(consumer.record_exchanges, 2);
-    assert_eq!(consumer.record_pages.len(), 2);
+    assert_eq!(report.event_delta_pages, 2);
+    assert_eq!(consumer.event_exchanges, 2);
     assert_eq!(
-        consumer.record_pages[0].records.len(),
-        MAX_CORE_RECORD_PAGE_ITEMS
+        consumer.event_pages[0].deltas.len(),
+        MAX_CORE_EVENT_DELTA_PAGE_ITEMS
     );
-    assert_eq!(consumer.record_pages[1].records.len(), 1);
-    assert!(!consumer.record_pages[0].terminal);
-    assert!(consumer.record_pages[1].terminal);
+    assert_eq!(consumer.event_pages[1].deltas.len(), 1);
+    assert!(!consumer.event_pages[0].terminal);
+    assert!(consumer.event_pages[1].terminal);
 }
 
 #[test]
@@ -466,23 +540,28 @@ fn escaped_single_record_above_content_byte_count_still_transports() {
 }
 
 #[test]
-fn deletion_is_applied_from_delta_without_resending_unchanged_records() {
+fn source_deletion_is_resumable_tombstone_pages() {
     let temp = tempdir().unwrap();
     let retained = source("retained.jsonl");
     let removed = source("removed.jsonl");
+    let removed_count = MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1;
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &retained, 1, vec!["retained".to_owned()]);
-    add_source_with_count(&mut writer, &removed, 1, vec!["removed".to_owned()]);
+    add_source(&mut writer, &retained, 1, vec!["retained".to_owned()]);
+    add_source(
+        &mut writer,
+        &removed,
+        1,
+        (0..removed_count)
+            .map(|index| format!("removed {index}"))
+            .collect(),
+    );
     writer.commit(|_| true).unwrap();
     let prior_index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let prior = receipt_for(&prior_index, "test-core-materializer-v1");
-    let retained_revision = core_source_states(prior_index.manifest())
-        .unwrap()
-        .into_iter()
-        .find(|state| state.source.exact_descriptor_eq(&retained))
-        .unwrap()
-        .source_revision_sha256;
+    let mut consumer = Consumer::new();
+    sync_core_feed(&prior_index, None, &mut consumer).unwrap();
     drop(prior_index);
+    consumer.event_pages.clear();
 
     let observation = SourceInventoryObservation::new(
         removed.provider(),
@@ -505,20 +584,43 @@ fn deletion_is_applied_from_delta_without_resending_unchanged_records() {
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
 
-    let mut consumer = Consumer::new();
-    consumer
-        .known_revisions
-        .insert(retained.identity().digest(), retained_revision);
-    consumer
-        .known_revisions
-        .insert(removed.identity().digest(), "1".repeat(64));
     let report = sync_core_feed(&index, Some(&prior), &mut consumer).unwrap();
     assert_eq!(report.changed_sources, 0);
     assert_eq!(report.removed_sources, 1);
-    assert!(consumer.record_pages.is_empty());
-    assert!(consumer.delta_pages.iter().flat_map(|page| &page.deltas).any(|delta| {
-        matches!(delta, CoreSourceDelta::Removed(value) if value.source.exact_descriptor_eq(&removed))
+    assert_eq!(
+        report.event_mutations,
+        u64::try_from(removed_count).unwrap()
+    );
+    assert_eq!(report.event_delta_pages, 2);
+    assert!(consumer.event_pages.iter().all(|page| {
+        page.reconciliation
+            .delta
+            .source()
+            .exact_descriptor_eq(&removed)
+            && page
+                .deltas
+                .iter()
+                .all(|delta| matches!(delta, CoreEventDelta::Tombstoned(_)))
     }));
+    assert!(!consumer
+        .known_events
+        .contains_key(&removed.identity().digest()));
+}
+
+#[test]
+fn event_page_cas_mismatch_fails_closed_after_one_exchange() {
+    let temp = tempdir().unwrap();
+    let source = source("event-cas-mismatch.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut consumer = Consumer::new();
+    consumer.wrong_event_page_index = true;
+
+    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
+    assert!(error.to_string().contains("acknowledgement"));
+    assert_eq!(consumer.event_exchanges, 1);
 }
 
 #[test]
@@ -526,7 +628,7 @@ fn generation_mismatched_delta_ack_fails_closed() {
     let temp = tempdir().unwrap();
     let source = source("mismatch.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &source, 1, vec!["body".to_owned()]);
+    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let mut consumer = Consumer::new();
@@ -538,27 +640,11 @@ fn generation_mismatched_delta_ack_fails_closed() {
 }
 
 #[test]
-fn record_page_cas_mismatch_fails_closed_after_one_exchange() {
-    let temp = tempdir().unwrap();
-    let source = source("record-cas-mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &source, 1, vec!["body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-    consumer.wrong_record_page_index = true;
-
-    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
-    assert!(error.to_string().contains("acknowledgement"));
-    assert_eq!(consumer.record_exchanges, 1);
-}
-
-#[test]
 fn producer_reads_only_pinned_core_records() {
     let source = include_str!("../core_materialization_feed.rs");
     for forbidden in ["ctx_history_capture", "reread_source"] {
         assert!(!source.contains(forbidden), "producer contains {forbidden}");
     }
     assert!(source.contains("core_source_event_page_with_budget"));
-    assert!(!source.contains("MaterializeCoreRecordPage(request.clone())"));
+    assert!(!source.contains("MaterializeCoreRecordPage"));
 }

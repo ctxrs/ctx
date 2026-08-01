@@ -80,9 +80,13 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             }),
         ),
         (
-            "materialize_core_record_page",
-            HostMessage::MaterializeCoreRecordPage(MaterializeCoreRecordPageRequest {
-                page: record_page(),
+            "core_event_state_page",
+            HostMessage::CoreEventStatePage(event_state_request()),
+        ),
+        (
+            "apply_core_event_delta_page",
+            HostMessage::ApplyCoreEventDeltaPage(ApplyCoreEventDeltaPageRequest {
+                page: event_delta_page(),
             }),
         ),
         (
@@ -95,15 +99,18 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
 
 fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
     let page = delta_page();
-    let changed = page
+    let reconciliations = page
         .deltas
         .iter()
-        .find_map(|delta| match delta {
-            CoreSourceDelta::Present(state) => Some(state.clone()),
-            CoreSourceDelta::Removed(_) => None,
+        .cloned()
+        .enumerate()
+        .map(|(source_index, delta)| CoreSourceReconciliation {
+            source_index: u32::try_from(source_index).expect("golden source index"),
+            delta,
         })
-        .expect("golden changed source");
-    let record = record_page();
+        .collect();
+    let state_page = event_state_page();
+    let delta_page = event_delta_page();
     vec![
         (
             "hello",
@@ -169,20 +176,24 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 page_index: page.page_index,
                 changed_sources: 1,
                 removed_sources: 1,
-                materialize_sources: vec![changed],
+                reconcile_sources: reconciliations,
                 replayed: false,
             }),
         ),
         (
-            "core_record_page_materialized",
-            HelperMessage::CoreRecordPageMaterialized(CoreRecordPageMaterialized {
-                materialization_id: record.materialization_id,
-                core_generation_id: record.core_generation_id,
-                source: record.source.source,
-                source_revision_sha256: record.source.source_revision_sha256,
-                source_index: record.source_index,
-                page_index: record.page_index,
-                accepted_records: 1,
+            "core_event_state_page",
+            HelperMessage::CoreEventStatePage(state_page),
+        ),
+        (
+            "core_event_delta_page_applied",
+            HelperMessage::CoreEventDeltaPageApplied(CoreEventDeltaPageApplied {
+                materialization_id: delta_page.materialization_id,
+                core_generation_id: delta_page.core_generation_id,
+                source_index: delta_page.reconciliation.source_index,
+                page_index: delta_page.page_index,
+                additions: 1,
+                replacements: 0,
+                tombstones: 0,
                 terminal: true,
                 replayed: false,
             }),

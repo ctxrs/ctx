@@ -37,7 +37,8 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::Status(_) => "status",
         HostMessage::BeginCoreMaterialization(_) => "begin_core_materialization",
         HostMessage::ApplyCoreSourceDeltaPage(_) => "apply_core_source_delta_page",
-        HostMessage::MaterializeCoreRecordPage(_) => "materialize_core_record_page",
+        HostMessage::CoreEventStatePage(_) => "core_event_state_page",
+        HostMessage::ApplyCoreEventDeltaPage(_) => "apply_core_event_delta_page",
         HostMessage::FinishCoreMaterialization(_) => "finish_core_materialization",
         HostMessage::Blame(_) => "blame",
     }
@@ -52,7 +53,8 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::Status(_) => "status",
         HelperMessage::CoreMaterializationBegan(_) => "core_materialization_began",
         HelperMessage::CoreSourceDeltaPageApplied(_) => "core_source_delta_page_applied",
-        HelperMessage::CoreRecordPageMaterialized(_) => "core_record_page_materialized",
+        HelperMessage::CoreEventStatePage(_) => "core_event_state_page",
+        HelperMessage::CoreEventDeltaPageApplied(_) => "core_event_delta_page_applied",
         HelperMessage::CoreMaterializationFinished(_) => "core_materialization_finished",
         HelperMessage::Blame(_) => "blame",
         HelperMessage::Error(_) => "error",
@@ -91,7 +93,8 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
         serde_json::json!([
             "begin_core_materialization",
             "apply_core_source_delta_page",
-            "materialize_core_record_page",
+            "core_event_state_page",
+            "apply_core_event_delta_page",
             "finish_core_materialization"
         ])
     );
@@ -160,7 +163,8 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
         serde_json::json!([
             "local_repository",
             "certified_live_root_access_events",
-            "file_evidence_events"
+            "file_evidence_events",
+            "exact_commit_evidence_events"
         ])
     );
     assert_eq!(
@@ -174,5 +178,5 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
     let ack = canonical["dto_fields"]["CoreSourceDeltaPageApplied"]["required"]
         .as_array()
         .unwrap();
-    assert!(ack.contains(&serde_json::json!("materialize_sources")));
+    assert!(ack.contains(&serde_json::json!("reconcile_sources")));
 }
