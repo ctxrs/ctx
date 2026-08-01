@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS core_vcs_observations (
     object_id TEXT,
     reference_name TEXT,
     relative_path TEXT,
+    outcome_json TEXT,
     observed_at_ms INTEGER,
     PRIMARY KEY (event_key, ordinal),
     FOREIGN KEY (event_key, repository_binding_key)
@@ -307,6 +308,7 @@ SELECT
     v.object_id,
     v.reference_name,
     v.relative_path,
+    v.outcome_json,
     v.observed_at_ms
 FROM core_vcs_observations v
 JOIN core_events e ON e.event_key = v.event_key

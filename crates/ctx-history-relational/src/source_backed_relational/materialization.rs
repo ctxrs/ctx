@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{
     CoreContentPolicyStatus, CoreRecord, ProjectionContractError, RepositoryBinding,
-    RepositoryVcsObservationKind, SourceKey,
+    RepositoryVcsObservationKind as VcsKind, SourceKey,
 };
 use rusqlite::{params, Connection, OptionalExtension, Statement};
 use serde::Serialize;
@@ -275,8 +275,9 @@ impl<'conn> MaterializationStatements<'conn> {
             vcs: conn.prepare(
                 "INSERT INTO core_vcs_observations (
                     event_key, repository_binding_key, ordinal, observation_kind,
-                    object_format, object_id, reference_name, relative_path, observed_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    object_format, object_id, reference_name, relative_path, outcome_json,
+                    observed_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?,
             vcs_parent: conn.prepare(
                 "INSERT INTO core_vcs_parent_objects (
@@ -447,11 +448,12 @@ impl<'conn> MaterializationStatements<'conn> {
                 &observation.repository_binding_id,
                 "VCS observation",
             )?;
+            let (observation_kind, outcome_json) = vcs_observation_payload(&observation.kind)?;
             self.vcs.execute(params![
                 event_key,
                 repository_binding_key,
                 sqlite_i64(ordinal as u64, "VCS observation ordinal")?,
-                repository_vcs_observation_kind_text(&observation.kind),
+                observation_kind,
                 observation
                     .object_id
                     .as_ref()
@@ -460,6 +462,7 @@ impl<'conn> MaterializationStatements<'conn> {
                 observation.object_id.as_ref().map(|id| id.hex.as_str()),
                 observation.reference,
                 observation.relative_path,
+                outcome_json,
                 record.occurred_at_unix_ms,
             ])?;
             for (parent_ordinal, parent) in observation.parent_object_ids.iter().enumerate() {
@@ -959,23 +962,24 @@ fn content_policy_status(status: &CoreContentPolicyStatus) -> &'static str {
     }
 }
 
-fn repository_vcs_observation_kind_text(kind: &RepositoryVcsObservationKind) -> &'static str {
-    match kind {
-        RepositoryVcsObservationKind::Head => "head",
-        RepositoryVcsObservationKind::Commit => "commit",
-        RepositoryVcsObservationKind::Branch => "branch",
-        RepositoryVcsObservationKind::Worktree => "worktree",
-        RepositoryVcsObservationKind::Change => "change",
-        RepositoryVcsObservationKind::Reference => "reference",
-        RepositoryVcsObservationKind::Outcome(_) => "outcome",
-    }
-}
-
 fn enum_text(value: &impl Serialize) -> Result<String> {
     match serde_json::to_value(value)? {
         serde_json::Value::String(value) => Ok(value),
         _ => invalid_record("Core enum did not serialize as text"),
     }
+}
+
+fn vcs_observation_payload(kind: &VcsKind) -> Result<(&'static str, Option<String>)> {
+    let (kind, outcome) = match kind {
+        VcsKind::Head => ("head", None),
+        VcsKind::Commit => ("commit", None),
+        VcsKind::Branch => ("branch", None),
+        VcsKind::Worktree => ("worktree", None),
+        VcsKind::Change => ("change", None),
+        VcsKind::Reference => ("reference", None),
+        VcsKind::Outcome(outcome) => ("outcome", Some(serde_json::to_string(outcome.as_ref())?)),
+    };
+    Ok((kind, outcome))
 }
 
 fn contract_record_error(error: ProjectionContractError) -> RelationalProjectionError {

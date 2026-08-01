@@ -187,6 +187,7 @@ Repository-scoped version-control observations attached to Core events.
 | `object_id` | Commit or object ID, when available. |
 | `reference_name` | Branch or reference name, when available. |
 | `relative_path` | Repository-relative path, when available. |
+| `outcome_json` | Complete typed repository outcome payload for `outcome` observations; otherwise null. |
 | `observed_at_ms` | Observation time in Unix epoch milliseconds, when available. |
 
 ### `ctx_repository_abstentions`
