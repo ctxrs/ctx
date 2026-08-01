@@ -404,6 +404,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "mcp_tests",
     src = "tests/mcp.rs",
+    extra_srcs = ["tests/mcp/input_validation.rs"],
     test_support = [
         "base",
         "fixtures",
