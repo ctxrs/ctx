@@ -833,6 +833,27 @@ mod tests {
     }
 
     #[test]
+    fn exact_oids_from_inspection_commands_are_not_production_outcomes() {
+        let oid = "d50d84a3e609d1ed30a435adbf2c19db35448b52";
+        let output = Value::String(format!("{oid}\n"));
+
+        for command in [
+            format!("git show --no-patch --format=%H {oid}"),
+            format!("git log -1 --format=%H {oid}"),
+            format!("git rev-parse --verify {oid}^{{commit}}"),
+            format!("git branch --contains {oid}"),
+        ] {
+            let evidence = linked_outcome_evidence(input(&command, &output));
+            assert!(
+                evidence
+                    .as_ref()
+                    .is_none_or(|evidence| evidence.outcomes.is_empty()),
+                "inspection command emitted a production outcome: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn merge_head_is_exact_only_when_the_output_demonstrates_merge_creation() {
         let oid = "0123456789abcdef0123456789abcdef01234567";
         let command = "git merge --no-ff feature && git rev-parse --verify HEAD";
