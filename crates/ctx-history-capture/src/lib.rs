@@ -107,10 +107,6 @@ pub(crate) fn test_provider_sqlite_data_root() -> &'static std::path::Path {
 
 pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
-pub use provider::codex::{
-    ingest_codex_source_backed_v0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
-    CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
-};
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
 };

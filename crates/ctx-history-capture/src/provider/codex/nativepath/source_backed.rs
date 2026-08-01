@@ -11,19 +11,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use ctx_history_core::CertifiedSourceDeletion;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
-    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation, CoreRecordError,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
     SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::VerifiedIndex;
-use ctx_history_index::{
-    BaseEventIdentityLookup, CommitReceipt, GenerationWriter, IndexError, RevalidationTarget,
-    WriterOptions,
-};
+use ctx_history_index::{BaseEventIdentityLookup, GenerationWriter, IndexError};
+#[cfg(test)]
+use ctx_history_index::{CommitReceipt, RevalidationTarget, WriterOptions};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -164,13 +165,17 @@ pub type CodexSourceBackedResultV0<T> = Result<T, CodexSourceBackedErrorV0>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodexSourceBackedPhaseTimingsV0 {
+    #[cfg(test)]
     pub discovery: Duration,
+    #[cfg(test)]
     pub writer_open: Duration,
     pub scan_and_stage: Duration,
     pub scanner_worker_busy: Duration,
     pub writer_add_document: Duration,
     pub certification: Duration,
+    #[cfg(test)]
     pub commit: Duration,
+    #[cfg(test)]
     pub total: Duration,
 }
 
@@ -217,6 +222,7 @@ pub struct CodexSourceBackedCountersV0 {
 }
 
 impl CodexSourceBackedCountersV0 {
+    #[cfg(test)]
     pub(crate) fn add_catalog_work(&mut self, work: CodexCatalogWorkV0) {
         self.inventory_walks = self.inventory_walks.saturating_add(work.inventory_walks);
         self.inventory_source_observations = self
@@ -287,6 +293,7 @@ impl CodexSourceBackedCountersV0 {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct CodexSourceBackedIngestReceiptV0 {
     pub commit: CommitReceipt,
@@ -300,11 +307,14 @@ mod identity;
 mod ingestion;
 
 pub(crate) use catalog::{
-    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_from_base_v0,
-    discover_codex_session_tree_inventory_from_plans_v0, discover_codex_session_tree_inventory_v0,
+    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
     managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
-    writer_base_sources, CodexCatalogWorkV0, CodexExplicitSessionSourceBackedInputV0,
-    CodexSessionTreeInventoryV0,
+    writer_base_sources, CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
+};
+#[cfg(test)]
+pub(crate) use catalog::{
+    discover_codex_session_tree_inventory_from_base_v0,
+    discover_codex_session_tree_inventory_from_plans_v0, CodexCatalogWorkV0,
 };
 use cold::{
     cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdIngestionTargetV0,
@@ -318,8 +328,7 @@ use identity::{
     validate_owner, CodexEventIdentityStateV0,
 };
 #[cfg(test)]
-use ingestion::ingest_codex_source_backed_inner_v0;
-pub use ingestion::ingest_codex_source_backed_v0;
+use ingestion::{ingest_codex_source_backed_inner_v0, ingest_codex_source_backed_v0};
 pub(crate) use ingestion::{ingest_codex_sources_serial_v0, ingest_codex_sources_v0};
 
 #[cfg(test)]

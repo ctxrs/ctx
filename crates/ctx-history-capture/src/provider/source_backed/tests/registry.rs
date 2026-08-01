@@ -507,12 +507,16 @@ fn unsupported_detected_format_stays_typed_and_never_executes() {
         source,
         "no product-approved source-backed adapter",
     ));
-    assert!(matches!(
-        refresh_source_backed_generation(
-            tempdir().unwrap().path(),
-            &registry,
-            WriterOptions::default()
-        ),
-        Err(SourceBackedCoordinatorError::NoExecutableRoutes)
-    ));
+    let temp = tempdir().unwrap();
+    let receipt =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(receipt.scanned_routes, 0);
+    assert_eq!(receipt.unsupported_routes.len(), 1);
+    assert!(receipt.sources.is_empty());
+    assert!(receipt.removals.is_empty());
+    assert!(VerifiedIndex::open(temp.path())
+        .unwrap()
+        .manifest()
+        .sources
+        .is_empty());
 }

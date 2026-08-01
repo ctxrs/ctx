@@ -8,7 +8,11 @@ mod tests {
         fs,
     };
 
-    use ctx_history_capture::ingest_codex_source_backed_v0;
+    use ctx_history_capture::{
+        provider_source_for_path, refresh_source_backed_generation,
+        register_landed_source_backed_route, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection,
+    };
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
         NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
@@ -194,7 +198,19 @@ mod tests {
             .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
             .collect::<String>();
         fs::write(source, body).unwrap();
-        ingest_codex_source_backed_v0(&sessions, index_root(data_root)).unwrap();
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route(
+            &mut registry,
+            provider_source_for_path(CaptureProvider::Codex, sessions),
+            SourceBackedRouteSelection::ExplicitManual,
+        )
+        .unwrap();
+        refresh_source_backed_generation(
+            index_root(data_root),
+            &registry,
+            WriterOptions::default(),
+        )
+        .unwrap();
     }
 
     fn append_fixture_event(data_root: &Path, event: EventRecord, revision: u8) {

@@ -129,9 +129,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .iter()
         .filter(|route| route.driver.is_some())
         .count();
-    if scanned_routes == 0 {
-        return Err(SourceBackedCoordinatorError::NoExecutableRoutes);
-    }
     let refresh_started = Instant::now();
     report_progress(SourceBackedRefreshProgress {
         phase: "discovering",
