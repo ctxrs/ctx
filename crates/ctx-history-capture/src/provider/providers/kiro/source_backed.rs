@@ -33,8 +33,6 @@ use super::super::history::{
     kiro_history_entry_events, kiro_provider_session_id, kiro_session_started_at,
     KiroConversationRow,
 };
-#[cfg(test)]
-use super::{absolute_kiro_path, KiroSqliteDatabase};
 use super::{scan::stream_rows, KiroPhase, KiroTables};
 
 const KIRO_SOURCE_ANCHOR_NAMESPACE: &str = "kiro.legacy-sqlite";
@@ -100,47 +98,6 @@ pub(super) struct KiroSourceBackedScan {
     pub(super) row_decode_passes: u64,
     pub(super) decoded_rows: u64,
     pub(super) peak_buffered_rows: u64,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct KiroSourceBackedScanV0 {
-    pub(crate) source: SourceKey,
-    pub(crate) documents: Vec<CoreRecord>,
-    pub(crate) certificate: CertifiedSource,
-    pub(super) terminal_fence: SqliteSourceEvidence,
-    pub(crate) emitted_pages: u64,
-    pub(crate) row_decode_passes: u64,
-    pub(crate) decoded_rows: u64,
-    pub(crate) peak_buffered_rows: u64,
-}
-
-#[cfg(test)]
-pub(super) fn scan_kiro_source_backed(
-    data_root: &Path,
-    source_path: &Path,
-    source_format: &str,
-    emit: &mut dyn FnMut(Vec<CoreRecord>) -> KiroSourceBackedResultV0<()>,
-) -> KiroSourceBackedResultV0<KiroSourceBackedScan> {
-    let source_path = absolute_kiro_path(source_path)?;
-    require_legacy_sqlite_format(&source_path, source_format)?;
-    let source = kiro_source_key()?;
-    let database = KiroSqliteDatabase::open(data_root, &source_path)?;
-    let opening_evidence = database.evidence().clone();
-    let scan = scan_kiro_snapshot(
-        database.connection(&source_path)?,
-        &source_path,
-        source,
-        opening_evidence,
-        emit,
-    )?;
-    let physical_evidence = database.finish(&source_path)?;
-    if physical_evidence != scan.terminal_fence {
-        return Err(KiroSourceBackedErrorV0::Capture(
-            CaptureError::SourceChangedDuringCapture,
-        ));
-    }
-    Ok(scan)
 }
 
 pub(super) fn scan_kiro_snapshot(
@@ -210,47 +167,6 @@ pub(super) fn observe_kiro_logical_snapshot(
     }
     digest.update(decoded_rows.to_be_bytes());
     Ok(digest.finalize().into())
-}
-
-#[cfg(test)]
-pub(crate) fn scan_kiro_source_backed_v0(
-    data_root: &Path,
-    source_path: impl AsRef<Path>,
-    source_format: &str,
-) -> KiroSourceBackedResultV0<KiroSourceBackedScanV0> {
-    let mut documents = Vec::new();
-    let scan = scan_kiro_source_backed(
-        data_root,
-        source_path.as_ref(),
-        source_format,
-        &mut |page| {
-            documents.extend(page);
-            Ok(())
-        },
-    )?;
-    Ok(KiroSourceBackedScanV0 {
-        source: scan.source,
-        documents,
-        certificate: scan.certificate,
-        terminal_fence: scan.terminal_fence,
-        emitted_pages: scan.emitted_pages,
-        row_decode_passes: scan.row_decode_passes,
-        decoded_rows: scan.decoded_rows,
-        peak_buffered_rows: scan.peak_buffered_rows,
-    })
-}
-
-#[cfg(test)]
-pub(super) fn terminal_fence_matches(
-    data_root: &Path,
-    source_path: &Path,
-    expected: &SqliteSourceEvidence,
-) -> KiroSourceBackedResultV0<bool> {
-    let source_path = absolute_kiro_path(source_path)?;
-    require_legacy_sqlite_format(&source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
-    let database = KiroSqliteDatabase::open(data_root, &source_path)?;
-    let current = database.finish(&source_path)?;
-    Ok(&current == expected)
 }
 
 pub(super) fn require_legacy_sqlite_format(

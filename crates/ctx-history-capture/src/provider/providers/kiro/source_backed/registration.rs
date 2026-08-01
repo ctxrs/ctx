@@ -68,7 +68,6 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         let source = kiro_source_key().map_err(route_error)?;
         match observe_kiro_inventory(&self.data_root, &self.path).map_err(route_error)? {
             KiroPhysicalInventory::Present(present) => {
-                record_logical_observation();
                 let fingerprint = present.logical_fingerprint;
                 Ok(CompleteDocumentTree::new(
                     fingerprint,
@@ -130,7 +129,6 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         }
         database.revalidate(&path).map_err(route_error)?;
         restore_database(&authority.database, database)?;
-        record_projection();
         Ok(document_terminal(scan))
     }
 
@@ -149,17 +147,6 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
                     ));
                 }
                 (authority.terminal_revalidate)().map_err(route_error)?;
-                #[cfg(test)]
-                {
-                    let counters = authority._sqlite_authority.snapshot_counters();
-                    record_snapshot_counters(
-                        counters.immutable_snapshot_opens(),
-                        counters.copied_snapshot_opens(),
-                        counters.source_bytes_copied(),
-                        counters.terminal_fences(),
-                        counters.terminal_revalidations(),
-                    );
-                }
             }
             KiroTreeAuthority::Missing(fence) if !fence.revalidate() => {
                 return Err(source_changed("Kiro SQLite absence changed before commit"));
@@ -287,68 +274,6 @@ fn restore_database(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct KiroRouteWorkCounters {
-    pub(crate) logical_observation_passes: u64,
-    pub(crate) projection_passes: u64,
-    pub(crate) immutable_snapshot_opens: u64,
-    pub(crate) copied_snapshot_opens: u64,
-    pub(crate) source_bytes_copied: u64,
-    pub(crate) terminal_fences: u64,
-    pub(crate) terminal_revalidations: u64,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static KIRO_ROUTE_WORK: std::cell::RefCell<KiroRouteWorkCounters> =
-        std::cell::RefCell::new(KiroRouteWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn reset_route_work_counters() {
-    KIRO_ROUTE_WORK.with(|work| *work.borrow_mut() = KiroRouteWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn route_work_counters() -> KiroRouteWorkCounters {
-    KIRO_ROUTE_WORK.with(|work| *work.borrow())
-}
-
-fn record_logical_observation() {
-    #[cfg(test)]
-    KIRO_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
-    });
-}
-
-fn record_projection() {
-    #[cfg(test)]
-    KIRO_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.projection_passes = work.projection_passes.saturating_add(1);
-    });
-}
-
-#[cfg(test)]
-fn record_snapshot_counters(
-    immutable_snapshot_opens: u64,
-    copied_snapshot_opens: u64,
-    source_bytes_copied: u64,
-    terminal_fences: u64,
-    terminal_revalidations: u64,
-) {
-    KIRO_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.immutable_snapshot_opens = immutable_snapshot_opens;
-        work.copied_snapshot_opens = copied_snapshot_opens;
-        work.source_bytes_copied = source_bytes_copied;
-        work.terminal_fences = terminal_fences;
-        work.terminal_revalidations = terminal_revalidations;
-    });
 }
 
 #[derive(Debug)]

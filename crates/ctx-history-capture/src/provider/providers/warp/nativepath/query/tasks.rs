@@ -39,8 +39,6 @@ pub(super) fn scan_tasks(
     ))?;
     let _guard = SqliteLengthPreflightGuard::new(conn);
     let mut rows = candidates.query([])?;
-    #[cfg(test)]
-    super::super::super::source_backed::record_warp_projection_query();
     while let Some(row) = rows.next()? {
         let candidate = task_candidate_from_row(row)?;
         counters.task_rows = counters.task_rows.saturating_add(1);

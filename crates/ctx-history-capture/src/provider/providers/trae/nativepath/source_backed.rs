@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
@@ -73,24 +72,6 @@ pub(crate) struct TraeSourceBackedScanV0 {
 #[derive(Debug, Clone)]
 pub(crate) struct TraeSourceTerminalFence {
     evidence: SqliteSourceEvidence,
-}
-
-/// Scans exactly one explicitly supplied `state.vscdb` leaf.
-///
-/// The callback receives bounded pages from the existing ItemTable scanner.
-/// This leaf owns no automatic inventory, lifecycle, or publication behavior.
-#[cfg(test)]
-pub(crate) fn scan_trae_source_backed_explicit_v0(
-    path: &Path,
-    emit: &mut dyn FnMut(TraeSourceBackedPageV0) -> TraeSourceBackedResultV0<()>,
-) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
-    let canonical_path = explicit_trae_leaf(path)?;
-    let authority = acquire_source(
-        crate::test_provider_sqlite_data_root(),
-        &canonical_path,
-        DateTime::<Utc>::UNIX_EPOCH,
-    )?;
-    scan_trae_authority(&canonical_path, &authority, emit)
 }
 
 pub(super) fn scan_trae_authority(

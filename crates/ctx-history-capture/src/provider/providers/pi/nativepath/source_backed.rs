@@ -16,8 +16,6 @@ use ctx_history_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::cell::Cell;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -49,21 +47,6 @@ const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
 const PARSER_REVISION: &str = "pi-shared-jsonl-v2";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
 const MAX_HEADER_PROBE_RECORDS: usize = 64;
-
-#[cfg(test)]
-thread_local! {
-    static HEADER_PROBES: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(super) fn reset_pi_header_probes() {
-    HEADER_PROBES.set(0);
-}
-
-#[cfg(test)]
-pub(super) fn pi_header_probes() -> usize {
-    HEADER_PROBES.get()
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PiSourceBackedRoot {
@@ -420,8 +403,6 @@ impl JsonlFamilyProjector for PiProjector {
 }
 
 fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
-    #[cfg(test)]
-    HEADER_PROBES.with(|count| count.set(count.get().saturating_add(1)));
     let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
         return Ok(None);
     };

@@ -98,23 +98,6 @@ impl OpenCodeSourceBackedRegistration {
         self.dialect.provider
     }
 
-    #[cfg(test)]
-    pub(crate) fn scan(
-        self,
-        path: &Path,
-        emit: &mut dyn FnMut(Vec<CoreRecord>) -> OpenCodeSourceBackedResult<()>,
-    ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-        scan_source(
-            crate::test_provider_sqlite_data_root(),
-            path,
-            self.dialect,
-            &mut |output| match output {
-                OpenCodeScanOutput::Begin(_) => Ok(()),
-                OpenCodeScanOutput::Document(document) => emit(vec![document]),
-            },
-        )
-    }
-
     fn owns_source(self, source: &SourceKey) -> bool {
         schema_family_for_source(self.dialect, source).is_some()
     }
@@ -266,26 +249,6 @@ impl SqliteSourceValue {
             _ => None,
         }
     }
-}
-
-#[cfg(test)]
-fn scan_source(
-    data_root: &Path,
-    path: &Path,
-    dialect: &'static OpenCodeSqliteDialect,
-    emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
-) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
-    let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
-    let scan = scan_pinned_source(
-        path,
-        dialect,
-        &observation,
-        authorized.sqlite_snapshot,
-        emit,
-    )?;
-    authorized.source_root.revalidate()?;
-    Ok(scan)
 }
 
 fn scan_pinned_source(
@@ -557,17 +520,6 @@ fn open_root_authorized_snapshot_retained(
     path: &Path,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     open_root_authorized_snapshot_retained_with_hook(data_root, path, || {})
-}
-
-#[cfg(test)]
-fn open_root_authorized_snapshot_with_hook(
-    data_root: &Path,
-    path: &Path,
-    after_authorize: impl FnOnce(),
-) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    let authorized =
-        open_root_authorized_snapshot_retained_with_hook(data_root, path, after_authorize)?;
-    Ok((authorized.source_root, authorized.sqlite_snapshot))
 }
 
 fn open_root_authorized_snapshot_retained_with_hook(

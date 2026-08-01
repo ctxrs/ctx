@@ -6,9 +6,6 @@ use std::{
     sync::Mutex,
 };
 
-#[cfg(test)]
-use std::cell::Cell;
-
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
@@ -55,52 +52,6 @@ const WARP_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.warp.logical-leaf.v1\0";
 const WARP_ORDERING_KEY_MAX_BYTES: usize = 240 * 1024;
 const WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES: u64 = 64 * 5;
 const WARP_NATIVE_SQLITE_CONVERSATION_ROW_OVERHEAD_BYTES: u64 = 64 * 4;
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct WarpSourceBackedWork {
-    pub(super) snapshot_opens: u64,
-    pub(super) source_bytes_copied: u64,
-    pub(super) terminal_fences: u64,
-    pub(super) terminal_revalidations: u64,
-    pub(super) active_snapshots: u64,
-    pub(super) max_active_snapshots: u64,
-    pub(super) logical_observation_queries: u64,
-    pub(super) provider_projections: u64,
-    pub(super) projection_queries: u64,
-}
-
-#[cfg(test)]
-thread_local! {
-    static WARP_SOURCE_BACKED_WORK: Cell<WarpSourceBackedWork> =
-        Cell::new(WarpSourceBackedWork::default());
-}
-
-#[cfg(test)]
-pub(super) fn reset_warp_source_backed_work() {
-    WARP_SOURCE_BACKED_WORK.set(WarpSourceBackedWork::default());
-}
-
-#[cfg(test)]
-pub(super) fn warp_source_backed_work() -> WarpSourceBackedWork {
-    WARP_SOURCE_BACKED_WORK.get()
-}
-
-#[cfg(test)]
-fn update_warp_source_backed_work(update: impl FnOnce(&mut WarpSourceBackedWork)) {
-    WARP_SOURCE_BACKED_WORK.set({
-        let mut work = WARP_SOURCE_BACKED_WORK.get();
-        update(&mut work);
-        work
-    });
-}
-
-#[cfg(test)]
-pub(super) fn record_warp_projection_query() {
-    update_warp_source_backed_work(|work| {
-        work.projection_queries = work.projection_queries.saturating_add(1);
-    });
-}
 
 #[derive(Debug, Error)]
 pub(crate) enum WarpSourceBackedErrorV0 {
@@ -318,8 +269,6 @@ fn finish_warp_authority(
             "Warp retained terminal fence changed before publication",
         ));
     }
-    #[cfg(test)]
-    authority.retained.record_snapshot_work();
     Ok(())
 }
 
@@ -382,32 +331,6 @@ impl RetainedWarpDirectory {
         self.directory.revalidate().map_err(route_error)?;
         self.root.revalidate().map_err(route_error)
     }
-
-    #[cfg(test)]
-    fn record_snapshot_work(&self) {
-        let counters = self.sqlite.snapshot_counters();
-        update_warp_source_backed_work(|work| {
-            work.snapshot_opens = work
-                .snapshot_opens
-                .saturating_add(counters.immutable_snapshot_opens())
-                .saturating_add(counters.copied_snapshot_opens());
-            work.source_bytes_copied = work
-                .source_bytes_copied
-                .saturating_add(counters.source_bytes_copied());
-            work.terminal_fences = work
-                .terminal_fences
-                .saturating_add(counters.terminal_fences());
-            work.terminal_revalidations = work
-                .terminal_revalidations
-                .saturating_add(counters.terminal_revalidations());
-            work.active_snapshots = work
-                .active_snapshots
-                .saturating_add(counters.active_snapshots());
-            work.max_active_snapshots = work
-                .max_active_snapshots
-                .max(counters.max_active_snapshots());
-        });
-    }
 }
 
 fn observe_warp_logical_fingerprint(
@@ -425,10 +348,6 @@ fn observe_warp_logical_fingerprint(
         [],
         |row| row.get(0),
     )?;
-    #[cfg(test)]
-    update_warp_source_backed_work(|work| {
-        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
-    });
     if invalid_rowid {
         return Err(WarpSourceBackedErrorV0::Capture(
             CaptureError::InvalidPayload(
@@ -486,10 +405,6 @@ fn observe_warp_conversation_rows(
          from agent_conversations where rowid > 0 order by rowid",
     )?;
     let mut rows = statement.query([hydration_limit])?;
-    #[cfg(test)]
-    update_warp_source_backed_work(|work| {
-        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
-    });
     while let Some(row) = rows.next()? {
         digest.update(b"conversation\0");
         digest.update(row.get::<_, i64>(0)?.to_be_bytes());
@@ -540,10 +455,6 @@ fn observe_warp_task_rows(
          order by t.task_id collate binary"
     ))?;
     let mut rows = statement.query([])?;
-    #[cfg(test)]
-    update_warp_source_backed_work(|work| {
-        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
-    });
     while let Some(row) = rows.next()? {
         digest.update(b"task\0");
         digest.update(row.get::<_, i64>(0)?.to_be_bytes());
@@ -572,11 +483,6 @@ fn scan_warp_logical_snapshot(
     path: &Path,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> WarpSourceBackedResultV0<DocumentSourceTerminal> {
-    #[cfg(test)]
-    update_warp_source_backed_work(|work| {
-        work.provider_projections = work.provider_projections.saturating_add(1);
-        work.projection_queries = work.projection_queries.saturating_add(1);
-    });
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);

@@ -6,12 +6,6 @@ use std::{
 
 use crate::{common::io::OpenedProviderSourceFile, CaptureError, Result};
 
-#[cfg(test)]
-use crate::common::io::{open_provider_source_path, OpenedProviderSourcePath};
-
-#[cfg(test)]
-use super::normalized_auggie_authority_path;
-
 /// Short-lived handle for one actively read Auggie document.
 ///
 /// Complete inventories retain only closed observations and reopen through
@@ -49,21 +43,6 @@ impl AuggieFileStamp {
             authority_fingerprint: opened.authority_fingerprint(),
             opened,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn observe(path: &Path) -> Result<Self> {
-        let path = normalized_auggie_authority_path(path)?;
-        let opened = match open_provider_source_path(&path)? {
-            OpenedProviderSourcePath::File(opened) => opened,
-            OpenedProviderSourcePath::Directory(_) => {
-                return Err(invalid_source_path(
-                    &path,
-                    "Auggie transcript paths must be regular files",
-                ));
-            }
-        };
-        Self::from_opened(path, opened)
     }
 
     pub(super) fn revalidate(&self) -> Result<bool> {

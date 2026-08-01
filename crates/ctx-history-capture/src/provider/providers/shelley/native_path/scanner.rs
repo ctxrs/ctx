@@ -18,7 +18,6 @@ pub(super) struct ShelleyQueryCounters {
     pub(super) pages_emitted: u64,
     pub(super) peak_buffered_rows: u64,
     pub(super) peak_buffered_bytes: u64,
-    pub(super) hydration_snapshot_opens: u64,
 }
 
 #[cfg(test)]
@@ -34,7 +33,6 @@ thread_local! {
             pages_emitted: 0,
             peak_buffered_rows: 0,
             peak_buffered_bytes: 0,
-            hydration_snapshot_opens: 0,
         }) };
 }
 
@@ -81,13 +79,6 @@ pub(super) fn record_shelley_buffered_results(buffered_rows: usize, buffered_byt
         counters.peak_buffered_bytes = counters
             .peak_buffered_bytes
             .max(u64::try_from(buffered_bytes).unwrap_or(u64::MAX));
-    });
-}
-
-#[cfg(test)]
-pub(super) fn record_shelley_hydration_snapshot() {
-    record_query(|counters| {
-        counters.hydration_snapshot_opens = counters.hydration_snapshot_opens.saturating_add(1);
     });
 }
 

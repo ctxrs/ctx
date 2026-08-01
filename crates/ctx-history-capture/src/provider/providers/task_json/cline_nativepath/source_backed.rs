@@ -5,12 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(test)]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
@@ -111,12 +105,6 @@ pub(crate) type TaskJsonSourceBackedResult<T> = Result<T, TaskJsonSourceBackedEr
 pub(crate) struct TaskJsonDocumentTreeAdapter {
     dialect: TaskJsonNativeDialect,
     selected: Box<[ProviderSource]>,
-    #[cfg(test)]
-    fixture_operations: Option<Arc<TaskJsonFixtureOperations>>,
-    #[cfg(test)]
-    terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
-    #[cfg(test)]
-    leaf_workers: Option<usize>,
 }
 
 /// Immutable task identity carried with one independently scannable leaf.
@@ -166,29 +154,6 @@ impl TaskJsonTreeAuthority {
     }
 }
 
-#[cfg(test)]
-#[derive(Default)]
-pub(super) struct TaskJsonFixtureOperations {
-    ordinal_membership_probes: AtomicUsize,
-    projection_scans: AtomicUsize,
-    hydration_scans: AtomicUsize,
-}
-
-#[cfg(test)]
-impl TaskJsonFixtureOperations {
-    pub(super) fn ordinal_membership_probes(&self) -> usize {
-        self.ordinal_membership_probes.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn projection_scans(&self) -> usize {
-        self.projection_scans.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn hydration_scans(&self) -> usize {
-        self.hydration_scans.load(Ordering::Relaxed)
-    }
-}
-
 pub(crate) fn cline_task_json_source_backed_adapter(
     selected: &[ProviderSource],
 ) -> TaskJsonDocumentTreeAdapter {
@@ -206,37 +171,7 @@ impl TaskJsonDocumentTreeAdapter {
         Self {
             dialect,
             selected: selected.to_vec().into_boxed_slice(),
-            #[cfg(test)]
-            fixture_operations: None,
-            #[cfg(test)]
-            terminal_revalidation_hook: None,
-            #[cfg(test)]
-            leaf_workers: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_fixture_operations(
-        mut self,
-        operations: Arc<TaskJsonFixtureOperations>,
-    ) -> Self {
-        self.fixture_operations = Some(operations);
-        self
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_terminal_revalidation_hook(
-        mut self,
-        hook: Arc<dyn Fn() + Send + Sync>,
-    ) -> Self {
-        self.terminal_revalidation_hook = Some(hook);
-        self
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_leaf_workers(mut self, leaf_workers: usize) -> Self {
-        self.leaf_workers = Some(leaf_workers);
-        self
     }
 }
 
@@ -253,10 +188,6 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
     }
 
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
-        #[cfg(test)]
-        if let Some(leaf_workers) = self.leaf_workers {
-            return DocumentLeafExecutionPolicy::IndependentCapped(leaf_workers);
-        }
         document_leaf_execution_policy(self.dialect.provider)
     }
 
@@ -281,17 +212,7 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        #[cfg(test)]
-        if let Some(operations) = self.fixture_operations.as_ref() {
-            operations
-                .ordinal_membership_probes
-                .fetch_add(1, Ordering::Relaxed);
-        }
         let current = authority.retained_task(self.dialect, leaf)?;
-        #[cfg(test)]
-        if let Some(operations) = self.fixture_operations.as_ref() {
-            operations.projection_scans.fetch_add(1, Ordering::Relaxed);
-        }
         sink.begin_source(leaf.source.clone())?;
         scan_task(self.dialect, &authority.discovery, current, |document| {
             sink.emit_core_record(document)
@@ -302,10 +223,6 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
-        #[cfg(test)]
-        if let Some(hook) = self.terminal_revalidation_hook.as_ref() {
-            hook();
-        }
         revalidate_document_tree(self.dialect, tree)
     }
 }
@@ -523,33 +440,6 @@ fn scan_task(
             })
         })?;
     task_terminal(dialect, accumulator, checkpoint).map_err(task_route_error)
-}
-
-#[cfg(test)]
-pub(super) fn collect_task_json_test_documents(
-    provider: CaptureProvider,
-    root: &Path,
-) -> SourceBackedRouteResult<Vec<CoreRecord>> {
-    let dialect = match provider {
-        CaptureProvider::Cline => TaskJsonNativeDialect::CLINE,
-        CaptureProvider::RooCode => TaskJsonNativeDialect::ROO,
-        _ => {
-            return Err(SourceBackedRouteError::new(
-                SourceBackedRouteErrorKind::InvalidSource,
-                "test document collection supports only Cline and Roo Code",
-            ))
-        }
-    };
-    let authority = discover_root(dialect, root)
-        .map_err(|error| task_route_error(TaskJsonSourceBackedError::Native(error)))?;
-    let mut documents = Vec::new();
-    for task in authority.task_routes() {
-        scan_task(dialect, &authority, task, |document| {
-            documents.push(document);
-            Ok(())
-        })?;
-    }
-    Ok(documents)
 }
 
 fn project_native_page(

@@ -8,9 +8,9 @@ use super::{
     catalog::{CatalogRoute, CatalogSelection, RouteKind},
     hash_path,
     index::{DiscoveryIndex, IndexedSession},
-    invalid, note_discovery_operation, source_backed, CodeBuddyDocumentLeaf, CodeBuddyObservedFile,
-    CodeBuddySourceShape, Digest, DocumentLeafFingerprint, DocumentLeafKind, ObservedDocumentLeaf,
-    Result, Sha256, SourceKey, LEAF_DOMAIN, TREE_DOMAIN,
+    invalid, source_backed, CodeBuddyDocumentLeaf, CodeBuddyObservedFile, CodeBuddySourceShape,
+    Digest, DocumentLeafFingerprint, DocumentLeafKind, ObservedDocumentLeaf, Result, Sha256,
+    SourceKey, LEAF_DOMAIN, TREE_DOMAIN,
 };
 
 pub(super) fn logical_leaves(
@@ -308,32 +308,6 @@ fn extension_fingerprint(
     DocumentLeafFingerprint::new(digest.finalize().into())
 }
 
-#[cfg(test)]
-pub(super) fn full_scan_extension_fingerprint(
-    source: &SourceKey,
-    session: &Path,
-    project_index: &Path,
-    routes: &[CatalogRoute],
-) -> DocumentLeafFingerprint {
-    let session_index = session.join("index.json");
-    let messages = session.join("messages");
-    let mut digest = Sha256::new();
-    digest.update(LEAF_DOMAIN);
-    digest.update(source.exact_descriptor_digest());
-    for route in routes.iter().filter(|route| {
-        route.relative_path == session
-            || route.relative_path == session_index
-            || route.relative_path == project_index
-            || route.relative_path == messages
-            || route.relative_path.starts_with(&messages)
-    }) {
-        digest.update([route.kind.tag()]);
-        hash_path(&mut digest, &route.relative_path);
-        digest.update(route.authority_fingerprint);
-    }
-    DocumentLeafFingerprint::new(digest.finalize().into())
-}
-
 pub(super) fn tree_fingerprint(
     selection: CatalogSelection,
     selected_relative_path: &Path,
@@ -345,7 +319,6 @@ pub(super) fn tree_fingerprint(
     digest.update([selection.tag()]);
     hash_path(&mut digest, selected_relative_path);
     for route in routes {
-        note_discovery_operation(0);
         digest.update([route.kind.tag()]);
         hash_path(&mut digest, &route.relative_path);
         digest.update(route.authority_fingerprint);
