@@ -122,7 +122,7 @@ pub(super) fn allowed_tool_arguments(name: &str) -> Option<&'static [&'static st
             "max_sql_bytes",
             "timeout_ms",
         ]),
-        "show_session" => Some(&["ctx_session_id", "mode"]),
+        "show_session" => Some(&["ctx_session_id", "mode", "limit", "cursor"]),
         "show_event" => Some(&["ctx_event_id", "before", "after", "window"]),
         "blame" => Some(&["target", "limit", "cursor"]),
         _ => None,

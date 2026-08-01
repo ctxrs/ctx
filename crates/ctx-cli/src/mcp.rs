@@ -59,7 +59,9 @@ use crate::source_sql::SqlCompatibility;
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-06-18"];
 const MCP_MAX_LINE_BYTES: usize = 1024 * 1024;
-const MCP_MAX_SESSION_EVENTS: usize = 200;
+const MCP_DEFAULT_SESSION_PAGE_LIMIT: usize = 200;
+const MCP_MAX_SESSION_PAGE_LIMIT: usize = 4_096;
+const MCP_MAX_SESSION_CURSOR_BYTES: usize = 4_096;
 
 #[derive(Debug, Args)]
 pub(crate) struct McpArgs {
@@ -725,10 +727,23 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "show_session",
             "title": "Show Session",
-            "description": "Return an indexed session transcript by ctx session id.",
+            "description": "Return one bounded page of an indexed session transcript by ctx session id. Continue with next_cursor while has_more is true.",
             "inputSchema": object_schema(json!({
                 "ctx_session_id": { "type": "string" },
                 "mode": { "type": "string", "enum": ["full", "lite", "log"], "default": "lite" },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MCP_MAX_SESSION_PAGE_LIMIT,
+                    "default": MCP_DEFAULT_SESSION_PAGE_LIMIT,
+                    "description": "Maximum selected transcript events to return after applying mode."
+                },
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MCP_MAX_SESSION_CURSOR_BYTES,
+                    "description": "Opaque next_cursor from the preceding page of this exact session and Core generation."
+                },
             }), vec!["ctx_session_id"]),
             "annotations": { "readOnlyHint": true },
         }),

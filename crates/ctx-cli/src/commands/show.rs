@@ -21,7 +21,7 @@ pub(crate) struct ShowSessionArgs {
     pub(crate) provider_session: Option<String>,
     #[arg(long, value_enum, default_value_t = TranscriptMode::Lite)]
     pub(crate) mode: TranscriptMode,
-    #[arg(long, help = "Return at most this many events (capped at 4096)")]
+    #[arg(long, help = "Return at most this many selected transcript events")]
     pub(crate) max_events: Option<usize>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) format: OutputFormat,
