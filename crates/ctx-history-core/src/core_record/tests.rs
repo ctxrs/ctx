@@ -136,7 +136,7 @@ fn binding() -> RepositoryBinding {
                 confidence: RepositoryEvidenceConfidence::High,
             },
         ],
-        association_policy_revision: 1,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     }
 }
 
@@ -242,7 +242,10 @@ fn repository_contract_rejects_unscoped_and_mismatched_observations() {
 #[test]
 fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_access() {
     let mut prior = record();
-    prior.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
+    prior.repository_candidate_evidence.insert(
+        RepositoryCandidateKind::DeclaredToolWorkdir,
+        "/old/repo".to_owned(),
+    );
     prior.repository_bindings.push(binding());
     prior
         .repository_file_observations
@@ -253,12 +256,15 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
             prior_relative_path: None,
         });
     let mut current = record();
-    current.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
+    current.repository_candidate_evidence.insert(
+        RepositoryCandidateKind::DeclaredToolWorkdir,
+        "/old/repo".to_owned(),
+    );
     current.repository_abstentions.push(RepositoryAbstention {
         evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
         reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
         detail: Some("candidate_missing_before_certification".to_owned()),
-        association_policy_revision: 1,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     });
 
     assert!(current.needs_prior_repository_certificate());
@@ -289,7 +295,7 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
         evidence_kind: RepositoryEvidenceKind::SessionCwd,
         reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
         detail: None,
-        association_policy_revision: 1,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     }];
     assert!(!wrong_source.reuse_prior_repository_certificate(&prior));
 }
@@ -297,17 +303,23 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
 #[test]
 fn prior_repository_certificate_is_bound_to_exact_generation_inputs() {
     let mut prior = record();
-    prior.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
+    prior.repository_candidate_evidence.insert(
+        RepositoryCandidateKind::DeclaredToolWorkdir,
+        "/old/repo".to_owned(),
+    );
     prior.repository_bindings.push(binding());
 
     let missing = || {
         let mut current = record();
-        current.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
+        current.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::DeclaredToolWorkdir,
+            "/old/repo".to_owned(),
+        );
         current.repository_abstentions.push(RepositoryAbstention {
             evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
             reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
             detail: Some("candidate_missing_before_certification".to_owned()),
-            association_policy_revision: 1,
+            association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
         });
         current
     };
@@ -330,9 +342,11 @@ fn prior_repository_certificate_is_bound_to_exact_generation_inputs() {
     assert!(!changed_command_digest.reuse_prior_repository_certificate(&prior));
 
     let mut changed_candidate = missing();
-    changed_candidate
-        .repository_candidate_evidence
-        .declared_tool_workdir = Some("/different/repo".to_owned());
+    changed_candidate.repository_candidate_evidence = RepositoryCandidateEvidence::default();
+    changed_candidate.repository_candidate_evidence.insert(
+        RepositoryCandidateKind::DeclaredToolWorkdir,
+        "/different/repo".to_owned(),
+    );
     assert!(!changed_candidate.reuse_prior_repository_certificate(&prior));
 }
 
@@ -399,22 +413,35 @@ fn object_observation_requires_binding_object_format() {
 #[test]
 fn repository_abstention_preserves_evidence_kind() {
     let mut record = record();
-    record.repository_candidate_evidence = RepositoryCandidateEvidence {
-        repository_observation_revision: CORE_REPOSITORY_OBSERVATION_REVISION,
-        bounded_shell_subset_revision: CORE_BOUNDED_SHELL_SUBSET_REVISION,
-        outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-        session_cwd: Some("/control/workspace".to_owned()),
-        declared_tool_workdir: Some("/code/repo".to_owned()),
-        derived_effective_cwd: Some("/code/repo/crates".to_owned()),
-        command_specific_repository_path: Some("/code/other".to_owned()),
-        outcome_operation_repository_path: Some("/code/repo".to_owned()),
-        outcome_output_repository_path: Some("/code/repo".to_owned()),
-    };
+    for (kind, path) in [
+        (RepositoryCandidateKind::SessionCwd, "/control/workspace"),
+        (RepositoryCandidateKind::DeclaredToolWorkdir, "/code/repo"),
+        (
+            RepositoryCandidateKind::DerivedEffectiveCwd,
+            "/code/repo/crates",
+        ),
+        (
+            RepositoryCandidateKind::CommandSpecificRepositoryPath,
+            "/code/other",
+        ),
+        (
+            RepositoryCandidateKind::OutcomeOperationRepositoryPath,
+            "/code/repo",
+        ),
+        (
+            RepositoryCandidateKind::OutcomeOutputRepositoryPath,
+            "/code/repo",
+        ),
+    ] {
+        record
+            .repository_candidate_evidence
+            .insert(kind, path.to_owned());
+    }
     record.repository_abstentions.push(RepositoryAbstention {
         evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
         reason: RepositoryAbstentionReason::AmbiguousCandidates,
         detail: Some("multiple certified boundaries".to_owned()),
-        association_policy_revision: 1,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     });
     let encoded = record.encode_stored().unwrap();
     let decoded = CoreRecord::decode_stored(&encoded).unwrap();
@@ -425,17 +452,74 @@ fn repository_abstention_preserves_evidence_kind() {
     assert_eq!(
         decoded
             .repository_candidate_evidence
-            .declared_tool_workdir
-            .as_deref(),
-        Some("/code/repo")
+            .paths(RepositoryCandidateKind::DeclaredToolWorkdir)
+            .collect::<Vec<_>>(),
+        vec!["/code/repo"]
     );
     assert_eq!(
         decoded
             .repository_candidate_evidence
-            .derived_effective_cwd
-            .as_deref(),
-        Some("/code/repo/crates")
+            .paths(RepositoryCandidateKind::DerivedEffectiveCwd)
+            .collect::<Vec<_>>(),
+        vec!["/code/repo/crates"]
     );
+}
+
+#[test]
+fn repository_candidate_evidence_is_a_complete_order_independent_set() {
+    let mut forward = RepositoryCandidateEvidence::default();
+    let mut reverse = RepositoryCandidateEvidence::default();
+    let candidates = [
+        (
+            RepositoryCandidateKind::FileActivityPath,
+            "/repos/a/src/a.rs",
+        ),
+        (
+            RepositoryCandidateKind::FileActivityPath,
+            "/repos/b/src/b.rs",
+        ),
+        (
+            RepositoryCandidateKind::CommandSpecificRepositoryPath,
+            "/repos/a",
+        ),
+        (
+            RepositoryCandidateKind::CommandSpecificRepositoryPath,
+            "/repos/b",
+        ),
+    ];
+    for (kind, path) in candidates {
+        forward.insert(kind, path.to_owned());
+    }
+    for (kind, path) in candidates.into_iter().rev() {
+        reverse.insert(kind, path.to_owned());
+    }
+    forward.insert(
+        RepositoryCandidateKind::FileActivityPath,
+        "/repos/a/src/a.rs".to_owned(),
+    );
+
+    assert_eq!(forward, reverse);
+    assert_eq!(
+        forward
+            .paths(RepositoryCandidateKind::FileActivityPath)
+            .collect::<Vec<_>>(),
+        vec!["/repos/a/src/a.rs", "/repos/b/src/b.rs"]
+    );
+    forward.validate_contract().unwrap();
+
+    let mut noncanonical = forward;
+    noncanonical.candidates.reverse();
+    assert!(matches!(
+        noncanonical.validate_contract(),
+        Err(CoreRecordError::NonCanonicalRepositoryCandidateEvidence)
+    ));
+
+    let mut stale_policy = reverse;
+    stale_policy.association_policy_revision -= 1;
+    assert!(matches!(
+        stale_policy.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryRevisions)
+    ));
 }
 
 #[test]
@@ -659,12 +743,62 @@ fn replacement_lineage_and_pull_request_shapes_are_explicit() {
 }
 
 #[test]
+fn pull_request_outcome_must_match_its_referenced_repository_binding() {
+    let pull_request = RepositoryPullRequestIdentity {
+        forge_repository: RepositoryAlias {
+            kind: RepositoryAliasKind::Forge,
+            host: "github.com".to_owned(),
+            namespace: vec!["ctxrs".to_owned()],
+            name: "ctx".to_owned(),
+            remote_name: None,
+        },
+        number: 224,
+        provider_id: None,
+    };
+    let mut created = outcome(RepositoryOutcomeKind::PullRequestCreated);
+    created.produced_object_ids.clear();
+    created.pull_request = Some(pull_request);
+
+    let mut record = record();
+    record.repository_bindings.push(binding());
+    record
+        .repository_vcs_observations
+        .push(RepositoryVcsObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            kind: RepositoryVcsObservationKind::Outcome(Box::new(created)),
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+            relative_path: None,
+        });
+    record.validate_contract().unwrap();
+
+    let RepositoryVcsObservationKind::Outcome(outcome) =
+        &mut record.repository_vcs_observations[0].kind
+    else {
+        unreachable!();
+    };
+    outcome.pull_request.as_mut().unwrap().forge_repository.name = "other".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+
+    record.repository_bindings[0].aliases.clear();
+    record.repository_bindings[0].logical_repository_id = "forge:github.com/ctxrs/ctx".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+}
+
+#[test]
 fn every_repository_revision_changes_the_core_contract_fingerprint() {
     let current = CoreContractRevisions::current();
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "f85156e7951c36b4a069c25f80f2dfe5e9079232b290519349bfd352531d5d3e"
+        "41ef12d599e6ebb8769b23e0e47e47a40e6939dd835b82aa2cc145038ac2d417"
     );
     for changed in [
         CoreContractRevisions {
@@ -677,6 +811,10 @@ fn every_repository_revision_changes_the_core_contract_fingerprint() {
         },
         CoreContractRevisions {
             bounded_shell_subset: current.bounded_shell_subset + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            repository_association_policy: current.repository_association_policy + 1,
             ..current
         },
         CoreContractRevisions {

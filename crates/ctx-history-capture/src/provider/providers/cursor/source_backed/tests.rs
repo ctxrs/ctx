@@ -81,9 +81,9 @@ mod repository_tests {
         assert_eq!(
             call_annotation
                 .repository_candidate_evidence
-                .declared_tool_workdir
-                .as_deref(),
-            Some(repo.to_string_lossy().as_ref())
+                .paths(ctx_history_core::RepositoryCandidateKind::DeclaredToolWorkdir)
+                .collect::<Vec<_>>(),
+            vec![repo.to_string_lossy().as_ref()]
         );
         assert_eq!(
             call_annotation.repository_file_observations[0].relative_path,

@@ -8,9 +8,9 @@ use std::{
 
 use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
-    RepositoryEvidenceKind, RepositoryFileObservationKind, RepositoryOutcomeKind,
-    RepositoryOutcomeLinkage, RepositoryOutcomeObservation, RepositoryVcsObservationKind,
-    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileObservationKind,
+    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
+    RepositoryVcsObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use tempfile::TempDir;
 
@@ -72,6 +72,16 @@ fn has_reason(
         .any(|abstention| abstention.reason == reason)
 }
 
+fn candidate_paths(
+    annotation: &ctx_history_core::CoreRecordAnnotation,
+    kind: RepositoryCandidateKind,
+) -> Vec<&str> {
+    annotation
+        .repository_candidate_evidence
+        .paths(kind)
+        .collect()
+}
+
 #[test]
 fn control_workspace_and_declared_repo_bind_only_the_repo() {
     let temp = TempDir::new().unwrap();
@@ -104,12 +114,52 @@ fn control_workspace_and_declared_repo_bind_only_the_repo() {
         RepositoryEvidenceKind::DeclaredToolWorkdir
     );
     assert_eq!(
-        annotation
-            .repository_candidate_evidence
-            .session_cwd
-            .as_deref(),
-        Some(control.to_string_lossy().as_ref())
+        candidate_paths(&annotation, RepositoryCandidateKind::SessionCwd),
+        vec![control.to_string_lossy().as_ref()]
     );
+}
+
+#[test]
+fn multi_repository_candidate_evidence_is_complete_and_input_order_independent() {
+    let temp = TempDir::new().unwrap();
+    let first = repository(temp.path(), "candidate-first", None);
+    let second = repository(temp.path(), "candidate-second", None);
+    let observations = [
+        UnscopedFileObservation {
+            path: first.join("tracked.txt").to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Read,
+        },
+        UnscopedFileObservation {
+            path: second.join("tracked.txt").to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        },
+    ];
+    let forward = attribute(AttributionInput {
+        file_observations: observations.to_vec(),
+        ..AttributionInput::default()
+    });
+    let reverse = attribute(AttributionInput {
+        file_observations: observations.into_iter().rev().collect(),
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(
+        forward.repository_candidate_evidence,
+        reverse.repository_candidate_evidence
+    );
+    let mut expected = vec![
+        first.join("tracked.txt").to_string_lossy().into_owned(),
+        second.join("tracked.txt").to_string_lossy().into_owned(),
+    ];
+    expected.sort();
+    assert_eq!(
+        candidate_paths(&forward, RepositoryCandidateKind::FileActivityPath),
+        expected.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_eq!(forward.repository_bindings.len(), 2);
+    assert_eq!(forward.repository_file_observations.len(), 2);
 }
 
 #[test]
@@ -189,11 +239,8 @@ fn relative_absolute_cd_and_repeated_git_c_are_literal_and_multi_repo() {
     });
     assert_eq!(relative.repository_bindings.len(), 1);
     assert_eq!(
-        relative
-            .repository_candidate_evidence
-            .derived_effective_cwd
-            .as_deref(),
-        Some(first.to_string_lossy().as_ref())
+        candidate_paths(&relative, RepositoryCandidateKind::DerivedEffectiveCwd),
+        vec![first.to_string_lossy().as_ref()]
     );
     let absolute = attribute(AttributionInput {
         command: Some(format!("cd -- {} && git status", second.display())),
@@ -218,6 +265,16 @@ fn relative_absolute_cd_and_repeated_git_c_are_literal_and_multi_repo() {
         [
             "forge:github.com/acme/first",
             "forge:github.com/acme/second"
+        ]
+    );
+    assert_eq!(
+        candidate_paths(
+            &repeated,
+            RepositoryCandidateKind::CommandSpecificRepositoryPath
+        ),
+        vec![
+            first.to_string_lossy().as_ref(),
+            second.to_string_lossy().as_ref()
         ]
     );
 }
@@ -261,18 +318,15 @@ fn structured_workdir_and_git_c_bind_independently_supported_repositories() {
         evidence.kind == RepositoryEvidenceKind::CommandSpecificRepositoryPath
     }));
     assert_eq!(
-        annotation
-            .repository_candidate_evidence
-            .declared_tool_workdir
-            .as_deref(),
-        Some(workdir.to_string_lossy().as_ref())
+        candidate_paths(&annotation, RepositoryCandidateKind::DeclaredToolWorkdir),
+        vec![workdir.to_string_lossy().as_ref()]
     );
     assert_eq!(
-        annotation
-            .repository_candidate_evidence
-            .command_specific_repository_path
-            .as_deref(),
-        Some(command_repo.to_string_lossy().as_ref())
+        candidate_paths(
+            &annotation,
+            RepositoryCandidateKind::CommandSpecificRepositoryPath
+        ),
+        vec![command_repo.to_string_lossy().as_ref()]
     );
 }
 
@@ -359,11 +413,8 @@ fn literal_cd_is_preserved_as_candidate_evidence_but_not_opaque_operation_author
         assert!(annotation.repository_bindings.is_empty(), "{suffix}");
         assert!(has_reason(&annotation, reason), "{suffix}");
         assert_eq!(
-            annotation
-                .repository_candidate_evidence
-                .derived_effective_cwd
-                .as_deref(),
-            Some(first.to_string_lossy().as_ref())
+            candidate_paths(&annotation, RepositoryCandidateKind::DerivedEffectiveCwd),
+            vec![first.to_string_lossy().as_ref()]
         );
     }
 }
@@ -516,11 +567,8 @@ fn opaque_command_routes_block_outcomes_but_retain_structured_workdir() {
             RepositoryAbstentionReason::OutcomeRepositoryUnbound
         ));
         assert_eq!(
-            annotation
-                .repository_candidate_evidence
-                .declared_tool_workdir
-                .as_deref(),
-            Some(path.as_str())
+            candidate_paths(&annotation, RepositoryCandidateKind::DeclaredToolWorkdir),
+            vec![path.as_str()]
         );
     }
 }
@@ -805,6 +853,10 @@ fn candidate_products_abstain_before_any_git_probe() {
         &files,
         RepositoryAbstentionReason::CandidateMissingBeforeCertification
     ));
+    assert_eq!(
+        candidate_paths(&files, RepositoryCandidateKind::FileActivityPath).len(),
+        33
+    );
 
     let command = (0..33)
         .map(|index| format!("git -C /definitely-missing/ctx-command-{index} status"))

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -44,7 +44,7 @@ const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
-    "gemini-nativepath-source-backed-v0-p8-p5-exact-results";
+    "gemini-nativepath-source-backed-v0-p8-p6-core-result-linkage";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
 const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;
@@ -224,6 +224,8 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            native_item_ids: GeminiSourceNativeItemIds::default(),
+            emitted_event_digests: BTreeSet::new(),
         }))
     }
 }
@@ -240,6 +242,61 @@ struct GeminiProjector {
     repository_attributor: crate::repository_attribution::RepositoryAttributor,
     tool_contexts: BTreeMap<String, GeminiToolContextState>,
     linkage_capacity_exceeded: bool,
+    native_item_ids: GeminiSourceNativeItemIds,
+    emitted_event_digests: BTreeSet<[u8; 32]>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct GeminiSourceNativeItemIds {
+    header_seen: bool,
+    ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiSourceNativeItemProbe {
+    id: Option<String>,
+    session_id: Option<String>,
+}
+
+impl GeminiSourceNativeItemIds {
+    fn candidate(&mut self, payload: &[u8]) -> Option<String> {
+        let Ok(probe) = serde_json::from_slice::<GeminiSourceNativeItemProbe>(payload) else {
+            return None;
+        };
+        if probe
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| !session_id.trim().is_empty())
+        {
+            self.header_seen = true;
+            return None;
+        }
+        if !self.header_seen {
+            return None;
+        }
+        probe.id.filter(|id| !id.trim().is_empty())
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    fn remember(&mut self, id: Option<String>) {
+        if let Some(id) = id {
+            self.ids.insert(id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn admit(&mut self, payload: &[u8]) -> bool {
+        let candidate = self.candidate(payload);
+        if candidate.as_deref().is_some_and(|id| self.contains(id)) {
+            return false;
+        }
+        self.remember(candidate);
+        true
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -264,8 +321,15 @@ impl JsonlFamilyProjector for GeminiProjector {
         record: JsonlRecordRef<'_>,
         emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
     ) -> crate::Result<()> {
+        let native_item_id = self.native_item_ids.candidate(record.bytes());
+        if native_item_id
+            .as_deref()
+            .is_some_and(|id| self.native_item_ids.contains(id))
+        {
+            return Ok(());
+        }
         let evidence = record.evidence();
-        for event in self
+        let events = self
             .parser
             .project(
                 record.bytes(),
@@ -274,8 +338,16 @@ impl JsonlFamilyProjector for GeminiProjector {
                 evidence.byte_end_exclusive(),
                 evidence.record_digest(),
             )
-            .map_err(capture_scan_error)?
-        {
+            .map_err(capture_scan_error)?;
+        if !events.is_empty() {
+            self.native_item_ids.remember(native_item_id);
+        }
+        for event in events {
+            let event_id =
+                gemini_event_id(&self.source, self.session_id, &event).map_err(capture_error)?;
+            if !self.emitted_event_digests.insert(event_id.digest()) {
+                continue;
+            }
             let annotation = self.attribution_for_event(&event);
             emit(
                 project_event(
@@ -322,20 +394,7 @@ fn gemini_attribution_for_event(
     linkage_capacity_exceeded: &mut bool,
     event: &super::GeminiRetainedEvent,
 ) -> ctx_history_core::CoreRecordAnnotation {
-    let structured_content = if matches!(&event.body, GeminiEventBody::Message { .. })
-        && event.safe_file_touches.is_empty()
-    {
-        None
-    } else {
-        Some(serde_json::json!({
-            "details": (!matches!(&event.body, GeminiEventBody::Message { .. }))
-                .then(|| serde_json::to_value(&event.body))
-                .transpose()
-                .ok()
-                .flatten(),
-            "file_touches": event.safe_file_touches,
-        }))
-    };
+    let structured_content = gemini_structured_content(event);
     let mut input = crate::repository_attribution::AttributionInput {
         activity_at_unix_ms: event
             .occurred_at
@@ -516,6 +575,53 @@ fn gemini_attribution_for_event(
     annotation
 }
 
+fn gemini_structured_content(event: &super::GeminiRetainedEvent) -> Option<serde_json::Value> {
+    if matches!(&event.body, GeminiEventBody::Message { .. }) && event.safe_file_touches.is_empty()
+    {
+        return None;
+    }
+    let details = match &event.body {
+        GeminiEventBody::Message { .. } => None,
+        GeminiEventBody::OutputDiagnostic {
+            result,
+            call_id,
+            tool_name,
+            command,
+            declared_workdir,
+            file_paths,
+            ambiguous_native_fields,
+            outcome,
+            exit_code,
+            duration_ms,
+        } => Some(serde_json::json!({
+            "kind": "output_diagnostic",
+            "complete_result": result.as_ref().map(|_| serde_json::json!({
+                "location": "normalized_body",
+                "retained_body_sha256": hex_digest(event.body_sha256),
+                "source_record_sha256": hex_digest(event.source_record.record_digest),
+            })),
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "command": command,
+            "declared_workdir": declared_workdir,
+            "file_paths": file_paths,
+            "ambiguous_native_fields": ambiguous_native_fields,
+            "outcome": outcome,
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+        })),
+        body => serde_json::to_value(body).ok(),
+    };
+    Some(serde_json::json!({
+        "details": details,
+        "file_touches": event.safe_file_touches,
+    }))
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn append_adapter_abstentions(
     annotation: &mut ctx_history_core::CoreRecordAnnotation,
     abstentions: Vec<(
@@ -529,7 +635,8 @@ fn append_adapter_abstentions(
             evidence_kind,
             reason,
             detail: Some(detail.to_owned()),
-            association_policy_revision: crate::repository_attribution::ASSOCIATION_POLICY_REVISION,
+            association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
         };
         if !annotation.repository_abstentions.contains(&abstention) {
             annotation.repository_abstentions.push(abstention);
@@ -743,17 +850,7 @@ fn project_event(
     annotation: ctx_history_core::CoreRecordAnnotation,
 ) -> GeminiSourceBackedResult<CoreRecord> {
     let GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
-    let native_item_key = NativeItemKey::native_id(
-        GEMINI_NATIVE_EVENT_NAMESPACE,
-        TypedKey::utf8(native_event_id)?,
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source,
-        session_id,
-        logical_item_kind: GEMINI_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
+    let event_id = gemini_event_id(source, session_id, &event)?;
     let native_event_id = TypedKey::utf8(native_event_id)?;
     let event_sequence = event
         .native_order
@@ -807,6 +904,25 @@ fn project_event(
     record.repository_vcs_observations = annotation.repository_vcs_observations;
     record.validate_contract()?;
     Ok(record)
+}
+
+fn gemini_event_id(
+    source: &SourceKey,
+    session_id: StableEntityId,
+    event: &super::GeminiRetainedEvent,
+) -> GeminiSourceBackedResult<StableEntityId> {
+    let GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
+    let native_item_key = NativeItemKey::native_id(
+        GEMINI_NATIVE_EVENT_NAMESPACE,
+        TypedKey::utf8(native_event_id)?,
+    )?;
+    Ok(derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: GEMINI_LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })?)
 }
 
 fn lexical_body(event: &super::GeminiRetainedEvent) -> String {
@@ -912,9 +1028,17 @@ pub(super) fn project_gemini_test_events(
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let mut tool_contexts = BTreeMap::new();
     let mut linkage_capacity_exceeded = false;
+    let mut emitted_event_digests = BTreeSet::new();
     events
         .into_iter()
-        .map(|event| {
+        .filter_map(|event| {
+            let event_id = match gemini_event_id(&source_key, session_id, &event) {
+                Ok(event_id) => event_id,
+                Err(error) => return Some(Err(error)),
+            };
+            if !emitted_event_digests.insert(event_id.digest()) {
+                return None;
+            }
             let annotation = gemini_attribution_for_event(
                 &mut repository_attributor,
                 &session,
@@ -922,7 +1046,7 @@ pub(super) fn project_gemini_test_events(
                 &mut linkage_capacity_exceeded,
                 &event,
             );
-            project_event(
+            Some(project_event(
                 &source_key,
                 session_id,
                 parent_session_id,
@@ -930,7 +1054,7 @@ pub(super) fn project_gemini_test_events(
                 &session,
                 event,
                 annotation,
-            )
+            ))
         })
         .collect()
 }

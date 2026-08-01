@@ -55,7 +55,7 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
             kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
             confidence: RepositoryEvidenceConfidence::High,
         }],
-        association_policy_revision: 1,
+        association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     };
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     initial.begin_source(source.clone()).unwrap();
@@ -81,7 +81,8 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
                     evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
                     reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
                     detail: None,
-                    association_policy_revision: 1,
+                    association_policy_revision:
+                        ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
                 }],
                 ..CoreRecordAnnotation::default()
             },
@@ -140,7 +141,7 @@ fn replacement_does_not_reuse_repository_certificate_after_event_semantics_chang
             kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
             confidence: RepositoryEvidenceConfidence::High,
         }],
-        association_policy_revision: 1,
+        association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     };
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     initial.begin_source(source.clone()).unwrap();
@@ -166,7 +167,8 @@ fn replacement_does_not_reuse_repository_certificate_after_event_semantics_chang
                     evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
                     reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
                     detail: None,
-                    association_policy_revision: 1,
+                    association_policy_revision:
+                        ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
                 }],
                 ..CoreRecordAnnotation::default()
             },

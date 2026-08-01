@@ -490,7 +490,8 @@ impl GitSnapshot {
                 kind: evidence_kind,
                 confidence: RepositoryEvidenceConfidence::High,
             }],
-            association_policy_revision: super::ASSOCIATION_POLICY_REVISION,
+            association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
         };
         Ok(CertifiedCandidate {
             binding,

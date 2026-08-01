@@ -482,7 +482,8 @@ fn append_adapter_abstentions(
             evidence_kind,
             reason,
             detail: Some(detail.to_owned()),
-            association_policy_revision: crate::repository_attribution::ASSOCIATION_POLICY_REVISION,
+            association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
         };
         if !annotation.repository_abstentions.contains(&abstention) {
             annotation.repository_abstentions.push(abstention);

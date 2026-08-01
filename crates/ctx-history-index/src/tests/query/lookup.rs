@@ -119,7 +119,7 @@ fn decoded_core_event_reports_searchable_touched_files_deterministically() {
             kind: RepositoryEvidenceKind::FileActivity,
             confidence: RepositoryEvidenceConfidence::Explicit,
         }],
-        association_policy_revision: 1,
+        association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     });
     expected.repository_file_observations = vec![
         RepositoryFileObservation {

@@ -600,7 +600,9 @@ fn verified_open_rejects_mismatched_core_contract_fingerprint() {
 fn policy_field_change_changes_hash_and_generation_id() {
     let manifest = GenerationManifest::from_sources(Vec::new()).unwrap();
     let mut changed_policy = current_source_generation_policy();
-    changed_policy.semantic.chunk_overlap_chars += 1;
+    changed_policy
+        .lexical
+        .core_repository_association_policy_revision += 1;
     let changed_policy_hash = changed_policy.canonical_sha256().unwrap();
     let mut changed_manifest = manifest.clone();
     changed_manifest.policy_schema_hash = changed_policy_hash.clone();

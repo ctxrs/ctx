@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,12 +11,12 @@ mod validation;
 
 pub use repository::{
     GitObjectFormat, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidateEvidence,
-    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryLocalRootAuthorization,
-    RepositoryObjectReplacement, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
-    RepositoryOutcomeObservation, RepositoryPullRequestIdentity, RepositoryVcsObservation,
-    RepositoryVcsObservationKind,
+    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidate,
+    RepositoryCandidateEvidence, RepositoryCandidateKind, RepositoryEvidence,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryFileObservationKind, RepositoryLocalRootAuthorization, RepositoryObjectReplacement,
+    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
+    RepositoryPullRequestIdentity, RepositoryVcsObservation, RepositoryVcsObservationKind,
 };
 use validation::{
     validate_count, validate_json_map, validate_optional_text, validate_owned_identity,
@@ -26,10 +26,11 @@ use validation::{
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 1;
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 4;
-pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 5;
+pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 2;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
-pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 1;
+pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 3;
+pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 2;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN: &[u8] =
     b"ctx.core.repository-local-root-fingerprint.v1\0";
@@ -72,6 +73,7 @@ struct CoreContractRevisions {
     repository_contract: u32,
     repository_observation: u32,
     bounded_shell_subset: u32,
+    repository_association_policy: u32,
     repository_outcome_capture: u32,
     repository_local_root_authorization_fingerprint: u32,
 }
@@ -85,6 +87,7 @@ impl CoreContractRevisions {
             repository_contract: CORE_REPOSITORY_CONTRACT_REVISION,
             repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
             bounded_shell_subset: CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            repository_association_policy: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
             repository_outcome_capture: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             repository_local_root_authorization_fingerprint:
                 CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
@@ -101,6 +104,7 @@ fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> Str
     digest.update(revisions.repository_contract.to_be_bytes());
     digest.update(revisions.repository_observation.to_be_bytes());
     digest.update(revisions.bounded_shell_subset.to_be_bytes());
+    digest.update(revisions.repository_association_policy.to_be_bytes());
     digest.update(revisions.repository_outcome_capture.to_be_bytes());
     digest.update(
         revisions
@@ -154,6 +158,8 @@ pub enum CoreRecordError {
     InvalidRepositoryRevisions,
     #[error("repository outcome does not match its declared operation or linkage")]
     InvalidRepositoryOutcome,
+    #[error("repository candidate evidence is not strictly sorted and unique")]
+    NonCanonicalRepositoryCandidateEvidence,
 }
 
 /// Complete normalized content retained under one explicit product policy.
@@ -458,12 +464,6 @@ impl CoreRecord {
             })
             .map(|abstention| abstention.evidence_kind)
             .unwrap_or(RepositoryEvidenceKind::SessionCwd);
-        let association_policy_revision = self
-            .repository_abstentions
-            .iter()
-            .map(|abstention| abstention.association_policy_revision)
-            .max()
-            .unwrap_or(CORE_REPOSITORY_CONTRACT_REVISION);
         self.repository_abstentions.retain(|abstention| {
             abstention.reason != RepositoryAbstentionReason::CandidateMissingBeforeCertification
         });
@@ -471,7 +471,7 @@ impl CoreRecord {
             evidence_kind,
             reason: RepositoryAbstentionReason::Unavailable,
             detail: Some("prior_certificate_reused_without_local_authorization".to_owned()),
-            association_policy_revision,
+            association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
         });
         true
     }
@@ -510,7 +510,6 @@ impl CoreRecord {
         )?;
 
         let mut binding_ids = HashSet::new();
-        let mut repository_formats = HashMap::new();
         for binding in &self.repository_bindings {
             binding.validate_contract()?;
             if !binding_ids.insert(binding.binding_id.as_str()) {
@@ -519,7 +518,6 @@ impl CoreRecord {
                     value: binding.binding_id.clone(),
                 });
             }
-            repository_formats.insert(binding.binding_id.as_str(), binding.git_object_format);
         }
         for abstention in &self.repository_abstentions {
             abstention.validate_contract()?;
@@ -534,9 +532,11 @@ impl CoreRecord {
         }
         for observation in &self.repository_vcs_observations {
             observation.validate_contract()?;
-            let Some(format) = repository_formats
-                .get(observation.repository_binding_id.as_str())
-                .copied()
+            let Some((binding, format)) = self
+                .repository_bindings
+                .iter()
+                .find(|binding| binding.binding_id == observation.repository_binding_id)
+                .map(|binding| (binding, binding.git_object_format))
             else {
                 return Err(CoreRecordError::UnknownRepositoryBinding(
                     observation.repository_binding_id.clone(),
@@ -552,6 +552,13 @@ impl CoreRecord {
                 }
             }
             if let RepositoryVcsObservationKind::Outcome(outcome) = &observation.kind {
+                if outcome
+                    .pull_request
+                    .as_ref()
+                    .is_some_and(|pull_request| !binding.accepts_pull_request(pull_request))
+                {
+                    return Err(CoreRecordError::InvalidRepositoryOutcome);
+                }
                 for object_id in outcome.object_ids() {
                     if format.is_none_or(|format| object_id.format != format) {
                         return Err(CoreRecordError::InvalidGitObjectId);

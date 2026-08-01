@@ -8,7 +8,7 @@ use super::{
         validate_repository_relative_path, validate_text,
     },
     CoreRecordError, CoreRecordResult, CORE_BOUNDED_SHELL_SUBSET_REVISION,
-    CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+    CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
     MAX_GIT_REF_BYTES, MAX_OUTCOME_LINKAGE_ITEMS, MAX_REPOSITORY_ALIASES, MAX_REPOSITORY_EVIDENCE,
@@ -68,10 +68,13 @@ impl RepositoryBinding {
             self.evidence.len(),
             MAX_REPOSITORY_EVIDENCE,
         )?;
-        if self.evidence.is_empty() || self.association_policy_revision == 0 {
+        if self.evidence.is_empty() {
             return Err(CoreRecordError::EmptyField {
                 field: "repository_evidence",
             });
+        }
+        if self.association_policy_revision != CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION {
+            return Err(CoreRecordError::InvalidRepositoryRevisions);
         }
         let mut aliases = HashSet::new();
         for alias in &self.aliases {
@@ -90,6 +93,24 @@ impl RepositoryBinding {
             local_root.validate_contract()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn accepts_pull_request(
+        &self,
+        pull_request: &RepositoryPullRequestIdentity,
+    ) -> bool {
+        if self
+            .logical_repository_id
+            .strip_prefix("forge:")
+            .is_some_and(|logical| {
+                !forge_logical_identity_matches(logical, &pull_request.forge_repository)
+            })
+        {
+            return false;
+        }
+        self.aliases
+            .iter()
+            .all(|alias| repository_alias_identity_matches(alias, &pull_request.forge_repository))
     }
 }
 
@@ -217,6 +238,31 @@ pub enum RepositoryEvidenceKind {
     SessionCwd,
 }
 
+/// One independent path candidate observed before repository certification.
+///
+/// Candidate identity is the pair of its evidence kind and path. The complete
+/// collection is a canonical set, so repeated evidence is deduplicated and
+/// provider traversal order cannot change stored Core bytes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCandidate {
+    pub kind: RepositoryCandidateKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryCandidateKind {
+    SessionCwd,
+    DeclaredToolWorkdir,
+    DerivedEffectiveCwd,
+    CommandSpecificRepositoryPath,
+    FileActivityPath,
+    VcsActivityPath,
+    OutcomeOperationRepositoryPath,
+    OutcomeOutputRepositoryPath,
+}
+
 /// Independent structured repository candidate evidence retained before
 /// bounded certification. These values are not repository authority.
 ///
@@ -228,13 +274,9 @@ pub enum RepositoryEvidenceKind {
 pub struct RepositoryCandidateEvidence {
     pub repository_observation_revision: u32,
     pub bounded_shell_subset_revision: u32,
+    pub association_policy_revision: u32,
     pub outcome_capture_revision: u32,
-    pub session_cwd: Option<String>,
-    pub declared_tool_workdir: Option<String>,
-    pub derived_effective_cwd: Option<String>,
-    pub command_specific_repository_path: Option<String>,
-    pub outcome_operation_repository_path: Option<String>,
-    pub outcome_output_repository_path: Option<String>,
+    pub candidates: Vec<RepositoryCandidate>,
 }
 
 impl Default for RepositoryCandidateEvidence {
@@ -242,55 +284,52 @@ impl Default for RepositoryCandidateEvidence {
         Self {
             repository_observation_revision: CORE_REPOSITORY_OBSERVATION_REVISION,
             bounded_shell_subset_revision: CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
             outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-            session_cwd: None,
-            declared_tool_workdir: None,
-            derived_effective_cwd: None,
-            command_specific_repository_path: None,
-            outcome_operation_repository_path: None,
-            outcome_output_repository_path: None,
+            candidates: Vec::new(),
         }
     }
 }
 
 impl RepositoryCandidateEvidence {
+    pub fn insert(&mut self, kind: RepositoryCandidateKind, path: String) {
+        let candidate = RepositoryCandidate { kind, path };
+        if let Err(index) = self.candidates.binary_search(&candidate) {
+            self.candidates.insert(index, candidate);
+        }
+    }
+
+    pub fn paths(&self, kind: RepositoryCandidateKind) -> impl Iterator<Item = &str> {
+        self.candidates
+            .iter()
+            .filter(move |candidate| candidate.kind == kind)
+            .map(|candidate| candidate.path.as_str())
+    }
+
     pub fn validate_contract(&self) -> CoreRecordResult<()> {
         if self.repository_observation_revision != CORE_REPOSITORY_OBSERVATION_REVISION
             || self.bounded_shell_subset_revision != CORE_BOUNDED_SHELL_SUBSET_REVISION
+            || self.association_policy_revision != CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION
             || self.outcome_capture_revision != CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION
         {
             return Err(CoreRecordError::InvalidRepositoryRevisions);
         }
-        validate_optional_text(
-            "repository_session_cwd",
-            self.session_cwd.as_deref(),
-            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+        validate_count(
+            "repository_candidate_evidence",
+            self.candidates.len(),
+            MAX_REPOSITORY_ITEMS,
         )?;
-        validate_optional_text(
-            "repository_declared_tool_workdir",
-            self.declared_tool_workdir.as_deref(),
-            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
-        )?;
-        validate_optional_text(
-            "repository_derived_effective_cwd",
-            self.derived_effective_cwd.as_deref(),
-            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
-        )?;
-        validate_optional_text(
-            "repository_command_specific_path",
-            self.command_specific_repository_path.as_deref(),
-            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
-        )?;
-        validate_optional_text(
-            "repository_outcome_operation_path",
-            self.outcome_operation_repository_path.as_deref(),
-            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
-        )?;
-        validate_optional_text(
-            "repository_outcome_output_path",
-            self.outcome_output_repository_path.as_deref(),
-            MAX_REPOSITORY_RELATIVE_PATH_BYTES,
-        )
+        if self.candidates.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(CoreRecordError::NonCanonicalRepositoryCandidateEvidence);
+        }
+        for candidate in &self.candidates {
+            validate_text(
+                "repository_candidate_path",
+                &candidate.path,
+                MAX_REPOSITORY_RELATIVE_PATH_BYTES,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -319,10 +358,8 @@ impl RepositoryAbstention {
             self.detail.as_deref(),
             MAX_TEXT_METADATA_BYTES,
         )?;
-        if self.association_policy_revision == 0 {
-            return Err(CoreRecordError::EmptyField {
-                field: "association_policy_revision",
-            });
+        if self.association_policy_revision != CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION {
+            return Err(CoreRecordError::InvalidRepositoryRevisions);
         }
         Ok(())
     }
@@ -613,6 +650,22 @@ impl RepositoryPullRequestIdentity {
             MAX_TEXT_METADATA_BYTES,
         )
     }
+}
+
+fn repository_alias_identity_matches(left: &RepositoryAlias, right: &RepositoryAlias) -> bool {
+    left.host.eq_ignore_ascii_case(&right.host)
+        && left.namespace == right.namespace
+        && left.name == right.name
+}
+
+fn forge_logical_identity_matches(logical: &str, repository: &RepositoryAlias) -> bool {
+    let Some((host, path)) = logical.split_once('/') else {
+        return false;
+    };
+    let mut expected_path = repository.namespace.join("/");
+    expected_path.push('/');
+    expected_path.push_str(&repository.name);
+    host.eq_ignore_ascii_case(&repository.host) && path == expected_path
 }
 
 /// Bounded native linkage proving which structured result belongs to which
