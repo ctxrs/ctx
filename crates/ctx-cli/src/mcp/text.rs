@@ -322,7 +322,7 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
     let Some(jobs) = daemon.get("jobs") else {
         return;
     };
-    let job_parts = ["source_backed_refresh"]
+    let job_parts = ["core_refresh"]
         .into_iter()
         .filter_map(|key| {
             jobs.get(key)

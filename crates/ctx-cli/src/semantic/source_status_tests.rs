@@ -148,7 +148,7 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
 
     let daemon = source_daemon_report(&data_root);
     let jobs = daemon["jobs"].as_object().unwrap();
-    assert!(jobs.contains_key("source_backed_refresh"), "{daemon:#}");
+    assert!(jobs.contains_key("core_refresh"), "{daemon:#}");
     assert!(jobs.contains_key("semantic_index"), "{daemon:#}");
     assert!(!jobs.contains_key("history_refresh"), "{daemon:#}");
     assert_eq!(

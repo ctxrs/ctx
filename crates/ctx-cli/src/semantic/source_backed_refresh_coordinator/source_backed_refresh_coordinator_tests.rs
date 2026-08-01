@@ -1095,7 +1095,15 @@ fn activated_generation_missing_commit_payload_remains_typed_corruption() {
     assert!(!run.failed);
     write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &run.job).unwrap();
 
-    let meta_path = source_backed_index_root(&data_root).join("meta.json");
+    let index_root = source_backed_index_root(&data_root);
+    let pointer: Value =
+        serde_json::from_slice(&std::fs::read(index_root.join("active-generation.json")).unwrap())
+            .unwrap();
+    let directory = pointer["active"]["directory"].as_str().unwrap();
+    let meta_path = index_root
+        .join("index-generations")
+        .join(directory)
+        .join("meta.json");
     let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
     assert!(meta.as_object_mut().unwrap().remove("payload").is_some());
     std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();

@@ -7,8 +7,8 @@ use std::{
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
     load_active_generation_pointer, load_manifest_for_metas, meta_generation, open_slot_index,
-    searcher_generation, validate_schema, verify_searcher, verify_searcher_structure,
-    GenerationManifest, IndexError, Result,
+    payload_generation_id, searcher_generation, validate_schema, verify_searcher,
+    verify_searcher_structure, GenerationManifest, IndexError, Result,
 };
 use tantivy::{Index, ReloadPolicy, Searcher};
 
@@ -21,6 +21,24 @@ pub struct VerifiedIndex {
 }
 
 impl VerifiedIndex {
+    /// Returns the generation named by the validated active pointer and commit
+    /// payload without constructing a query reader or auditing documents.
+    pub fn active_generation_id(root: impl AsRef<Path>) -> Result<Option<String>> {
+        let control_directory =
+            DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+        let root = control_directory.root_path().to_path_buf();
+        let Some(pointer) = load_active_generation_pointer(&root)? else {
+            return Ok(None);
+        };
+        let index = open_slot_index(&root, pointer.active())?;
+        let generation_id =
+            payload_generation_id(&index.load_metas()?)?.ok_or(IndexError::MissingCommitPayload)?;
+        if generation_id != pointer.active().generation_id() {
+            return Err(IndexError::InvalidActiveGenerationPointer);
+        }
+        Ok(Some(generation_id))
+    }
+
     /// Opens a generation and performs the exhaustive publication audit.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         Self::open_inner(root.as_ref(), true)
