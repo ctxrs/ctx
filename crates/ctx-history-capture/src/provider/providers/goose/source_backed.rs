@@ -198,10 +198,6 @@ impl GooseSourceBackedSelectionV0 {
     pub(crate) fn selected(&self) -> &GooseSourceRouteV0 {
         &self.selected
     }
-
-    fn routes(&self) -> impl Iterator<Item = &GooseSourceRouteV0> {
-        std::iter::once(&self.selected).chain(self.retained.iter())
-    }
 }
 
 pub(crate) struct GooseSourceBackedAdapterV0 {

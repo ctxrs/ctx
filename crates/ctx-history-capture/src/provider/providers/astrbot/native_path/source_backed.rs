@@ -16,14 +16,8 @@ mod parsing;
 #[cfg(test)]
 mod tests;
 
-#[allow(unused_imports)]
-pub(crate) use discovery::{
-    AstrBotSourceBackedInventoryV0, AstrBotSourceBackedSourceV0, AstrBotSourceIdentityV0,
-};
-#[cfg(test)]
-pub(crate) use parsing::scan_astrbot_source_backed_v0;
-#[allow(unused_imports)]
-pub(crate) use parsing::{scan_astrbot_snapshot_v0, AstrBotSourceBackedSinkV0};
+pub(crate) use discovery::{AstrBotSourceBackedInventoryV0, AstrBotSourceBackedSourceV0};
+pub(crate) use parsing::scan_astrbot_snapshot_v0;
 
 const SOURCE_SCHEMA_VARIANT: &str = "astrbot-data-v4-logical-v0";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
@@ -38,6 +32,7 @@ const LAUNCHER_SOURCE_NAMESPACE: &str = "astrbot.launcher-instance";
 const SESSION_NAMESPACE: &str = "astrbot.session";
 const LOGICAL_SESSION_KIND: &str = "astrbot-session";
 const LOGICAL_EVENT_KIND: &str = "astrbot-event";
+#[cfg(test)]
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "AstrBot SQLite source must have an authorized parent and database leaf";
 

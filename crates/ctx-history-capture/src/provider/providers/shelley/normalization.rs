@@ -1,18 +1,11 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::EventType;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::common::time::parse_rfc3339_utc;
-use crate::provider::normalization::{
-    provider_capped_json, provider_policy_body, provider_policy_event_text,
-    provider_result_identifier_evidence, provider_result_outcome_evidence,
-};
-use crate::{OutputOutcome, PROVIDER_MAX_PREVIEW_CHARS, SHELLEY_SQLITE_SOURCE_FORMAT};
+use crate::OutputOutcome;
 
-use super::relationships::{
-    shelley_event_index, shelley_event_type, shelley_message_body, shelley_message_text,
-    ShelleyMessageRow,
-};
+use super::relationships::{shelley_event_type, shelley_message_body, ShelleyMessageRow};
 
 pub(super) struct ShelleyOutputClassification {
     pub(super) outcome: OutputOutcome,
@@ -190,40 +183,6 @@ fn shelley_error_value_is_present(value: &Value) -> bool {
         Value::Array(values) => !values.is_empty(),
         Value::Object(values) => !values.is_empty(),
     }
-}
-
-/// Reconstructs the released event fields required by the shared legacy
-/// complete-content resolver. This is hydration-only and is not a publisher.
-pub(crate) fn shelley_complete_event(
-    message: &ShelleyMessageRow,
-    _occurred_at: DateTime<Utc>,
-) -> (u64, String, String, EventType, Value) {
-    let body = shelley_message_body(message);
-    let text = shelley_message_text(message, &body)
-        .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
-    let event_type = shelley_event_type(message, &body);
-    let retained_text = provider_policy_event_text(event_type, &text, &body);
-    let retained_body = provider_policy_body(event_type, &body);
-    let result_evidence = provider_result_identifier_evidence(event_type, &text, &body);
-    let result_outcome = provider_result_outcome_evidence(event_type, &body);
-    let payload = json!({
-        "text": retained_text.text,
-        "text_retention": retained_text.retention.as_json(),
-        "result_evidence": result_evidence,
-        "result_outcome": result_outcome,
-        "source_format": SHELLEY_SQLITE_SOURCE_FORMAT,
-        "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-    });
-    (
-        shelley_event_index(message),
-        message.message_id.clone(),
-        format!(
-            "conversation:{}:sequence:{}:message:{}",
-            message.conversation_id, message.sequence_id, message.message_id
-        ),
-        event_type,
-        payload,
-    )
 }
 
 pub(super) fn shelley_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {

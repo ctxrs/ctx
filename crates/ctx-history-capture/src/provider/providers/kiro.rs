@@ -6,8 +6,3 @@
 mod event;
 mod history;
 pub(crate) mod native_path;
-
-pub(crate) use history::{
-    decode_kiro_conversation_for_complete, kiro_history_events, kiro_provider_session_id,
-    kiro_session_started_at,
-};

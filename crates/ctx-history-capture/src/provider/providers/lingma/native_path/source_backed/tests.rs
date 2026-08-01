@@ -194,7 +194,6 @@ fn cold_scan_is_bounded_deterministic_and_emits_valid_stable_core() {
             candidate_set_reads: 5,
             raw_row_set_reads: 4,
             raw_rows_read: 257,
-            identity_set_reads: 0,
         }
     );
 
@@ -207,7 +206,6 @@ fn cold_scan_is_bounded_deterministic_and_emits_valid_stable_core() {
             candidate_set_reads: 5,
             raw_row_set_reads: 4,
             raw_rows_read: 257,
-            identity_set_reads: 0,
         }
     );
 }

@@ -9,21 +9,13 @@ use crate::{
 
 use super::super::{
     capture::CRUSH_SQLITE_VALUE_OVERHEAD_BYTES,
-    projection::{decode_message_child, decode_session, decode_session_at, optional_text},
+    projection::{decode_message_child, decode_session_at, optional_text},
     source::{
         message_projection, message_session_join, optional_session_column, retained_length_expr,
         session_projection,
     },
 };
-#[cfg(test)]
-use super::super::{
-    projection::{decode_file, decode_read_file},
-    source::{file_projection, read_file_projection},
-};
-use super::{
-    CrushLoadedRow, CrushNativeFrontier, CrushNativePhase, CrushNativeSchema,
-    CRUSH_NATIVE_PAGE_OVERHEAD_BYTES,
-};
+use super::{CrushLoadedRow, CrushNativeFrontier, CrushNativeSchema};
 
 pub(super) fn row_decode_error_is_local(error: &CaptureError) -> bool {
     match error {
@@ -65,92 +57,39 @@ pub(super) fn next_candidate_batch(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let (rowid, retained, from) = match frontier.phase {
-        CrushNativePhase::Sessions => (
-            "s.rowid".to_owned(),
-            retained_length_expr(
-                &schema.session_columns,
-                "s",
-                &[
-                    "id",
-                    "parent_session_id",
-                    "title",
-                    "created_at",
-                    "updated_at",
-                    "prompt_tokens",
-                    "completion_tokens",
-                    "cost",
-                    "summary_message_id",
-                ],
-            ),
-            "sessions s".to_owned(),
-        ),
-        CrushNativePhase::Messages => {
-            let local = retained_length_expr(
-                &schema.message_columns,
-                "m",
-                &[
-                    "id",
-                    "session_id",
-                    "role",
-                    "parts",
-                    "created_at",
-                    "updated_at",
-                    "provider",
-                    "model",
-                    "is_summary_message",
-                ],
-            );
-            let parent = retained_length_expr(
-                &schema.session_columns,
-                "s",
-                &[
-                    "id",
-                    "parent_session_id",
-                    "title",
-                    "created_at",
-                    "updated_at",
-                    "prompt_tokens",
-                    "completion_tokens",
-                    "cost",
-                    "summary_message_id",
-                ],
-            );
-            (
-                "m.rowid".to_owned(),
-                format!("{local} + {parent}"),
-                message_session_join().to_owned(),
-            )
-        }
-        CrushNativePhase::Files => {
-            let Some(columns) = schema
-                .file_columns
-                .as_ref()
-                .filter(|columns| columns.contains("session_id"))
-            else {
-                return Ok(Vec::new());
-            };
-            (
-                "f.rowid".to_owned(),
-                retained_length_expr(
-                    columns,
-                    "f",
-                    &["session_id", "path", "version", "created_at", "updated_at"],
-                ),
-                "files f".to_owned(),
-            )
-        }
-        CrushNativePhase::ReadFiles => {
-            let Some(columns) = schema.read_file_columns.as_ref() else {
-                return Ok(Vec::new());
-            };
-            (
-                "r.rowid".to_owned(),
-                retained_length_expr(columns, "r", &["session_id", "path", "read_at"]),
-                "read_files r".to_owned(),
-            )
-        }
-    };
+    let rowid = "m.rowid";
+    let local = retained_length_expr(
+        &schema.message_columns,
+        "m",
+        &[
+            "id",
+            "session_id",
+            "role",
+            "parts",
+            "created_at",
+            "updated_at",
+            "provider",
+            "model",
+            "is_summary_message",
+        ],
+    );
+    let parent = retained_length_expr(
+        &schema.session_columns,
+        "s",
+        &[
+            "id",
+            "parent_session_id",
+            "title",
+            "created_at",
+            "updated_at",
+            "prompt_tokens",
+            "completion_tokens",
+            "cost",
+            "summary_message_id",
+        ],
+    );
+    let retained = format!("{local} + {parent}");
+    let from = message_session_join();
     let after = if frontier.after_rowid.is_some() {
         format!(" where {rowid} > ?1")
     } else {
@@ -173,8 +112,7 @@ pub(super) fn next_candidate_batch(
         let (rowid, retained) = row?;
         if rowid <= 0 || retained < 0 {
             return Err(CaptureError::InvalidPayload(format!(
-                "Crush {} keyset metadata is invalid",
-                frontier.phase.label()
+                "Crush message keyset metadata is invalid"
             )));
         }
         let retained = u64::try_from(retained).map_err(|_| {
@@ -214,10 +152,6 @@ pub(super) fn load_message_batch(
          from {} where m.rowid in ({placeholders}) order by m.rowid",
         message_session_join()
     ))?;
-    let observed = candidates
-        .iter()
-        .map(|candidate| (candidate.rowid, candidate.observed_bytes))
-        .collect::<HashMap<_, _>>();
     let rowids = candidates.iter().map(|candidate| candidate.rowid);
     let mut rows = statement.query(params_from_iter(rowids))?;
     let mut loaded = HashMap::with_capacity(candidates.len());
@@ -226,13 +160,6 @@ pub(super) fn load_message_batch(
         let values = raw_sqlite_values_offset(row, 1, 22)?;
         let decoded = (|| {
             let child = decode_message_child(&values[..13])?;
-            let retained_bytes = usize::try_from(
-                *observed
-                    .get(&rowid)
-                    .ok_or(CaptureError::SourceChangedDuringCapture)?,
-            )
-            .unwrap_or(usize::MAX)
-            .saturating_add(CRUSH_NATIVE_PAGE_OVERHEAD_BYTES);
             let session = if child.parent_rowid.is_some() {
                 let session = decode_session_at(&values, 13)?
                     .ok_or(CaptureError::SourceChangedDuringCapture)?;
@@ -243,11 +170,10 @@ pub(super) fn load_message_batch(
             } else {
                 None
             };
-            Ok(CrushLoadedRow::Message {
+            Ok(CrushLoadedRow {
                 row: child.message,
                 session,
                 digest_values: values,
-                retained_bytes,
             })
         })();
         loaded.insert(rowid, decoded);
@@ -285,89 +211,6 @@ pub(super) fn load_session_parents(
         }
     }
     Ok(parents)
-}
-
-#[cfg(test)]
-pub(super) fn load_row_from_connection(
-    connection: &Connection,
-    schema: &CrushNativeSchema,
-    phase: CrushNativePhase,
-    rowid: i64,
-    observed_bytes: u64,
-) -> Result<CrushLoadedRow> {
-    let retained_bytes = usize::try_from(observed_bytes)
-        .unwrap_or(usize::MAX)
-        .saturating_add(CRUSH_NATIVE_PAGE_OVERHEAD_BYTES);
-    match phase {
-        CrushNativePhase::Sessions => {
-            let projection = session_projection(&schema.session_columns, "s");
-            let values = connection.query_row(
-                &format!("select s.rowid, {projection} from sessions s where s.rowid = ?1"),
-                [rowid],
-                |row| raw_sqlite_values(row, 10),
-            )?;
-            Ok(CrushLoadedRow::Session {
-                row: decode_session(&values)?,
-                retained_bytes,
-            })
-        }
-        CrushNativePhase::Messages => load_message_batch(
-            connection,
-            schema,
-            &[CrushCandidate {
-                rowid,
-                observed_bytes,
-            }],
-        )?
-        .remove(&rowid)
-        .ok_or(CaptureError::SourceChangedDuringCapture)?,
-        CrushNativePhase::Files => {
-            let columns = schema
-                .file_columns
-                .as_ref()
-                .ok_or(CaptureError::SystemInvariant(
-                    "Crush file phase has no schema",
-                ))?;
-            let projection = file_projection(columns, "f");
-            let values = connection.query_row(
-                &format!("select {projection} from files f where f.rowid = ?1"),
-                [rowid],
-                |row| raw_sqlite_values(row, 6),
-            )?;
-            Ok(CrushLoadedRow::File {
-                row: decode_file(&values)?,
-                retained_bytes,
-            })
-        }
-        CrushNativePhase::ReadFiles => {
-            let columns =
-                schema
-                    .read_file_columns
-                    .as_ref()
-                    .ok_or(CaptureError::SystemInvariant(
-                        "Crush read-file phase has no schema",
-                    ))?;
-            let projection = read_file_projection(columns, "r");
-            let values = connection.query_row(
-                &format!("select {projection} from read_files r where r.rowid = ?1"),
-                [rowid],
-                |row| raw_sqlite_values(row, 4),
-            )?;
-            Ok(CrushLoadedRow::ReadFile {
-                row: decode_read_file(&values)?,
-                retained_bytes,
-            })
-        }
-    }
-}
-
-fn raw_sqlite_values(
-    row: &rusqlite::Row<'_>,
-    count: usize,
-) -> rusqlite::Result<Vec<NativeSqliteValue>> {
-    (0..count)
-        .map(|index| row.get_ref(index).map(raw_sqlite_value))
-        .collect()
 }
 
 fn raw_sqlite_values_offset(

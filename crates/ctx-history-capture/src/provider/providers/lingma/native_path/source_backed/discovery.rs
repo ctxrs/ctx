@@ -1,20 +1,23 @@
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::ffi::OsString;
 
 use ctx_history_core::{
     CaptureProvider, SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use sha2::{Digest, Sha256};
 
+use crate::LINGMA_SQLITE_SOURCE_FORMAT;
+
+#[cfg(test)]
 use crate::{
     common::io::ProviderSourceRoot,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
-    CaptureError, LINGMA_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 use super::{
@@ -23,12 +26,14 @@ use super::{
     SOURCE_ANCHOR_NAMESPACE, SOURCE_SCHEMA_VARIANT,
 };
 
+#[cfg(test)]
 pub(super) struct LingmaRootAuthorizedSource {
     pub(super) source_root: ProviderSourceRoot,
     sqlite_authority: SqliteSourceDirectoryAuthority,
     database_name: OsString,
 }
 
+#[cfg(test)]
 impl LingmaRootAuthorizedSource {
     pub(super) fn retain(data_root: &Path, path: &Path) -> LingmaSourceBackedResultV0<Self> {
         let parent = path.parent().ok_or_else(|| {

@@ -22,7 +22,7 @@ use crate::{
 };
 
 use super::{
-    discovery::{open_root_authorized_snapshot_with_hook, source_key},
+    discovery::{open_root_authorized_snapshot_with_hook, source_key, AstrBotSourceIdentityV0},
     parsing::scan_astrbot_source_backed_v0,
     *,
 };
@@ -114,7 +114,7 @@ fn scan_records(source: &AstrBotSourceBackedSourceV0) -> Vec<CoreRecord> {
     scan_astrbot_source_backed_v0(
         crate::test_provider_sqlite_data_root(),
         source,
-        &mut |record| {
+        &mut |record: CoreRecord| {
             record.validate_contract()?;
             records.push(record);
             Ok(())

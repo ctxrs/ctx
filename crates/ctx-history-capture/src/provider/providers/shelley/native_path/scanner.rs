@@ -142,27 +142,6 @@ pub(super) fn next_message_units(
     )
 }
 
-pub(super) fn message_units_for_rowids(
-    conn: &Connection,
-    message_select: &[String],
-    conversation_select: &[String],
-    has_sequence_id: bool,
-    rowids: &[i64],
-) -> Result<BTreeMap<i64, ShelleyScannedUnit>> {
-    let candidates = candidates_for_rowids(conn, "messages", "m", message_select, rowids)?;
-    Ok(project_message_candidates(
-        conn,
-        message_select,
-        conversation_select,
-        has_sequence_id,
-        candidates,
-        false,
-    )?
-    .into_iter()
-    .map(|unit| (unit.0.rowid(), unit))
-    .collect())
-}
-
 fn project_message_candidates(
     conn: &Connection,
     message_select: &[String],
@@ -468,58 +447,6 @@ fn next_candidates(
             (None, None) => collect(rusqlite::params![]),
             _ => unreachable!(),
         }
-    })?;
-    candidates
-        .into_iter()
-        .map(|(rowid, retained)| {
-            let retained_bytes = usize::try_from(retained).map_err(|_| {
-                CaptureError::InvalidPayload(format!(
-                    "Shelley {table} retained byte count must be nonnegative"
-                ))
-            })?;
-            Ok(Candidate {
-                rowid,
-                retained_bytes: retained_bytes.saturating_add(select.len() * 16),
-            })
-        })
-        .collect()
-}
-
-fn candidates_for_rowids(
-    conn: &Connection,
-    table: &str,
-    alias: &str,
-    select: &[String],
-    rowids: &[i64],
-) -> Result<Vec<Candidate>> {
-    if rowids.is_empty() {
-        return Ok(Vec::new());
-    }
-    if rowids.len() > SHELLEY_QUERY_BATCH_ROWS {
-        return Err(CaptureError::SystemInvariant(
-            "Shelley exact-row query exceeded its bounded SQL batch",
-        ));
-    }
-    record_query(|counters| counters.candidate_set_reads += 1);
-    let placeholders = std::iter::repeat_n("?", rowids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let lengths = shelley_retained_length_expr(select);
-    let sql = format!(
-        "select {alias}.rowid, {lengths}
-           from {table} {alias}
-          where {alias}.rowid in ({placeholders})
-          order by {alias}.rowid"
-    );
-    let parameters = rowids.iter().copied().map(SqlValue::Integer);
-    let candidates: Vec<(i64, i64)> = with_shelley_length_preflight(conn, || {
-        let mut statement = conn.prepare(&sql)?;
-        let candidates = statement
-            .query_map(params_from_iter(parameters), |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
-            .collect();
-        candidates
     })?;
     candidates
         .into_iter()

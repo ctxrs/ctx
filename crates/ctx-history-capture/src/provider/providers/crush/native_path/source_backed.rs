@@ -27,7 +27,7 @@ use super::{
         load_message_batch, load_session_parents, next_candidate_batch, row_decode_error_is_local,
         CrushCandidate,
     },
-    read_native_schema, CrushLoadedRow, CrushNativeFrontier, CrushNativePhase, CrushNativeSchema,
+    read_native_schema, CrushLoadedRow, CrushNativeFrontier, CrushNativeSchema,
     CRUSH_NATIVE_MAX_EVENT_TOUCHES, CRUSH_NATIVE_MAX_ROW_BYTES,
 };
 use crate::{
@@ -457,11 +457,7 @@ fn scan_source_in_snapshot(
     source: &OpenedSource,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> CrushSourceBackedResultV0<SourceScan> {
-    let mut frontier = CrushNativeFrontier {
-        phase: CrushNativePhase::Messages,
-        after_rowid: None,
-        next_ordinal: 0,
-    };
+    let mut frontier = CrushNativeFrontier { after_rowid: None };
     let mut digest = Sha256::new();
     digest.update(CRUSH_MESSAGE_DIGEST_DOMAIN);
     let mut counts = ScannedSourceCounts::default();
@@ -499,7 +495,6 @@ fn scan_source_in_snapshot(
 
         for candidate in candidates {
             frontier.after_rowid = Some(candidate.rowid);
-            frontier.next_ordinal = checked_add(frontier.next_ordinal, 1)?;
             counts.complete_records = checked_add(counts.complete_records, 1)?;
             counts.certified_bytes = checked_add(counts.certified_bytes, candidate.observed_bytes)?;
             if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
@@ -511,18 +506,11 @@ fn scan_source_in_snapshot(
                 .remove(&candidate.rowid)
                 .ok_or(CaptureError::SourceChangedDuringCapture)?;
             let (row, session, digest_values) = match row {
-                Ok(CrushLoadedRow::Message {
+                Ok(CrushLoadedRow {
                     row,
                     session,
                     digest_values,
-                    ..
                 }) => (row, session, digest_values),
-                Ok(_) => {
-                    return Err(CaptureError::SystemInvariant(
-                        "Crush message scan loaded a non-message row",
-                    )
-                    .into())
-                }
                 Err(error) if row_decode_error_is_local(&error) => {
                     counts.rejected_records = checked_add(counts.rejected_records, 1)?;
                     hash_rejected_candidate(&mut digest, candidate, error.to_string().as_bytes());
@@ -535,7 +523,7 @@ fn scan_source_in_snapshot(
             super::hash_field(&mut digest, &record_digest);
 
             match project_message(&row, session.as_ref())? {
-                CrushRecordProjection::Rejection { .. } => {
+                CrushRecordProjection::Rejection => {
                     counts.rejected_records = checked_add(counts.rejected_records, 1)?;
                 }
                 CrushRecordProjection::Message(projection) if projection.event.is_some() => {

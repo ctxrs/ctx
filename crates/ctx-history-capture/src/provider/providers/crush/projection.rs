@@ -3,18 +3,10 @@ use serde_json::Value;
 
 use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::provider_normalized_result_value;
-use crate::provider::normalization::{
-    provider_line_from_index, provider_role, provider_value_text,
-};
-use crate::{
-    CaptureError, OutputCommandContext, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, Result,
-};
+use crate::provider::normalization::{provider_role, provider_value_text};
+use crate::{CaptureError, OutputOutcome, OutputOutcomeMetadata, Result};
 
 #[derive(Debug, Clone)]
-// The SQLite decoder keeps the complete provider row for deterministic
-// source-backed projection even when Core does not read every optional column.
-#[allow(dead_code)]
 pub(super) struct CrushSessionRow {
     pub(super) id: String,
     pub(super) parent_session_id: Option<String>,
@@ -41,46 +33,17 @@ pub(super) struct CrushMessageRow {
     pub(super) is_summary_message: bool,
 }
 
-#[derive(Debug, Clone)]
-// File-row columns are retained by the phase-complete query decoder.
-#[allow(dead_code)]
-pub(super) struct CrushFileRow {
-    pub(super) rowid: i64,
-    pub(super) session_id: Option<String>,
-    pub(super) path: String,
-    pub(super) version: Option<String>,
-    pub(super) created_at: Option<i64>,
-    pub(super) updated_at: Option<i64>,
-}
-
-#[derive(Debug, Clone)]
-// Read-file columns are retained by the phase-complete query decoder.
-#[allow(dead_code)]
-pub(super) struct CrushReadFileRow {
-    pub(super) rowid: i64,
-    pub(super) session_id: String,
-    pub(super) path: String,
-    pub(super) read_at: Option<i64>,
-}
-
-// Rejection detail is retained for provider diagnostics at the page boundary.
-#[allow(dead_code)]
 pub(super) enum CrushRecordProjection {
     Message(Box<CrushMessageProjection>),
-    Rejection { line_number: usize, reason: String },
+    Rejection,
 }
 
-// This is the retained event shape consumed by source-backed page projection.
-#[allow(dead_code)]
 pub(super) struct CrushEventDraft {
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
     pub(super) occurred_at_unix_ms: Option<i64>,
 }
 
-// The projection carries exact row/accounting evidence alongside the Core
-// event even when the current coordinator reads only a subset.
-#[allow(dead_code)]
 pub(super) struct CrushMessageProjection {
     pub(super) event: Option<CrushEventDraft>,
     pub(super) event_type: EventType,
@@ -89,12 +52,7 @@ pub(super) struct CrushMessageProjection {
     pub(super) output: Option<CrushOutputProjection>,
 }
 
-// Command classification is retained with the output evidence shape.
-#[allow(dead_code)]
 pub(super) struct CrushOutputProjection {
-    pub(super) kind: OutputObservationKind,
-    pub(super) call_id: Option<String>,
-    pub(super) command: Option<OutputCommandContext>,
     pub(super) outcome: OutputOutcomeMetadata,
 }
 
@@ -117,29 +75,17 @@ pub(super) fn project_message(
     session: Option<&CrushSessionRow>,
 ) -> Result<CrushRecordProjection> {
     if session.is_none() {
-        return Ok(CrushRecordProjection::Rejection {
-            line_number: provider_line_from_index(message.rowid.max(0) as u64),
-            reason: format!(
-                "Crush message {} references missing session {}",
-                message.id, message.session_id
-            ),
-        });
+        return Ok(CrushRecordProjection::Rejection);
     }
     let parts: Value = match serde_json::from_str(&message.parts) {
         Ok(parts) => parts,
-        Err(error) => {
-            return Ok(CrushRecordProjection::Rejection {
-                line_number: provider_line_from_index(message.rowid.max(0) as u64),
-                reason: format!(
-                    "invalid JSON in Crush message {} parts: {error}",
-                    message.id
-                ),
-            });
+        Err(_) => {
+            return Ok(CrushRecordProjection::Rejection);
         }
     };
     let event_type = event_type(message, &parts);
     let output = matches!(event_type, EventType::ToolOutput | EventType::CommandOutput)
-        .then(|| crush_output_projection(event_type, &parts));
+        .then(|| crush_output_projection(&parts));
     let retain_core_event = output
         .as_ref()
         .is_none_or(CrushOutputProjection::retain_in_core);
@@ -162,18 +108,6 @@ pub(super) fn project_message(
             output,
         },
     )))
-}
-
-pub(super) fn decode_session(values: &[NativeSqliteValue]) -> Result<CrushSessionRow> {
-    if values.len() != 10 {
-        return Err(CaptureError::SystemInvariant(
-            "Crush session logical row has an invalid value count",
-        ));
-    }
-    let _rowid = integer(values, 0)?;
-    decode_session_at(values, 1)?.ok_or_else(|| {
-        CaptureError::InvalidPayload("Crush session row has a NULL required session id".to_owned())
-    })
 }
 
 pub(super) fn decode_message_child(values: &[NativeSqliteValue]) -> Result<CrushChildMessageRow> {
@@ -234,36 +168,6 @@ pub(super) fn decode_session_at(
         cost: optional_real(values, offset + 7)?,
         summary_message_id: optional_text(values, offset + 8)?,
     }))
-}
-
-pub(super) fn decode_file(values: &[NativeSqliteValue]) -> Result<CrushFileRow> {
-    if values.len() != 6 {
-        return Err(CaptureError::SystemInvariant(
-            "Crush file logical row has an invalid value count",
-        ));
-    }
-    Ok(CrushFileRow {
-        rowid: integer(values, 0)?,
-        session_id: optional_text(values, 1)?,
-        path: text(values, 2)?.to_owned(),
-        version: optional_text(values, 3)?,
-        created_at: optional_integer(values, 4)?,
-        updated_at: optional_integer(values, 5)?,
-    })
-}
-
-pub(super) fn decode_read_file(values: &[NativeSqliteValue]) -> Result<CrushReadFileRow> {
-    if values.len() != 4 {
-        return Err(CaptureError::SystemInvariant(
-            "Crush read-file logical row has an invalid value count",
-        ));
-    }
-    Ok(CrushReadFileRow {
-        rowid: integer(values, 0)?,
-        session_id: text(values, 1)?.to_owned(),
-        path: text(values, 2)?.to_owned(),
-        read_at: optional_integer(values, 3)?,
-    })
 }
 
 fn text(values: &[NativeSqliteValue], index: usize) -> Result<&str> {
@@ -341,42 +245,9 @@ fn parts_have_type(parts: &Value, expected: &str) -> bool {
     })
 }
 
-fn crush_output_projection(event_type: EventType, parts: &Value) -> CrushOutputProjection {
-    let kind = if event_type == EventType::CommandOutput {
-        OutputObservationKind::Command
-    } else {
-        OutputObservationKind::Tool
-    };
+fn crush_output_projection(parts: &Value) -> CrushOutputProjection {
     let mut aggregate = CrushOutcomeAggregate::default();
     let items = parts.as_array().map(Vec::as_slice).unwrap_or_default();
-    let preferred_kind = if kind == OutputObservationKind::Command {
-        "shell_command"
-    } else {
-        "tool_result"
-    };
-    for item in items
-        .iter()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some(preferred_kind))
-    {
-        let data = item.get("data").unwrap_or(item);
-        if aggregate.call_id.is_none() {
-            aggregate.call_id =
-                crush_string_field(data, &["call_id", "callId", "tool_call_id", "id"]);
-        }
-        if aggregate.command.is_none() && kind == OutputObservationKind::Command {
-            let command =
-                crush_string_field(data, &["command", "cmd"]).unwrap_or_else(|| "shell".to_owned());
-            let tool_name =
-                crush_string_field(data, &["name", "tool"]).unwrap_or_else(|| "shell".to_owned());
-            let working_directory =
-                crush_string_field(data, &["working_directory", "workingDirectory", "cwd"]);
-            aggregate.command = Some(OutputCommandContext {
-                tool_name,
-                command,
-                working_directory,
-            });
-        }
-    }
     for item in items {
         let kind = item.get("type").and_then(Value::as_str);
         if !matches!(kind, Some("tool_result" | "shell_command")) {
@@ -385,9 +256,6 @@ fn crush_output_projection(event_type: EventType, parts: &Value) -> CrushOutputP
         crush_collect_outcome_value(item.get("data").unwrap_or(item), &mut aggregate);
     }
     CrushOutputProjection {
-        kind,
-        call_id: aggregate.call_id,
-        command: aggregate.command,
         outcome: OutputOutcomeMetadata {
             outcome: if aggregate.timeout {
                 OutputOutcome::Timeout
@@ -411,8 +279,6 @@ struct CrushOutcomeAggregate {
     success: bool,
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
-    call_id: Option<String>,
-    command: Option<OutputCommandContext>,
 }
 
 fn crush_collect_outcome_value(value: &Value, aggregate: &mut CrushOutcomeAggregate) {
@@ -460,17 +326,6 @@ fn crush_collect_outcome_value(value: &Value, aggregate: &mut CrushOutcomeAggreg
             );
         }
     }
-}
-
-fn crush_string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        value
-            .get(*key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    })
 }
 
 fn parts_text(parts: &Value) -> Option<String> {
