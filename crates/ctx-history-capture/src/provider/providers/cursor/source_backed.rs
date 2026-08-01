@@ -13,7 +13,7 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
     EventType, NativeItemKey, NativeSessionKey, RepositoryAbstention, RepositoryAbstentionReason,
     RepositoryEvidenceKind, RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
+    SourceKey, StableEntityId, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -749,7 +749,6 @@ fn core_record(
         .ok_or(CaptureError::SystemInvariant(
             "Cursor event sequence overflowed",
         ))?;
-    let normalized_body_bytes = text.len();
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
@@ -769,16 +768,7 @@ fn core_record(
         .occurred_at
         .map(|occurred_at| occurred_at.timestamp_millis());
     record.role = Some(event.role.as_str().to_owned());
-    record.content.structured_content = annotation.structured_content.and_then(|structured| {
-        serde_json::to_vec(&structured)
-            .ok()
-            .and_then(|encoded| {
-                normalized_body_bytes
-                    .checked_add(encoded.len())
-                    .filter(|bytes| *bytes <= MAX_CORE_CONTENT_BYTES)
-            })
-            .map(|_| structured)
-    });
+    record.content.structured_content = annotation.structured_content;
     record.metadata = annotation.metadata;
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
     record.repository_bindings = annotation.repository_bindings;

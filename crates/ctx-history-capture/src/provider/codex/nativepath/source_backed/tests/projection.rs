@@ -995,6 +995,75 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
 }
 
 #[test]
+fn codex_large_tool_arguments_keep_both_complete_core_representations() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000024";
+    let tail = "codex-large-tool-argument-tail";
+    let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
+    let tool_call = serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "custom_complete_tool",
+            "call_id": "large-complete-call",
+            "arguments": serde_json::json!({"prompt": &full_argument}).to_string(),
+        }
+    })
+    .to_string();
+    assert!(tool_call.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+    write_session(&sessions, native_session_id, &[tool_call]);
+
+    let (_, catalog_sessions) = discover_codex_session_catalog(&sessions).unwrap();
+    let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
+    assert!(discovery.rejections.is_empty());
+    let catalog_source = discovery.sources.into_iter().next().unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let mut scanner = CodexNativeScanner::new_source_backed_v0(catalog_source, None).unwrap();
+    let mut records = Vec::new();
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
+    let mut event_identity_state = CodexEventIdentityStateV0::default();
+    while let Some(page) = scanner.next_page().unwrap() {
+        let CodexNativeOwnedPage::Core(page) = page;
+        let owner = page.owner.unwrap();
+        for row in page.source_backed_rows {
+            records.push(
+                codex_core_record(
+                    &source,
+                    session_id,
+                    &owner,
+                    row,
+                    &mut event_identity_state,
+                    &mut repository_attributor,
+                )
+                .unwrap(),
+            );
+        }
+    }
+    scanner.finish().unwrap();
+
+    let [record] = records.as_slice() else {
+        panic!("expected exactly one Codex tool-call record");
+    };
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert!(normalized.contains(tail));
+    assert_eq!(
+        structured["provider_native_tool_call"]["arguments"]["prompt"].as_str(),
+        Some(full_argument.as_str())
+    );
+    assert!(
+        normalized.len() + serde_json::to_vec(structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
 fn indexed_core_keeps_over_16k_message_tool_arguments_and_successful_result() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

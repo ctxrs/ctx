@@ -111,6 +111,48 @@ fn gemini_nativepath_retains_core_rows_with_exact_result_material() {
 }
 
 #[test]
+fn gemini_large_tool_arguments_keep_both_complete_core_representations() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let tail = "gemini_large_tool_argument_tail_complete";
+    let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
+    let tool_call = json!({
+        "id": "large-tool-call-record",
+        "timestamp": "2026-01-01T00:00:03.000Z",
+        "type": "gemini",
+        "toolCalls": [{
+            "id": "large-call-1",
+            "name": "custom_complete_tool",
+            "args": {"prompt": &full_argument}
+        }]
+    });
+    assert!(serde_json::to_vec(&tool_call).unwrap().len() <= MAX_PROVIDER_JSONL_LINE_BYTES);
+    let path = write_transcript(&root, &[header("large-tool-session", "main"), tool_call]);
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    let [record] = records.as_slice() else {
+        panic!("expected exactly one Gemini tool-call record");
+    };
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert!(normalized.contains(tail));
+    assert_eq!(
+        structured
+            .pointer("/details/calls/0/args/prompt")
+            .and_then(Value::as_str),
+        Some(full_argument.as_str())
+    );
+    assert!(
+        normalized.len() + serde_json::to_vec(structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
 fn gemini_nativepath_malformed_record_is_local_and_incomplete_tail_is_nonterminal() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);

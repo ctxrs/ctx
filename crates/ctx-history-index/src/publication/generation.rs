@@ -22,7 +22,7 @@ pub(crate) fn lexical_index_settings() -> IndexSettings {
     IndexSettings {
         docstore_compression: Compressor::Lz4,
         docstore_compress_dedicated_thread: true,
-        docstore_blocksize: 16 * 1024,
+        docstore_blocksize: 32 * 1024,
     }
 }
 
@@ -292,9 +292,9 @@ mod tests {
         let settings = lexical_index_settings();
 
         assert_eq!(settings.docstore_compression, Compressor::Lz4);
-        assert_eq!(settings.docstore_blocksize, 16 * 1024);
+        assert_eq!(settings.docstore_blocksize, 32 * 1024);
         assert!(settings.docstore_compress_dedicated_thread);
-        assert_eq!(settings, IndexSettings::default());
+        assert_ne!(settings, IndexSettings::default());
     }
 
     #[test]

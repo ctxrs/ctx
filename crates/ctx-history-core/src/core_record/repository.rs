@@ -99,18 +99,18 @@ impl RepositoryBinding {
         &self,
         pull_request: &RepositoryPullRequestIdentity,
     ) -> bool {
-        if self
+        let logical_forge_matches = self
             .logical_repository_id
             .strip_prefix("forge:")
-            .is_some_and(|logical| {
-                !forge_logical_identity_matches(logical, &pull_request.forge_repository)
-            })
-        {
+            .map(|logical| forge_logical_identity_matches(logical, &pull_request.forge_repository));
+        if logical_forge_matches == Some(false) {
             return false;
         }
-        self.aliases
+        let aliases_match = self
+            .aliases
             .iter()
-            .all(|alias| repository_alias_identity_matches(alias, &pull_request.forge_repository))
+            .all(|alias| repository_alias_identity_matches(alias, &pull_request.forge_repository));
+        aliases_match && (logical_forge_matches == Some(true) || !self.aliases.is_empty())
     }
 }
 
