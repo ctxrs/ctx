@@ -457,7 +457,6 @@ fn source_backed_message_round_trips_full_policy_body_and_structured_content() {
             .and_then(serde_json::Value::as_i64),
         Some(1000)
     );
-    assert_eq!(page.items[0].source_path, None);
     let encoded = String::from_utf8(record.encode_stored().unwrap()).unwrap();
     assert!(!encoded.contains("\"locator\""));
     assert!(!encoded.contains("\"source_path\""));

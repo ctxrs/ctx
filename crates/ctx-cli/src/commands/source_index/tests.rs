@@ -88,7 +88,6 @@ mod tests {
             provider_session_id: Some(format!("fixture-session-{lineage}")),
             native_event_id: Some(TypedKey::U64(sequence)),
             branch: None,
-            source_path: None,
             agent_type: "primary".to_owned(),
             is_primary: true,
             event_sequence: sequence,

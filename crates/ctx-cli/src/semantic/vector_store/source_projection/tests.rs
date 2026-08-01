@@ -166,7 +166,6 @@ impl Fixture {
             provider_session_id: core_record.provider_session_id.clone(),
             native_event_id: core_record.native_event_id.clone(),
             branch: core_record.branch.clone(),
-            source_path: None,
             agent_type: core_record.agent_type.clone(),
             is_primary: core_record.is_primary,
             event_sequence: core_record.event_sequence,

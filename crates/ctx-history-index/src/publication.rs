@@ -9,12 +9,11 @@ use std::{
 };
 
 use ctx_history_core::{
-    core_record_contract_fingerprint, CertifiedSource, SourceKey, StableEntityId,
-    CORE_RECORD_VERSION, IDENTITY_VERSION,
+    core_record_contract_fingerprint, StableEntityId, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use tantivy::{
     collector::Count, directory::Directory, schema::IndexRecordOption, DocAddress, Executor, Index,
-    IndexMeta, ReloadPolicy, Searcher, Term,
+    IndexMeta, ReloadPolicy, Searcher,
 };
 use uuid::Uuid;
 
@@ -581,41 +580,6 @@ fn merge_source_counts(
     Ok(())
 }
 
-pub(crate) fn verify_source_document_count(
-    searcher: &Searcher,
-    source: &CertifiedSource,
-) -> Result<()> {
-    verify_source_count(
-        searcher,
-        source.observation().source(),
-        source.counts().indexed_documents,
-    )
-}
-
-pub(crate) fn verify_source_absent(searcher: &Searcher, source: &SourceKey) -> Result<()> {
-    verify_source_count(searcher, source, 0)
-}
-
-fn verify_source_count(searcher: &Searcher, source: &SourceKey, expected: u64) -> Result<()> {
-    use tantivy::query::TermQuery;
-
-    let source_id = source_token(source);
-    let source_field = required_field(searcher.schema(), "source_key")?;
-    let query = TermQuery::new(
-        Term::from_field_text(source_field, &source_id),
-        IndexRecordOption::Basic,
-    );
-    let actual = searcher.search(&query, &Count)? as u64;
-    if actual != expected {
-        return Err(IndexError::SourceCountMismatch {
-            source_id,
-            manifest: expected,
-            index: actual,
-        });
-    }
-    Ok(())
-}
-
 fn merge_identity_maps(
     event_identities: &mut HashMap<Uuid, [u8; 32]>,
     session_identities: &mut HashMap<Uuid, ([u8; 32], Option<String>)>,
@@ -749,7 +713,7 @@ pub(crate) fn verify_searcher_reference(
     searcher: &Searcher,
     manifest: &GenerationManifest,
 ) -> Result<()> {
-    use tantivy::query::TermQuery;
+    use tantivy::{query::TermQuery, Term};
 
     verify_total_document_count(searcher, manifest.indexed_documents)?;
     let source_field = required_field(searcher.schema(), "source_key")?;
