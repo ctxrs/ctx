@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_markers_keep_populated_current_tables_authoritative() {
+    fn independently_populated_conversation_families_fail_closed() {
         let session_message = mixed_schema(CurrentTable::SessionMessage);
         CurrentTable::SessionMessage.insert(
             &session_message,
@@ -725,9 +725,11 @@ mod tests {
             &json!({"agent": "build", "model": {"id": "gpt-5"}, "time": {"created": 0}})
                 .to_string(),
         );
-        let schema =
-            OpenCodeNativeSchema::probe(&session_message, &OPENCODE_SQLITE_DIALECT).unwrap();
-        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+        let error =
+            OpenCodeNativeSchema::probe(&session_message, &OPENCODE_SQLITE_DIALECT).unwrap_err();
+        assert!(error.to_string().contains(
+            "ambiguous populated message schema families: session_message_seq, message_part"
+        ));
 
         let session_entry = mixed_schema(CurrentTable::SessionEntry);
         CurrentTable::SessionEntry.insert(
@@ -736,8 +738,11 @@ mod tests {
             "label",
             &json!({"role": "user", "time": {"created": 0}}).to_string(),
         );
-        let schema = OpenCodeNativeSchema::probe(&session_entry, &OPENCODE_SQLITE_DIALECT).unwrap();
-        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionEntry);
+        let error =
+            OpenCodeNativeSchema::probe(&session_entry, &OPENCODE_SQLITE_DIALECT).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ambiguous populated message schema families: session_entry, message_part"));
     }
 
     #[test]
