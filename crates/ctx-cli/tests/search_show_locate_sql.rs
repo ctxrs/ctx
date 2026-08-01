@@ -1495,7 +1495,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "Codex acceptance must use the source-backed generation and relational projection"
+        "Codex acceptance must use the Core generation and relational projection"
     );
 }
 

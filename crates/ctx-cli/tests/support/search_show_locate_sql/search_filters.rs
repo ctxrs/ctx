@@ -71,17 +71,17 @@ fn search_requires_query_term_or_file_before_refreshing() {
 }
 
 #[test]
-fn search_refresh_off_requires_existing_store_without_creating_one() {
+fn search_refresh_off_requires_existing_core_generation_without_creating_one() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["search", "anything", "--refresh", "off"]));
 
     assert!(
-        stderr.contains("source-backed index does not exist; retry with daemon refresh enabled"),
+        stderr.contains("There is no current searchable generation"),
         "{stderr}"
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "refresh-off search should not create the ctx store"
+        "refresh-off search should not create retired work.sqlite"
     );
 }
 

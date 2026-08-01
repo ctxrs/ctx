@@ -354,7 +354,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "json",
     ]));
     assert!(
-        deleted_show.contains("was not found in the source-backed Core generation"),
+        deleted_show.contains("was not found in the Core generation"),
         "{deleted_show}"
     );
 }

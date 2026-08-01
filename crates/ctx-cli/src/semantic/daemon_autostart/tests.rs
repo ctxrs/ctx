@@ -1,7 +1,6 @@
 use super::*;
 use crate::config::CONFIG_FILE;
 use crate::semantic::paths_status::DaemonLock;
-use ctx_history_core::database_path;
 use std::sync::{Arc, Barrier};
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
@@ -305,7 +304,7 @@ fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
     let temp = tempfile::tempdir().unwrap();
     let config = AppConfig::default();
 
-    assert!(!database_path(temp.path().to_path_buf()).exists());
+    assert!(!temp.path().join("work.sqlite").exists());
     assert!(daemon_autostart_allowed(temp.path(), &config));
     assert!(
         fs::read_dir(temp.path()).unwrap().next().is_none(),
@@ -678,7 +677,7 @@ fn current_format_recovery_reexec_preserves_daemon_restart_intent() -> Result<()
 fn durable_daemon_disable_wins_over_handoff_restart() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join(CONFIG_FILE), "[daemon]\nenabled = false\n")?;
-    fs::write(database_path(temp.path().to_path_buf()), b"")?;
+    fs::write(temp.path().join("work.sqlite"), b"")?;
     write_daemon_restart_request(
         temp.path(),
         DaemonTriggerCommandArg::Setup,

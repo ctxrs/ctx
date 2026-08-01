@@ -24,18 +24,6 @@ pub fn history_dir(root: PathBuf) -> PathBuf {
     root
 }
 
-pub fn database_path(root: PathBuf) -> PathBuf {
-    history_dir(root).join("work.sqlite")
-}
-
-pub fn object_dir(root: PathBuf) -> PathBuf {
-    history_dir(root).join("objects")
-}
-
-pub fn blob_dir(root: PathBuf) -> PathBuf {
-    object_dir(root)
-}
-
 pub fn config_path(root: PathBuf) -> PathBuf {
     history_dir(root).join("config.toml")
 }

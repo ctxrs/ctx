@@ -130,7 +130,7 @@ pub(crate) fn run_history_source_plugin_import(
 
     let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
-            "Published history source plugin {} in source-backed generation {published_generation}.",
+            "Published history source plugin {} in Core generation {published_generation}.",
             prepared.source().label()
         )
     } else {

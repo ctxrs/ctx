@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 6;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 10;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 11;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
@@ -225,7 +225,7 @@ mod tests {
             .contains_key("core_repository_association_policy_revision"));
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "cf52bad983143269bc156c117fe2a1277ee0a329baf4f37abe6dcff9e557dc23"
+            "946dd1c1dd07788d24d86ed7192d1fa4b8c4ed442406e4c418b6934b40acaee2"
         );
     }
 

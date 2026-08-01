@@ -493,6 +493,7 @@ fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record(
         .next()
         .unwrap();
     let mut forged: TantivyDocument = searcher.doc(address).unwrap();
+    add_query_metadata_fast_values(&searcher, address, &mut forged);
     let encoded_core = forged
         .get_first(fields.core_record)
         .and_then(|value| value.as_bytes())

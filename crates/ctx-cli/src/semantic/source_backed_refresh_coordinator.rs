@@ -378,7 +378,7 @@ fn coordinate_source_backed_refresh_with_catalog(
             bail!("explicit source catalog imports require daemon refresh mode `wait`");
         }
         let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!("the source-backed index does not exist; retry with daemon refresh enabled")
+            anyhow!("the Core index does not exist; retry with daemon refresh enabled")
         })?;
         return Ok(SourceBackedRefreshObservation {
             mode,
@@ -543,12 +543,12 @@ fn wait_for_published_generation(
                     })?;
                 let pin = pin_published_generation(data_root)?.ok_or_else(|| {
                     anyhow!(
-                        "daemon published source-backed generation {expected}, but no verified generation can be opened"
+                        "daemon published Core generation {expected}, but no verified generation can be opened"
                     )
                 })?;
                 if pin.generation_id() != expected {
                     bail!(
-                        "daemon reported source-backed generation {expected}, but the verified published generation is {}",
+                        "daemon reported Core generation {expected}, but the verified published generation is {}",
                         pin.generation_id()
                     );
                 }

@@ -10,9 +10,9 @@ mod tests {
 
     use ctx_history_capture::ingest_codex_source_backed_v0;
     use ctx_history_core::{
-        database_path, derive_event_id, derive_session_id, CertifiedSource, CoreRecord,
-        EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
-        SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
+        derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+        NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+        SourceKey, SourceObservation, TypedKey,
     };
     use ctx_history_index::{
         EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
@@ -907,7 +907,7 @@ mod tests {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let index = open_index(temp.path()).unwrap();
-        assert!(!database_path(temp.path().to_path_buf()).exists());
+        assert!(!temp.path().join("work.sqlite").exists());
 
         let mut lexical_request = request(RefreshArg::Off);
         lexical_request.backend = Some(SearchBackendArg::Lexical);
@@ -952,7 +952,7 @@ mod tests {
         assert!(not_ready.detail().contains("flat-F32"));
 
         assert!(
-            !database_path(temp.path().to_path_buf()).exists(),
+            !temp.path().join("work.sqlite").exists(),
             "generation-only semantic/hybrid must not create or open the legacy Store"
         );
     }
@@ -985,7 +985,7 @@ mod tests {
         assert!(collection.semantic_fallback.is_none());
         assert_eq!(collection.result_window.hits.len(), 1);
         assert!(!temp.path().join("search").join("semantic").exists());
-        assert!(!database_path(temp.path().to_path_buf()).exists());
+        assert!(!temp.path().join("work.sqlite").exists());
     }
 
     #[test]
@@ -1016,7 +1016,7 @@ mod tests {
         let (file_only, _) = mcp_search(file_only, temp.path()).unwrap();
         assert_eq!(file_only["retrieval"]["requested_mode"], "lexical");
         assert_eq!(file_only["retrieval"]["effective_mode"], "lexical");
-        assert!(!database_path(temp.path().to_path_buf()).exists());
+        assert!(!temp.path().join("work.sqlite").exists());
     }
 
     #[test]

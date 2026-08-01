@@ -572,7 +572,7 @@ fn search_refresh_wait_human_output_uses_daemon_job_progress_without_stderr_nois
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     let generation = status["lexical"]["generation_id"]
         .as_str()
-        .expect("human search should publish a source-backed generation")
+        .expect("human search should publish a Core generation")
         .to_owned();
     let status = assert_daemon_publication(&temp, &generation, 1, &["claude"]);
     let job = &status["daemon"]["jobs"]["source_backed_refresh"];
@@ -710,8 +710,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
         "--format=json",
     ]));
     assert!(
-        uncommitted
-            .contains("the source-backed index does not exist; retry with daemon refresh enabled"),
+        uncommitted.contains("There is no current searchable generation"),
         "{uncommitted}"
     );
     let failed = assert_daemon_refresh_failure(&temp, 0, None);

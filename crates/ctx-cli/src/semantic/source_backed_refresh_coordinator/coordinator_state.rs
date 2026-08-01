@@ -269,7 +269,7 @@ impl CoreRefreshEngine {
                 publication_probe_attempted.set(true);
                 let pin = Arc::new(
                     open_verified_index(&source_backed_index_root(data_root))
-                        .context("verify source-backed generation after publication")?,
+                        .context("verify Core generation after publication")?,
                 );
                 let verification = verify_source_backed_publication(&publication, &pin);
                 coordinator.set_publication_probe_timing(
