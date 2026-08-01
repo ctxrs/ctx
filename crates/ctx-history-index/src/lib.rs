@@ -51,11 +51,11 @@ pub use policy::{
 pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
     create_candidate_generation, load_active_generation_pointer, load_manifest_for_metas,
-    meta_generation, migrate_legacy_generation, open_slot_index, payload_generation_id,
-    publish_active_generation_pointer, reclaim_inactive_generation_directories,
-    reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
-    sync_generation, verify_searcher, verify_searcher_structure, write_manifest,
-    ActiveGenerationPointer, GenerationSlot, INDEX_GENERATIONS_DIRECTORY,
+    meta_generation, open_slot_index, payload_generation_id, publish_active_generation_pointer,
+    reclaim_inactive_generation_directories, reclaim_unreferenced_manifests,
+    reconcile_commit_error, searcher_generation, sync_directory, sync_generation, verify_searcher,
+    verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
+    INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
@@ -86,10 +86,12 @@ use ctx_history_core::{
 #[cfg(test)]
 use ctx_history_core::{StableEntityId, IDENTITY_VERSION};
 #[cfg(test)]
+use tantivy::directory::INDEX_WRITER_LOCK;
+#[cfg(test)]
 use tantivy::TantivyDocument;
 use tantivy::{
     collector::Count,
-    directory::{error::LockError, Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
+    directory::{error::LockError, Directory, DirectoryLock, Lock},
     indexer::LogMergePolicy,
     query::TermQuery,
     schema::{Field, IndexRecordOption},
@@ -101,8 +103,8 @@ use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_support::{
-    acquire_generation_writer_lock_with_retry, acquire_preflight_writer_lock_with_retry,
-    construct_index_writer_with_retry, ExactReplayInventoryWitness, PendingSource,
+    acquire_generation_writer_lock_with_retry, construct_index_writer_with_retry,
+    ExactReplayInventoryWitness, PendingSource,
 };
 
 pub struct GenerationWriter {
@@ -170,23 +172,7 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let mut active_pointer = load_active_generation_pointer(&root)?;
-        if active_pointer.is_none()
-            && Index::exists(&directory).map_err(tantivy::TantivyError::from)?
-        {
-            let legacy_lock = acquire_preflight_writer_lock_with_retry(&directory)?;
-            let legacy_index = Index::open(directory.clone())?;
-            analyzer::register_body_analyzer(&legacy_index);
-            validate_schema(&legacy_index.schema())?;
-            let legacy_metas = legacy_index.load_metas()?;
-            if legacy_metas.payload.is_some() {
-                let manifest = load_manifest_for_metas(&root, &legacy_metas)?;
-                active_pointer = Some(migrate_legacy_generation(&root, &legacy_index, &manifest)?);
-            } else if !legacy_metas.segments.is_empty() {
-                return Err(IndexError::UnboundIndexState);
-            }
-            drop(legacy_lock);
-        }
+        let active_pointer = load_active_generation_pointer(&root)?;
         reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
         let retained_manifests = active_pointer
             .iter()

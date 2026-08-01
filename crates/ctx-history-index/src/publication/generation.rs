@@ -9,12 +9,8 @@ use tantivy::{directory::Directory, Index, IndexSettings};
 use uuid::Uuid;
 
 use crate::{
-    analyzer::register_body_analyzer,
-    durable_directory::DurableMmapDirectory,
-    identity::is_generation_id,
-    lexical_schema,
-    publication::{load_manifest_for_metas, verify_searcher},
-    sync_directory, GenerationManifest, IndexError, Result,
+    analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
+    identity::is_generation_id, lexical_schema, sync_directory, IndexError, Result,
 };
 
 pub(crate) const ACTIVE_GENERATION_POINTER_FILE: &str = "active-generation.json";
@@ -100,7 +96,6 @@ impl ActiveGenerationPointer {
 
 pub(crate) struct CandidateGeneration {
     pub(crate) directory_name: String,
-    pub(crate) path: PathBuf,
     pub(crate) index: Index,
 }
 
@@ -156,49 +151,6 @@ pub(crate) fn create_candidate_generation(
     register_body_analyzer(&index);
     Ok(CandidateGeneration {
         directory_name,
-        path,
-        index,
-    })
-}
-
-pub(crate) fn migrate_legacy_generation(
-    root: &Path,
-    legacy_index: &Index,
-    manifest: &GenerationManifest,
-) -> Result<ActiveGenerationPointer> {
-    let metas = legacy_index.load_metas()?;
-    let loaded_manifest = load_manifest_for_metas(root, &metas)?;
-    if loaded_manifest.generation_id()? != manifest.generation_id()? {
-        return Err(IndexError::ConcurrentGenerationChange);
-    }
-    let reader = legacy_index.reader()?;
-    let searcher = reader.searcher();
-    if !legacy_index.validate_checksum()?.is_empty() {
-        return Err(IndexError::ChecksumMismatch);
-    }
-    verify_searcher(&searcher, manifest)?;
-    let candidate = create_candidate_from_directory(root, root)?;
-    sync_generation(&candidate.path)?;
-    let slot = GenerationSlot::new(manifest.generation_id()?, candidate.directory_name)?;
-    let pointer = ActiveGenerationPointer::new(slot, None)?;
-    publish_active_generation_pointer(root, &pointer)?;
-    Ok(pointer)
-}
-
-fn create_candidate_from_directory(root: &Path, source: &Path) -> Result<CandidateGeneration> {
-    let generations = root.join(INDEX_GENERATIONS_DIRECTORY);
-    fs::create_dir_all(&generations)?;
-    let directory_name = format!("{GENERATION_DIRECTORY_PREFIX}{}", Uuid::now_v7().simple());
-    let path = generations.join(&directory_name);
-    fs::create_dir(&path)?;
-    clone_index_files(source, &path)?;
-    sync_directory(&generations)?;
-    let directory = DurableMmapDirectory::open(&path).map_err(tantivy::TantivyError::from)?;
-    let index = Index::open(directory)?;
-    register_body_analyzer(&index);
-    Ok(CandidateGeneration {
-        directory_name,
-        path,
         index,
     })
 }

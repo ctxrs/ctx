@@ -10,7 +10,7 @@ use crate::{
     payload_generation_id, searcher_generation, validate_schema, verify_searcher,
     verify_searcher_structure, GenerationManifest, IndexError, Result,
 };
-use tantivy::{Index, ReloadPolicy, Searcher};
+use tantivy::{ReloadPolicy, Searcher};
 
 /// A verified reader pinned to one immutable lexical generation.
 pub struct VerifiedIndex {
@@ -58,23 +58,15 @@ impl VerifiedIndex {
         let control_directory =
             DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = control_directory.root_path().to_path_buf();
-        let pointer = load_active_generation_pointer(&root)?;
-        let legacy = pointer.is_none();
-        let index = match &pointer {
-            Some(pointer) => open_slot_index(&root, pointer.active())?,
-            None if Index::exists(&control_directory).map_err(tantivy::TantivyError::from)? => {
-                Index::open(control_directory)?
-            }
-            None => return Err(IndexError::MissingActiveGenerationPointer),
-        };
+        let pointer = load_active_generation_pointer(&root)?
+            .ok_or(IndexError::MissingActiveGenerationPointer)?;
+        let index = open_slot_index(&root, pointer.active())?;
         register_body_analyzer(&index);
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let manifest = load_manifest_for_metas(&root, &metas)?;
-        if let Some(pointer) = &pointer {
-            if pointer.active().generation_id() != manifest.generation_id()? {
-                return Err(IndexError::InvalidActiveGenerationPointer);
-            }
+        if pointer.active().generation_id() != manifest.generation_id()? {
+            return Err(IndexError::InvalidActiveGenerationPointer);
         }
         let reader = index
             .reader_builder()
@@ -84,7 +76,7 @@ impl VerifiedIndex {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        if exhaustive || legacy {
+        if exhaustive {
             if !searcher.index().validate_checksum()?.is_empty() {
                 return Err(IndexError::ChecksumMismatch);
             }

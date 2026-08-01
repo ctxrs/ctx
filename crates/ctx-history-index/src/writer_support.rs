@@ -22,16 +22,6 @@ impl std::ops::DerefMut for PendingSource {
 const WRITER_HANDOFF_RETRY_WINDOW: Duration = Duration::from_millis(500);
 const WRITER_HANDOFF_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
-pub(super) fn acquire_preflight_writer_lock_with_retry(
-    directory: &impl Directory,
-) -> Result<DirectoryLock> {
-    acquire_lock_with_retry(
-        directory,
-        &INDEX_WRITER_LOCK,
-        "failed to acquire the index preflight lock",
-    )
-}
-
 pub(super) fn acquire_generation_writer_lock_with_retry(
     directory: &impl Directory,
     lock: &Lock,
