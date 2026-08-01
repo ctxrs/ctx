@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::{
     index_terminal_error, index_watch_output, lexical_index_status, IndexSelection,
-    IndexWatchOutput,
+    IndexWaitHumanOutput, IndexWatchOutput,
 };
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
 
@@ -141,6 +141,46 @@ fn first_publication_pending_has_stable_human_and_machine_frames() {
     assert_eq!(rendered["initialized"], false);
     assert_eq!(rendered["lexical"]["status"], "pending");
     assert_eq!(rendered["lexical"]["pending_inventory_units"], 1);
+}
+
+#[test]
+fn wait_human_output_prints_a_fresh_final_status() {
+    let stdout = SharedWriter::default();
+    let captured = stdout.clone();
+    let stdout_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    let mut ui = Ui::with_writers(stdout, stdout_context, Vec::new(), stderr_context);
+    let mut output = IndexWaitHumanOutput::default();
+
+    output
+        .print_final(&mut ui, &watch_status(4, 12, true))
+        .unwrap();
+
+    let rendered = captured.text();
+    assert_eq!(rendered.matches("Indexing your history").count(), 1);
+    assert!(rendered.contains("Sessions    4 indexed"), "{rendered}");
+    assert!(rendered.contains("Records     40 searchable"), "{rendered}");
+}
+
+#[test]
+fn wait_human_output_prints_a_changed_final_status() {
+    let stdout = SharedWriter::default();
+    let captured = stdout.clone();
+    let stdout_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    let mut ui = Ui::with_writers(stdout, stdout_context, Vec::new(), stderr_context);
+    let mut output = IndexWaitHumanOutput::default();
+
+    output.print(&mut ui, &watch_status(0, 12, true)).unwrap();
+    output
+        .print_final(&mut ui, &watch_status(4, 12, true))
+        .unwrap();
+
+    let rendered = captured.text();
+    assert_eq!(rendered.matches("Indexing your history").count(), 2);
+    assert!(rendered.contains("Sessions    0 indexed"), "{rendered}");
+    assert!(rendered.contains("Sessions    4 indexed"), "{rendered}");
+    assert!(rendered.contains("Records     40 searchable"), "{rendered}");
 }
 
 #[test]
