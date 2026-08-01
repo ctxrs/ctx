@@ -33,7 +33,8 @@ use crate::{
         SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
         SourceBackedSelectorAuthority,
     },
-    CaptureError, GEMINI_CLI_SOURCE_FORMAT,
+    repository_attribution::{linked_outcome_evidence, LinkedOutcomeInput},
+    CaptureError, OutputOutcome, GEMINI_CLI_SOURCE_FORMAT,
 };
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
@@ -43,7 +44,7 @@ const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
-    "gemini-nativepath-source-backed-v0-p7-p4-repository-attribution";
+    "gemini-nativepath-source-backed-v0-p8-p5-exact-results";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
 const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;
@@ -243,6 +244,8 @@ struct GeminiProjector {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct GeminiToolContext {
+    origin_call_id: Option<String>,
+    origin_event_sequence: Option<u64>,
     command: Option<String>,
     declared_workdir: Option<String>,
     file_paths: Vec<String>,
@@ -365,7 +368,7 @@ fn gemini_attribution_for_event(
                     "gemini_tool_calls_do_not_share_one_exact_repository_context",
                 ));
             }
-            for (call, context) in calls.iter().zip(contexts) {
+            for (call, mut context) in calls.iter().zip(contexts) {
                 let Some(call_id) = call
                     .id
                     .as_deref()
@@ -378,6 +381,8 @@ fn gemini_attribution_for_event(
                     ));
                     continue;
                 };
+                context.origin_call_id = Some(call_id.to_owned());
+                context.origin_event_sequence = gemini_event_sequence(event);
                 if tool_contexts.contains_key(call_id) {
                     tool_contexts.insert(call_id.to_owned(), GeminiToolContextState::Ambiguous);
                 } else if tool_contexts.len() < MAX_GEMINI_TOOL_CONTEXTS {
@@ -389,6 +394,7 @@ fn gemini_attribution_for_event(
             }
         }
         GeminiEventBody::OutputDiagnostic {
+            result,
             call_id,
             command,
             declared_workdir,
@@ -402,6 +408,7 @@ fn gemini_attribution_for_event(
                 declared_workdir: declared_workdir.clone(),
                 file_paths: file_paths.clone(),
                 ambiguous_native_fields: *ambiguous_native_fields,
+                ..GeminiToolContext::default()
             };
             let linked = call_id
                 .as_ref()
@@ -439,10 +446,65 @@ fn gemini_attribution_for_event(
                     detail,
                 ));
             }
+            let result_outcome = match outcome.as_str() {
+                "success" => OutputOutcome::Success,
+                "failure" => OutputOutcome::Failure,
+                "timeout" => OutputOutcome::Timeout,
+                _ => OutputOutcome::Unknown,
+            };
+            if linkage_exact && result_outcome == OutputOutcome::Success {
+                if let (
+                    Some(command),
+                    Some(origin_call_id),
+                    Some(result_call_id),
+                    Some(origin_event_sequence),
+                    Some(result),
+                ) = (
+                    context.command.as_deref(),
+                    context.origin_call_id.as_deref(),
+                    call_id.as_deref(),
+                    context.origin_event_sequence,
+                    result.as_ref(),
+                ) {
+                    let structured_oid = result
+                        .pointer("/gitOperation/commit/sha")
+                        .and_then(serde_json::Value::as_str);
+                    let output_workdir = result
+                        .get("cwd")
+                        .or_else(|| result.get("workdir"))
+                        .and_then(serde_json::Value::as_str);
+                    if let Some(linked) = linked_outcome_evidence(LinkedOutcomeInput {
+                        provider: "gemini",
+                        command,
+                        session_cwd: input.session_cwd.as_deref(),
+                        declared_workdir: context.declared_workdir.as_deref(),
+                        origin_call_id,
+                        result_call_id,
+                        origin_event_sequence,
+                        continuation_call_id_sha256: &[],
+                        result_record_sha256: event.source_record.record_digest,
+                        observed_at_unix_ms: input.activity_at_unix_ms.unwrap_or(0),
+                        result_outcome,
+                        result_output: result,
+                        structured_commit_oid: structured_oid,
+                        output_repository_path: output_workdir,
+                    }) {
+                        input.provider_native_repository_aliases =
+                            linked.provider_native_repository_aliases;
+                        input.outcome_operation_repository_path =
+                            linked.outcome_operation_repository_path;
+                        input.outcome_output_repository_path =
+                            linked.outcome_output_repository_path;
+                        input.outcome_observations = linked.outcomes;
+                        input.outcome_abstentions = linked.abstentions;
+                    }
+                }
+            }
             input.outcome_abstentions.extend(gemini_outcome_abstentions(
                 &context,
-                outcome,
+                result_outcome,
                 linkage_exact,
+                result.is_some(),
             ));
         }
         GeminiEventBody::Message { .. }
@@ -531,6 +593,7 @@ fn combine_gemini_tool_contexts(
             || contexts
                 .iter()
                 .any(|context| context.ambiguous_native_fields),
+        ..GeminiToolContext::default()
     }
 }
 
@@ -562,6 +625,8 @@ fn merge_gemini_result_context(
     linked: GeminiToolContext,
 ) -> (GeminiToolContext, bool) {
     let mut exact = !direct.ambiguous_native_fields && !linked.ambiguous_native_fields;
+    direct.origin_call_id = linked.origin_call_id;
+    direct.origin_event_sequence = linked.origin_event_sequence;
     for (direct_field, linked_field) in [
         (&mut direct.command, linked.command),
         (&mut direct.declared_workdir, linked.declared_workdir),
@@ -600,8 +665,9 @@ fn apply_gemini_context(
 
 fn gemini_outcome_abstentions(
     context: &GeminiToolContext,
-    outcome: &str,
+    outcome: OutputOutcome,
     linkage_exact: bool,
+    has_exact_result: bool,
 ) -> Vec<(RepositoryAbstentionReason, &'static str)> {
     let Some(command) = context.command.as_deref() else {
         return Vec::new();
@@ -615,60 +681,27 @@ fn gemini_outcome_abstentions(
             "gemini_repository_outcome_has_no_exact_result_link",
         )];
     }
-    let base = context
-        .declared_workdir
-        .as_deref()
-        .and_then(|path| crate::repository_attribution::lexical_absolute(path, None));
-    let plan = match base.as_deref() {
-        Some(base) => crate::repository_attribution::bounded_outcome_plan(command, base),
-        None => {
-            let provisional =
-                crate::repository_attribution::bounded_outcome_plan(command, Path::new("/"));
-            if matches!(
-                provisional,
-                crate::repository_attribution::BoundedOutcomePlanDisposition::Planned(_)
-            ) {
-                return vec![(
-                    RepositoryAbstentionReason::OutcomeRepositoryUnbound,
-                    "gemini_outcome_command_has_no_bounded_base",
-                )];
-            }
-            provisional
-        }
-    };
-    match plan {
-        crate::repository_attribution::BoundedOutcomePlanDisposition::Unrecognized => Vec::new(),
-        crate::repository_attribution::BoundedOutcomePlanDisposition::Abstained {
-            reason,
-            detail,
-            ..
-        } => vec![(reason, detail)],
-        crate::repository_attribution::BoundedOutcomePlanDisposition::Planned(plan) => {
-            if outcome != "success" {
-                return vec![(
-                    RepositoryAbstentionReason::OutcomeResultInadmissible,
-                    "recognized_gemini_outcome_command_did_not_succeed",
-                )];
-            }
-            if matches!(
-                plan.operation,
-                crate::repository_attribution::BoundedOutcomeOperation::Commit {
-                    rewrites_history: true,
-                    ..
-                }
-            ) {
-                vec![(
-                    RepositoryAbstentionReason::HistoryRewriteUnlinked,
-                    "gemini_result_has_no_exact_structured_replacement_lineage",
-                )]
-            } else {
-                vec![(
-                    RepositoryAbstentionReason::OutcomeResultInadmissible,
-                    "gemini_result_has_no_exact_structured_repository_outcome",
-                )]
-            }
-        }
+    if outcome != OutputOutcome::Success {
+        return vec![(
+            RepositoryAbstentionReason::OutcomeResultInadmissible,
+            "recognized_gemini_outcome_command_did_not_succeed",
+        )];
     }
+    (!has_exact_result)
+        .then_some((
+            RepositoryAbstentionReason::OutcomeResultInadmissible,
+            "gemini_result_has_no_exact_value",
+        ))
+        .into_iter()
+        .collect()
+}
+
+fn gemini_event_sequence(event: &super::GeminiRetainedEvent) -> Option<u64> {
+    event
+        .native_order
+        .raw_ordinal
+        .checked_mul(u64::from(u32::MAX) + 1)
+        .and_then(|sequence| sequence.checked_add(u64::from(event.native_order.sub_ordinal)))
 }
 
 fn shared_authority(
@@ -784,27 +817,37 @@ fn lexical_body(event: &super::GeminiRetainedEvent) -> String {
         GeminiEventBody::Message { text, .. } => text.clone(),
         GeminiEventBody::ToolCall { .. } => "Gemini tool call".to_owned(),
         GeminiEventBody::OutputDiagnostic {
+            result,
             call_id,
             tool_name,
             outcome,
             exit_code,
             duration_ms,
             ..
-        } => format!(
-            "Gemini {} output {}{}{}{}",
-            tool_name.as_deref().unwrap_or("tool"),
-            outcome,
-            call_id
-                .as_deref()
-                .map(|call| format!(", call {call}"))
-                .unwrap_or_default(),
-            exit_code
-                .map(|code| format!(", exit code {code}"))
-                .unwrap_or_default(),
-            duration_ms
-                .map(|duration| format!(", duration {duration} ms"))
-                .unwrap_or_default(),
-        ),
+        } => result
+            .as_ref()
+            .and_then(|value| match value {
+                serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
+                serde_json::Value::String(_) => None,
+                value => serde_json::to_string(value).ok(),
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "Gemini {} output {}{}{}{}",
+                    tool_name.as_deref().unwrap_or("tool"),
+                    outcome,
+                    call_id
+                        .as_deref()
+                        .map(|call| format!(", call {call}"))
+                        .unwrap_or_default(),
+                    exit_code
+                        .map(|code| format!(", exit code {code}"))
+                        .unwrap_or_default(),
+                    duration_ms
+                        .map(|duration| format!(", duration {duration} ms"))
+                        .unwrap_or_default(),
+                )
+            }),
         GeminiEventBody::StateNotice { summary } => summary
             .as_deref()
             .filter(|summary| !summary.is_empty())

@@ -86,6 +86,51 @@ fn gemini_nativepath_pull_reader_pages_at_retained_byte_bound() {
 }
 
 #[test]
+fn gemini_single_exact_result_may_roll_past_the_page_target() {
+    let exact = format!(
+        "{}gemini-full-result-tail",
+        "x".repeat(MAX_GEMINI_NATIVE_PAGE_BYTES + 64 * 1024)
+    );
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let path = write_transcript(
+        &root,
+        &[
+            header("large-exact-result", "main"),
+            json!({
+                "id": "large-result",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "large-call",
+                    "result": {"content": exact}
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let mut reader = read_gemini_transcript_pages(&source, None).unwrap();
+    let mut rows = Vec::new();
+    let mut saw_singleton_rollover = false;
+    while let Some(page) = reader.next_page().unwrap() {
+        saw_singleton_rollover |= page.physical_records == 1
+            && page.conservative_serialized_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES
+            && page.conservative_serialized_bytes <= MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES;
+        rows.extend(page.events);
+    }
+
+    assert!(saw_singleton_rollover);
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(
+        &rows[0].body,
+        GeminiEventBody::OutputDiagnostic {
+            result: Some(serde_json::Value::String(value)),
+            ..
+        } if value.ends_with("gemini-full-result-tail")
+            && value.len() > MAX_GEMINI_NATIVE_PAGE_BYTES
+    ));
+}
+
+#[test]
 fn gemini_nativepath_safe_pages_rewind_before_an_uncommitted_overflow_record() {
     const CONTENT_BYTES: usize = 2_100_000;
 
@@ -133,7 +178,7 @@ fn gemini_nativepath_safe_pages_rewind_before_an_uncommitted_overflow_record() {
 }
 
 #[test]
-fn gemini_nativepath_core_retains_failure_and_timeout_diagnostics() {
+fn gemini_nativepath_core_retains_every_exact_result_value() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let path = write_transcript(
@@ -178,14 +223,14 @@ fn gemini_nativepath_core_retains_failure_and_timeout_diagnostics() {
         .collect::<Vec<_>>();
     let serialized = serde_json::to_string(&rows).unwrap();
 
-    assert_eq!(diagnostic_outcomes, ["failure", "timeout"]);
+    assert_eq!(diagnostic_outcomes, ["success", "failure", "timeout"]);
     for secret in ["successful secret", "failure secret", "timeout secret"] {
-        assert!(!serialized.contains(secret));
+        assert!(serialized.contains(secret));
     }
 }
 
 #[test]
-fn gemini_nativepath_core_bounds_large_failure_diagnostic_parsing() {
+fn gemini_nativepath_core_retains_large_failure_result_exactly() {
     const FAILURE_BYTES: usize = 3 * 1024 * 1024;
 
     let temp = TempDir::new().unwrap();
@@ -219,6 +264,6 @@ fn gemini_nativepath_core_bounds_large_failure_diagnostic_parsing() {
             ..
         } if call_id == "failure-call"
     ));
-    assert!(!serde_json::to_string(&rows).unwrap().contains(canary));
+    assert!(serde_json::to_string(&rows).unwrap().contains(canary));
     assert_eq!(gemini_parse_counters(), (2, 1));
 }

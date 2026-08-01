@@ -18,7 +18,6 @@ pub(in super::super) fn decode_result_record(
         ));
     }
     let mut decoded = DecodedGeminiResult { events: Vec::new() };
-    let mut retained_identities = BTreeSet::new();
     let mut result_call_counts = BTreeMap::<String, usize>::new();
     for output in &probed {
         if let Some(call_id) = output.call_id.as_ref() {
@@ -33,23 +32,10 @@ pub(in super::super) fn decode_result_record(
             .is_some_and(|count| *count != 1);
     }
     for (index, probed) in probed.into_iter().enumerate() {
-        let retained_failure = !probed.redacted
-            && matches!(
-                probed.outcome.outcome,
-                OutputOutcome::Failure | OutputOutcome::Timeout
-            );
-        let retained_repository_evidence = probed.command.is_some()
-            || probed.declared_workdir.is_some()
-            || !probed.file_paths.is_empty()
-            || probed.ambiguous_native_fields;
         let sub_ordinal = u32::try_from(index)
             .map_err(|_| "Gemini result subrecord ordinal overflowed".to_owned())?;
-        let event_identity = result_event_identity(native_record_id.as_deref(), &probed);
-        let GeminiEventIdentity::NativeRecordId(identity_key) = &event_identity;
-        if !retained_identities.insert(identity_key.clone()) {
-            continue;
-        }
-        if !probed.redacted && (retained_failure || retained_repository_evidence) {
+        let event_identity = result_event_identity(native_record_id.as_deref(), &probed, index);
+        if !probed.redacted {
             let event = decode_output_diagnostic(
                 occurred_at_unix_ms,
                 raw_ordinal,
@@ -81,6 +67,7 @@ fn decode_output_diagnostic(
     }
     .to_owned();
     let body = GeminiEventBody::OutputDiagnostic {
+        result: output.result.clone(),
         call_id: output.call_id.clone(),
         tool_name: output.tool_name.clone(),
         command: output.command.clone(),
@@ -96,10 +83,6 @@ fn decode_output_diagnostic(
     let mut hasher = Sha256::new();
     hasher.update(BODY_HASH_DOMAIN);
     hasher.update(&body_bytes);
-    // The normalized fallback hash must notice output rewrites even though
-    // output bytes never enter the Core body.
-    hasher.update(b"\0gemini-result-content\0");
-    hasher.update(output.fallback_identity_sha256);
     let body_sha256 = hasher.finalize().into();
     Ok(DecodedGeminiEvent {
         event: GeminiRetainedEvent {

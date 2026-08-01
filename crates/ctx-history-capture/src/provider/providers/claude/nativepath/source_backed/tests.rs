@@ -2,6 +2,39 @@ use super::*;
 use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceObservation};
 use ctx_history_index::{GenerationWriter, WriterOptions};
 
+#[test]
+fn claude_body_above_the_page_target_is_retained_whole() {
+    let body = format!(
+        "{}claude-full-body-tail",
+        "x".repeat(8 * 1024 * 1024 + 64 * 1024)
+    );
+    let bytes = serde_json::json!({
+        "type": "user",
+        "sessionId": "large-body-session",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {"role": "user", "content": body},
+    })
+    .to_string()
+    .into_bytes();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("large-body-session.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: bytes.len() as u64,
+        line_number: 1,
+        record_sha256: Sha256::digest(&bytes).into(),
+    };
+
+    let parsed = parse_native_record(&bytes, 0, &locator).unwrap();
+
+    assert_eq!(parsed.rows.len(), 1);
+    assert_eq!(parsed.rows[0].body.as_deref(), Some(body.as_str()));
+    assert!(parsed.rows[0]
+        .body
+        .as_deref()
+        .is_some_and(|value| value.ends_with("claude-full-body-tail")));
+}
+
 fn fallback_row(body: &str, ordinal: u64) -> ClaudeRetainedRow {
     let bytes = serde_json::json!({
         "type": "user",
@@ -175,16 +208,88 @@ fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
         abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
             && abstention.detail.as_deref() == Some("claude_tool_result_call_id_is_ambiguous")
     }));
-    assert!(retain_result_event(
-        false,
-        abstained,
-        ClaudeOutputOutcome::Success
-    ));
-    assert!(retain_result_event(
-        false,
-        false,
-        ClaudeOutputOutcome::Failure
-    ));
+}
+
+fn test_projector() -> ClaudeProjector {
+    let key = ClaudeSessionKey {
+        root_session_id: "test-session".to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let binding = Binding {
+        project_dir: PathBuf::from("/tmp/project"),
+        key: key.clone(),
+        layout: SessionLayout::Primary,
+    };
+    ClaudeProjector {
+        source: source_key(&key).unwrap(),
+        source_path: "test-session.jsonl".to_owned(),
+        identities: identities(&binding).unwrap(),
+        binding,
+        session: ClaudeSessionMetadata::new(key),
+        attributor: RepositoryAttributor::default(),
+        pending_calls: HashMap::new(),
+        linkage_capacity_exceeded: false,
+        fallback_identities: FallbackEventIdentityState::default(),
+    }
+}
+
+#[test]
+fn exact_linked_unknown_tool_result_is_emitted_without_outcome_evidence() {
+    let call = br#"{"type":"assistant","uuid":"call-record","sessionId":"test-session","message":{"role":"assistant","content":[{"type":"tool_use","id":"unknown-call","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#;
+    let result = br#"{"type":"user","uuid":"result-record","sessionId":"test-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"unknown-call","content":"exact unknown output"}]}}"#;
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(call, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    projector
+        .project(JsonlRecordRef::for_test(result, 1), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(emitted.len(), 2);
+    assert!(emitted[1]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("exact unknown output")));
+    assert!(emitted[1].repository_vcs_observations.is_empty());
+}
+
+#[test]
+fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
+    let mut projector = test_projector();
+    projector.remember_pending_call(
+        "oversized-call",
+        PendingCallState::Exact(PendingCall {
+            command: Some("x".repeat(MAX_PROJECTOR_CHECKPOINT_BYTES)),
+            declared_workdir: Some("/tmp/project".to_owned()),
+            event_sequence: 1,
+        }),
+    );
+
+    assert!(projector.pending_calls.is_empty());
+    assert!(projector.linkage_capacity_exceeded);
+    assert!(encode_projector_checkpoint(&projector).is_ok());
+    let mut input = AttributionInput::default();
+    let (context, abstained) = resolve_pending_call(
+        &mut projector.pending_calls,
+        Some("oversized-call"),
+        projector.linkage_capacity_exceeded,
+        &mut input,
+    );
+    assert!(context.is_none());
+    assert!(abstained);
+    assert!(input
+        .outcome_abstentions
+        .iter()
+        .any(|(reason, _)| { *reason == RepositoryAbstentionReason::LinkageCapacityExceeded }));
 }
 
 #[test]

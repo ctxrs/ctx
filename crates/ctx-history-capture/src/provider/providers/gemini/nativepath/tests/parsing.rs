@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
+fn gemini_nativepath_retains_core_rows_with_exact_result_material() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let output_sentinel = "NATIVEPATH_SYNTHETIC_OUTPUT_GEMINI_PRIVATE";
@@ -62,12 +62,12 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
 
     let (outcome, rows) = scan_collect(&source, None);
 
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
     assert_eq!(
         rows.iter()
             .map(|row| row.native_order.raw_ordinal)
             .collect::<Vec<_>>(),
-        [1, 2, 3, 5]
+        [1, 2, 3, 4, 5]
     );
     assert_eq!(
         rows.iter().map(|row| row.event_type).collect::<Vec<_>>(),
@@ -75,6 +75,7 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
             EventType::Message,
             EventType::Message,
             EventType::ToolCall,
+            EventType::ToolOutput,
             EventType::Notice
         ]
     );
@@ -84,18 +85,22 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
         rows[2].safe_file_touches,
         vec!["safe-request.txt".to_owned()]
     );
-    assert!(matches!(rows[3].body, GeminiEventBody::StateNotice { .. }));
-    assert!(rows.iter().all(|row| {
-        !format!("{row:?}").contains(output_sentinel)
-            && !row
-                .safe_file_touches
-                .iter()
-                .any(|path| path.contains("output-only"))
-    }));
+    assert!(matches!(
+        &rows[3].body,
+        GeminiEventBody::OutputDiagnostic {
+            result: Some(serde_json::Value::String(value)),
+            ..
+        } if value == output_sentinel
+    ));
+    assert!(matches!(rows[4].body, GeminiEventBody::StateNotice { .. }));
+    assert!(rows.iter().all(|row| !row
+        .safe_file_touches
+        .iter()
+        .any(|path| path.contains("output-only"))));
     assert_eq!(outcome.metrics.header_records, 1);
     assert_eq!(outcome.metrics.native_result_records_observed, 1);
     assert!(outcome.metrics.native_result_record_bytes_observed > 0);
-    assert_eq!(outcome.checkpoint.retained_event_count, 4);
+    assert_eq!(outcome.checkpoint.retained_event_count, 5);
     assert_eq!(outcome.signals.source_change, GeminiSourceChange::Fresh);
     assert_eq!(
         outcome.signals.publication_shape,
@@ -316,17 +321,14 @@ fn gemini_nativepath_invalid_decoding_size_and_touch_rows_do_not_block_later_rec
 
     let (outcome, rows) = scan_collect(&source, None);
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].native_order.raw_ordinal, 4);
-    assert_eq!(outcome.rejected_records, 3);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].native_order.raw_ordinal, 2);
+    assert_eq!(rows[1].native_order.raw_ordinal, 4);
+    assert_eq!(outcome.rejected_records, 2);
     assert!(outcome
         .rejections
         .iter()
         .any(|rejection| rejection.reason.contains("missing a nonempty native id")));
-    assert!(outcome
-        .rejections
-        .iter()
-        .any(|rejection| rejection.reason.contains("retained event exceeds")));
     assert!(outcome
         .rejections
         .iter()
@@ -528,7 +530,7 @@ fn record_has_reason(
 }
 
 #[test]
-fn gemini_exact_native_result_args_and_id_bind_without_scanning_result_content() {
+fn gemini_exact_native_result_args_id_and_content_are_retained() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let repo = native_repository(&temp);
@@ -610,7 +612,7 @@ fn gemini_exact_native_result_args_and_id_bind_without_scanning_result_content()
         result,
         RepositoryAbstentionReason::ProviderOutputUnjoined
     ));
-    assert!(!serde_json::to_string(&records)
+    assert!(serde_json::to_string(&records)
         .unwrap()
         .contains(output_sentinel));
 }
@@ -672,6 +674,79 @@ fn gemini_commit_rewrite_and_pr_results_require_exact_structured_outcomes() {
     assert!(record_has_reason(
         &records[5],
         RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+}
+
+#[test]
+fn gemini_outcomes_require_an_exact_linked_successful_value() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let oid = "a".repeat(40);
+    let mut values = vec![json!({
+        "sessionId": "gemini-exact-outcomes",
+        "startTime": "2026-07-31T12:00:00Z",
+        "kind": "main",
+        "directories": [repo]
+    })];
+    for (name, status) in [
+        ("success", Some("success")),
+        ("failure", Some("failure")),
+        ("unknown", None),
+    ] {
+        values.push(json!({
+            "id": format!("{name}-call-record"),
+            "type": "gemini",
+            "toolCalls": [{
+                "id": format!("{name}-call"),
+                "name": "run_shell_command",
+                "args": {"command": "git commit -m exact", "dir_path": repo}
+            }]
+        }));
+        let mut result = json!({
+            "id": format!("{name}-result-record"),
+            "type": "gemini",
+            "toolCalls": [{
+                "id": format!("{name}-call"),
+                "result": {"content": {"commit_oid": oid}}
+            }]
+        });
+        if let Some(status) = status {
+            result["toolCalls"][0]["status"] = json!(status);
+        }
+        values.push(result);
+    }
+    values.push(json!({
+        "id": "orphan-result-record",
+        "type": "gemini",
+        "toolCalls": [{
+            "id": "orphan-call",
+            "args": {"command": "git commit -m exact", "dir_path": repo},
+            "result": {"content": {"commit_oid": oid}},
+            "status": "success"
+        }]
+    }));
+    let path = write_transcript(&root, &values);
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    assert_eq!(records.len(), 7);
+    assert_eq!(records[1].repository_vcs_observations.len(), 1);
+    assert!(records[3].repository_vcs_observations.is_empty());
+    assert!(records[5].repository_vcs_observations.is_empty());
+    assert!(records[6].repository_vcs_observations.is_empty());
+    assert!(record_has_reason(
+        &records[3],
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+    assert!(record_has_reason(
+        &records[5],
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+    assert!(record_has_reason(
+        &records[6],
+        RepositoryAbstentionReason::ProviderOutputUnjoined
     ));
 }
 

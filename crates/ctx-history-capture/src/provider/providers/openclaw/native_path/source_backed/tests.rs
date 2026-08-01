@@ -7,6 +7,40 @@ const HISTORY: &str =
 const SESSIONS: &str =
     include_str!("../../../../../../tests/fixtures/repository_attribution/openclaw-sessions.json");
 
+fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
+    let temp = tempfile::tempdir().unwrap();
+    let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+    let native_session_id = "main/test-session";
+    let source = source_key(native_session_id).unwrap();
+    let session_id = session_identity(&source, native_session_id).unwrap();
+    let session = SessionState::new(
+        Path::new("/agents/main/sessions/test-session.jsonl"),
+        native_session_id,
+        &Value::Null,
+        None,
+        None,
+        DateTime::<Utc>::UNIX_EPOCH,
+        session_id,
+    )
+    .unwrap();
+    (
+        temp,
+        OpenClawProjector {
+            source,
+            native_session_id: native_session_id.to_owned(),
+            session_id,
+            session,
+            index_file: None,
+            authority,
+            attributor: RepositoryAttributor::default(),
+            pending_calls: HashMap::new(),
+            running_processes: HashMap::new(),
+            linkage_capacity_exceeded: false,
+            fallback_identities: FallbackEventIdentityState::default(),
+        },
+    )
+}
+
 fn fallback_event_ids(bodies: &[&str]) -> Vec<StableEntityId> {
     let native_session_id = "main/fallback-session";
     let source = source_key(native_session_id).unwrap();
@@ -136,7 +170,8 @@ fn native_tool_call_result_and_spawned_family_are_exact() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    let call = native_tool_call(&lines[1]).unwrap();
+    let calls = native_tool_calls(&lines[1]);
+    let call = calls.first().unwrap();
     assert_eq!(call.call_id, Some("call-1"));
     assert_eq!(call.command.as_deref(), Some("git commit -m exact"));
     assert_eq!(call.declared_workdir.as_deref(), Some("/tmp/repository"));
@@ -160,6 +195,148 @@ fn native_tool_call_result_and_spawned_family_are_exact() {
             Some("main/parent-session".to_owned())
         )
     );
+}
+
+#[test]
+fn every_tool_call_block_projects_with_a_stable_selector() {
+    let value = serde_json::json!({
+        "type": "message",
+        "id": "multi-call-record",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "toolCall", "id": "call-a", "name": "read_file", "arguments": {"path": "a.rs"}},
+                {"type": "text", "text": "between"},
+                {"type": "toolCall", "id": "call-b", "name": "write_file", "arguments": {"path": "b.rs"}}
+            ]
+        }
+    });
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let (_temp, mut projector) = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(emitted.len(), 2);
+    assert_ne!(emitted[0].event_id, emitted[1].event_id);
+    assert_ne!(emitted[0].native_event_id, emitted[1].native_event_id);
+    assert_eq!(emitted[0].event_sequence, 1);
+    assert_eq!(emitted[1].event_sequence, 3);
+    assert!(emitted[0]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("call-a")));
+    assert!(emitted[1]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("call-b")));
+
+    let (_temp, mut replay) = test_projector();
+    let mut replayed = Vec::new();
+    replay
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            replayed.push(record.event_id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        replayed
+    );
+}
+
+#[test]
+fn running_result_is_emitted_before_continuation_state_is_checkpointed() {
+    let call = serde_json::to_vec(&serde_json::json!({
+        "type": "message",
+        "id": "running-call-record",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {"role": "assistant", "content": [{
+            "type": "toolCall",
+            "id": "running-call",
+            "name": "exec",
+            "arguments": {"command": "git status", "workdir": "/tmp/project"}
+        }]}
+    }))
+    .unwrap();
+    let running = serde_json::to_vec(&serde_json::json!({
+        "type": "message",
+        "id": "running-result-record",
+        "timestamp": "2026-07-31T12:00:01Z",
+        "message": {
+            "role": "toolResult",
+            "toolCallId": "running-call",
+            "content": "partial exact output",
+            "details": {"status": "running", "sessionId": "process-1"}
+        }
+    }))
+    .unwrap();
+    let (_temp, mut projector) = test_projector();
+    let mut emitted = Vec::new();
+    for (ordinal, bytes) in [&call, &running].into_iter().enumerate() {
+        projector
+            .project(
+                JsonlRecordRef::for_test(bytes, ordinal as u64),
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(emitted.len(), 2);
+    assert!(emitted[1]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("partial exact output")));
+    assert!(projector.running_processes.contains_key("process-1"));
+    assert!(encode_projector_checkpoint(&projector).is_ok());
+}
+
+#[test]
+fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
+    let (_temp, mut projector) = test_projector();
+    projector.remember_state(
+        projection::StateBucket::Pending,
+        "oversized-call",
+        PendingCallState::Exact(PendingCall {
+            origin_call_id: "oversized-call".to_owned(),
+            command: Some("x".repeat(MAX_PROJECTOR_CHECKPOINT_BYTES)),
+            declared_workdir: Some("/tmp/project".to_owned()),
+            event_sequence: 1,
+            continuation_call_id_sha256: Vec::new(),
+        }),
+    );
+
+    assert!(projector.pending_calls.is_empty());
+    assert!(projector.linkage_capacity_exceeded);
+    assert!(encode_projector_checkpoint(&projector).is_ok());
+    let mut input = AttributionInput::default();
+    let (context, abstained) = resolve_pending_call(
+        &mut projector.pending_calls,
+        Some("oversized-call"),
+        projector.linkage_capacity_exceeded,
+        &mut input,
+    );
+    assert!(context.is_none());
+    assert!(abstained);
+    assert!(input
+        .outcome_abstentions
+        .iter()
+        .any(|(reason, _)| { *reason == RepositoryAbstentionReason::LinkageCapacityExceeded }));
 }
 
 #[test]

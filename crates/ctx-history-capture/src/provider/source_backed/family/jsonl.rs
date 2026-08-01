@@ -13,10 +13,14 @@ use crate::{
     common::io::OpenedProviderSourceFile, CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
+mod checkpoint;
 mod identity;
 mod revalidation;
 mod route;
 
+pub(crate) use checkpoint::{
+    bounded_checkpoint_fits, decode_bounded_checkpoint, encode_bounded_checkpoint,
+};
 use identity::observe_metadata;
 use revalidation::hash_prefix;
 #[cfg(test)]
@@ -254,6 +258,19 @@ pub(crate) struct JsonlRecordRef<'record> {
 }
 
 impl<'record> JsonlRecordRef<'record> {
+    #[cfg(test)]
+    pub(crate) fn for_test(bytes: &'record [u8], physical_ordinal: u64) -> Self {
+        Self {
+            bytes,
+            evidence: JsonlRecordEvidence {
+                physical_ordinal,
+                byte_start: 0,
+                byte_end_exclusive: bytes.len() as u64,
+                record_digest: Sha256::digest(bytes).into(),
+            },
+        }
+    }
+
     pub(crate) fn bytes(self) -> &'record [u8] {
         self.bytes
     }
@@ -492,14 +509,6 @@ impl JsonlReader {
                 break;
             };
 
-            if wire_bytes > PAGE_MAX_BYTES {
-                return Err(E::from(CaptureError::InvalidPayload(format!(
-                    "{}:{} exceeds the {} byte JSONL physical page limit",
-                    self.identity.source_path.display(),
-                    ordinal.saturating_add(1),
-                    PAGE_MAX_BYTES
-                ))));
-            }
             if records != 0 && page_bytes.saturating_add(wire_bytes) > PAGE_MAX_BYTES {
                 self.prefix_hasher = hasher_before;
                 self.reader
@@ -552,11 +561,11 @@ impl JsonlReader {
                 "whole-record JSON source exceeds platform limits".to_owned(),
             ))
         })?;
-        if length > MAX_PROVIDER_JSONL_LINE_BYTES || length > PAGE_MAX_BYTES {
+        if length > MAX_PROVIDER_JSONL_LINE_BYTES {
             return Err(E::from(CaptureError::InvalidPayload(format!(
                 "{} exceeds the {} byte whole-record JSON limit",
                 self.identity.source_path.display(),
-                MAX_PROVIDER_JSONL_LINE_BYTES.min(PAGE_MAX_BYTES)
+                MAX_PROVIDER_JSONL_LINE_BYTES
             ))));
         }
         self.record_buffer.resize(length, 0);
@@ -699,9 +708,8 @@ where
     let mut hasher = new_prefix_hasher();
     let mut buffer = Vec::new();
     let mut start = 0_u64;
-    let mut page_bytes = 0_usize;
     for ordinal in 0..max_records {
-        let (end, record_digest, wire_bytes) = match read_bounded_line(
+        let (end, record_digest, _wire_bytes) = match read_bounded_line(
             &mut reader,
             &mut buffer,
             &mut hasher,
@@ -723,13 +731,6 @@ where
                 ))));
             }
         };
-        page_bytes = page_bytes.saturating_add(wire_bytes);
-        if page_bytes > PAGE_MAX_BYTES {
-            return Err(E::from(CaptureError::InvalidPayload(format!(
-                "provider identity probe exceeds the {} byte JSONL physical page limit",
-                PAGE_MAX_BYTES
-            ))));
-        }
         let physical_ordinal = u64::try_from(ordinal).map_err(|_| {
             E::from(CaptureError::SystemInvariant(
                 "provider identity probe ordinal exceeds u64",
@@ -846,6 +847,10 @@ fn read_bounded_line(
                 if bytes.last() == Some(&b'\r') {
                     bytes.pop();
                 }
+            }
+            if bytes.len() > MAX_PROVIDER_JSONL_LINE_BYTES {
+                bytes.clear();
+                return Ok(RawLine::Oversized);
             }
             return Ok(RawLine::Complete {
                 end,

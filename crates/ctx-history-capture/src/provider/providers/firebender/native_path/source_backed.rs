@@ -22,9 +22,10 @@ use crate::{
 mod direct;
 mod direct_snapshot;
 
+#[cfg(test)]
+pub(super) use direct::firebender_database_path_and_source;
 pub(crate) use direct::register_source_backed_route;
 
-const FIREBENDER_SOURCE_ANCHOR_NAMESPACE: &str = "firebender.explicit-chat-history";
 const FIREBENDER_NATIVE_SESSION_NAMESPACE: &str = "firebender.chat-session";
 const FIREBENDER_NATIVE_EVENT_NAMESPACE: &str = "firebender.message";
 const FIREBENDER_POSITION_KIND: &str = "firebender.messages-json-index";
@@ -49,19 +50,13 @@ pub(crate) enum FirebenderSourceBackedError {
 pub(crate) type FirebenderSourceBackedResult<T> =
     std::result::Result<T, FirebenderSourceBackedError>;
 
-pub(super) fn firebender_source_key(
-    route_identity: &str,
-) -> FirebenderSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        FIREBENDER_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(route_identity)?,
-    )?;
+pub(super) fn firebender_source_key() -> FirebenderSourceBackedResult<SourceKey> {
     Ok(SourceKey::derive(
         CaptureProvider::Firebender.as_str(),
         FIREBENDER_SQLITE_SOURCE_FORMAT,
         FIREBENDER_SOURCE_SCHEMA_VARIANT,
-        1,
-        anchor,
+        super::FIREBENDER_SOURCE_IDENTITY_REVISION,
+        SourceAnchor::CatalogLineage(super::FIREBENDER_SELECTED_CATALOG_LINEAGE_V1),
     )?)
 }
 

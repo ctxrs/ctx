@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use ctx_history_core::MAX_CORE_CONTENT_BYTES;
+
 use crate::{OutputOutcome, OutputOutcomeMetadata};
 
 mod outcome;
@@ -440,8 +442,8 @@ impl<'a> ResultScanner<'a> {
             return self.skip_value(depth);
         }
         let value = self.string_range()?;
-        if value.len() > 8 * 1024 * 1024 {
-            self.limit_violation = Some("Claude summary exceeds the 8 MiB structural limit");
+        if value.len() > MAX_CORE_CONTENT_BYTES {
+            self.limit_violation = Some("Claude summary exceeds the Core content limit");
         }
         scan_tagged_string(&self.bytes[value], &mut self.result);
         Ok(())
@@ -456,8 +458,8 @@ impl<'a> ResultScanner<'a> {
             return self.skip_value(depth);
         }
         let value = self.string_range()?;
-        if value.len() > 8 * 1024 * 1024 {
-            self.limit_violation = Some("Claude text block body exceeds 8 MiB");
+        if value.len() > MAX_CORE_CONTENT_BYTES {
+            self.limit_violation = Some("Claude text block body exceeds the Core content limit");
         }
         scan_tagged_string(&self.bytes[value], &mut self.result);
         Ok(())

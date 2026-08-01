@@ -9,9 +9,9 @@ use thiserror::Error;
 use crate::{common::io::ProviderSourceRoot, CaptureError};
 
 #[cfg(test)]
-pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 7;
+pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 8;
 #[cfg(test)]
-pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 4;
+pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GeminiFileObservation {
@@ -104,6 +104,7 @@ pub(crate) enum GeminiEventBody {
         calls: Vec<GeminiToolCall>,
     },
     OutputDiagnostic {
+        result: Option<Value>,
         call_id: Option<String>,
         tool_name: Option<String>,
         command: Option<String>,

@@ -60,7 +60,7 @@ pub(crate) use resume::read_gemini_transcript_pages_from_frontier;
 
 const BODY_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-retained-body-v1\0";
 const RESULT_STRING_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-string-v1\0";
-const RESULT_UNSUPPORTED_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-unsupported-v1\0";
+const RESULT_STRUCTURED_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-structured-v1\0";
 const RESULT_FALLBACK_ID_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-fallback-id-v1\0";
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-complete-prefix-v1\0";
 #[cfg(test)]
@@ -78,6 +78,8 @@ pub(super) const MAX_GEMINI_FILE_TOUCHES_PER_EVENT: usize = 256;
 pub(super) const MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT: usize = 64 * 1024;
 pub(super) const MAX_GEMINI_NATIVE_PAGE_RECORDS: usize = 64;
 pub(super) const MAX_GEMINI_NATIVE_PAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES: usize =
+    MAX_PROVIDER_JSONL_LINE_BYTES * 2 + 1024 * 1024;
 pub(super) const MAX_GEMINI_NATIVE_EVENT_IDS: usize = MAX_GEMINI_NATIVE_PAGE_RECORDS;
 pub(super) const MAX_GEMINI_NATIVE_EVENT_ID_BYTES: usize = MAX_GEMINI_NATIVE_PAGE_BYTES;
 
@@ -225,7 +227,7 @@ impl GeminiBorrowedRecordParser {
                 if decoded
                     .events
                     .iter()
-                    .any(|(_, bytes)| *bytes > MAX_GEMINI_NATIVE_PAGE_BYTES)
+                    .any(|(_, bytes)| *bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES)
                 {
                     return Ok(Vec::new());
                 }
@@ -257,7 +259,7 @@ impl GeminiBorrowedRecordParser {
                 let Ok(event_bytes) = retained_event_bytes(&decoded) else {
                     return Ok(Vec::new());
                 };
-                if event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
+                if event_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES {
                     return Ok(Vec::new());
                 }
                 let mut event = decoded.event;
