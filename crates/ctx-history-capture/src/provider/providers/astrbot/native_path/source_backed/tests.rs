@@ -250,17 +250,37 @@ fn cold_scan_is_bounded_deterministic_and_emits_valid_stable_core() {
             .map(|rowid| format!("prompt-{rowid}"))
             .collect::<Vec<_>>()
     );
-    assert!(first.iter().enumerate().all(|(index, record)| {
-        let rowid = i64::try_from(index).unwrap() + 1;
-        let expected_session = format!("session-{rowid}");
-        record.provider_session_id.as_deref() == Some(expected_session.as_str())
-            && record.event_sequence == u64::try_from(index).unwrap()
-            && record.native_event_id
-                == Some(TypedKey::Composite(vec![
-                    TypedKey::I64(rowid),
-                    TypedKey::Utf8(format!("message-{rowid}")),
-                ]))
-    }));
+    assert_eq!(
+        first
+            .iter()
+            .map(|record| (
+                record.provider_session_id.clone(),
+                record.event_sequence,
+                record.native_event_id.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        (1..=ROW_COUNT)
+            .enumerate()
+            .map(|(index, rowid)| {
+                let provider_session_id = format!("session-{rowid}");
+                // `create_database` derives the first native message ID from its
+                // session; the remaining rows receive their native IDs directly.
+                let native_message_id = if rowid == 1 {
+                    format!("message-{provider_session_id}")
+                } else {
+                    format!("message-{rowid}")
+                };
+                (
+                    Some(provider_session_id),
+                    u64::try_from(index).unwrap(),
+                    Some(TypedKey::Composite(vec![
+                        TypedKey::I64(rowid),
+                        TypedKey::Utf8(native_message_id),
+                    ])),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         astrbot_query_counters(),
         crate::provider::providers::astrbot::source::AstrBotQueryCounters {
