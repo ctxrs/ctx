@@ -90,6 +90,59 @@ pub(crate) fn verify_searcher_structure(
     Ok(())
 }
 
+/// Audits only the event-ID term dictionaries and live postings.
+///
+/// This publication gate deliberately avoids stored fields, Core records, and
+/// checksum-file reads while still rejecting missing or duplicate event IDs.
+pub(crate) fn verify_event_id_terms(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+) -> Result<()> {
+    let event_id = fields_from_schema(searcher.schema())?.event_id;
+    let segments = searcher.segment_readers();
+    let inverted_indexes = segments
+        .iter()
+        .map(|segment| segment.inverted_index(event_id))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let streams = inverted_indexes
+        .iter()
+        .map(|inverted| inverted.terms().stream())
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut merged = TermMerger::new(streams);
+    let mut total_occurrences = 0_u64;
+    while merged.advance() {
+        let uuid = canonical_uuid_term(merged.key(), "event_id")?;
+        let mut term_occurrences = 0_u64;
+        for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
+            for_each_live_posting(
+                &inverted_indexes[segment_ord],
+                &term_info,
+                segment_ord,
+                &segments[segment_ord],
+                |_| {
+                    term_occurrences = term_occurrences
+                        .checked_add(1)
+                        .ok_or(IndexError::CountOverflow)?;
+                    if term_occurrences > 1 {
+                        return Err(IndexError::DuplicateEventIdentity(uuid.to_string()));
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        total_occurrences = total_occurrences
+            .checked_add(term_occurrences)
+            .ok_or(IndexError::CountOverflow)?;
+    }
+    if total_occurrences != manifest.indexed_documents {
+        return Err(IndexError::DocumentCountMismatch {
+            manifest: manifest.indexed_documents,
+            index: total_occurrences,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
     let worker_budget = verification_worker_budget(searcher.segment_readers().len());
     verify_searcher_with_options(searcher, manifest, worker_budget, false, false).map(|_| ())

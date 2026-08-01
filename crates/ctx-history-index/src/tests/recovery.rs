@@ -74,7 +74,7 @@ fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restar
 }
 
 #[test]
-fn exact_verification_fault_never_switches_the_active_pointer() {
+fn structural_verification_fault_never_switches_the_active_pointer() {
     let temp = tempdir().unwrap();
     let source = source("candidate-verification-fault.jsonl");
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -94,10 +94,28 @@ fn exact_verification_fault_never_switches_the_active_pointer() {
     candidate
         .certify_source(certificate(&source, 2, 1))
         .unwrap();
-    candidate.after_candidate_commit = Some(Box::new(|candidate_path| {
-        fs::write(candidate_path.join("meta.json"), b"{").unwrap();
+    let source_token = source_token(&source);
+    candidate.before_pointer_switch = Some(Box::new(move |candidate_path| {
+        let directory = DurableMmapDirectory::open(candidate_path).unwrap();
+        let index = Index::open(directory).unwrap();
+        let payload = index.load_metas().unwrap().payload.unwrap();
+        let source_key = required_field(&index.schema(), "source_key").unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+            .unwrap();
+        writer.delete_term(Term::from_field_text(source_key, &source_token));
+        let mut prepared = writer.prepare_commit().unwrap();
+        prepared.set_payload(&payload);
+        prepared.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
     }));
-    assert!(candidate.commit(|_| true).is_err());
+    assert!(matches!(
+        candidate.commit(|_| true),
+        Err(IndexError::DocumentCountMismatch {
+            manifest: 1,
+            index: 0
+        })
+    ));
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
         pointer_before
@@ -385,7 +403,7 @@ fn certified_append_indexes_only_the_delta() {
 }
 
 #[test]
-fn append_candidate_verifier_rejects_an_identity_already_in_the_base() {
+fn append_event_term_audit_rejects_an_identity_already_in_the_base() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -394,7 +412,7 @@ fn append_candidate_verifier_rejects_an_identity_already_in_the_base() {
     first
         .certify_source(appendable_certificate(&source, 1, 1, 10))
         .unwrap();
-    first.commit(|_| true).unwrap();
+    let baseline = first.commit(|_| true).unwrap();
 
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
@@ -412,7 +430,11 @@ fn append_candidate_verifier_rejects_an_identity_already_in_the_base() {
     let error = append.commit(|_| true).unwrap_err();
     assert!(
         matches!(error, IndexError::DuplicateEventIdentity(_)),
-        "unexpected append verification error: {error:?}"
+        "unexpected event term audit error: {error:?}"
+    );
+    assert_eq!(
+        VerifiedIndex::active_generation_id(temp.path()).unwrap(),
+        Some(baseline.generation_id)
     );
 }
 
@@ -668,7 +690,7 @@ fn certificate_count_mismatch_is_rejected_before_commit() {
 }
 
 #[test]
-fn duplicate_event_identity_is_rejected_by_streaming_candidate_verifier() {
+fn duplicate_event_identity_is_rejected_by_prepublication_term_audit() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -679,6 +701,9 @@ fn duplicate_event_identity_is_rejected_by_streaming_candidate_verifier() {
     writer.certify_source(certificate(&source, 1, 2)).unwrap();
     let error = writer.commit(|_| true).unwrap_err();
     assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
+    assert!(load_active_generation_pointer(temp.path())
+        .unwrap()
+        .is_none());
 }
 
 #[test]

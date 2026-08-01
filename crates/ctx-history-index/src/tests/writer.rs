@@ -1187,11 +1187,15 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
     );
     drop(pinned);
     assert_eq!(
-        VerifiedIndex::open(temp.path())
+        VerifiedIndex::open_pinned(temp.path())
             .unwrap()
             .count_term("searchable")
             .unwrap(),
         0
+    );
+    assert!(
+        VerifiedIndex::open(temp.path()).is_err(),
+        "the explicit exhaustive scrub admitted malformed stored projection state"
     );
 
     let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
