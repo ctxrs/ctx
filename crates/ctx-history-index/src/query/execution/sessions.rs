@@ -89,7 +89,9 @@ impl VerifiedIndex {
     }
 
     /// Returns the first `limit` deterministic coordinates for one session
-    /// without decoding stored Core records or retaining the complete session.
+    /// without scoring or retaining the complete session. One stored record is
+    /// decoded to authenticate the full stable identity behind the compact
+    /// session UUID; coordinate traversal itself stays body-free.
     pub fn session_event_coordinate_prefix(
         &self,
         session_id: Uuid,
@@ -103,26 +105,22 @@ impl VerifiedIndex {
         }
         validate_session_event_coordinate_fast_fields(&self.searcher)?;
         let fields = fields_from_schema(self.searcher.schema())?;
-        let query = TermQuery::new(
-            Term::from_field_text(fields.session_id, &session_id.to_string()),
-            IndexRecordOption::Basic,
-        );
-        let collector = TopDocs::with_limit(limit).tweak_score(move |segment_reader| {
-            let score = session_event_coordinate_score(segment_reader);
-            move |doc, original_score| Reverse(score(doc, original_score))
-        });
-        type CoordinateHit = (Reverse<SessionEventCoordinateSortKey>, DocAddress);
-        let hits: Vec<CoordinateHit> = self.searcher.search(&query, &collector)?;
-        let coordinates = hits
+        let Some(stable_session_id) = self.stable_session_id(session_id, fields)? else {
+            return Ok(Vec::new());
+        };
+        let candidates =
+            self.session_event_addresses_after(stable_session_id, None, limit, fields)?;
+        let coordinates = candidates
             .into_iter()
-            .map(|(Reverse(sort_key), _)| SessionEventCoordinate::from_sort_key(sort_key))
+            .map(|candidate| session_event_coordinate(candidate.order))
             .collect::<Vec<_>>();
         validate_session_event_coordinates(&coordinates)?;
         Ok(coordinates)
     }
 
     /// Returns a deterministic body-free window centered on one exact event.
-    /// At most 101 coordinates are retained regardless of session cardinality.
+    /// At most 101 coordinates are retained and only one stable-identity
+    /// bootstrap record is decoded regardless of session cardinality.
     pub fn session_event_coordinate_window(
         &self,
         session_id: Uuid,
@@ -142,14 +140,14 @@ impl VerifiedIndex {
         }
         validate_session_event_coordinate_fast_fields(&self.searcher)?;
         let fields = fields_from_schema(self.searcher.schema())?;
-        let session_term = || {
-            TermQuery::new(
-                Term::from_field_text(fields.session_id, &session_id.to_string()),
-                IndexRecordOption::Basic,
-            )
-        };
         let selected_query = BooleanQuery::new(vec![
-            (Occur::Must, Box::new(session_term())),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.session_id, &session_id.to_string()),
+                    IndexRecordOption::Basic,
+                )),
+            ),
             (
                 Occur::Must,
                 Box::new(TermQuery::new(
@@ -171,48 +169,37 @@ impl VerifiedIndex {
                 ));
             }
         };
-        let selected = SessionEventCoordinate::from_sort_key(selected_sort_key);
-        if selected.event_id != selected_event_id {
+        if SessionEventCoordinate::from_sort_key(selected_sort_key).event_id != selected_event_id {
             return Err(IndexError::InvalidStoredDocumentField("event_id"));
         }
+        let stable_session_id = self
+            .stable_session_id(session_id, fields)?
+            .ok_or(IndexError::InvalidStoredDocumentField("session_id"))?;
+        let selected_order = session_event_order_key(stable_session_id, selected_sort_key)?;
 
-        let mut preceding = if before == 0 {
+        let preceding = if before == 0 {
             Vec::new()
         } else {
-            let collector = TopDocs::with_limit(before).tweak_score(move |segment_reader| {
-                let score = session_event_coordinate_score(segment_reader);
-                move |doc, original_score| {
-                    let sort_key = score(doc, original_score);
-                    (sort_key < selected_sort_key, sort_key)
-                }
-            });
-            type PrecedingHit = ((bool, SessionEventCoordinateSortKey), DocAddress);
-            let hits: Vec<PrecedingHit> = self.searcher.search(&session_term(), &collector)?;
-            let mut coordinates = hits
+            self.session_event_addresses_before(stable_session_id, selected_order, before, fields)?
                 .into_iter()
-                .filter(|((is_preceding, _), _)| *is_preceding)
-                .map(|((_, sort_key), _)| SessionEventCoordinate::from_sort_key(sort_key))
-                .collect::<Vec<_>>();
-            coordinates.reverse();
-            coordinates
+                .map(|candidate| session_event_coordinate(candidate.order))
+                .collect::<Vec<_>>()
         };
         let following = if after == 0 {
             Vec::new()
         } else {
-            let collector = TopDocs::with_limit(after).tweak_score(move |segment_reader| {
-                let score = session_event_coordinate_score(segment_reader);
-                move |doc, original_score| {
-                    let sort_key = score(doc, original_score);
-                    (sort_key > selected_sort_key, Reverse(sort_key))
-                }
-            });
-            type FollowingHit = ((bool, Reverse<SessionEventCoordinateSortKey>), DocAddress);
-            let hits: Vec<FollowingHit> = self.searcher.search(&session_term(), &collector)?;
-            hits.into_iter()
-                .filter(|((is_following, _), _)| *is_following)
-                .map(|((_, Reverse(sort_key)), _)| SessionEventCoordinate::from_sort_key(sort_key))
-                .collect::<Vec<_>>()
+            self.session_event_addresses_after(
+                stable_session_id,
+                Some(selected_order),
+                after,
+                fields,
+            )?
+            .into_iter()
+            .map(|candidate| session_event_coordinate(candidate.order))
+            .collect::<Vec<_>>()
         };
+        let selected = session_event_coordinate(selected_order);
+        let mut preceding = preceding;
         preceding.push(selected);
         preceding.extend(following);
         validate_session_event_coordinates(&preceding)?;
@@ -334,4 +321,216 @@ impl VerifiedIndex {
         sort_core_events_for_session(&mut records);
         Ok(Some((records, stored_core_bytes)))
     }
+
+    /// Resolves the full stable identity from one live compact-session
+    /// posting. Verified generations guarantee every posting for a compact
+    /// session UUID has the same full identity, so no session-wide collector
+    /// is needed to establish the indexed order-key prefix.
+    fn stable_session_id(
+        &self,
+        session_id: Uuid,
+        fields: Fields,
+    ) -> Result<Option<StableEntityId>> {
+        let term = Term::from_field_text(fields.session_id, &session_id.to_string());
+        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+            let inverted = segment.inverted_index(fields.session_id)?;
+            let Some(mut postings) = inverted.read_postings(&term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
+            let mut doc_id = postings.doc();
+            while doc_id != TERMINATED {
+                if !segment.is_deleted(doc_id) {
+                    let segment_ord =
+                        u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+                    let event = stored_event_record(
+                        &self.searcher,
+                        DocAddress::new(segment_ord, doc_id),
+                        fields,
+                    )?;
+                    if event.session_id.as_uuid() != session_id {
+                        return Err(IndexError::InvalidStoredDocumentField("session_id"));
+                    }
+                    return Ok(Some(event.session_id));
+                }
+                doc_id = postings.advance();
+            }
+        }
+        Ok(None)
+    }
+
+    /// Pulls at most `capacity` live coordinates from one exact session range
+    /// in global ascending order. Each segment stream seeks directly to the
+    /// requested lower bound and `TermMerger` retains only one frontier per
+    /// segment.
+    fn session_event_addresses_after(
+        &self,
+        session_id: StableEntityId,
+        after: Option<SessionEventOrderKey>,
+        capacity: usize,
+        fields: Fields,
+    ) -> Result<Vec<SessionEventAddressCandidate>> {
+        let segments = self.searcher.segment_readers();
+        let session_prefix = SessionEventOrderKey::session_prefix(session_id)?;
+        let range_end = SessionEventOrderKey::session_range_end(session_id)?;
+        let inverted_indexes = segments
+            .iter()
+            .map(|segment| segment.inverted_index(fields.session_event_order))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let streams = inverted_indexes
+            .iter()
+            .map(|inverted| match after.as_ref() {
+                Some(after) => inverted
+                    .terms()
+                    .range()
+                    .gt(after.as_bytes())
+                    .lt(&range_end)
+                    .into_stream(),
+                None => inverted
+                    .terms()
+                    .range()
+                    .ge(session_prefix)
+                    .lt(&range_end)
+                    .into_stream(),
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut merged = TermMerger::new(streams);
+        session_event_address_page(
+            session_id,
+            capacity,
+            &mut merged,
+            &inverted_indexes,
+            segments,
+        )
+    }
+
+    /// Pulls at most `capacity` live coordinates below an exact order key.
+    /// Tantivy's merger is ascending-only, so this keeps one reverse frontier
+    /// per segment and merges those frontiers by their largest current key.
+    fn session_event_addresses_before(
+        &self,
+        session_id: StableEntityId,
+        before: SessionEventOrderKey,
+        capacity: usize,
+        fields: Fields,
+    ) -> Result<Vec<SessionEventAddressCandidate>> {
+        let segments = self.searcher.segment_readers();
+        let session_prefix = SessionEventOrderKey::session_prefix(session_id)?;
+        let inverted_indexes = segments
+            .iter()
+            .map(|segment| segment.inverted_index(fields.session_event_order))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut streams = inverted_indexes
+            .iter()
+            .map(|inverted| {
+                inverted
+                    .terms()
+                    .range()
+                    .ge(session_prefix)
+                    .lt(before.as_bytes())
+                    .backward()
+                    .into_stream()
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut active = streams
+            .iter_mut()
+            .map(|stream| stream.advance())
+            .collect::<Vec<_>>();
+        let mut candidates = Vec::with_capacity(capacity);
+
+        while candidates.len() < capacity {
+            let Some(current_key) = (0..streams.len())
+                .filter(|segment_ord| active[*segment_ord])
+                .map(|segment_ord| streams[segment_ord].key())
+                .max()
+                .map(<[u8]>::to_vec)
+            else {
+                break;
+            };
+            let order = SessionEventOrderKey::decode_for_session(session_id, &current_key)?;
+            #[cfg(test)]
+            {
+                SESSION_EVENT_ORDER_TERM_VISITS
+                    .set(SESSION_EVENT_ORDER_TERM_VISITS.get().saturating_add(1));
+                SESSION_EVENT_ORDER_VISITED_SEQUENCES
+                    .with(|sequences| sequences.borrow_mut().push(order.event_sequence()));
+            }
+
+            let mut address = None;
+            let mut matching_segments = Vec::new();
+            for segment_ord in 0..streams.len() {
+                if !active[segment_ord] || streams[segment_ord].key() != current_key {
+                    continue;
+                }
+                matching_segments.push(segment_ord);
+                let inverted = inverted_indexes.get(segment_ord).ok_or(
+                    IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
+                )?;
+                let segment =
+                    segments
+                        .get(segment_ord)
+                        .ok_or(IndexError::InvalidStoredDocumentField(
+                            SESSION_EVENT_ORDER_FIELD,
+                        ))?;
+                let mut postings = inverted.read_postings_from_terminfo(
+                    streams[segment_ord].value(),
+                    IndexRecordOption::Basic,
+                )?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        let segment_ord =
+                            u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+                        if address
+                            .replace(DocAddress::new(segment_ord, doc_id))
+                            .is_some()
+                        {
+                            return Err(IndexError::InvalidStoredDocumentField(
+                                SESSION_EVENT_ORDER_FIELD,
+                            ));
+                        }
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+            for segment_ord in matching_segments {
+                active[segment_ord] = streams[segment_ord].advance();
+            }
+            if let Some(address) = address {
+                candidates.push(SessionEventAddressCandidate { order, address });
+            }
+        }
+        candidates.reverse();
+        Ok(candidates)
+    }
+}
+
+fn session_event_coordinate(order: SessionEventOrderKey) -> SessionEventCoordinate {
+    let event_id = order.event_id().as_u128();
+    SessionEventCoordinate::from_sort_key((
+        order.event_sequence(),
+        order.occurred_at_unix_ms(),
+        (event_id >> 64) as u64,
+        event_id as u64,
+    ))
+}
+
+fn session_event_order_key(
+    session_id: StableEntityId,
+    sort_key: SessionEventCoordinateSortKey,
+) -> Result<SessionEventOrderKey> {
+    let coordinate = SessionEventCoordinate::from_sort_key(sort_key);
+    let mut encoded = Vec::with_capacity(StableEntityId::CANONICAL_LEN + 33);
+    encoded.extend_from_slice(&SessionEventOrderKey::session_prefix(session_id)?);
+    encoded.extend_from_slice(&coordinate.event_sequence.to_be_bytes());
+    match coordinate.occurred_at_unix_ms {
+        None => encoded.extend_from_slice(&[0_u8; 9]),
+        Some(occurred_at_unix_ms) => {
+            encoded.push(1);
+            let sortable = (occurred_at_unix_ms as u64) ^ (1_u64 << 63);
+            encoded.extend_from_slice(&sortable.to_be_bytes());
+        }
+    }
+    encoded.extend_from_slice(coordinate.event_id.as_bytes());
+    SessionEventOrderKey::decode_for_session(session_id, &encoded)
 }
