@@ -57,6 +57,19 @@ fn helper_name() -> &'static str {
     }
 }
 
+fn assert_stable_json_error(output: &std::process::Output, code: &str) {
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        format!("{{\"error\":\"{code}\",\"error_code\":\"{code}\"}}\n").as_bytes()
+    );
+    assert!(!output.stderr.contains(&0x1b));
+    let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["error"], code);
+    assert_eq!(value["error_code"], code);
+}
+
 #[cfg(unix)]
 fn protect_pro_directory(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -99,17 +112,15 @@ fn commercial_channel_selection_rejects_every_non_registry_value() {
         vec!["pro", "setup", "--format=json"],
     ] {
         for value in ["", "production", "Staging", "1"] {
-            Command::cargo_bin("ctx")
+            let output = Command::cargo_bin("ctx")
                 .unwrap()
                 .env("CTX_PRO_CHANNEL", value)
                 .arg("--data-root")
                 .arg(root.path())
                 .args(&arguments)
-                .assert()
-                .failure()
-                .stderr(predicate::str::contains(
-                    "CTX_PRO_CHANNEL must be stable or staging",
-                ));
+                .output()
+                .unwrap();
+            assert_stable_json_error(&output, "invalid_request");
         }
     }
 }
@@ -240,20 +251,19 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
 
 #[test]
 fn pro_help_documents_bare_setup_and_the_explicit_synonym() {
-    Command::cargo_bin("ctx")
+    let output = Command::cargo_bin("ctx")
         .unwrap()
         .args(["pro", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Bare `ctx pro` runs the idempotent setup path",
-        ))
-        .stdout(predicate::str::contains(
-            "setup      Explicit synonym for `ctx pro`",
-        ))
-        .stdout(predicate::str::contains(
-            "`ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata",
-        ));
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("Bare `ctx pro` runs the idempotent setup path"));
+    assert!(normalized.contains("setup Explicit synonym for `ctx pro`"));
+    assert!(normalized.contains(
+        "`ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata"
+    ));
 }
 
 #[test]
@@ -270,16 +280,14 @@ fn noninteractive_uninstall_requires_an_explicit_data_choice() {
             "noninteractive uninstall requires --delete-data or --keep-data",
         ));
 
-    Command::cargo_bin("ctx")
+    let output = Command::cargo_bin("ctx")
         .unwrap()
         .arg("--data-root")
         .arg(root.path())
         .args(["pro", "uninstall", "--format=json"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "noninteractive uninstall requires --delete-data or --keep-data",
-        ));
+        .output()
+        .unwrap();
+    assert_stable_json_error(&output, "invalid_request");
 }
 
 #[test]
@@ -313,17 +321,30 @@ fn delete_data_fails_closed_without_local_deletion_identity() {
     let graph = root.path().join("pro").join("ctx-pro.db");
     fs::write(&graph, b"encrypted graph").unwrap();
 
-    Command::cargo_bin("ctx")
+    let output = Command::cargo_bin("ctx")
         .unwrap()
         .env("CTX_PRO_CHANNEL", "not-a-channel")
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env_remove("XDG_RUNTIME_DIR")
+        .arg("--color=always")
         .arg("--data-root")
         .arg(root.path())
         .args(["pro", "uninstall", "--delete-data"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("key_store_unavailable"));
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("The secure key store is unavailable"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\u{1b}[2mNext\u{1b}[0m\n  \u{1b}[36mctx pro"),
+        "{stderr:?}"
+    );
+    assert!(!stderr.contains("key_store_unavailable"), "{stderr}");
+    assert!(output.stderr.contains(&0x1b));
 
     assert!(helper.is_file());
     assert!(graph.is_file());
@@ -361,25 +382,13 @@ fn referral_commands_are_available_on_both_channels_before_cached_authentication
             let output = Command::cargo_bin("ctx")
                 .unwrap()
                 .env("CTX_PRO_CHANNEL", channel)
+                .arg("--color=always")
                 .arg("--data-root")
                 .arg(&data_root)
                 .args(arguments)
                 .output()
                 .unwrap();
-            assert!(!output.status.success());
-            assert!(output.stdout.is_empty());
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("authentication_required:"),
-                "{channel}: {stderr}"
-            );
-            assert!(
-                !stderr.contains("referral_unavailable:"),
-                "{channel}: {stderr}"
-            );
-            assert!(!stderr.contains("Sign in to ctx Pro"));
-            assert!(!stderr.contains("http://"));
-            assert!(!stderr.contains("https://"));
+            assert_stable_json_error(&output, "authentication_required");
             assert!(
                 !data_root.join("pro").exists(),
                 "noninteractive referrals must not initialize Pro credentials"
@@ -399,16 +408,14 @@ fn invalid_referral_codenames_are_rejected_without_echoing_the_secret() {
         let data_root = parent.path().join("missing-data-root");
         let output = Command::cargo_bin("ctx")
             .unwrap()
+            .arg("--color=always")
             .arg("--data-root")
             .arg(&data_root)
             .args(arguments)
             .output()
             .unwrap();
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("invalid_request: referral codename must be"));
-        assert!(!stderr.contains(INVALID_SECRET));
+        assert_stable_json_error(&output, "invalid_request");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(INVALID_SECRET));
         assert!(!data_root.exists());
     }
 
@@ -476,17 +483,23 @@ fn referral_input_is_rejected_when_any_explicit_pro_subcommand_follows() {
     ] {
         let parent = tempdir().unwrap();
         let data_root = parent.path().join("missing-data-root");
-        Command::cargo_bin("ctx")
+        let output = Command::cargo_bin("ctx")
             .unwrap()
             .arg("--data-root")
             .arg(&data_root)
             .args(&arguments)
-            .assert()
-            .failure()
-            .stderr(
-                predicate::str::contains("--referral is accepted only by bare `ctx pro`")
-                    .or(predicate::str::contains("unexpected argument '--referral'")),
+            .output()
+            .unwrap();
+        if output.stderr.starts_with(b"{") {
+            assert_stable_json_error(&output, "invalid_request");
+        } else {
+            assert!(!output.status.success());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("unexpected argument '--referral'"),
+                "{stderr}"
             );
+        }
         assert!(
             !data_root.exists(),
             "invalid referral/subcommand combination mutated local state: {arguments:?}"

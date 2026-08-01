@@ -164,10 +164,21 @@ pub(crate) fn run_cli() -> Result<()> {
     let output_measurement = OutputMeasurement::start();
     let cli = parse_cli_from(env::args_os())?;
     let mut ui = Ui::stdio(cli.color);
+    let json_output = command_json_output(&cli.command);
+    let machine_output = command_machine_readable_output(&cli.command, json_output);
+    let pro_referral_json_output = command_uses_stable_pro_error_json(&cli.command, json_output);
     if let CommandRoot::Referral(args) = &cli.command {
+        let validation = args.validate_invocation();
+        if pro_referral_json_output {
+            if let Err(error) = &validation {
+                if render_stable_pro_error_json(error)? {
+                    return Err(RenderedJsonError.into());
+                }
+            }
+        }
         pro::human_result(
-            args.validate_invocation(),
-            !args.json_output(),
+            validation,
+            !json_output,
             "ctx referral create <codename>",
             &mut ui,
         )?;
@@ -191,8 +202,6 @@ pub(crate) fn run_cli() -> Result<()> {
             ui.write_stderr(&document)?;
         }
     }
-    let json_output = command_json_output(&cli.command);
-    let machine_output = command_machine_readable_output(&cli.command, json_output);
     let usage_control_action = matches!(
         &cli.command,
         CommandRoot::Status(args) if args.usage.is_some()
@@ -406,7 +415,9 @@ pub(crate) fn run_cli() -> Result<()> {
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())
         } else if json_output {
-            if let Some(error) =
+            if pro_referral_json_output && render_stable_pro_error_json(error)? {
+                Some(RenderedJsonError.into())
+            } else if let Some(error) =
                 error.downcast_ref::<ctx_history_capture::complete_content::CompleteContentError>()
             {
                 eprintln!(
@@ -500,6 +511,10 @@ fn render_generic_command_error(
     Ok(())
 }
 
+fn render_stable_pro_error_json(error: &anyhow::Error) -> Result<bool> {
+    pro::write_stable_error_json(&mut io::stderr().lock(), error)
+}
+
 fn write_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
     let rendered = error.render();
     if error.use_stderr() {
@@ -542,6 +557,10 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Upgrade(args) => args.json_output(),
         CommandRoot::Doctor(args) => args.format.is_json(),
     }
+}
+
+fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) -> bool {
+    json_output && matches!(command, CommandRoot::Pro(_) | CommandRoot::Referral(_))
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {
@@ -700,6 +719,40 @@ mod tests {
                 command_local_usage_draft(&cli.command)
                     .completed(true, std::time::Duration::ZERO)
                     .is_none(),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stable_pro_error_json_is_scoped_to_pro_and_referral_json_modes() {
+        for args in [
+            &["pro", "--format=json"][..],
+            &["pro", "manage", "--format=json"][..],
+            &["referral", "create", "agent-smith", "--format=json"][..],
+            &["referral", "status", "--format=json"][..],
+            &["referral", "payout", "--format=json"][..],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert!(
+                command_uses_stable_pro_error_json(&cli.command, json_output),
+                "{args:?}"
+            );
+        }
+
+        for args in [
+            &["pro"][..],
+            &["referral", "status"][..],
+            &["blame", "file", "src/main.rs", "--format=json"][..],
+            &["status", "--format=json"][..],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert!(
+                !command_uses_stable_pro_error_json(&cli.command, json_output),
                 "{args:?}"
             );
         }
