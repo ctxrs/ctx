@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ctx_history_core::{ContentRef, RepositoryFileObservationKind};
+use ctx_history_core::RepositoryFileObservationKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -95,7 +95,6 @@ pub(crate) struct ClaudeRetainedRow {
     pub(crate) body: Option<String>,
     pub(crate) body_sha256: Option<[u8; 32]>,
     pub(crate) body_text_retention: Option<Value>,
-    pub(crate) complete_body_ref: Option<ContentRef>,
     pub(crate) tool_call: Option<ToolCallRequest>,
     pub(crate) tool_result: Option<ClaudeToolResult>,
     pub(crate) locator: ClaudePhysicalLocator,

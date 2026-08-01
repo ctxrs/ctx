@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::native_source::NativeLocator;
 use crate::{CaptureError, Result};
-
-use super::NANOCLAW_MESSAGE_LOCATOR_KIND;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,28 +69,6 @@ impl NanoClawFrontier {
             message_rowid: 0,
         }
     }
-}
-
-pub(super) fn nanoclaw_message_locator(
-    session_rowid: i64,
-    source: NanoClawMessageSource,
-    message_rowid: i64,
-) -> Result<NativeLocator> {
-    if session_rowid <= 0 || message_rowid <= 0 {
-        return Err(CaptureError::InvalidPayload(
-            "NanoClaw native message coordinate rowids must be positive".to_owned(),
-        ));
-    }
-    let mut value = Vec::with_capacity(17);
-    value.extend_from_slice(&nanoclaw_ordered_i64(session_rowid).to_be_bytes());
-    value.push(source.tag());
-    value.extend_from_slice(&nanoclaw_ordered_i64(message_rowid).to_be_bytes());
-    NativeLocator::new(NANOCLAW_MESSAGE_LOCATOR_KIND, value)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
-}
-
-pub(super) fn nanoclaw_ordered_i64(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
 }
 
 pub(super) fn nanoclaw_next_ordinal(ordinal: u64) -> Result<u64> {
