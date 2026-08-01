@@ -168,7 +168,7 @@ fn generation(
 ) -> CommittedCoreGeneration {
     CommittedCoreGeneration {
         generation_id: format!("{generation_byte:02x}").repeat(32),
-        manifest_version: 5,
+        manifest_version: 6,
         core_record_version: CORE_RECORD_VERSION,
         core_record_contract_fingerprint: core_record_contract_fingerprint(),
         lexical_schema_version: 6,
