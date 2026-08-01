@@ -315,10 +315,10 @@ provider/path. It creates the data root if needed, reads provider transcript
 files, builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records plus lexical fields, identities, and filter metadata,
 verifies it, and atomically publishes it under `search/lexical`. Before
-returning, it waits for the required daemon-owned `relational.sqlite`
-projection to reach that exact Core generation. Pro and semantic catch-up
-remain independently scheduled and do not extend the foreground import
-boundary. It does not write `config.toml` for implicit defaults.
+returning, it waits only for that Core publication. The daemon-owned
+`relational.sqlite`, Pro, and semantic projections catch up independently and
+do not extend the foreground import boundary. It does not write `config.toml`
+for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v1` path; the
