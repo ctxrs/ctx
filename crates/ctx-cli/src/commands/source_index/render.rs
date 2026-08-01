@@ -122,17 +122,14 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
                         hit.event.event_id
                     )
                 })?;
-            let (snippet, snippet_truncated) = search_snippet(core_record)?;
-            Ok(search_result_json(
+            search_result_json(
                 hit,
                 core_record,
-                &snippet,
-                snippet_truncated,
                 result_scope,
                 &normalized_query,
                 offset.saturating_add(1),
                 &command_prefix,
-            ))
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     let phase_attribution = phase_attribution(metrics.query_duration);
@@ -191,13 +188,12 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
 fn search_result_json(
     hit: &SearchHit,
     core_record: &ctx_history_index::CoreEventRecord,
-    snippet: &str,
-    snippet_truncated: bool,
     result_scope: &str,
     query: &NormalizedSearchQuery,
     rank: usize,
     command_prefix: &str,
-) -> Value {
+) -> Result<Value> {
+    let (snippet, snippet_truncated) = search_snippet(core_record)?;
     let event = &core_record.event;
     let event_id = event.event_id.as_uuid();
     let session_id = event.session_id.as_uuid();
@@ -222,7 +218,7 @@ fn search_result_json(
             "{command_prefix} search {query_arguments} --session {session_id}"
         ));
     }
-    compact_json(json!({
+    Ok(compact_json(json!({
         "item_id": item_id,
         "result_type": if result_scope == "session" { "session_result" } else { "event" },
         "ctx_event_id": event_id,
@@ -262,7 +258,7 @@ fn search_result_json(
             "event_seq": event.event_sequence,
         }],
         "visibility": "local",
-    }))
+    })))
 }
 
 fn search_snippet(record: &ctx_history_index::CoreEventRecord) -> Result<(String, bool)> {
