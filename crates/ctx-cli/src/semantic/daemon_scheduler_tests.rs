@@ -5,7 +5,7 @@ use ctx_history_core::{
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
     SourceFrontier, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_history_index::{GenerationWriter, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS};
 use serde_json::{json, Value};
 
 use crate::{
@@ -138,6 +138,99 @@ fn readiness_record(source: &ctx_history_core::SourceKey) -> CoreRecord {
     record.cwd = Some("/work/ctx".to_owned());
     record.validate_contract().unwrap();
     record
+}
+
+fn semantic_catch_up_record(source: &ctx_history_core::SourceKey, sequence: u64) -> CoreRecord {
+    let native_session = TypedKey::utf8("semantic-catch-up-session").unwrap();
+    let session_key = NativeSessionKey::native_id("session", native_session).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "thread",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let native_item = NativeItemKey::native_id(
+        "message",
+        TypedKey::utf8(format!("semantic-catch-up-event-{sequence}")).unwrap(),
+    )
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "daemon-scheduler-semantic-catch-up-test-v1",
+        format!("eligible semantic catch-up event {sequence}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("semantic-catch-up-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("user".to_owned());
+    record.validate_contract().unwrap();
+    record
+}
+
+fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> String {
+    let source = readiness_source();
+    let mut writer = GenerationWriter::open(
+        source_backed_index_root(data_root),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 0..event_count {
+        writer
+            .add_core_record(semantic_catch_up_record(&source, sequence))
+            .unwrap();
+    }
+    let certified_bytes = event_count * 128;
+    let observation = SourceObservation::new(source.clone(), "regular-file-v1", vec![2]).unwrap();
+    writer
+        .certify_source(
+            CertifiedSource::certify_with_frontier(
+                observation.clone(),
+                observation,
+                "codex-parser-v1",
+                [8; 32],
+                ScannedSourceCounts {
+                    complete_records: event_count,
+                    retained_records: event_count,
+                    indexed_documents: event_count,
+                    certified_bytes,
+                    ..ScannedSourceCounts::default()
+                },
+                Some(
+                    SourceFrontier::new(
+                        "jsonl-byte-offset",
+                        TypedKey::U64(certified_bytes),
+                        certified_bytes,
+                        [8; 32],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+    assert_eq!(receipt.semantic_eligible_documents, event_count);
+    receipt.generation_id
 }
 
 fn readiness_certificate(source: &ctx_history_core::SourceKey) -> CertifiedSource {
@@ -546,6 +639,115 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     assert_eq!(runtime.pro_retry.consecutive_failures, 0);
     assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
     assert_eq!(pinned_generation(temp.path()), generation);
+}
+
+#[test]
+fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
+    const ELIGIBLE_EVENTS: u64 = MAX_SEMANTIC_EVENT_PAGE_ITEMS as u64 + 1;
+
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_semantic_catch_up_generation(temp.path(), ELIGIBLE_EVENTS);
+    let index = coordinate_source_backed_refresh(temp.path(), SourceBackedRefreshMode::Off)
+        .unwrap()
+        .pin
+        .into_index();
+    let first_page = index
+        .core_semantic_event_page(None, MAX_SEMANTIC_EVENT_PAGE_ITEMS)
+        .unwrap();
+    assert_eq!(first_page.eligible_total, ELIGIBLE_EVENTS);
+    assert_eq!(first_page.items.len(), MAX_SEMANTIC_EVENT_PAGE_ITEMS);
+    assert!(!first_page.terminal);
+    let terminal_page = index
+        .core_semantic_event_page(
+            first_page.next_cursor.as_ref(),
+            MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+        )
+        .unwrap();
+    assert_eq!(terminal_page.items.len(), 1);
+    assert!(terminal_page.terminal);
+
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut runtime = DaemonRuntime::default();
+    runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.relational_attempted_generation = Some(generation.clone());
+
+    {
+        let _jobs = install_jobs(
+            calls.clone(),
+            None,
+            Some(json!({
+                "status": "budget_exhausted",
+                "source_records_scanned": MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+                "source_generation_ready": false,
+                "source_work_remaining": true,
+            })),
+        );
+        let first = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(first.did_work);
+        assert!(first.continue_immediately);
+    }
+    let first_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(first_status["core_generation_id"], generation);
+    assert_eq!(
+        first_status["source_records_scanned"],
+        MAX_SEMANTIC_EVENT_PAGE_ITEMS
+    );
+    assert_eq!(first_status["source_work_remaining"], true);
+
+    {
+        let _jobs = install_jobs(
+            calls.clone(),
+            None,
+            Some(json!({
+                "status": "ready",
+                "source_records_scanned": 1,
+                "source_generation_ready": true,
+                "source_work_remaining": false,
+            })),
+        );
+        let terminal = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(terminal.did_work);
+        assert!(terminal.continue_immediately);
+    }
+    let terminal_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(terminal_status["status"], "ready");
+    assert_eq!(terminal_status["core_generation_id"], generation);
+    assert_eq!(terminal_status["source_records_scanned"], 1);
+    assert_eq!(terminal_status["source_work_remaining"], false);
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
+
+    let drained = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!drained.did_work);
+    assert!(!drained.continue_immediately);
+    assert!(runtime.sidecar_drain.generation.is_none());
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
 }
 
 #[test]

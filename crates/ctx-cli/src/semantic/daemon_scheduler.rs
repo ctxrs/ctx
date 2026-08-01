@@ -132,12 +132,14 @@ fn run_pending_core_semantic_catch_up(
         return Ok(None);
     };
     let generation_id = generation.generation_id();
+    let page_continuation_pending = semantic_page_continuation_pending(data_root, generation_id);
     if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
         && runtime
             .sidecar_drain
             .semantic_attempted_generation
             .as_deref()
             == Some(generation_id)
+        && !page_continuation_pending
     {
         return Ok(None);
     }
@@ -590,6 +592,15 @@ fn semantic_generation_needs_catch_up(data_root: &Path, core_generation_id: &str
     };
     job.get("core_generation_id").and_then(Value::as_str) != Some(core_generation_id)
         || job.get("status").and_then(Value::as_str) != Some("ready")
+}
+
+fn semantic_page_continuation_pending(data_root: &Path, core_generation_id: &str) -> bool {
+    read_daemon_job_status(&daemon_semantic_job_path(data_root)).is_some_and(|job| {
+        job.get("core_generation_id").and_then(Value::as_str) == Some(core_generation_id)
+            && job.get("source_generation_ready").and_then(Value::as_bool) == Some(false)
+            && job.get("source_work_remaining").and_then(Value::as_bool) == Some(true)
+            && !daemon_job_should_backoff(&job)
+    })
 }
 
 fn prepare_semantic_retry_for_generation(
