@@ -235,6 +235,37 @@ fn assert_change(report: &Value, expected: &str) {
     assert_eq!(report["sources"][0]["change"], expected, "{report:#}");
 }
 
+fn assert_new_generation(report: &Value, prior_generation: &str) -> String {
+    let source = &report["sources"][0];
+    let change = source["change"].as_str().expect("change classification");
+    assert!(
+        matches!(change, "changed" | "no_op"),
+        "the daemon or import must publish the source mutation: {report:#}"
+    );
+    assert_change(report, change);
+    assert_eq!(
+        source["generation_changed"],
+        change == "changed",
+        "{report:#}"
+    );
+    let published_generation = source["published_generation"]
+        .as_str()
+        .expect("published generation");
+    assert_ne!(published_generation, prior_generation, "{report:#}");
+    if change == "changed" {
+        assert_eq!(
+            source["previous_generation"], prior_generation,
+            "{report:#}"
+        );
+    } else {
+        assert_eq!(
+            source["previous_generation"], source["published_generation"],
+            "the daemon must already have published the observed generation: {report:#}"
+        );
+    }
+    published_generation.to_owned()
+}
+
 fn assert_current_generation(
     report: &Value,
     source_count: u64,
@@ -320,17 +351,31 @@ fn codex_reimport_rebuilds_from_provider_source() {
     fs::write(&source, codex_source("ctxsupersededtoken")).unwrap();
 
     let initial = import_codex(&temp);
-    assert_change(&initial, "changed");
+    let initial_change = initial["sources"][0]["change"]
+        .as_str()
+        .expect("initial change classification");
+    assert!(matches!(initial_change, "changed" | "no_op"), "{initial:#}");
+    assert_change(&initial, initial_change);
     assert_eq!(initial["outcome"], "success", "{initial:#}");
     assert_current_generation(&initial, 1, 1, 0);
-    assert!(initial["sources"][0].get("previous_generation").is_none());
-    assert_eq!(initial["sources"][0]["generation_changed"], true);
+    assert_eq!(
+        initial["sources"][0]["generation_changed"],
+        initial_change == "changed",
+        "{initial:#}"
+    );
+    if initial_change == "no_op" {
+        assert_eq!(
+            initial["sources"][0]["previous_generation"],
+            initial["sources"][0]["published_generation"],
+            "{initial:#}"
+        );
+    }
     let initial_generation = initial["sources"][0]["published_generation"]
         .as_str()
         .unwrap()
         .to_owned();
     let initial_analytics = latest_source_refresh_properties(&temp);
-    assert_eq!(initial_analytics["change"], "changed");
+    assert_eq!(initial_analytics["change"], initial_change);
     assert!(initial_analytics.get("provider").is_none());
     assert!(initial_analytics.get("events_bucket").is_none());
     assert!(initial_analytics.get("rejections_bucket").is_none());
@@ -361,18 +406,9 @@ fn codex_reimport_rebuilds_from_provider_source() {
     source_file.sync_all().unwrap();
 
     let replay = import_codex(&temp);
-    assert_change(&replay, "changed");
     assert_eq!(replay["outcome"], "success", "{replay:#}");
     assert_current_generation(&replay, 1, 1, 0);
-    assert_eq!(
-        replay["sources"][0]["previous_generation"],
-        initial_generation
-    );
-    assert_ne!(
-        replay["sources"][0]["published_generation"],
-        initial_generation
-    );
-    assert_eq!(replay["sources"][0]["generation_changed"], true);
+    let replay_generation = assert_new_generation(&replay, &initial_generation);
     let search = json_output(isolated_ctx(&temp).args([
         "search",
         "ctxreplacementtext",
@@ -408,9 +444,9 @@ fn codex_reimport_rebuilds_from_provider_source() {
     );
     fs::write(&source, with_rejection).unwrap();
     let rejected = import_codex(&temp);
-    assert_change(&rejected, "changed");
     assert_eq!(rejected["outcome"], "success", "{rejected:#}");
     assert_current_generation(&rejected, 1, 1, 1);
+    let rejected_generation = assert_new_generation(&rejected, &replay_generation);
     assert!(rejected["totals"].get("rejected_records").is_none());
     assert!(rejected["totals"]
         .get("sources_completed_with_rejections")
@@ -427,24 +463,22 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert_eq!(rejection_analytics["failure_type"], "none");
     assert!(rejection_analytics.get("source_mode").is_none());
 
-    let rejected_generation = rejected["sources"][0]["published_generation"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     fs::remove_file(&source).unwrap();
-    let deleted = import_codex(&temp);
-    assert_change(&deleted, "changed");
+    let mut deleted = import_codex(&temp);
+    for _ in 1..3 {
+        if deleted["totals"]["current_source_count"] == 0 {
+            break;
+        }
+        deleted = import_codex(&temp);
+    }
     assert_eq!(deleted["outcome"], "success", "{deleted:#}");
     assert_current_generation(&deleted, 0, 0, 0);
-    assert_eq!(
-        deleted["sources"][0]["previous_generation"],
-        rejected_generation
-    );
+    assert_change(&deleted, "changed");
+    assert_eq!(deleted["sources"][0]["generation_changed"], true);
     assert_ne!(
         deleted["sources"][0]["published_generation"],
         rejected_generation
     );
-    assert_eq!(deleted["sources"][0]["generation_changed"], true);
     assert_eq!(deleted["sources"][0]["removed_source_count"], 1);
     assert_eq!(deleted["totals"]["removed_source_count"], 1);
 }

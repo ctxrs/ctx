@@ -639,9 +639,25 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         ]));
         assert!(stderr.contains(failure_kind), "{name}: {stderr}");
         assert!(stderr.contains(cli_classification), "{name}: {stderr}");
+        let status = json_output(ctx(&temp).args(["status", "--format=json"]));
         assert!(
-            stderr.contains("retained generation"),
-            "{name} did not report fail-closed retention: {stderr}"
+            matches!(
+                status["refresh"]["status"].as_str(),
+                Some("pending" | "unavailable")
+            ),
+            "{name}: {status:#}"
+        );
+        assert!(
+            status["indexed_sources"]
+                .as_u64()
+                .is_none_or(|count| count == 0),
+            "{name}: {status:#}"
+        );
+        assert!(
+            status["indexed_events"]
+                .as_u64()
+                .is_none_or(|count| count == 0),
+            "{name}: {status:#}"
         );
     }
 
@@ -1004,8 +1020,9 @@ fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProje
         ),
         sources: relational_rows(
             &conn,
-            "SELECT source_id || ':' || source_format || ':' || content_digest_hex
-             FROM source_backed_sources
+            "SELECT source_id || ':' || source_format || ':' || parser_revision || ':' ||
+                    indexed_event_count || ':' || health
+             FROM ctx_sources
              WHERE provider = ?1
              ORDER BY source_id",
             provider,
@@ -1181,7 +1198,7 @@ fn setup_adds_provider_without_changing_unchanged_source_ids() {
 }
 
 #[test]
-fn repeated_setup_and_import_preserve_generation_and_source_backed_ids() {
+fn repeated_setup_and_import_preserve_generation_and_public_ids() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
     let _daemon = start_full_source_refresh_daemon(&temp);

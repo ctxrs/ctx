@@ -5,13 +5,13 @@ use std::{
     sync::Arc,
 };
 
+mod projection;
+
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    RepositoryAbstention, RepositoryAbstentionReason, RepositoryEvidenceKind,
-    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
-    TypedKey,
+    CaptureProvider, CoreRecord, CoreRecordError, ProjectionContractError, RepositoryAbstention,
+    RepositoryAbstentionReason, RepositoryEvidenceKind, RepositoryFileObservationKind, SourceKey,
+    StableEntityId, TypedKey,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,8 +19,8 @@ use thiserror::Error;
 use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
 use super::parser::{read_gemini_session_header, GeminiBorrowedRecordParser};
 use super::{
-    discover_gemini_transcripts, GeminiEventIdentity, GeminiFileObservation, GeminiScanError,
-    GeminiSession, GeminiTranscriptSource,
+    discover_gemini_transcripts, GeminiFileObservation, GeminiScanError, GeminiSession,
+    GeminiTranscriptSource,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -36,6 +36,7 @@ use crate::{
     repository_attribution::{linked_outcome_evidence, LinkedOutcomeInput},
     CaptureError, OutputOutcome, GEMINI_CLI_SOURCE_FORMAT,
 };
+use projection::{gemini_event_id, gemini_session_id, gemini_source_key, project_event};
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
 const GEMINI_NATIVE_SESSION_NAMESPACE: &str = "gemini.session";
@@ -899,174 +900,6 @@ fn decode_binding(leaf: &JsonlFamilyLeaf) -> crate::Result<GeminiFamilyBinding> 
         ));
     };
     Ok(serde_json::from_slice(bytes)?)
-}
-
-fn project_event(
-    source: &SourceKey,
-    session_id: StableEntityId,
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
-    session: &GeminiSession,
-    event: super::GeminiRetainedEvent,
-    annotation: ctx_history_core::CoreRecordAnnotation,
-) -> GeminiSourceBackedResult<CoreRecord> {
-    let GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
-    let event_id = gemini_event_id(source, session_id, &event)?;
-    let native_event_id = TypedKey::utf8(native_event_id)?;
-    let event_sequence = event
-        .native_order
-        .raw_ordinal
-        .checked_mul(u64::from(u32::MAX) + 1)
-        .and_then(|sequence| sequence.checked_add(u64::from(event.native_order.sub_ordinal)))
-        .ok_or_else(|| {
-            GeminiSourceBackedError::Capture(CaptureError::SystemInvariant(
-                "Gemini event sequence overflowed",
-            ))
-        })?;
-    let body = lexical_body(&event);
-    if body.is_empty() {
-        return Err(CaptureError::InvalidPayload(
-            "Gemini source-backed event has no lexical body".to_owned(),
-        )
-        .into());
-    }
-    let is_primary =
-        session.parent_native_session_id.is_none() && session.agent_type != AgentType::Subagent;
-    let mut record = CoreRecord::new_selected(
-        event_id,
-        session_id,
-        root_session_id,
-        source.clone(),
-        event_sequence,
-        event.event_type.as_str(),
-        session.agent_type.as_str(),
-        is_primary,
-        GEMINI_SOURCE_BACKED_PARSER_REVISION,
-        body,
-    )?;
-    record.parent_session_id = parent_session_id;
-    record.provider_session_id = Some(session.native_session_id.clone());
-    record.native_event_id = Some(native_event_id);
-    record.occurred_at_unix_ms = event
-        .occurred_at
-        .or(session.started_at)
-        .map(|timestamp| timestamp.timestamp_millis());
-    record.role = Some(event.role.as_str().to_owned());
-    record.cwd = session
-        .cwd
-        .as_deref()
-        .map(|cwd| bounded_chars(cwd, MAX_GEMINI_LEXICAL_METADATA_CHARS));
-    record.content.structured_content = annotation.structured_content;
-    record.metadata = annotation.metadata;
-    record.repository_candidate_evidence = annotation.repository_candidate_evidence;
-    record.repository_bindings = annotation.repository_bindings;
-    record.repository_abstentions = annotation.repository_abstentions;
-    record.repository_file_observations = annotation.repository_file_observations;
-    record.repository_vcs_observations = annotation.repository_vcs_observations;
-    record.validate_contract()?;
-    Ok(record)
-}
-
-fn gemini_event_id(
-    source: &SourceKey,
-    session_id: StableEntityId,
-    event: &super::GeminiRetainedEvent,
-) -> GeminiSourceBackedResult<StableEntityId> {
-    let GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
-    let native_item_key = NativeItemKey::native_id(
-        GEMINI_NATIVE_EVENT_NAMESPACE,
-        TypedKey::utf8(native_event_id)?,
-    )?;
-    Ok(derive_event_id(EventIdentityInput {
-        source,
-        session_id,
-        logical_item_kind: GEMINI_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?)
-}
-
-fn lexical_body(event: &super::GeminiRetainedEvent) -> String {
-    if !event.searchable_text.is_empty() {
-        return event.searchable_text.clone();
-    }
-    match &event.body {
-        GeminiEventBody::Message { text, .. } => text.clone(),
-        GeminiEventBody::ToolCall { .. } => "Gemini tool call".to_owned(),
-        GeminiEventBody::OutputDiagnostic {
-            result,
-            call_id,
-            tool_name,
-            outcome,
-            exit_code,
-            duration_ms,
-            ..
-        } => result
-            .as_ref()
-            .and_then(|value| match value {
-                serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
-                serde_json::Value::String(_) => None,
-                value => serde_json::to_string(value).ok(),
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "Gemini {} output {}{}{}{}",
-                    tool_name.as_deref().unwrap_or("tool"),
-                    outcome,
-                    call_id
-                        .as_deref()
-                        .map(|call| format!(", call {call}"))
-                        .unwrap_or_default(),
-                    exit_code
-                        .map(|code| format!(", exit code {code}"))
-                        .unwrap_or_default(),
-                    duration_ms
-                        .map(|duration| format!(", duration {duration} ms"))
-                        .unwrap_or_default(),
-                )
-            }),
-        GeminiEventBody::StateNotice { summary } => summary
-            .as_deref()
-            .filter(|summary| !summary.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| "Gemini state update".to_owned()),
-        GeminiEventBody::RewindNotice {
-            target_native_record_id,
-        } => format!("Gemini rewind to {target_native_record_id}"),
-    }
-}
-
-fn bounded_chars(value: &str, maximum: usize) -> String {
-    value.chars().take(maximum).collect()
-}
-
-fn gemini_source_key(native_session_id: &str) -> GeminiSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        GEMINI_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
-    )?;
-    Ok(SourceKey::derive(
-        CaptureProvider::Gemini.as_str(),
-        GEMINI_CLI_SOURCE_FORMAT,
-        GEMINI_SOURCE_SCHEMA_VARIANT,
-        1,
-        anchor,
-    )?)
-}
-
-fn gemini_session_id(
-    source: &SourceKey,
-    native_session_id: &str,
-) -> GeminiSourceBackedResult<StableEntityId> {
-    let native_session_key = NativeSessionKey::native_id(
-        GEMINI_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
-    )?;
-    Ok(derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: GEMINI_LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?)
 }
 
 #[cfg(test)]

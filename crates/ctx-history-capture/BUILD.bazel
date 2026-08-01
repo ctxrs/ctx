@@ -105,6 +105,54 @@ ctx_rust_test(
     edition = crate_edition(),
 )
 
+ctx_rust_test(
+    name = "codex_direct_result_tests",
+    srcs = ["tests/codex_direct_result.rs"],
+    crate_name = "codex_direct_result",
+    crate_root = "tests/codex_direct_result.rs",
+    compile_data = [":test_fixtures"],
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [":lib"] + CTX_HISTORY_CAPTURE_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "repository_shell_outcomes_tests",
+    srcs = [
+        "tests/repository_shell_outcomes.rs",
+        "src/repository_attribution/outcome.rs",
+        "src/repository_attribution/shell.rs",
+        "src/repository_attribution/shell/outcome_plan.rs",
+    ],
+    crate_name = "repository_shell_outcomes",
+    crate_root = "tests/repository_shell_outcomes.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [":lib"] + CTX_HISTORY_CAPTURE_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
 sh_test(
     name = "active_source_family_contract_tests",
     srcs = ["tests/run-active-source-family-contracts.sh"],

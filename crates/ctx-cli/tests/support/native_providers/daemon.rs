@@ -109,7 +109,8 @@ pub(super) fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("source-backed SQL projection")
+        if (stderr.contains("Core SQL projection")
+            || stderr.contains("source-backed SQL projection")
             || stderr.contains("source-backed relational projection")
             || stderr.contains("no such table: source_backed_relational_state"))
             && Instant::now() < deadline

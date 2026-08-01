@@ -5,7 +5,10 @@ use serde::{
     Deserialize,
 };
 
-use super::{BoundedStringVisitor, CursorRejectionKind, MAX_CURSOR_ATOM_CHARS};
+use super::{
+    bounded_strings::{BoundedStringVisitor, MAX_CURSOR_ATOM_CHARS},
+    CursorRejectionKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CursorContentLocation {

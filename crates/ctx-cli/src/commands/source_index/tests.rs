@@ -2,11 +2,7 @@
 mod tests {
     mod semantic_fallback;
 
-    use std::{
-        cell::Cell,
-        collections::HashMap,
-        fs,
-    };
+    use std::{cell::Cell, collections::HashMap, fs};
 
     use ctx_history_capture::{
         provider_source_for_path, refresh_source_backed_generation,
@@ -661,7 +657,6 @@ mod tests {
         assert_eq!(event_value["event"]["provider_session_id"], TEST_SESSION_ID);
         assert!(event_value["event"].get("source").is_none());
         assert!(event_value["event"].get("cursor").is_none());
-
     }
 
     #[test]

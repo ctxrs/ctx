@@ -7,6 +7,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{ErrorClass, ProtocolError};
 
+mod validation;
+#[cfg(test)]
+use validation::canonical_sha256;
+pub use validation::{core_materialization_id, core_record_sha256, core_source_snapshot_sha256};
+use validation::{
+    core_record_content_bytes, core_source_delta_exact_eq, encode_with_bound, hex_sha256,
+    invalid_contract, validate_encoded_bound, validate_identity, validate_sha256,
+    validate_source_states,
+};
+
 pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 1;
 pub const MAX_CORE_SOURCE_STATES: usize = 16_384;
 pub const MAX_CORE_SOURCE_DELTA_PAGE_ITEMS: usize = 256;
@@ -970,161 +980,6 @@ impl CoreMaterializationFinished {
         self.receipt.validate_for_head(&request.head)?;
         Ok(())
     }
-}
-
-pub fn core_source_snapshot_sha256(sources: &[CoreSourceState]) -> Result<String, ProtocolError> {
-    validate_source_states(sources)?;
-    canonical_sha256(sources, "Core source snapshot encoding failed")
-}
-
-pub fn core_materialization_id(
-    request: &BeginCoreMaterializationRequest,
-    materializer_revision: &str,
-) -> Result<String, ProtocolError> {
-    request
-        .acknowledgement_identity()?
-        .materialization_id(materializer_revision)
-}
-
-pub fn core_record_sha256(record: &CoreRecord) -> Result<String, ProtocolError> {
-    record
-        .validate_contract()
-        .map_err(|error| invalid_contract("Core record", error))?;
-    canonical_sha256(record, "Core record state encoding failed")
-}
-
-fn validate_source_states(sources: &[CoreSourceState]) -> Result<(), ProtocolError> {
-    if sources.len() > MAX_CORE_SOURCE_STATES {
-        return Err(ProtocolError::new(
-            ErrorClass::Bounds,
-            "Core source snapshot exceeds its source count bound",
-        ));
-    }
-    let mut prior = None;
-    for source in sources {
-        source.validate()?;
-        let current = source.source.identity().digest();
-        if prior.is_some_and(|prior| prior >= current) {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core source snapshot must be strictly ordered by stable source identity",
-            ));
-        }
-        prior = Some(current);
-    }
-    Ok(())
-}
-
-fn core_source_state_exact_eq(left: &CoreSourceState, right: &CoreSourceState) -> bool {
-    left.source.exact_descriptor_eq(&right.source)
-        && left.core_record_accumulator == right.core_record_accumulator
-        && left.event_count == right.event_count
-}
-
-fn core_source_delta_exact_eq(left: &CoreSourceDelta, right: &CoreSourceDelta) -> bool {
-    match (left, right) {
-        (CoreSourceDelta::Present(left), CoreSourceDelta::Present(right)) => {
-            core_source_state_exact_eq(left, right)
-        }
-        (CoreSourceDelta::Removed(left), CoreSourceDelta::Removed(right)) => {
-            left.source.exact_descriptor_eq(&right.source)
-                && left.removal_revision_sha256 == right.removal_revision_sha256
-        }
-        _ => false,
-    }
-}
-
-fn core_record_content_bytes(record: &CoreRecord) -> Result<usize, ProtocolError> {
-    let body = record
-        .content
-        .normalized_body
-        .as_ref()
-        .map_or(0, String::len);
-    let structured = record
-        .content
-        .structured_content
-        .as_ref()
-        .map(serde_json::to_vec)
-        .transpose()
-        .map_err(|_| {
-            ProtocolError::new(
-                ErrorClass::Internal,
-                "Core structured content encoding failed",
-            )
-        })?
-        .map_or(0, |encoded| encoded.len());
-    body.checked_add(structured).ok_or_else(|| {
-        ProtocolError::new(ErrorClass::Bounds, "Core record content bytes overflowed")
-    })
-}
-
-fn validate_identity(value: &str, label: &'static str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value.len() > MAX_CORE_MATERIALIZER_REVISION_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(ProtocolError::new(
-            ErrorClass::Bounds,
-            format!("{label} is empty, unsafe, or exceeds its byte bound"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_sha256(value: &str, label: &'static str) -> Result<(), ProtocolError> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(ProtocolError::new(
-            ErrorClass::InvalidRequest,
-            format!("{label} must be lowercase SHA-256"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_encoded_bound<T: Serialize>(
-    value: &T,
-    maximum: usize,
-    message: &'static str,
-) -> Result<(), ProtocolError> {
-    encode_with_bound(value, maximum, message).map(drop)
-}
-
-fn encode_with_bound<T: Serialize>(
-    value: &T,
-    maximum: usize,
-    message: &'static str,
-) -> Result<Vec<u8>, ProtocolError> {
-    let encoded = serde_json::to_vec(value)
-        .map_err(|_| ProtocolError::new(ErrorClass::Internal, "protocol encoding failed"))?;
-    if encoded.len() > maximum {
-        return Err(ProtocolError::new(ErrorClass::Bounds, message));
-    }
-    Ok(encoded)
-}
-
-fn canonical_sha256<T: Serialize + ?Sized>(
-    value: &T,
-    message: &'static str,
-) -> Result<String, ProtocolError> {
-    let encoded =
-        serde_json::to_vec(value).map_err(|_| ProtocolError::new(ErrorClass::Internal, message))?;
-    Ok(hex_sha256(Sha256::digest(encoded)))
-}
-
-fn hex_sha256(digest: impl AsRef<[u8]>) -> String {
-    digest
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn invalid_contract(label: &'static str, error: impl std::fmt::Display) -> ProtocolError {
-    ProtocolError::new(ErrorClass::InvalidRequest, format!("{label}: {error}"))
 }
 
 #[cfg(test)]

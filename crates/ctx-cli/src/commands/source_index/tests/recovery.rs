@@ -66,9 +66,7 @@ fn missing_lookup_machine_errors_keep_exact_bytes_and_no_human_output() {
         ),
         (
             resolve_session(&index, MISSING_SESSION_ID).unwrap_err(),
-            format!(
-                "session {MISSING_SESSION_ID} was not found in the Core generation"
-            ),
+            format!("session {MISSING_SESSION_ID} was not found in the Core generation"),
         ),
     ] {
         assert_eq!(error.to_string(), expected);
