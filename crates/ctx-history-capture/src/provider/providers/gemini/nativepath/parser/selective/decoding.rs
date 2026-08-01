@@ -17,12 +17,7 @@ pub(in super::super) fn decode_result_record(
             "Gemini result record exceeds the {MAX_GEMINI_NATIVE_PAGE_RECORDS} output limit"
         ));
     }
-    let mut decoded = DecodedGeminiResult {
-        events: Vec::new(),
-        decoded_body_bytes: 0,
-        failure_diagnostics: 0,
-        failure_previews: 0,
-    };
+    let mut decoded = DecodedGeminiResult { events: Vec::new() };
     let mut retained_identities = BTreeSet::new();
     let mut result_call_counts = BTreeMap::<String, usize>::new();
     for output in &probed {
@@ -47,17 +42,6 @@ pub(in super::super) fn decode_result_record(
             || probed.declared_workdir.is_some()
             || !probed.file_paths.is_empty()
             || probed.ambiguous_native_fields;
-        decoded.decoded_body_bytes =
-            decoded
-                .decoded_body_bytes
-                .saturating_add(if retained_failure {
-                    probed
-                        .released_diagnostic_preview
-                        .as_ref()
-                        .map_or(0, |preview| preview.len() as u64)
-                } else {
-                    0
-                });
         let sub_ordinal = u32::try_from(index)
             .map_err(|_| "Gemini result subrecord ordinal overflowed".to_owned())?;
         let event_identity = result_event_identity(native_record_id.as_deref(), &probed);
@@ -67,7 +51,6 @@ pub(in super::super) fn decode_result_record(
         }
         if !probed.redacted && (retained_failure || retained_repository_evidence) {
             let event = decode_output_diagnostic(
-                native_record_id.as_deref(),
                 occurred_at_unix_ms,
                 raw_ordinal,
                 sub_ordinal,
@@ -76,12 +59,6 @@ pub(in super::super) fn decode_result_record(
                 event_identity.clone(),
             )?;
             let event_bytes = retained_event_bytes(&event)?;
-            if retained_failure {
-                decoded.failure_diagnostics = decoded.failure_diagnostics.saturating_add(1);
-                if probed.released_diagnostic_preview.is_some() {
-                    decoded.failure_previews = decoded.failure_previews.saturating_add(1);
-                }
-            }
             decoded.events.push((event.event, event_bytes));
         }
     }
@@ -89,7 +66,6 @@ pub(in super::super) fn decode_result_record(
 }
 
 fn decode_output_diagnostic(
-    native_record_id: Option<&str>,
     occurred_at_unix_ms: Option<i64>,
     raw_ordinal: u64,
     sub_ordinal: u32,
@@ -125,34 +101,9 @@ fn decode_output_diagnostic(
     hasher.update(b"\0gemini-result-content\0");
     hasher.update(output.fallback_identity_sha256);
     let body_sha256 = hasher.finalize().into();
-    let released_body = ReleasedGeminiEventBody::OutputDiagnostic {
-        call_id: output.call_id.clone(),
-        tool_name: output.tool_name.clone(),
-        outcome: match output.outcome.outcome {
-            OutputOutcome::Failure => "failure",
-            OutputOutcome::Timeout => "timeout",
-            OutputOutcome::Success => "success",
-            OutputOutcome::Unknown => "unknown",
-        }
-        .to_owned(),
-        exit_code: output.outcome.exit_code,
-        duration_ms: output.outcome.duration_ms,
-        output_preview: output.released_diagnostic_preview.clone(),
-    };
-    let released_body_bytes = serde_json::to_vec(&released_body)
-        .map_err(|error| format!("failed to encode released Gemini output diagnostic: {error}"))?;
-    let mut released_hasher = Sha256::new();
-    released_hasher.update(BODY_HASH_DOMAIN);
-    released_hasher.update(&released_body_bytes);
     Ok(DecodedGeminiEvent {
         event: GeminiRetainedEvent {
             identity,
-            released_identity: format!(
-                "{}:subrecord:{sub_ordinal}",
-                native_record_id
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("raw-{raw_ordinal}"))
-            ),
             native_order: GeminiNativeOrder {
                 raw_ordinal,
                 sub_ordinal,
@@ -163,26 +114,12 @@ fn decode_output_diagnostic(
             occurred_at: occurred_at_unix_ms.and_then(DateTime::<Utc>::from_timestamp_millis),
             body,
             body_sha256,
-            released_body_sha256: released_hasher.finalize().into(),
             preview: String::new(),
             searchable_text: String::new(),
             safe_file_touches: Vec::new(),
         },
         serialized_body_bytes: body_bytes.len(),
     })
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ReleasedGeminiEventBody {
-    OutputDiagnostic {
-        call_id: Option<String>,
-        tool_name: Option<String>,
-        outcome: String,
-        exit_code: Option<i32>,
-        duration_ms: Option<u64>,
-        output_preview: Option<String>,
-    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,7 +278,6 @@ pub(in super::super) fn decode_retained_event(
     Ok(Some(DecodedGeminiEvent {
         event: GeminiRetainedEvent {
             identity: GeminiEventIdentity::NativeRecordId(id.clone()),
-            released_identity: id,
             native_order: GeminiNativeOrder {
                 raw_ordinal,
                 sub_ordinal: 0,
@@ -352,7 +288,6 @@ pub(in super::super) fn decode_retained_event(
             occurred_at,
             body,
             body_sha256,
-            released_body_sha256: body_sha256,
             preview,
             searchable_text,
             safe_file_touches,

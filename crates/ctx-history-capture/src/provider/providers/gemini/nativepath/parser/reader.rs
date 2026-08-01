@@ -513,21 +513,6 @@ impl<'a> GeminiNativePageReader<'a> {
                         )));
                     }
                 };
-                self.state.metrics.result_body_bytes_decoded_or_allocated = self
-                    .state
-                    .metrics
-                    .result_body_bytes_decoded_or_allocated
-                    .saturating_add(decoded.decoded_body_bytes);
-                self.state.metrics.result_body_hashes_created = self
-                    .state
-                    .metrics
-                    .result_body_hashes_created
-                    .saturating_add(decoded.failure_diagnostics as u64);
-                self.state.metrics.result_previews_created = self
-                    .state
-                    .metrics
-                    .result_previews_created
-                    .saturating_add(decoded.failure_previews as u64);
                 for (event, event_bytes) in &decoded.events {
                     if *event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
                         return Ok(Some(self.reject_completed_record(

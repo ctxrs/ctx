@@ -168,7 +168,7 @@ fn gemini_nativepath_core_retains_failure_and_timeout_diagnostics() {
     );
     let source = rediscover(&root, &path);
 
-    let (outcome, rows) = scan_collect(&source, None);
+    let (_, rows) = scan_collect(&source, None);
     let diagnostic_outcomes = rows
         .iter()
         .filter_map(|row| match &row.body {
@@ -182,8 +182,6 @@ fn gemini_nativepath_core_retains_failure_and_timeout_diagnostics() {
     for secret in ["successful secret", "failure secret", "timeout secret"] {
         assert!(!serialized.contains(secret));
     }
-    assert_eq!(outcome.metrics.result_body_hashes_created, 2);
-    assert_eq!(outcome.metrics.result_previews_created, 2);
 }
 
 #[test]
@@ -211,7 +209,7 @@ fn gemini_nativepath_core_bounds_large_failure_diagnostic_parsing() {
     let source = rediscover(&root, &path);
 
     reset_gemini_parse_counters();
-    let (outcome, rows) = scan_collect(&source, None);
+    let (_, rows) = scan_collect(&source, None);
 
     assert_eq!(rows.len(), 1);
     assert!(matches!(
@@ -222,8 +220,5 @@ fn gemini_nativepath_core_bounds_large_failure_diagnostic_parsing() {
         } if call_id == "failure-call"
     ));
     assert!(!serde_json::to_string(&rows).unwrap().contains(canary));
-    assert!(
-        outcome.metrics.result_body_bytes_decoded_or_allocated <= PROVIDER_MAX_PREVIEW_CHARS as u64
-    );
     assert_eq!(gemini_parse_counters(), (2, 1));
 }

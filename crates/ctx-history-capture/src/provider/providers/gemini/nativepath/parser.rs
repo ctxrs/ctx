@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{AgentType, EventRole, EventType};
 use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
-    Deserialize, Deserializer, Serialize,
+    Deserialize, Deserializer,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};

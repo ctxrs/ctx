@@ -22,7 +22,7 @@ use super::parser::{
     MAX_GEMINI_NATIVE_PAGE_BYTES, MAX_GEMINI_NATIVE_PAGE_RECORDS,
 };
 use super::source_backed::project_gemini_test_events;
-use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES};
 
 fn fixture_root(temp: &TempDir) -> PathBuf {
     temp.path().join(".gemini")
