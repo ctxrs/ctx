@@ -19,7 +19,6 @@ use super::{
         daemon_core_refresh_job_path, daemon_jobs_path, daemon_report_with_disabled_status,
         daemon_semantic_job_path, read_daemon_job_status,
     },
-    source_backed_refresh_coordinator::source_backed_lexical_artifact_is_uncommitted_schema_only,
     source_backed_relational_catch_up::read_status_json as read_relational_catch_up_status,
     vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
 };
@@ -116,7 +115,7 @@ fn attach_catch_up_status(report: &mut Value, status: Option<Value>) {
 fn source_daemon_report(data_root: &Path) -> Value {
     let mut daemon = daemon_report_with_disabled_status(data_root, true);
     if let Some(jobs) = daemon.get_mut("jobs").and_then(Value::as_object_mut) {
-        jobs.retain(|name, _| name == "core_refresh");
+        jobs.retain(|name, _| matches!(name.as_str(), "core_refresh" | "semantic_index"));
     }
     daemon
 }
@@ -188,33 +187,6 @@ fn lexical_report(
     let published_generation = refresh_job
         .and_then(|job| job.get("published_generation"))
         .and_then(Value::as_str);
-    if !path.join("meta.json").is_file() {
-        let (status, reason) = match request_state {
-            Some("queued" | "running") => ("pending", "generation_not_published"),
-            Some("failed") => ("unavailable", "core_refresh_failed"),
-            Some("published") => ("unavailable", "published_generation_missing"),
-            _ => ("unavailable", "generation_not_published"),
-        };
-        return (
-            compact_json(json!({
-                "status": status,
-                "reason": reason,
-                "path": path,
-                "generation_id": Value::Null,
-                "request_state": request_state,
-                "published_generation": published_generation,
-                "generation_matches": Value::Null,
-                "policy": {
-                    "current_hash": current_policy_hash,
-                    "current": current_policy,
-                    "published_hash": Value::Null,
-                    "matches_current": Value::Null,
-                },
-            })),
-            None,
-        );
-    }
-
     match VerifiedIndex::open_pinned(&path) {
         Ok(index) => {
             let manifest = index.manifest();
@@ -246,24 +218,13 @@ fn lexical_report(
             }));
             (value, Some(index))
         }
-        Err(error) => {
-            let cold_uncommitted =
-                if matches!(error, ctx_history_index::IndexError::MissingCommitPayload)
-                    && !matches!(request_state, Some("published"))
-                {
-                    source_backed_lexical_artifact_is_uncommitted_schema_only(&path)
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-            let (status, reason) =
-                if cold_uncommitted && matches!(request_state, Some("queued" | "running")) {
-                    ("pending", "generation_not_published")
-                } else if cold_uncommitted {
-                    ("unavailable", "generation_not_published")
-                } else {
-                    ("unavailable", "generation_verification_failed")
-                };
+        Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => {
+            let (status, reason) = match request_state {
+                Some("queued" | "running") => ("pending", "generation_not_published"),
+                Some("failed") => ("unavailable", "core_refresh_failed"),
+                Some("published") => ("unavailable", "published_generation_missing"),
+                _ => ("unavailable", "generation_not_published"),
+            };
             (
                 compact_json(json!({
                     "status": status,
@@ -279,11 +240,29 @@ fn lexical_report(
                         "published_hash": Value::Null,
                         "matches_current": Value::Null,
                     },
-                    "last_error": format!("{error:#}"),
                 })),
                 None,
             )
         }
+        Err(error) => (
+            compact_json(json!({
+                "status": "unavailable",
+                "reason": "generation_verification_failed",
+                "path": path,
+                "generation_id": Value::Null,
+                "request_state": request_state,
+                "published_generation": published_generation,
+                "generation_matches": Value::Null,
+                "policy": {
+                    "current_hash": current_policy_hash,
+                    "current": current_policy,
+                    "published_hash": Value::Null,
+                    "matches_current": Value::Null,
+                },
+                "last_error": format!("{error:#}"),
+            })),
+            None,
+        ),
     }
 }
 

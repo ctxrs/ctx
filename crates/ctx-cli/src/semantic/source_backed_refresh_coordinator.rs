@@ -1,7 +1,9 @@
+#[cfg(test)]
+use std::fs;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant as StdInstant},
@@ -215,7 +217,7 @@ fn published_generation_id(data_root: &Path) -> Result<Option<String>> {
 
 fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> {
     let index_root = source_backed_index_root(data_root);
-    if !index_root.join("meta.json").is_file() {
+    if !index_root.is_dir() {
         if let Some(generation_id) = published_generation_receipt(data_root)? {
             bail!(
                 "verified Core generation {generation_id} is missing from {}",
@@ -226,14 +228,13 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
     }
     match open_verified_index(&index_root) {
         Ok(index) => Ok(Some(index)),
-        // Tantivy creates schema-only meta.json before the first ctx commit.
-        // It is replaceable only while no durable publication receipt proves
-        // that a real generation was activated. Once publication succeeds,
-        // the same typed error is corruption and remains fail-closed.
-        Err(IndexError::MissingCommitPayload)
-            if published_generation_receipt(data_root)?.is_none()
-                && source_backed_lexical_artifact_is_uncommitted_schema_only(&index_root)? =>
-        {
+        Err(IndexError::MissingActiveGenerationPointer) => {
+            if let Some(generation_id) = published_generation_receipt(data_root)? {
+                bail!(
+                    "verified Core generation {generation_id} is missing from {}",
+                    index_root.display()
+                );
+            }
             Ok(None)
         }
         Err(error) => {
@@ -266,27 +267,6 @@ fn verify_source_backed_publication(
     Ok(())
 }
 
-pub(in crate::semantic) fn source_backed_lexical_artifact_is_uncommitted_schema_only(
-    index_root: &Path,
-) -> Result<bool> {
-    let meta_path = index_root.join("meta.json");
-    let meta: Value = serde_json::from_slice(
-        &fs::read(&meta_path)
-            .with_context(|| format!("read lexical metadata {}", meta_path.display()))?,
-    )
-    .with_context(|| format!("parse lexical metadata {}", meta_path.display()))?;
-    Ok(source_backed_meta_is_uncommitted_schema_only(&meta))
-}
-
-fn source_backed_meta_is_uncommitted_schema_only(meta: &Value) -> bool {
-    meta.get("payload").is_none_or(Value::is_null)
-        && meta.get("opstamp").and_then(Value::as_u64) == Some(0)
-        && meta
-            .get("segments")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
-}
-
 fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
     let Some(job) = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root))
     else {
@@ -310,43 +290,28 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
                 .filter(|generation_id| !generation_id.is_empty())
                 .map(str::to_owned)
         });
-    let meta_path = source_backed_index_root(data_root).join("meta.json");
-    if !meta_path.is_file() {
+    let index_root = source_backed_index_root(data_root);
+    if !index_root.is_dir() {
         if let Some(generation_id) = receipt_generation {
             bail!(
-                "retained lexical generation hint {generation_id} has no metadata at {}",
-                meta_path.display()
+                "retained lexical generation hint {generation_id} has no active generation at {}",
+                index_root.display()
             );
         }
         return Ok(None);
     }
-    let meta: Value = serde_json::from_slice(
-        &fs::read(&meta_path)
-            .with_context(|| format!("read retained lexical metadata {}", meta_path.display()))?,
-    )
-    .with_context(|| format!("parse retained lexical metadata {}", meta_path.display()))?;
-    let payload = match meta.get("payload").and_then(Value::as_str) {
-        Some(payload) => payload,
-        None if receipt_generation.is_none()
-            && source_backed_meta_is_uncommitted_schema_only(&meta) =>
-        {
-            return Ok(None);
+    match VerifiedIndex::active_generation_id(&index_root)? {
+        Some(generation_id) => Ok(Some(generation_id)),
+        None => {
+            let Some(generation_id) = receipt_generation else {
+                return Ok(None);
+            };
+            bail!(
+                "retained lexical generation hint {generation_id} has no active generation at {}",
+                index_root.display()
+            )
         }
-        None => return Err(IndexError::MissingCommitPayload.into()),
-    };
-    let payload: Value =
-        serde_json::from_str(payload).context("parse retained lexical generation payload")?;
-    let meta_generation = payload
-        .get("generation_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("retained lexical metadata has no generation ID"))?;
-    // Tantivy's atomically published payload is the data-plane authority. The
-    // daemon job receipt can lag it when the process dies after commit but
-    // before the coordinator persists its final status. A successor refresh
-    // rewrites that stale bookkeeping; startup must not reject the valid
-    // generation or require a foreground writer first.
-    Ok(Some(meta_generation.to_owned()))
+    }
 }
 
 pub(crate) struct PinnedSourceBackedGeneration {
