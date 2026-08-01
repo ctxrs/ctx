@@ -5,6 +5,7 @@ use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CoreRecord, ScannedSourceCounts, SourceFrontier,
     SourceKey, SourceObservation, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 
 use super::super::{
     JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlReader, JsonlSourceChange,
@@ -42,41 +43,48 @@ fn scan_leaf_serial(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
+    base_event_lookup: &BaseEventIdentityLookup,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<TerminalSourceEvidence> {
     let mut staging_started = false;
     let mut append_staging = false;
-    let prepared = prepare_leaf(adapter, leaf, base, &mut |append, core_records| {
-        if !staging_started {
-            if append {
-                let expected = base.ok_or_else(|| {
-                    CaptureError::InvalidPayload("JSONL append has no base".to_owned())
-                })?;
-                let staged = sink
-                    .begin_source_append(leaf.source().clone())
-                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-                if staged != expected {
-                    return Err(CaptureError::InvalidPayload(
-                        "JSONL append base changed before staging".to_owned(),
-                    ));
+    let prepared = prepare_leaf(
+        adapter,
+        leaf,
+        base,
+        base_event_lookup,
+        &mut |append, core_records| {
+            if !staging_started {
+                if append {
+                    let expected = base.ok_or_else(|| {
+                        CaptureError::InvalidPayload("JSONL append has no base".to_owned())
+                    })?;
+                    let staged = sink
+                        .begin_source_append(leaf.source().clone())
+                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                    if staged != expected {
+                        return Err(CaptureError::InvalidPayload(
+                            "JSONL append base changed before staging".to_owned(),
+                        ));
+                    }
+                } else {
+                    sink.begin_source(leaf.source().clone())
+                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
                 }
-            } else {
-                sink.begin_source(leaf.source().clone())
+                staging_started = true;
+                append_staging = append;
+            } else if append_staging != append {
+                return Err(CaptureError::SystemInvariant(
+                    "JSONL publication mode changed during one leaf scan",
+                ));
+            }
+            for record in core_records {
+                sink.add_core_record(record)
                     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
             }
-            staging_started = true;
-            append_staging = append;
-        } else if append_staging != append {
-            return Err(CaptureError::SystemInvariant(
-                "JSONL publication mode changed during one leaf scan",
-            ));
-        }
-        for record in core_records {
-            sink.add_core_record(record)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .map_err(route_invalid)?;
 
     let PreparedLeaf {
@@ -129,6 +137,7 @@ pub(super) fn scan_leaves(
     adapter: &dyn JsonlFamilyAdapter,
     leaves: &[JsonlFamilyLeaf],
     bases: &HashMap<[u8; 32], &CertifiedSource>,
+    base_event_lookup: BaseEventIdentityLookup,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<HashMap<[u8; 32], TerminalSourceEvidence>> {
     let worker_count = family_scanner_worker_count(sink.recommended_leaf_workers(leaves.len()));
@@ -139,7 +148,13 @@ pub(super) fn scan_leaves(
         for leaf in leaves {
             #[cfg(test)]
             let _active_scanner = scanner_probe.as_ref().map(|probe| probe.enter());
-            let evidence = scan_leaf_serial(adapter, leaf, base_for_leaf(bases, leaf), sink)?;
+            let evidence = scan_leaf_serial(
+                adapter,
+                leaf,
+                base_for_leaf(bases, leaf),
+                &base_event_lookup,
+                sink,
+            )?;
             if terminal_sources
                 .insert(leaf.source().exact_descriptor_digest(), evidence)
                 .is_some()
@@ -171,6 +186,7 @@ pub(super) fn scan_leaves(
                 adapter,
                 leaf,
                 job.leaf().base.as_ref(),
+                &base_event_lookup,
                 &mut |append, core_records| {
                     if !staging_started {
                         let begin = if append {
@@ -283,6 +299,7 @@ fn prepare_leaf(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
+    base_event_lookup: &BaseEventIdentityLookup,
     emit_page: &mut dyn FnMut(bool, Vec<CoreRecord>) -> Result<()>,
 ) -> Result<PreparedLeaf> {
     let (leaf, opened) = leaf.open_for_scan()?;
@@ -356,7 +373,13 @@ fn prepare_leaf(
     } else {
         None
     };
-    let mut projector = adapter.projector(&leaf, opened, DateTime::<Utc>::UNIX_EPOCH)?;
+    let mut projector = adapter.projector_with_provider_checkpoint(
+        &leaf,
+        opened,
+        DateTime::<Utc>::UNIX_EPOCH,
+        resumed.and_then(|checkpoint| checkpoint.provider_checkpoint.as_ref()),
+        is_append.then(|| base_event_lookup.clone()),
+    )?;
     let mut physical_records = resumed.map_or_else(
         || {
             leaf.identity_probe
@@ -419,6 +442,7 @@ fn prepare_leaf(
         .ok_or_else(|| {
             CaptureError::InvalidPayload("JSONL rejected count overflowed".to_owned())
         })?;
+    let provider_checkpoint = projector.provider_checkpoint()?;
     if documents != before_finish {
         represented_records = physical_records;
     }
@@ -438,6 +462,7 @@ fn prepare_leaf(
         represented_physical_records: represented_records,
         rejected_records,
         indexed_documents: documents,
+        provider_checkpoint,
     };
     let terminal_checkpoint = outcome.checkpoint().clone();
     let certificate = certify(adapter, &leaf, checkpoint)

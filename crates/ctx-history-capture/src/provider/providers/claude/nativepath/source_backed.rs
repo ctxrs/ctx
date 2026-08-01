@@ -7,12 +7,14 @@ use std::{
     sync::Arc,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, TypedKey,
+    NativeItemKey, NativeSessionKey, RepositoryAbstentionReason, SessionIdentityInput,
+    SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -44,11 +46,16 @@ use crate::{
 const SOURCE_ANCHOR_NAMESPACE: &str = "claude.session-leaf";
 const SESSION_KEY_NAMESPACE: &str = "claude.session";
 const NATIVE_EVENT_KEY_NAMESPACE: &str = "claude.event";
-const EVENT_POSITION_KIND: &str = "claude.jsonl.event-position";
+const FALLBACK_EVENT_ID_VERSION: &str = "claude.fallback-event.v1";
+const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v2";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v3";
+const MAX_PENDING_CALLS: usize = 4096;
+const PROJECTOR_CHECKPOINT_VERSION: u32 = 1;
+const PROJECTOR_CHECKPOINT_PREFIX: &str = "claude.projector-checkpoint.v1:";
+const MAX_PROJECTOR_CHECKPOINT_BYTES: usize = 40 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ClaudeJsonlAdapter;
@@ -83,7 +90,7 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
-        JsonlFamilyAppendMode::Replacement
+        JsonlFamilyAppendMode::CertifiedSuffix
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -149,19 +156,51 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
         _source_file: Arc<OpenedProviderSourceFile>,
         _imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let identities = identities(&binding)?;
+        let restored = checkpoint
+            .map(|checkpoint| decode_projector_checkpoint(checkpoint, &binding))
+            .transpose()?;
+        let (session, pending_calls, linkage_capacity_exceeded) = restored.map_or_else(
+            || {
+                (
+                    ClaudeSessionMetadata::new(binding.key.clone()),
+                    HashMap::new(),
+                    false,
+                )
+            },
+            |restored| {
+                (
+                    restored.session,
+                    restored.pending_calls,
+                    restored.linkage_capacity_exceeded,
+                )
+            },
+        );
         Ok(Box::new(ClaudeProjector {
             source: leaf.source().clone(),
             source_path: leaf.source_path().to_string_lossy().into_owned(),
-            session: ClaudeSessionMetadata::new(binding.key.clone()),
+            session,
             binding,
             identities,
             attributor: RepositoryAttributor::default(),
-            pending_calls: HashMap::new(),
+            pending_calls,
+            linkage_capacity_exceeded,
+            fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
         }))
     }
 }
@@ -181,14 +220,67 @@ struct ClaudeProjector {
     identities: Identities,
     session: ClaudeSessionMetadata,
     attributor: RepositoryAttributor,
-    pending_calls: HashMap<String, PendingCall>,
+    pending_calls: HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: bool,
+    fallback_identities: FallbackEventIdentityState,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PendingCall {
     command: Option<String>,
     declared_workdir: Option<String>,
     event_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingCallState {
+    Exact(PendingCall),
+    Ambiguous,
+}
+
+#[derive(Debug)]
+enum PendingCallLookup {
+    Exact(PendingCall),
+    Ambiguous,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FallbackEventIdentity {
+    digest: [u8; 32],
+    duplicate_occurrence: u64,
+}
+
+#[derive(Default)]
+struct FallbackEventIdentityState {
+    base_lookup: Option<BaseEventIdentityLookup>,
+    next_occurrences: HashMap<[u8; 32], u64>,
+}
+
+impl FallbackEventIdentityState {
+    fn new(base_lookup: Option<BaseEventIdentityLookup>) -> Self {
+        Self {
+            base_lookup,
+            next_occurrences: HashMap::new(),
+        }
+    }
+}
+
+struct RestoredProjectorCheckpoint {
+    session: ClaudeSessionMetadata,
+    pending_calls: HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectorCheckpoint {
+    version: u32,
+    session: ClaudeSessionMetadata,
+    pending_calls: Vec<(String, PendingCallState)>,
+    linkage_capacity_exceeded: bool,
 }
 
 impl JsonlFamilyProjector for ClaudeProjector {
@@ -253,25 +345,26 @@ impl JsonlFamilyProjector for ClaudeProjector {
                     })
                     .collect();
                 if let Some(call_id) = call.call_id.as_deref().filter(|id| !id.is_empty()) {
-                    if self.pending_calls.len() < 4096 && !self.pending_calls.contains_key(call_id)
-                    {
-                        self.pending_calls.insert(
-                            call_id.to_owned(),
-                            PendingCall {
-                                command: call.command.clone(),
-                                declared_workdir: call.declared_workdir.clone(),
-                                event_sequence,
-                            },
-                        );
-                    }
+                    remember_pending_call(
+                        &mut self.pending_calls,
+                        &mut self.linkage_capacity_exceeded,
+                        call_id,
+                        PendingCallState::Exact(PendingCall {
+                            command: call.command.clone(),
+                            declared_workdir: call.declared_workdir.clone(),
+                            event_sequence,
+                        }),
+                    );
                 }
             }
             let mut outcome_relevant = false;
             if let Some(result) = &row.tool_result {
-                let context = result
-                    .call_id
-                    .as_deref()
-                    .and_then(|call_id| self.pending_calls.remove(call_id));
+                let (context, linkage_abstained) = resolve_pending_call(
+                    &mut self.pending_calls,
+                    result.call_id.as_deref(),
+                    self.linkage_capacity_exceeded,
+                    &mut input,
+                );
                 if let (Some(context), Some(result_call_id)) = (context, result.call_id.as_deref())
                 {
                     input.command = context.command.clone();
@@ -316,15 +409,16 @@ impl JsonlFamilyProjector for ClaudeProjector {
                         }
                     }
                 }
-                if !outcome_relevant
-                    && !matches!(
-                        result.outcome,
-                        ClaudeOutputOutcome::Failure | ClaudeOutputOutcome::Timeout
-                    )
-                {
+                if !retain_result_event(outcome_relevant, linkage_abstained, result.outcome) {
                     continue;
                 }
             }
+            let fallback_identity = next_fallback_event_identity(
+                &row,
+                &self.source,
+                self.identities.session_id,
+                &mut self.fallback_identities,
+            )?;
             let mut core = core_record(
                 &self.source,
                 &self.source_path,
@@ -332,12 +426,17 @@ impl JsonlFamilyProjector for ClaudeProjector {
                 &self.identities,
                 &self.session,
                 row,
+                fallback_identity,
             )?;
             apply_annotation(&mut core, self.attributor.attribute(input));
             core.validate_contract().map_err(contract)?;
             emit(core)?;
         }
         Ok(())
+    }
+
+    fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
+        encode_projector_checkpoint(self).map(Some)
     }
 }
 
@@ -348,8 +447,9 @@ fn core_record(
     identities: &Identities,
     session: &ClaudeSessionMetadata,
     row: ClaudeRetainedRow,
+    fallback_identity: Option<FallbackEventIdentity>,
 ) -> Result<CoreRecord> {
-    let native_item_key = native_item_key(&row)?;
+    let native_item_key = native_item_key(&row, fallback_identity)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id: identities.session_id,
@@ -358,7 +458,7 @@ fn core_record(
         subrecord_selector: None,
     })
     .map_err(contract)?;
-    let native_event_id = native_event_typed_key(&row)?;
+    let native_event_id = native_event_typed_key(&row, fallback_identity)?;
     let event_sequence = row_event_sequence(&row)?;
     let structured_content = row_structured_content(&row);
     let mut record = CoreRecord::new_selected(
@@ -436,6 +536,14 @@ fn claude_output_outcome(outcome: ClaudeOutputOutcome) -> OutputOutcome {
     }
 }
 
+fn retain_result_event(
+    outcome_relevant: bool,
+    linkage_abstained: bool,
+    outcome: ClaudeOutputOutcome,
+) -> bool {
+    outcome_relevant || linkage_abstained || outcome != ClaudeOutputOutcome::Unknown
+}
+
 fn identities(binding: &Binding) -> Result<Identities> {
     let native_session_key = session_typed_key(&binding.key)?;
     let source = source_key(&binding.key)?;
@@ -509,7 +617,10 @@ fn session_identity(source: &SourceKey, native_key: &TypedKey) -> Result<StableE
     .map_err(contract)
 }
 
-fn native_item_key(row: &ClaudeRetainedRow) -> Result<NativeItemKey> {
+fn native_item_key(
+    row: &ClaudeRetainedRow,
+    fallback_identity: Option<FallbackEventIdentity>,
+) -> Result<NativeItemKey> {
     if let Some(native_record_id) = row.native_record_id.as_deref() {
         return NativeItemKey::composite(
             NATIVE_EVENT_KEY_NAMESPACE,
@@ -520,26 +631,295 @@ fn native_item_key(row: &ClaudeRetainedRow) -> Result<NativeItemKey> {
         )
         .map_err(contract);
     }
-    NativeItemKey::certified_position(
-        EVENT_POSITION_KIND,
-        native_event_typed_key(row)?,
-        PositionStability::AppendStable,
+    let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
+        "Claude fallback event identity was not assigned",
+    ))?;
+    NativeItemKey::composite(
+        NATIVE_EVENT_KEY_NAMESPACE,
+        fallback_event_key_parts(fallback_identity)?,
     )
     .map_err(contract)
 }
 
-fn native_event_typed_key(row: &ClaudeRetainedRow) -> Result<TypedKey> {
-    TypedKey::composite(vec![
-        row.native_record_id
-            .as_deref()
-            .map(TypedKey::utf8)
-            .transpose()
-            .map_err(contract)?
-            .unwrap_or(TypedKey::Null),
-        TypedKey::U64(row.identity.source_record_ordinal),
-        TypedKey::U64(row.identity.source_subrecord_index),
+fn native_event_typed_key(
+    row: &ClaudeRetainedRow,
+    fallback_identity: Option<FallbackEventIdentity>,
+) -> Result<TypedKey> {
+    if let Some(native_record_id) = row.native_record_id.as_deref() {
+        return TypedKey::composite(vec![
+            TypedKey::utf8(native_record_id).map_err(contract)?,
+            TypedKey::U64(row.identity.source_subrecord_index),
+        ])
+        .map_err(contract);
+    }
+    let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
+        "Claude fallback native event key was not assigned",
+    ))?;
+    TypedKey::composite(fallback_event_key_parts(fallback_identity)?).map_err(contract)
+}
+
+fn remember_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: &mut bool,
+    call_id: &str,
+    state: PendingCallState,
+) {
+    if let Some(existing) = pending_calls.get_mut(call_id) {
+        *existing = PendingCallState::Ambiguous;
+    } else if pending_calls.len() < MAX_PENDING_CALLS {
+        pending_calls.insert(call_id.to_owned(), state);
+    } else {
+        *linkage_capacity_exceeded = true;
+    }
+}
+
+fn take_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    call_id: Option<&str>,
+) -> PendingCallLookup {
+    match call_id.and_then(|call_id| pending_calls.remove(call_id)) {
+        Some(PendingCallState::Exact(context)) => PendingCallLookup::Exact(context),
+        Some(PendingCallState::Ambiguous) => PendingCallLookup::Ambiguous,
+        None => PendingCallLookup::Missing,
+    }
+}
+
+fn resolve_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    call_id: Option<&str>,
+    linkage_capacity_exceeded: bool,
+    input: &mut AttributionInput,
+) -> (Option<PendingCall>, bool) {
+    match take_pending_call(pending_calls, call_id) {
+        PendingCallLookup::Exact(context) => (Some(context), false),
+        PendingCallLookup::Ambiguous => {
+            input.outcome_abstentions.push((
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "claude_tool_result_call_id_is_ambiguous",
+            ));
+            (None, true)
+        }
+        PendingCallLookup::Missing => {
+            let (reason, detail) = if linkage_capacity_exceeded {
+                (
+                    RepositoryAbstentionReason::LinkageCapacityExceeded,
+                    "claude_tool_result_linkage_capacity_exceeded",
+                )
+            } else {
+                (
+                    RepositoryAbstentionReason::ProviderOutputUnjoined,
+                    "claude_tool_result_has_no_exact_unique_call_link",
+                )
+            };
+            input.outcome_abstentions.push((reason, detail));
+            (None, true)
+        }
+    }
+}
+
+fn next_fallback_event_identity(
+    row: &ClaudeRetainedRow,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    state: &mut FallbackEventIdentityState,
+) -> Result<Option<FallbackEventIdentity>> {
+    if row.native_record_id.is_some() {
+        return Ok(None);
+    }
+    let digest = fallback_event_digest(row)?;
+    let occurrence = match state.next_occurrences.get(&digest).copied() {
+        Some(occurrence) => occurrence,
+        None => {
+            first_unused_base_occurrence(state.base_lookup.as_ref(), source, session_id, digest)?
+        }
+    };
+    let identity = FallbackEventIdentity {
+        digest,
+        duplicate_occurrence: occurrence,
+    };
+    state.next_occurrences.insert(
+        digest,
+        occurrence
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "Claude fallback duplicate occurrence overflowed",
+            ))?,
+    );
+    Ok(Some(identity))
+}
+
+fn first_unused_base_occurrence(
+    base_lookup: Option<&BaseEventIdentityLookup>,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    digest: [u8; 32],
+) -> Result<u64> {
+    let Some(base_lookup) = base_lookup else {
+        return Ok(0);
+    };
+    if !base_occurrence_exists(base_lookup, source, session_id, digest, 0)? {
+        return Ok(0);
+    }
+
+    let mut present = 0_u64;
+    let mut missing = 1_u64;
+    while base_occurrence_exists(base_lookup, source, session_id, digest, missing)? {
+        present = missing;
+        missing = match missing.checked_mul(2) {
+            Some(next) => next,
+            None if missing != u64::MAX => u64::MAX,
+            None => {
+                return Err(CaptureError::SystemInvariant(
+                    "Claude fallback duplicate occurrence overflowed",
+                ));
+            }
+        };
+    }
+    while present.saturating_add(1) < missing {
+        let candidate = present + (missing - present) / 2;
+        if base_occurrence_exists(base_lookup, source, session_id, digest, candidate)? {
+            present = candidate;
+        } else {
+            missing = candidate;
+        }
+    }
+    Ok(missing)
+}
+
+fn base_occurrence_exists(
+    base_lookup: &BaseEventIdentityLookup,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    digest: [u8; 32],
+    occurrence: u64,
+) -> Result<bool> {
+    let identity = FallbackEventIdentity {
+        digest,
+        duplicate_occurrence: occurrence,
+    };
+    let native_item_key = NativeItemKey::composite(
+        NATIVE_EVENT_KEY_NAMESPACE,
+        fallback_event_key_parts(identity)?,
+    )
+    .map_err(contract)?;
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(contract)?;
+    base_lookup
+        .contains(event_id.as_uuid())
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
+}
+
+fn fallback_event_digest(row: &ClaudeRetainedRow) -> Result<[u8; 32]> {
+    let logical = serde_json::to_vec(&(
+        row.parent_native_record_id.as_deref(),
+        row.kind,
+        row.role.as_deref(),
+        row.occurred_at.as_deref(),
+        row.body.as_deref(),
+        row.body_sha256,
+        row.body_text_retention.as_ref(),
+        row.tool_call.as_ref(),
+        row.tool_result.as_ref(),
+    ))?;
+    let mut hasher = Sha256::new();
+    hasher.update(FALLBACK_EVENT_ID_DOMAIN);
+    hasher.update((logical.len() as u64).to_be_bytes());
+    hasher.update(logical);
+    Ok(hasher.finalize().into())
+}
+
+fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<TypedKey>> {
+    Ok(vec![
+        TypedKey::utf8(FALLBACK_EVENT_ID_VERSION).map_err(contract)?,
+        TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
+        TypedKey::U64(identity.duplicate_occurrence),
     ])
+}
+
+fn encode_projector_checkpoint(projector: &ClaudeProjector) -> Result<TypedKey> {
+    let mut pending_calls = projector
+        .pending_calls
+        .iter()
+        .map(|(call_id, state)| (call_id.clone(), state.clone()))
+        .collect::<Vec<_>>();
+    pending_calls.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let bytes = serde_json::to_vec(&ProjectorCheckpoint {
+        version: PROJECTOR_CHECKPOINT_VERSION,
+        session: projector.session.clone(),
+        pending_calls,
+        linkage_capacity_exceeded: projector.linkage_capacity_exceeded,
+    })?;
+    if bytes.len() > MAX_PROJECTOR_CHECKPOINT_BYTES {
+        return Err(CaptureError::InvalidPayload(
+            "Claude projector checkpoint exceeds its bounded encoding".to_owned(),
+        ));
+    }
+    TypedKey::utf8(format!(
+        "{PROJECTOR_CHECKPOINT_PREFIX}{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
     .map_err(contract)
+}
+
+fn decode_projector_checkpoint(
+    checkpoint: &TypedKey,
+    binding: &Binding,
+) -> Result<RestoredProjectorCheckpoint> {
+    let TypedKey::Utf8(encoded) = checkpoint else {
+        return Err(CaptureError::InvalidPayload(
+            "Claude projector checkpoint is not an opaque string".to_owned(),
+        ));
+    };
+    let encoded = encoded
+        .strip_prefix(PROJECTOR_CHECKPOINT_PREFIX)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "Claude projector checkpoint version is unsupported".to_owned(),
+            )
+        })?;
+    if encoded.len() > MAX_PROJECTOR_CHECKPOINT_BYTES.div_ceil(3) * 4 {
+        return Err(CaptureError::InvalidPayload(
+            "Claude projector checkpoint exceeds its bounded encoding".to_owned(),
+        ));
+    }
+    let bytes = BASE64_STANDARD.decode(encoded).map_err(|_| {
+        CaptureError::InvalidPayload("Claude projector checkpoint is malformed".to_owned())
+    })?;
+    if bytes.len() > MAX_PROJECTOR_CHECKPOINT_BYTES {
+        return Err(CaptureError::InvalidPayload(
+            "Claude projector checkpoint exceeds its bounded encoding".to_owned(),
+        ));
+    }
+    let checkpoint: ProjectorCheckpoint = serde_json::from_slice(&bytes)?;
+    if checkpoint.version != PROJECTOR_CHECKPOINT_VERSION || checkpoint.session.key != binding.key {
+        return Err(CaptureError::InvalidPayload(
+            "Claude projector checkpoint does not match its source binding".to_owned(),
+        ));
+    }
+    if checkpoint.pending_calls.len() > MAX_PENDING_CALLS {
+        return Err(CaptureError::InvalidPayload(
+            "Claude projector checkpoint exceeds its state capacity".to_owned(),
+        ));
+    }
+    let mut pending_calls = HashMap::with_capacity(checkpoint.pending_calls.len());
+    for (call_id, state) in checkpoint.pending_calls {
+        if call_id.is_empty() || pending_calls.insert(call_id, state).is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "Claude projector checkpoint repeats a call identity".to_owned(),
+            ));
+        }
+    }
+    Ok(RestoredProjectorCheckpoint {
+        session: checkpoint.session,
+        pending_calls,
+        linkage_capacity_exceeded: checkpoint.linkage_capacity_exceeded,
+    })
 }
 
 fn lexical_body(row: &ClaudeRetainedRow) -> String {
@@ -633,5 +1013,319 @@ pub(crate) mod registration {
             driver,
         )?);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceObservation};
+    use ctx_history_index::{GenerationWriter, WriterOptions};
+
+    fn fallback_row(body: &str, ordinal: u64) -> ClaudeRetainedRow {
+        let bytes = serde_json::json!({
+            "type": "user",
+            "sessionId": "fallback-session",
+            "timestamp": "2026-07-31T12:00:00Z",
+            "message": {"role": "user", "content": body},
+        })
+        .to_string()
+        .into_bytes();
+        let locator = ClaudePhysicalLocator {
+            path: PathBuf::from("fallback-session.jsonl"),
+            byte_start: 0,
+            byte_end_exclusive: bytes.len() as u64,
+            line_number: ordinal + 1,
+            record_sha256: Sha256::digest(&bytes).into(),
+        };
+        parse_native_record(&bytes, ordinal, &locator)
+            .unwrap()
+            .rows
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    fn fallback_event_ids(bodies: &[&str]) -> Vec<StableEntityId> {
+        let key = ClaudeSessionKey {
+            root_session_id: "fallback-session".to_owned(),
+            workflow_run_id: None,
+            agent_id: None,
+        };
+        let source = source_key(&key).unwrap();
+        let session_id = session_identity(&source, &session_typed_key(&key).unwrap()).unwrap();
+        let mut state = FallbackEventIdentityState::default();
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(ordinal, body)| {
+                let row = fallback_row(body, ordinal as u64);
+                let fallback = next_fallback_event_identity(&row, &source, session_id, &mut state)
+                    .unwrap()
+                    .unwrap();
+                let native_item_key = native_item_key(&row, Some(fallback)).unwrap();
+                derive_event_id(EventIdentityInput {
+                    source: &source,
+                    session_id,
+                    logical_item_kind: LOGICAL_EVENT_KIND,
+                    native_item_key: &native_item_key,
+                    subrecord_selector: None,
+                })
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn fallback_event_id(
+        row: &ClaudeRetainedRow,
+        source: &SourceKey,
+        session_id: StableEntityId,
+        state: &mut FallbackEventIdentityState,
+    ) -> (StableEntityId, TypedKey) {
+        let fallback = next_fallback_event_identity(row, source, session_id, state)
+            .unwrap()
+            .unwrap();
+        let native_item_key = native_item_key(row, Some(fallback)).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source,
+            session_id,
+            logical_item_kind: LOGICAL_EVENT_KIND,
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        let native_event_id = native_event_typed_key(row, Some(fallback)).unwrap();
+        (event_id, native_event_id)
+    }
+
+    fn base_lookup_with_events(
+        source: &SourceKey,
+        session_id: StableEntityId,
+        events: &[(StableEntityId, TypedKey)],
+    ) -> (tempfile::TempDir, BaseEventIdentityLookup) {
+        let temp = tempfile::tempdir().unwrap();
+        let options = WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        };
+        let mut writer = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        for (index, (event_id, native_event_id)) in events.iter().enumerate() {
+            let event_sequence = u64::try_from(index).unwrap() + 1;
+            let mut record = CoreRecord::new_selected(
+                *event_id,
+                session_id,
+                session_id,
+                source.clone(),
+                event_sequence,
+                "message",
+                "primary",
+                true,
+                PARSER_REVISION,
+                "Claude fallback lookup test",
+            )
+            .unwrap();
+            record.provider_session_id = Some("fallback-session".to_owned());
+            record.native_event_id = Some(native_event_id.clone());
+            record.occurred_at_unix_ms = Some(i64::try_from(event_sequence).unwrap());
+            record.role = Some("user".to_owned());
+            writer.add_core_record(record).unwrap();
+        }
+        let observation =
+            SourceObservation::new(source.clone(), "fallback-test-source-v1", vec![1]).unwrap();
+        let count = u64::try_from(events.len()).unwrap();
+        writer
+            .certify_source(
+                CertifiedSource::certify(
+                    observation.clone(),
+                    observation,
+                    PARSER_REVISION,
+                    [1; 32],
+                    ScannedSourceCounts {
+                        complete_records: count,
+                        retained_records: count,
+                        indexed_documents: count,
+                        certified_bytes: count,
+                        ..ScannedSourceCounts::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+        let writer = GenerationWriter::open(temp.path(), options).unwrap();
+        let lookup = writer.base_event_identity_lookup();
+        drop(writer);
+        (temp, lookup)
+    }
+
+    #[test]
+    fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
+        let mut pending_calls = HashMap::new();
+        let mut capacity_exceeded = false;
+        for command in ["git commit -m first", "git commit -m second"] {
+            remember_pending_call(
+                &mut pending_calls,
+                &mut capacity_exceeded,
+                "duplicate-call",
+                PendingCallState::Exact(PendingCall {
+                    command: Some(command.to_owned()),
+                    declared_workdir: Some("/tmp/repository".to_owned()),
+                    event_sequence: 1,
+                }),
+            );
+        }
+        assert!(matches!(
+            pending_calls.get("duplicate-call"),
+            Some(PendingCallState::Ambiguous)
+        ));
+
+        let mut input = AttributionInput::default();
+        let (context, abstained) = resolve_pending_call(
+            &mut pending_calls,
+            Some("duplicate-call"),
+            capacity_exceeded,
+            &mut input,
+        );
+        assert!(context.is_none());
+        assert!(abstained);
+        let annotation = RepositoryAttributor::default().attribute(input);
+        assert!(annotation.repository_vcs_observations.is_empty());
+        assert!(annotation.repository_abstentions.iter().any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref() == Some("claude_tool_result_call_id_is_ambiguous")
+        }));
+        assert!(retain_result_event(
+            false,
+            abstained,
+            ClaudeOutputOutcome::Success
+        ));
+        assert!(retain_result_event(
+            false,
+            false,
+            ClaudeOutputOutcome::Failure
+        ));
+    }
+
+    #[test]
+    fn fallback_event_ids_survive_insert_and_delete_before_with_stable_duplicates() {
+        let baseline = fallback_event_ids(&["prefix", "target", "suffix"]);
+        let inserted = fallback_event_ids(&["inserted", "prefix", "target", "suffix"]);
+        let deleted = fallback_event_ids(&["target", "suffix"]);
+        assert_eq!(baseline[1], inserted[2]);
+        assert_eq!(baseline[1], deleted[0]);
+        assert_eq!(baseline[2], inserted[3]);
+        assert_eq!(baseline[2], deleted[1]);
+
+        let duplicates = fallback_event_ids(&["duplicate", "duplicate"]);
+        let replayed = fallback_event_ids(&["duplicate", "duplicate"]);
+        assert_ne!(duplicates[0], duplicates[1]);
+        assert_eq!(duplicates, replayed);
+    }
+
+    #[test]
+    fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
+        let key = ClaudeSessionKey {
+            root_session_id: "fallback-session".to_owned(),
+            workflow_run_id: None,
+            agent_id: None,
+        };
+        let binding = Binding {
+            project_dir: PathBuf::from("/tmp/project"),
+            key: key.clone(),
+            layout: SessionLayout::Primary,
+        };
+        let source = source_key(&key).unwrap();
+        let identities = identities(&binding).unwrap();
+        let mut cold_identity_state = FallbackEventIdentityState::default();
+        let prefix_events = [fallback_row("duplicate", 0), fallback_row("duplicate", 1)]
+            .iter()
+            .map(|row| {
+                fallback_event_id(
+                    row,
+                    &source,
+                    identities.session_id,
+                    &mut cold_identity_state,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (_base, base_lookup) =
+            base_lookup_with_events(&source, identities.session_id, &prefix_events);
+        let mut pending_calls = HashMap::new();
+        let mut linkage_capacity_exceeded = false;
+        remember_pending_call(
+            &mut pending_calls,
+            &mut linkage_capacity_exceeded,
+            "cross-append-call",
+            PendingCallState::Exact(PendingCall {
+                command: Some("git commit -m prefix".to_owned()),
+                declared_workdir: Some("/tmp/project".to_owned()),
+                event_sequence: 0,
+            }),
+        );
+        let mut projector = ClaudeProjector {
+            source: source.clone(),
+            source_path: "fallback-session.jsonl".to_owned(),
+            binding: binding.clone(),
+            identities,
+            session: ClaudeSessionMetadata::new(key),
+            attributor: RepositoryAttributor::default(),
+            pending_calls,
+            linkage_capacity_exceeded,
+            fallback_identities: FallbackEventIdentityState::default(),
+        };
+        let checkpoint = encode_projector_checkpoint(&projector).unwrap();
+        for occurrence in 0_u64..1_024 {
+            let mut digest = [0; 32];
+            digest[..8].copy_from_slice(&occurrence.to_be_bytes());
+            projector
+                .fallback_identities
+                .next_occurrences
+                .insert(digest, occurrence + 1);
+        }
+        assert_eq!(encode_projector_checkpoint(&projector).unwrap(), checkpoint);
+        let mut restored = decode_projector_checkpoint(&checkpoint, &binding).unwrap();
+
+        let suffix_row = fallback_row("duplicate", 2);
+        let mut append_identity_state = FallbackEventIdentityState::new(Some(base_lookup));
+        let suffix_event = fallback_event_id(
+            &suffix_row,
+            &source,
+            projector.identities.session_id,
+            &mut append_identity_state,
+        );
+        let replayed = fallback_event_ids(&["duplicate", "duplicate", "duplicate"]);
+        assert_eq!(prefix_events[0].0, replayed[0]);
+        assert_eq!(prefix_events[1].0, replayed[1]);
+        assert_eq!(suffix_event.0, replayed[2]);
+        assert_ne!(prefix_events[0].0, suffix_event.0);
+        assert_ne!(prefix_events[1].0, suffix_event.0);
+
+        remember_pending_call(
+            &mut restored.pending_calls,
+            &mut restored.linkage_capacity_exceeded,
+            "cross-append-call",
+            PendingCallState::Exact(PendingCall {
+                command: Some("git commit -m suffix".to_owned()),
+                declared_workdir: Some("/tmp/project".to_owned()),
+                event_sequence: 1_u64 << 16,
+            }),
+        );
+        let mut input = AttributionInput::default();
+        let (context, abstained) = resolve_pending_call(
+            &mut restored.pending_calls,
+            Some("cross-append-call"),
+            restored.linkage_capacity_exceeded,
+            &mut input,
+        );
+        assert!(context.is_none());
+        assert!(abstained);
+        assert_eq!(
+            input.outcome_abstentions,
+            vec![(
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "claude_tool_result_call_id_is_ambiguous"
+            )]
+        );
     }
 }
