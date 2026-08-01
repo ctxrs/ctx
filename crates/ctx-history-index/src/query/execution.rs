@@ -598,17 +598,42 @@ impl VerifiedIndex {
             ));
         }
 
+        let segments = self.searcher.segment_readers();
+        let range_end = SessionEventOrderKey::session_range_end(session_id)?;
+        let inverted_indexes = segments
+            .iter()
+            .map(|segment| segment.inverted_index(fields.session_event_order))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let streams = inverted_indexes
+            .iter()
+            .map(|inverted| {
+                inverted
+                    .terms()
+                    .range()
+                    .gt(after.as_bytes())
+                    .lt(&range_end)
+                    .into_stream()
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut merged = TermMerger::new(streams);
+
         let mut latest_assistant = None;
         loop {
-            let candidates = self.session_event_addresses_after(session_id, after, page_items)?;
+            let candidates = session_event_address_page(
+                session_id,
+                page_items,
+                &mut merged,
+                &inverted_indexes,
+                segments,
+            )?;
             if candidates.is_empty() {
                 return Ok(latest_assistant);
             }
 
             for candidate in candidates {
-                after = candidate.order;
                 let event = stored_event_record(&self.searcher, candidate.address, fields)?;
-                if event.session_id != session_id
+                if candidate.order <= after
+                    || event.session_id != session_id
                     || event.event_id.as_uuid() != candidate.order.event_id()
                     || event.event_sequence != candidate.order.event_sequence()
                     || event.occurred_at_unix_ms != candidate.order.occurred_at_unix_ms()
@@ -617,6 +642,7 @@ impl VerifiedIndex {
                         SESSION_EVENT_ORDER_FIELD,
                     ));
                 }
+                after = candidate.order;
                 if event.event_type == "message" && event.role.as_deref() == Some("user") {
                     return Ok(latest_assistant);
                 }
@@ -1479,64 +1505,6 @@ impl VerifiedIndex {
         Ok(candidates)
     }
 
-    fn session_event_addresses_after(
-        &self,
-        session_id: StableEntityId,
-        after: SessionEventOrderKey,
-        capacity: usize,
-    ) -> Result<Vec<SessionEventAddressCandidate>> {
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let range_end = SessionEventOrderKey::session_range_end(session_id)?;
-        let candidate_capacity = capacity
-            .checked_mul(self.searcher.segment_readers().len())
-            .ok_or(IndexError::CountOverflow)?;
-        let mut candidates = Vec::with_capacity(candidate_capacity);
-
-        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
-            let inverted = segment.inverted_index(fields.session_event_order)?;
-            let terms = inverted.terms();
-            let mut stream = terms
-                .range()
-                .gt(after.as_bytes())
-                .lt(&range_end)
-                .into_stream()?;
-            let mut segment_candidates = 0_usize;
-            while segment_candidates < capacity && stream.advance() {
-                #[cfg(test)]
-                SESSION_EVENT_ORDER_TERM_VISITS
-                    .set(SESSION_EVENT_ORDER_TERM_VISITS.get().saturating_add(1));
-                let order = SessionEventOrderKey::decode_for_session(session_id, stream.key())?;
-                let mut postings = inverted
-                    .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
-                let mut doc_id = postings.doc();
-                while doc_id != TERMINATED && segment_candidates < capacity {
-                    if !segment.is_deleted(doc_id) {
-                        candidates.push(SessionEventAddressCandidate {
-                            order,
-                            address: DocAddress::new(segment_ord as u32, doc_id),
-                        });
-                        segment_candidates = segment_candidates
-                            .checked_add(1)
-                            .ok_or(IndexError::CountOverflow)?;
-                    }
-                    doc_id = postings.advance();
-                }
-            }
-        }
-
-        candidates.sort_by_key(|candidate| candidate.order);
-        if candidates
-            .windows(2)
-            .any(|pair| pair[0].order == pair[1].order)
-        {
-            return Err(IndexError::InvalidStoredDocumentField(
-                SESSION_EVENT_ORDER_FIELD,
-            ));
-        }
-        candidates.truncate(capacity);
-        Ok(candidates)
-    }
-
     fn semantic_event_addresses_after(
         &self,
         after: Option<StableEntityId>,
@@ -1669,6 +1637,72 @@ impl VerifiedIndex {
     fn core_event_record(&self, address: DocAddress, fields: Fields) -> Result<CoreEventRecord> {
         stored_core_event_record(&self.searcher, address, fields)
     }
+}
+
+/// Pulls one globally ordered page from traversal-scoped segment streams.
+///
+/// `TermMerger` retains one frontier per segment between calls, so a term that
+/// loses an earlier page's global cutoff is not sought and decoded again on a
+/// later page. The page itself retains only `capacity` addresses.
+fn session_event_address_page(
+    session_id: StableEntityId,
+    capacity: usize,
+    merged: &mut TermMerger<'_>,
+    inverted_indexes: &[std::sync::Arc<InvertedIndexReader>],
+    segments: &[SegmentReader],
+) -> Result<Vec<SessionEventAddressCandidate>> {
+    if inverted_indexes.len() != segments.len() {
+        return Err(IndexError::InvalidStoredDocumentField(
+            SESSION_EVENT_ORDER_FIELD,
+        ));
+    }
+    let mut candidates = Vec::with_capacity(capacity);
+    while candidates.len() < capacity && merged.advance() {
+        #[cfg(test)]
+        SESSION_EVENT_ORDER_TERM_VISITS
+            .set(SESSION_EVENT_ORDER_TERM_VISITS.get().saturating_add(1));
+        let order = SessionEventOrderKey::decode_for_session(session_id, merged.key())?;
+        #[cfg(test)]
+        SESSION_EVENT_ORDER_VISITED_SEQUENCES
+            .with(|sequences| sequences.borrow_mut().push(order.event_sequence()));
+        let mut address = None;
+        for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
+            let inverted =
+                inverted_indexes
+                    .get(segment_ord)
+                    .ok_or(IndexError::InvalidStoredDocumentField(
+                        SESSION_EVENT_ORDER_FIELD,
+                    ))?;
+            let segment =
+                segments
+                    .get(segment_ord)
+                    .ok_or(IndexError::InvalidStoredDocumentField(
+                        SESSION_EVENT_ORDER_FIELD,
+                    ))?;
+            let mut postings =
+                inverted.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+            let mut doc_id = postings.doc();
+            while doc_id != TERMINATED {
+                if !segment.is_deleted(doc_id) {
+                    let segment_ord =
+                        u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+                    if address
+                        .replace(DocAddress::new(segment_ord, doc_id))
+                        .is_some()
+                    {
+                        return Err(IndexError::InvalidStoredDocumentField(
+                            SESSION_EVENT_ORDER_FIELD,
+                        ));
+                    }
+                }
+                doc_id = postings.advance();
+            }
+        }
+        if let Some(address) = address {
+            candidates.push(SessionEventAddressCandidate { order, address });
+        }
+    }
+    Ok(candidates)
 }
 
 struct SessionIdCollector {
