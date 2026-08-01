@@ -1,26 +1,109 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
-use ctx_history_core::RepositoryFileObservationKind;
+use ctx_history_core::{RepositoryFileObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::events::codex_tool_name;
-use crate::repository_attribution::{UnscopedFileObservation, MAX_COMMAND_BYTES};
+use super::events::{codex_tool_name, CodexToolCallContext};
+use crate::{
+    repository_attribution::{UnscopedFileObservation, MAX_COMMAND_BYTES},
+    OutputOutcomeMetadata,
+};
 
 #[path = "repository/outcomes.rs"]
 mod outcomes;
+mod static_js;
 
-pub(crate) use outcomes::{repository_result_evidence, CodexRepositoryResultEvidence};
+pub(crate) use outcomes::CodexRepositoryResultEvidence;
+use static_js::{StaticJsParser, StaticNestedToolCall};
 
 const MAX_STRUCTURED_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WORKDIR_BYTES: usize = 16 * 1024;
 const MAX_CALL_ID_BYTES: usize = 1024;
 const MAX_CONTINUATION_CELL_ID_BYTES: usize = 1024;
-const MAX_STATIC_NESTED_TOOL_CALLS: usize = 24;
-const MAX_STATIC_LITERAL_DEPTH: usize = 32;
-const MAX_STATIC_LITERAL_ITEMS: usize = 256;
+const MAX_STATIC_PATCH_PATHS: usize = 256;
 const CODEX_CONTINUATION_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/continuation-call-id/v1\0";
 const CODEX_COMMAND_DOMAIN: &[u8] = b"ctx/codex-nativepath/exact-command/v1\0";
+
+pub(crate) fn repository_result_evidence(
+    payload: &Value,
+    context: &CodexToolCallContext,
+    result_call_id: &str,
+    result_record_sha256: [u8; 32],
+    observed_at_unix_ms: i64,
+    result_outcome: &OutputOutcomeMetadata,
+) -> Option<CodexRepositoryResultEvidence> {
+    if let Some(evidence) = outcomes::repository_result_evidence(
+        payload,
+        context,
+        result_call_id,
+        result_record_sha256,
+        observed_at_unix_ms,
+        result_outcome,
+    ) {
+        return Some(evidence);
+    }
+    exact_linked_result_context(payload, context, result_call_id, result_record_sha256)
+}
+
+fn exact_linked_result_context(
+    payload: &Value,
+    context: &CodexToolCallContext,
+    result_call_id: &str,
+    result_record_sha256: [u8; 32],
+) -> Option<CodexRepositoryResultEvidence> {
+    repository_result_output(payload)?;
+    let command = context.exact_command.clone()?;
+    let origin_call_id = bounded_literal(
+        context.origin_call_id.as_deref()?,
+        MAX_CALL_ID_BYTES,
+        control_identifier,
+    )?;
+    let result_call_id = bounded_literal(result_call_id, MAX_CALL_ID_BYTES, control_identifier)?;
+    let origin_event_sequence = context.origin_event_sequence?;
+    if context.command_too_large
+        || context.correlation_ambiguous
+        || context.continuation_capacity_exceeded
+        || context.continuation_call_id_sha256.len()
+            > crate::provider::codex::nativepath::MAX_CODEX_TOOL_CONTEXTS
+        || context
+            .continuation_call_id_sha256
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != context.continuation_call_id_sha256.len()
+        || (context.continuation_cell_id.is_some() && !terminal_continuation_result(payload))
+    {
+        return None;
+    }
+    Some(CodexRepositoryResultEvidence {
+        command: Some(command),
+        command_too_large: false,
+        declared_workdir: context.declared_workdir.clone(),
+        outcome_operation_repository_path: None,
+        outcome_output_repository_path: None,
+        structured_content: json!({
+            "provider_native_tool_result": {
+                "provider": "codex",
+                "origin_call_id": origin_call_id,
+                "result_call_id": result_call_id,
+                "origin_event_sequence": origin_event_sequence,
+                "continuation_call_id_sha256": context.continuation_call_id_sha256
+                    .iter()
+                    .map(hex_digest)
+                    .collect::<Vec<_>>(),
+                "result_record_sha256": hex_digest(&result_record_sha256),
+                "result_context_schema": "codex_exact_linked_result_context_v1",
+                "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+                "captured_outcomes": 0,
+                "raw_output_retained": false,
+            }
+        }),
+        provider_native_repository_aliases: Vec::new(),
+        outcomes: Vec::new(),
+        abstentions: Vec::new(),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexRepositoryToolEvidence {
@@ -44,12 +127,50 @@ pub(crate) fn repository_tool_evidence(payload: &Value) -> Vec<CodexRepositoryTo
     if item_type == "custom_tool_call" && tool_name == "exec" {
         return nested_exec_tool_evidence(payload).unwrap_or_default();
     }
+    if tool_name == "apply_patch" {
+        return native_patch_tool_evidence(payload, item_type)
+            .into_iter()
+            .collect();
+    }
     if !matches!(tool_name.as_str(), "exec_command" | "wait") {
         return Vec::new();
     }
     native_tool_evidence(payload, tool_name)
         .into_iter()
         .collect()
+}
+
+fn native_patch_tool_evidence(
+    payload: &Value,
+    item_type: &str,
+) -> Option<CodexRepositoryToolEvidence> {
+    if payload
+        .get("name")
+        .zip(payload.get("tool"))
+        .is_some_and(|(name, tool)| name != tool)
+    {
+        return None;
+    }
+    let call_id = bounded_literal(
+        payload.get("call_id")?.as_str()?,
+        MAX_CALL_ID_BYTES,
+        control_identifier,
+    )?;
+    let input = exact_one_of(payload, "arguments", "input")?;
+    let (patch, schema) = match input {
+        Value::String(patch) if item_type == "custom_tool_call" => {
+            (patch.clone(), "codex_apply_patch_input_v1")
+        }
+        Value::Object(_) | Value::String(_) if item_type == "function_call" => {
+            let arguments = decode_top_level_argument_object(input)?;
+            (
+                arguments.get("patch")?.as_str()?.to_owned(),
+                "codex_apply_patch_args_v1",
+            )
+        }
+        _ => return None,
+    };
+    patch_tool_evidence(call_id, None, schema, &patch)?
 }
 
 fn native_tool_evidence(payload: &Value, tool_name: String) -> Option<CodexRepositoryToolEvidence> {
@@ -172,402 +293,150 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                 });
             }
             StaticNestedToolCall::ApplyPatch(patch) => {
-                let mut patch_paths = patch
-                    .lines()
-                    .filter_map(|line| {
-                        let line = line.trim();
-                        [
-                            ("*** Add File:", RepositoryFileObservationKind::Created),
-                            ("*** Update File:", RepositoryFileObservationKind::Modified),
-                            ("*** Delete File:", RepositoryFileObservationKind::Deleted),
-                        ]
-                        .into_iter()
-                        .find_map(|(header, kind)| {
-                            line.strip_prefix(header)
-                                .map(str::trim)
-                                .filter(|path| bounded_path(path))
-                                .map(|path| (path.to_owned(), kind))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let mut seen = std::collections::HashSet::new();
-                patch_paths.retain(|(path, _)| seen.insert(path.clone()));
-                if patch_paths.is_empty() {
-                    continue;
+                if let Some(patch_evidence) = patch_tool_evidence(
+                    call_id.clone(),
+                    Some(index),
+                    "codex_nested_apply_patch_literal_v3",
+                    &patch,
+                )? {
+                    evidence.push(patch_evidence);
                 }
-                evidence.push(CodexRepositoryToolEvidence {
-                    tool_name: "apply_patch".to_owned(),
-                    command: None,
-                    command_too_large: false,
-                    declared_workdir: None,
-                    continuation_cell_id: None,
-                    file_observations: patch_paths
-                        .iter()
-                        .cloned()
-                        .map(|(path, kind)| UnscopedFileObservation {
-                            path,
-                            prior_path: None,
-                            kind,
-                        })
-                        .collect(),
-                    structured_content: json!({
-                        "provider_native_tool": {
-                            "provider": "codex",
-                            "name": "apply_patch",
-                            "outer_name": "exec",
-                            "call_id": call_id,
-                            "nested_activity_index": index,
-                            "argument_schema": "codex_nested_apply_patch_literal_v2",
-                            "static_patch_paths": patch_paths.len(),
-                            "raw_arguments_retained": false,
-                        }
-                    }),
-                });
             }
         }
     }
     Some(evidence)
 }
 
-enum StaticNestedToolCall {
-    ExecCommand(Map<String, Value>),
-    ApplyPatch(String),
+fn patch_tool_evidence(
+    call_id: String,
+    nested_activity_index: Option<usize>,
+    schema: &'static str,
+    patch: &str,
+) -> Option<Option<CodexRepositoryToolEvidence>> {
+    if patch.len() > MAX_STRUCTURED_ARGUMENT_BYTES {
+        return None;
+    }
+    let file_observations = static_patch_file_observations(patch)?;
+    if file_observations.is_empty() {
+        return Some(None);
+    }
+    let static_patch_paths = file_observations.len();
+    Some(Some(CodexRepositoryToolEvidence {
+        tool_name: "apply_patch".to_owned(),
+        command: None,
+        command_too_large: false,
+        declared_workdir: None,
+        continuation_cell_id: None,
+        file_observations,
+        structured_content: json!({
+            "provider_native_tool": {
+                "provider": "codex",
+                "name": "apply_patch",
+                "outer_name": nested_activity_index.map(|_| "exec"),
+                "call_id": call_id,
+                "nested_activity_index": nested_activity_index,
+                "argument_schema": schema,
+                "static_patch_paths": static_patch_paths,
+                "raw_arguments_retained": false,
+            }
+        }),
+    }))
 }
 
-struct StaticJsParser<'a> {
-    source: &'a [u8],
-    cursor: usize,
+fn static_patch_file_observations(patch: &str) -> Option<Vec<UnscopedFileObservation>> {
+    let mut lines = patch.lines();
+    if lines.next()?.trim_end() != "*** Begin Patch" {
+        return None;
+    }
+    let mut observations = Vec::new();
+    let mut pending_update = None;
+    let mut ended = false;
+    for line in lines {
+        if ended {
+            if !line.trim().is_empty() {
+                return None;
+            }
+            continue;
+        }
+        if line.trim_end() == "*** End Patch" {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            ended = true;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            push_patch_observation(
+                &mut observations,
+                path,
+                None,
+                RepositoryFileObservationKind::Created,
+            )?;
+        } else if let Some(path) = line.strip_prefix("*** Update File: ") {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            pending_update = Some(bounded_patch_path(path)?);
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            push_patch_observation(
+                &mut observations,
+                path,
+                None,
+                RepositoryFileObservationKind::Deleted,
+            )?;
+        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+            let prior_path = pending_update.take()?;
+            push_patch_observation(
+                &mut observations,
+                path,
+                Some(prior_path),
+                RepositoryFileObservationKind::Renamed,
+            )?;
+        }
+    }
+    ended.then_some(observations)
 }
 
-impl<'a> StaticJsParser<'a> {
-    fn new(source: &'a str) -> Self {
-        Self {
-            source: source.as_bytes(),
-            cursor: 0,
-        }
+fn push_pending_patch_update(
+    observations: &mut Vec<UnscopedFileObservation>,
+    pending_update: &mut Option<String>,
+) -> Option<()> {
+    if let Some(path) = pending_update.take() {
+        push_patch_observation(
+            observations,
+            &path,
+            None,
+            RepositoryFileObservationKind::Modified,
+        )?;
     }
+    Some(())
+}
 
-    fn parse_program(mut self) -> Option<Vec<StaticNestedToolCall>> {
-        let mut calls = Vec::new();
-        let mut terminal_output_statements = 0_usize;
-        loop {
-            self.skip_program_trivia()?;
-            if self.cursor == self.source.len() {
-                break;
-            }
-            if terminal_output_statements == 0 {
-                if let Some(call) = self.parse_tool_statement() {
-                    calls.push(call);
-                    if calls.len() > MAX_STATIC_NESTED_TOOL_CALLS {
-                        return None;
-                    }
-                    continue;
-                }
-            }
-            if self.parse_terminal_output_statement() {
-                terminal_output_statements += 1;
-                if terminal_output_statements > MAX_STATIC_NESTED_TOOL_CALLS {
-                    return None;
-                }
-                continue;
-            }
-            return None;
-        }
-        Some(calls)
+fn push_patch_observation(
+    observations: &mut Vec<UnscopedFileObservation>,
+    path: &str,
+    prior_path: Option<String>,
+    kind: RepositoryFileObservationKind,
+) -> Option<()> {
+    let path = bounded_patch_path(path)?;
+    if let Some(existing) = observations
+        .iter()
+        .find(|observation| observation.path == path)
+    {
+        return (existing.prior_path == prior_path && existing.kind == kind).then_some(());
     }
+    if observations.len() >= MAX_STATIC_PATCH_PATHS {
+        return None;
+    }
+    observations.push(UnscopedFileObservation {
+        path,
+        prior_path,
+        kind,
+    });
+    Some(())
+}
 
-    fn parse_terminal_output_statement(&mut self) -> bool {
-        let checkpoint = self.cursor;
-        if !self.consume_keyword("text") {
-            return false;
-        }
-        self.skip_whitespace();
-        if !self.consume_byte(b'(') {
-            self.cursor = checkpoint;
-            return false;
-        }
-        self.skip_whitespace();
-        if self.parse_identifier().is_none() {
-            self.cursor = checkpoint;
-            return false;
-        }
-        loop {
-            if !self.consume_byte(b'.') {
-                break;
-            }
-            if self.parse_identifier().is_none() {
-                self.cursor = checkpoint;
-                return false;
-            }
-        }
-        self.skip_whitespace();
-        if !self.consume_byte(b')') {
-            self.cursor = checkpoint;
-            return false;
-        }
-        if !self.consume_statement_terminator() {
-            self.cursor = checkpoint;
-            return false;
-        }
-        true
-    }
-
-    fn consume_statement_terminator(&mut self) -> bool {
-        self.skip_whitespace();
-        if self.consume_byte(b';') {
-            return true;
-        }
-        let saved = self.cursor;
-        if self.skip_program_trivia().is_some() && self.cursor == self.source.len() {
-            self.cursor = saved;
-            true
-        } else {
-            self.cursor = saved;
-            false
-        }
-    }
-
-    fn parse_tool_statement(&mut self) -> Option<StaticNestedToolCall> {
-        let checkpoint = self.cursor;
-        if self.consume_keyword("const") {
-            self.skip_whitespace();
-            self.parse_identifier()?;
-            self.skip_whitespace();
-            if !self.consume_byte(b'=') {
-                self.cursor = checkpoint;
-                return None;
-            }
-            self.skip_whitespace();
-        }
-        if !self.consume_keyword("await") {
-            self.cursor = checkpoint;
-            return None;
-        }
-        self.skip_whitespace();
-        if !self.consume_bytes(b"tools.") {
-            self.cursor = checkpoint;
-            return None;
-        }
-        let method = self.parse_identifier()?;
-        self.skip_whitespace();
-        if !self.consume_byte(b'(') {
-            self.cursor = checkpoint;
-            return None;
-        }
-        self.skip_whitespace();
-        let value = self.parse_static_value(0)?;
-        self.skip_whitespace();
-        if !self.consume_byte(b')') {
-            self.cursor = checkpoint;
-            return None;
-        }
-        if !self.consume_statement_terminator() {
-            self.cursor = checkpoint;
-            return None;
-        }
-        match (method.as_str(), value) {
-            ("exec_command", Value::Object(arguments)) => {
-                Some(StaticNestedToolCall::ExecCommand(arguments))
-            }
-            ("apply_patch", Value::String(patch)) => Some(StaticNestedToolCall::ApplyPatch(patch)),
-            _ => {
-                self.cursor = checkpoint;
-                None
-            }
-        }
-    }
-
-    fn parse_static_value(&mut self, depth: usize) -> Option<Value> {
-        if depth > MAX_STATIC_LITERAL_DEPTH {
-            return None;
-        }
-        self.skip_whitespace();
-        match self.source.get(self.cursor).copied()? {
-            b'"' => self.parse_json_string().map(Value::String),
-            b'{' => self.parse_static_object(depth + 1).map(Value::Object),
-            b'[' => self.parse_static_array(depth + 1).map(Value::Array),
-            b't' if self.consume_keyword("true") => Some(Value::Bool(true)),
-            b'f' if self.consume_keyword("false") => Some(Value::Bool(false)),
-            b'n' if self.consume_keyword("null") => Some(Value::Null),
-            b'-' | b'0'..=b'9' => self.parse_number(),
-            _ => None,
-        }
-    }
-
-    fn parse_static_object(&mut self, depth: usize) -> Option<Map<String, Value>> {
-        self.consume_byte(b'{').then_some(())?;
-        let mut object = Map::new();
-        loop {
-            self.skip_whitespace();
-            if self.consume_byte(b'}') {
-                return Some(object);
-            }
-            if object.len() >= MAX_STATIC_LITERAL_ITEMS {
-                return None;
-            }
-            let key = if self.source.get(self.cursor) == Some(&b'"') {
-                self.parse_json_string()?
-            } else {
-                self.parse_identifier()?
-            };
-            self.skip_whitespace();
-            self.consume_byte(b':').then_some(())?;
-            let value = self.parse_static_value(depth)?;
-            if object.insert(key, value).is_some() {
-                return None;
-            }
-            self.skip_whitespace();
-            if self.consume_byte(b'}') {
-                return Some(object);
-            }
-            self.consume_byte(b',').then_some(())?;
-        }
-    }
-
-    fn parse_static_array(&mut self, depth: usize) -> Option<Vec<Value>> {
-        self.consume_byte(b'[').then_some(())?;
-        let mut values = Vec::new();
-        loop {
-            self.skip_whitespace();
-            if self.consume_byte(b']') {
-                return Some(values);
-            }
-            if values.len() >= MAX_STATIC_LITERAL_ITEMS {
-                return None;
-            }
-            values.push(self.parse_static_value(depth)?);
-            self.skip_whitespace();
-            if self.consume_byte(b']') {
-                return Some(values);
-            }
-            self.consume_byte(b',').then_some(())?;
-        }
-    }
-
-    fn parse_json_string(&mut self) -> Option<String> {
-        let start = self.cursor;
-        self.consume_byte(b'"').then_some(())?;
-        let mut escaped = false;
-        while let Some(byte) = self.source.get(self.cursor).copied() {
-            self.cursor += 1;
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                return serde_json::from_slice(self.source.get(start..self.cursor)?).ok();
-            } else if byte.is_ascii_control() {
-                return None;
-            }
-        }
-        None
-    }
-
-    fn parse_number(&mut self) -> Option<Value> {
-        let start = self.cursor;
-        while self.source.get(self.cursor).is_some_and(|byte| {
-            byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
-        }) {
-            self.cursor += 1;
-        }
-        serde_json::from_slice(self.source.get(start..self.cursor)?).ok()
-    }
-
-    fn parse_identifier(&mut self) -> Option<String> {
-        let start = self.cursor;
-        let first = self.source.get(self.cursor).copied()?;
-        if !first.is_ascii_alphabetic() && !matches!(first, b'_' | b'$') {
-            return None;
-        }
-        self.cursor += 1;
-        while self
-            .source
-            .get(self.cursor)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
-        {
-            self.cursor += 1;
-        }
-        std::str::from_utf8(self.source.get(start..self.cursor)?)
-            .ok()
-            .map(str::to_owned)
-    }
-
-    fn consume_keyword(&mut self, keyword: &str) -> bool {
-        let start = self.cursor;
-        if !self.consume_bytes(keyword.as_bytes()) {
-            return false;
-        }
-        if self
-            .source
-            .get(self.cursor)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
-        {
-            self.cursor = start;
-            return false;
-        }
-        true
-    }
-
-    fn consume_bytes(&mut self, expected: &[u8]) -> bool {
-        if self
-            .source
-            .get(self.cursor..self.cursor.saturating_add(expected.len()))
-            == Some(expected)
-        {
-            self.cursor += expected.len();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn consume_byte(&mut self, expected: u8) -> bool {
-        if self.source.get(self.cursor) == Some(&expected) {
-            self.cursor += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn skip_whitespace(&mut self) {
-        while self
-            .source
-            .get(self.cursor)
-            .is_some_and(|byte| byte.is_ascii_whitespace())
-        {
-            self.cursor += 1;
-        }
-    }
-
-    fn skip_program_trivia(&mut self) -> Option<()> {
-        loop {
-            self.skip_whitespace();
-            if self.source.get(self.cursor..self.cursor.saturating_add(2)) == Some(b"//") {
-                self.cursor += 2;
-                while self
-                    .source
-                    .get(self.cursor)
-                    .is_some_and(|byte| *byte != b'\n')
-                {
-                    self.cursor += 1;
-                }
-                continue;
-            }
-            if self.source.get(self.cursor..self.cursor.saturating_add(2)) == Some(b"/*") {
-                self.cursor += 2;
-                while self.source.get(self.cursor..self.cursor.saturating_add(2)) != Some(b"*/") {
-                    self.cursor += 1;
-                    if self.cursor >= self.source.len() {
-                        return None;
-                    }
-                }
-                self.cursor += 2;
-                continue;
-            }
-            return Some(());
-        }
-    }
+fn bounded_patch_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    bounded_path(path).then(|| path.to_owned())
 }
 
 fn bounded_absolute_path(value: &str) -> bool {
@@ -668,202 +537,9 @@ fn digest_hex(domain: &[u8], value: &[u8]) -> String {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use ctx_history_core::{RepositoryAbstentionReason, RepositoryFileObservationKind};
-    use serde_json::json;
-
-    use super::repository_tool_evidence;
-    use crate::repository_attribution::{attribute, AttributionInput, CommandEvidenceDisposition};
-
-    #[test]
-    fn accepts_only_one_top_level_native_argument_decode_and_redacts_it() {
-        let payload = json!({
-            "type": "function_call",
-            "name": "exec_command",
-            "call_id": "call-1",
-            "arguments": json!({
-                "cmd": "git status",
-                "workdir": "/repo",
-                "yield_time_ms": 10000,
-                "decoy": {"cmd": "git commit -m decoy", "workdir": "/other"}
-            }).to_string()
-        });
-        let evidence = repository_tool_evidence(&payload).remove(0);
-        assert_eq!(evidence.command.as_deref(), Some("git status"));
-        assert_eq!(evidence.declared_workdir.as_deref(), Some("/repo"));
-        let encoded = serde_json::to_string(&evidence.structured_content).unwrap();
-        assert!(!encoded.contains("git status"));
-        assert!(!encoded.contains("decoy"));
-        assert_eq!(
-            evidence.structured_content["provider_native_tool"]["raw_arguments_retained"],
-            false
-        );
-    }
-
-    #[test]
-    fn oversized_native_command_retains_typed_abstention_and_blocks_cwd_fallback() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(std::process::Command::new("/usr/bin/git")
-            .args(["init", "-q"])
-            .current_dir(temp.path())
-            .status()
-            .unwrap()
-            .success());
-        let oversized = "x".repeat(super::MAX_COMMAND_BYTES + 1);
-        let payload = json!({
-            "type": "function_call",
-            "name": "exec_command",
-            "call_id": "oversized-command",
-            "arguments": json!({"cmd": oversized}).to_string(),
-        });
-        let evidence = repository_tool_evidence(&payload).remove(0);
-        assert!(evidence.command.is_none());
-        assert!(evidence.command_too_large);
-
-        let annotation = attribute(AttributionInput {
-            session_cwd: Some(temp.path().to_string_lossy().into_owned()),
-            command: evidence.command,
-            command_disposition: CommandEvidenceDisposition::CommandTooLarge,
-            ..AttributionInput::default()
-        });
-        assert!(annotation.repository_bindings.is_empty());
-        assert!(annotation.repository_abstentions.iter().any(|abstention| {
-            abstention.reason == RepositoryAbstentionReason::CommandTooLarge
-        }));
-    }
-
-    #[test]
-    fn javascript_wrappers_nested_only_commands_and_missing_call_ids_abstain() {
-        for payload in [
-            json!({
-                "type": "custom_tool_call",
-                "name": "exec_command",
-                "call_id": "call-1",
-                "arguments": "tools.exec_command({cmd:'git status',workdir:'/repo'})"
-            }),
-            json!({
-                "type": "function_call",
-                "name": "exec_command",
-                "call_id": "call-2",
-                "arguments": {"dead_branch": {"cmd": "git status", "workdir": "/repo"}}
-            }),
-            json!({
-                "type": "function_call",
-                "name": "exec_command",
-                "arguments": {"cmd": "git status", "workdir": "/repo"}
-            }),
-            json!({
-                "type": "function_call",
-                "name": "exec_command",
-                "call_id": "call-3",
-                "arguments": {"cmd": "git status"},
-                "input": {"cmd": "git commit -m decoy"}
-            }),
-            json!({
-                "type": "function_call",
-                "name": "exec_command",
-                "tool": "wait",
-                "call_id": "call-4",
-                "arguments": {"cmd": "git status"}
-            }),
-        ] {
-            assert!(repository_tool_evidence(&payload).is_empty());
-        }
-    }
-
-    #[test]
-    fn exact_top_level_literal_calls_decode_commands_and_patch_headers() {
-        let payload = json!({
-            "type": "custom_tool_call",
-            "name": "exec",
-            "call_id": "outer-1",
-            "input": r#"
-                const first = await tools.exec_command({cmd:"git status",workdir:"/repo/one",yield_time_ms:10000});
-                const second = await tools.exec_command({cmd:"git log -1",workdir:"/repo/two"});
-                const patched = await tools.apply_patch("*** Begin Patch\n*** Add File: /repo/one/src/new.rs\n*** Update File: /repo/one/src/lib.rs\n*** Delete File: /repo/one/src/old.rs\n*** End Patch");
-                text(first.output);
-            "#
-        });
-        let evidence = repository_tool_evidence(&payload);
-        assert_eq!(evidence.len(), 3);
-        assert_eq!(evidence[0].tool_name, "exec_command");
-        assert_eq!(evidence[0].declared_workdir.as_deref(), Some("/repo/one"));
-        assert_eq!(evidence[0].command.as_deref(), Some("git status"));
-        assert_eq!(evidence[1].declared_workdir.as_deref(), Some("/repo/two"));
-        assert_eq!(evidence[1].command.as_deref(), Some("git log -1"));
-        assert_eq!(evidence[2].tool_name, "apply_patch");
-        assert_eq!(evidence[2].file_observations.len(), 3);
-        assert_eq!(
-            evidence[2].file_observations[0].path,
-            "/repo/one/src/new.rs"
-        );
-        assert_eq!(
-            evidence[2].file_observations[0].kind,
-            RepositoryFileObservationKind::Created
-        );
-        assert_eq!(
-            evidence[2].file_observations[1].path,
-            "/repo/one/src/lib.rs"
-        );
-        assert_eq!(
-            evidence[2].file_observations[1].kind,
-            RepositoryFileObservationKind::Modified
-        );
-        assert_eq!(
-            evidence[2].file_observations[2].path,
-            "/repo/one/src/old.rs"
-        );
-        assert_eq!(
-            evidence[2].file_observations[2].kind,
-            RepositoryFileObservationKind::Deleted
-        );
-    }
-
-    #[test]
-    fn inert_or_dynamic_javascript_never_emits_executed_tool_evidence() {
-        for source in [
-            r#"const example = "tools.exec_command({cmd:\"git commit -m inert\",workdir:\"/repo\"})"; text(example);"#,
-            r#"// tools.exec_command({cmd:"git commit -m comment",workdir:"/repo"})
-                text("*** Add File: /repo/inert.rs");"#,
-            r#"if (false) { await tools.exec_command({cmd:"git commit -m dead",workdir:"/repo"}); }"#,
-            r#"const args = {cmd:"git commit -m dynamic",workdir:"/repo"};
-                const result = await tools.exec_command(args);"#,
-            r#"const result = await tools.exec_command({cmd:"git status",workdir:"/repo"});
-                observeDynamically(result);"#,
-            r#"text(prior.output);
-                const result = await tools.exec_command({cmd:"git status",workdir:"/repo"});"#,
-            r#"const patch = "*** Begin Patch\n*** Add File: /repo/inert.rs\n*** End Patch"; text(patch);"#,
-        ] {
-            let payload = json!({
-                "type": "custom_tool_call",
-                "name": "exec",
-                "call_id": "outer-inert",
-                "input": source,
-            });
-            assert!(repository_tool_evidence(&payload).is_empty(), "{source}");
-        }
-    }
-
-    #[test]
-    fn continuation_controls_require_exact_bounded_identifiers() {
-        assert_eq!(
-            super::running_continuation_cell_id(&json!({
-                "output": "Script running with cell ID cell-7\n"
-            }))
-            .as_deref(),
-            Some("cell-7")
-        );
-        assert!(super::running_continuation_cell_id(&json!({
-            "output": "prose says Script running with cell ID cell-7"
-        }))
-        .is_none());
-        assert!(super::terminal_continuation_result(&json!({
-            "output": "Script completed\nFinal output:\nok"
-        })));
-        assert!(!super::terminal_continuation_result(&json!({
-            "output": "Script completed",
-            "result": "Process exited with code 0"
-        })));
-    }
+fn hex_digest(value: &[u8; 32]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[cfg(test)]
+mod tests;

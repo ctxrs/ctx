@@ -1,4 +1,5 @@
 use super::*;
+use crate::merge_policy::deletion_density_exceeds_limit;
 
 impl GenerationWriter {
     pub(super) fn writer_mut(&mut self) -> Result<&mut IndexWriter<IndexDocument>> {
@@ -49,9 +50,7 @@ impl GenerationWriter {
                 return Err(IndexError::ConcurrentGenerationChange);
             }
 
-            let mut merge_policy = LogMergePolicy::default();
-            merge_policy.set_min_num_segments(LEXICAL_SEGMENT_MERGE_FAN_IN);
-            writer.set_merge_policy(Box::new(merge_policy));
+            writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
             let _ = writer.garbage_collect_files().wait()?;
             self.writer = Some(writer);
         }
@@ -275,6 +274,14 @@ impl GenerationWriter {
         let loaded_manifest = load_manifest_for_metas(&self.root, &metas)?;
         if loaded_manifest.generation_id()? != generation_id {
             return Err(IndexError::ConcurrentGenerationChange);
+        }
+        for segment in &metas.segments {
+            if deletion_density_exceeds_limit(segment) {
+                return Err(IndexError::CandidateDeletionDensityExceeded {
+                    deleted_documents: u64::from(segment.num_deleted_docs()),
+                    max_documents: u64::from(segment.max_doc()),
+                });
+            }
         }
         let reader = index
             .reader_builder()

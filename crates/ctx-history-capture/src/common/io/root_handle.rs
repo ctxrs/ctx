@@ -216,6 +216,28 @@ impl ProviderSourceRoot {
         }
         Ok(())
     }
+
+    /// Confirms that both the retained directory handle and its named route
+    /// still identify the same root while allowing metadata changes caused by
+    /// children being added, removed, or updated. Inventory owners use
+    /// [`Self::revalidate`] separately when they require an exact tree fence.
+    pub(crate) fn revalidate_same_object(&self) -> Result<()> {
+        let current_metadata = self.inner.directory.metadata()?;
+        let current = platform::object_stamp(&self.inner.directory, &current_metadata)?;
+        if !platform::same_object(&current, &self.inner.opened) {
+            return Err(changed_path(&self.inner.named_path));
+        }
+        let reopened = platform::open_absolute(&self.inner.named_path)
+            .map_err(|error| map_changed_open_error(&self.inner.named_path, error))?;
+        let platform::OpenedPath::Directory { file, metadata, .. } = reopened else {
+            return Err(changed_path(&self.inner.named_path));
+        };
+        let named = platform::object_stamp(&file, &metadata)?;
+        if !platform::same_object(&named, &self.inner.opened) {
+            return Err(changed_path(&self.inner.named_path));
+        }
+        Ok(())
+    }
 }
 
 #[allow(
@@ -520,7 +542,7 @@ impl OpenedProviderSourceFile {
     pub(crate) fn revalidate_same_object(&self) -> Result<()> {
         self.revalidate_same_object_leaf()?;
         if let ProviderSourceFileRoute::Relative { root, .. } = &self.route {
-            root.revalidate()?;
+            root.revalidate_same_object()?;
         }
         Ok(())
     }
@@ -736,6 +758,42 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn symlinked_ancestor_is_classified_as_a_rejected_provider_path() {
+        use std::os::unix::fs::symlink;
+
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("source.jsonl"), b"inside\n").unwrap();
+        symlink(&target, &linked).unwrap();
+
+        let error = open_provider_source_file(&linked.join("source.jsonl")).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CaptureError::InvalidProviderTranscriptPath { reason, .. }
+                if reason.contains("symlinked provider source path components")
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn plain_file_ancestor_preserves_the_raw_not_a_directory_io_error() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let plain_file = temp.path().join("plain-file");
+        fs::write(&plain_file, b"ordinary").unwrap();
+
+        let error = open_provider_source_file(&plain_file.join("source.jsonl")).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CaptureError::Io(error) if error.raw_os_error() == Some(libc::ENOTDIR)
+        ));
+    }
+
     #[test]
     fn descendants_reject_absolute_and_parent_escape() {
         let temp = crate::test_support_paths::tempdir().unwrap();
@@ -783,11 +841,13 @@ mod tests {
             .unwrap()
             .write_all(b"second\n")
             .unwrap();
+        fs::write(temp.path().join("new-sibling.jsonl"), b"sibling\n").unwrap();
         assert_eq!(
             source.read_exact_range_allow_append(0, 6, 6).unwrap(),
             b"first\n"
         );
         assert!(source.revalidate_same_object().is_ok());
+        assert!(root.revalidate_same_object().is_ok());
         assert!(source.revalidate().is_err());
 
         fs::rename(&path, &moved).unwrap();
@@ -813,7 +873,9 @@ mod tests {
         fs::rename(&replacement, &root).unwrap();
 
         source.revalidate_leaf().unwrap();
+        assert!(authority.revalidate_same_object().is_err());
         assert!(authority.revalidate().is_err());
+        assert!(source.revalidate_same_object().is_err());
         assert!(source.revalidate().is_err());
     }
 

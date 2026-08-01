@@ -202,6 +202,37 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
             .get("content")
             .is_none());
     }
+    let show_session_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "show_session")
+        .unwrap();
+    let show_session_schema = &show_session_tool["inputSchema"];
+    assert_eq!(show_session_schema["required"], json!(["ctx_session_id"]));
+    assert_eq!(show_session_schema["additionalProperties"], false);
+    assert_eq!(
+        show_session_schema["properties"]["mode"]["enum"],
+        json!(["full", "lite", "log"])
+    );
+    assert_eq!(show_session_schema["properties"]["mode"]["default"], "lite");
+    assert_eq!(
+        show_session_schema["properties"]["limit"],
+        json!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "default": 200,
+            "description": "Maximum selected transcript events to return after applying mode."
+        })
+    );
+    assert_eq!(
+        show_session_schema["properties"]["cursor"],
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Opaque next_cursor from the preceding page of this exact session and Core generation."
+        })
+    );
     let providers = search_tool["inputSchema"]["properties"]["provider"]["enum"]
         .as_array()
         .unwrap();
@@ -542,9 +573,20 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
     );
 
     let sql = &responses[1]["result"]["structuredContent"];
+    assert_eq!(sql["schema_version"], 2);
     assert_eq!(sql["payload_type"], "sql_result");
     assert_eq!(sql["read_only"], true);
     assert_eq!(sql["share_safe"], false);
+    assert_eq!(
+        sql["snapshot"],
+        json!({
+            "observed_core_generation_id": generation_id.clone(),
+            "projection_status": "ready",
+            "relational_build_generation": 1,
+            "relational_core_generation_id": generation_id.clone(),
+            "stale": false,
+        })
+    );
     assert_eq!(
         sql["columns"],
         json!(["core_generation_id", "status", "sessions"])

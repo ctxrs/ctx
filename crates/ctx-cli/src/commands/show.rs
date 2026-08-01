@@ -21,7 +21,7 @@ pub(crate) struct ShowSessionArgs {
     pub(crate) provider_session: Option<String>,
     #[arg(long, value_enum, default_value_t = TranscriptMode::Lite)]
     pub(crate) mode: TranscriptMode,
-    #[arg(long, help = "Return at most this many events (capped at 4096)")]
+    #[arg(long, help = "Return at most this many selected transcript events")]
     pub(crate) max_events: Option<usize>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) format: OutputFormat,
@@ -33,11 +33,25 @@ pub(crate) struct ShowSessionArgs {
 pub(crate) struct ShowEventArgs {
     #[arg(help = "ctx event id or unambiguous id prefix")]
     pub(crate) id: String,
-    #[arg(long, default_value_t = 0, value_parser = parse_event_window_limit)]
+    #[arg(
+        long,
+        default_value_t = 0,
+        value_parser = parse_event_window_limit,
+        help = "Number of preceding events to include (0..50)"
+    )]
     pub(crate) before: usize,
-    #[arg(long, default_value_t = 0, value_parser = parse_event_window_limit)]
+    #[arg(
+        long,
+        default_value_t = 0,
+        value_parser = parse_event_window_limit,
+        help = "Number of following events to include (0..50)"
+    )]
     pub(crate) after: usize,
-    #[arg(long, value_parser = parse_event_window_limit)]
+    #[arg(
+        long,
+        value_parser = parse_event_window_limit,
+        help = "Use this many events on both sides of the selected event (0..50)"
+    )]
     pub(crate) window: Option<usize>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) format: OutputFormat,

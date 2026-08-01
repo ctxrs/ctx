@@ -1,5 +1,9 @@
 use super::*;
 use crate::provider::normalization::provider_role;
+use crate::repository_attribution::{
+    apply_annotation, AttributionInput, RepositoryAttributor, UnscopedFileObservation,
+};
+use ctx_history_core::RepositoryFileObservationKind;
 
 pub(super) fn source_backed_retained_event_kind(
     effective_type: &str,
@@ -140,6 +144,94 @@ fn source_backed_retained_file_touches(
     (retained, observed)
 }
 
+fn repository_tool_string(body: &serde_json::Value, pointers: &[&str]) -> Option<String> {
+    pointers
+        .iter()
+        .find_map(|pointer| body.pointer(pointer).and_then(serde_json::Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn repository_file_observation_kind(
+    effective_type: &str,
+    body: &serde_json::Value,
+) -> RepositoryFileObservationKind {
+    let tool = body
+        .get("tool")
+        .or_else(|| body.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(effective_type)
+        .trim()
+        .to_ascii_lowercase();
+    match tool.as_str() {
+        "read" | "read_file" | "grep" | "glob" | "search" => RepositoryFileObservationKind::Read,
+        "edit" | "edit_file" | "apply_patch" | "patch" => RepositoryFileObservationKind::Modified,
+        "write" | "write_file" => RepositoryFileObservationKind::Unknown,
+        _ => RepositoryFileObservationKind::Unknown,
+    }
+}
+
+fn repository_attribution_input(
+    session: &SourceSession,
+    retained: &OpenCodeRetainedJson,
+    kind: OpenCodeNativeEventKind,
+    activity_at_unix_ms: i64,
+    file_touches: &[OpenCodeNativeFileTouch],
+) -> AttributionInput {
+    let has_tool_context = matches!(
+        kind,
+        OpenCodeNativeEventKind::Notice
+            | OpenCodeNativeEventKind::ToolCall
+            | OpenCodeNativeEventKind::ToolOutput
+            | OpenCodeNativeEventKind::CommandOutput
+    );
+    let command = has_tool_context.then(|| {
+        repository_tool_string(
+            &retained.body,
+            &[
+                "/command",
+                "/cmd",
+                "/input/command",
+                "/state/input/command",
+                "/state/metadata/command",
+            ],
+        )
+    });
+    let declared_tool_workdir = has_tool_context.then(|| {
+        repository_tool_string(
+            &retained.body,
+            &[
+                "/working_directory",
+                "/workingDirectory",
+                "/workdir",
+                "/cwd",
+                "/input/workdir",
+                "/input/cwd",
+                "/state/input/workdir",
+                "/state/input/cwd",
+                "/state/metadata/cwd",
+            ],
+        )
+    });
+    let observation_kind =
+        repository_file_observation_kind(&retained.effective_type, &retained.body);
+    AttributionInput {
+        activity_at_unix_ms: Some(activity_at_unix_ms),
+        session_cwd: session.directory.clone(),
+        declared_tool_workdir: declared_tool_workdir.flatten(),
+        command: command.flatten(),
+        file_observations: file_touches
+            .iter()
+            .map(|touch| UnscopedFileObservation {
+                path: touch.path.clone(),
+                prior_path: None,
+                kind: observation_kind,
+            })
+            .collect(),
+        ..AttributionInput::default()
+    }
+}
+
 pub(super) fn decode_source_event_row(
     row: &Row<'_>,
     _schema: &OpenCodeNativeSchema,
@@ -209,6 +301,7 @@ pub(super) fn core_record(
     event: SourceEventRow,
     retained: OpenCodeRetainedJson,
     next_sequence: &mut u64,
+    repository_attributor: &mut RepositoryAttributor,
 ) -> OpenCodeSourceBackedResult<CoreRecord> {
     event
         .source_data
@@ -289,6 +382,14 @@ pub(super) fn core_record(
     record.role = Some(role.as_str().to_owned());
     record.branch = session.branch.clone();
     record.cwd = session.directory.clone();
+    let attribution = repository_attributor.attribute(repository_attribution_input(
+        session,
+        &retained,
+        kind,
+        normalized_time,
+        &file_touches,
+    ));
+    apply_annotation(&mut record, attribution);
     if let Some(native_file_touches) = native_file_touches {
         record.metadata.insert(
             "provider_native_file_touches".to_owned(),

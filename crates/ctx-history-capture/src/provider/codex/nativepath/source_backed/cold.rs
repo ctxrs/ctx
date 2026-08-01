@@ -128,6 +128,7 @@ struct ColdSourceJobV0 {
     session_id: StableEntityId,
     proof: Option<CodexAppendProof>,
     base_event_lookup: BaseEventIdentityLookup,
+    outcome_lineage: Arc<CodexOutcomeLineageAuthorityV0>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,9 +170,26 @@ enum ColdLaneMessageV0 {
     Complete(ColdSourceCompleteV0),
 }
 
+// This envelope inherits the one-per-source 1,032-byte completion described
+// above. Boxing every ready event adds allocation without reducing retained
+// scanner/page memory, because the shared transport is a rendezvous.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
-struct ColdWorkerFailureV0 {
-    error: CodexSourceBackedErrorV0,
+enum ColdWorkerEventV0 {
+    Message {
+        lane_index: usize,
+        message: ColdLaneMessageV0,
+    },
+    Failed {
+        lane_index: usize,
+        error: CodexSourceBackedErrorV0,
+    },
+    Panicked {
+        lane_index: usize,
+    },
+    Finished {
+        lane_index: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -240,6 +258,7 @@ pub(super) struct ColdIngestionTargetV0<'target> {
 pub(super) fn ingest_codex_cold_parallel_v0(
     sources: Vec<ChangedSourceV0>,
     base_event_lookup: BaseEventIdentityLookup,
+    outcome_lineage: Arc<CodexOutcomeLineageAuthorityV0>,
     target: ColdIngestionTargetV0<'_>,
     worker_count: usize,
     cold_options: ColdParallelOptionsV0,
@@ -279,6 +298,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             session_id,
             proof,
             base_event_lookup: base_event_lookup.clone(),
+            outcome_lineage: Arc::clone(&outcome_lineage),
         });
     }
 
@@ -292,16 +312,16 @@ pub(super) fn ingest_codex_cold_parallel_v0(
         .map(|requested| Arc::new(std::sync::Barrier::new(requested.clamp(1, worker_count))));
     let pipeline_started = Instant::now();
     let pipeline_result = thread::scope(|scope| {
-        let (failure_sender, failure_receiver) = mpsc::channel::<ColdWorkerFailureV0>();
-        let mut receivers = Vec::with_capacity(worker_count);
+        // One shared rendezvous receives whichever lane is ready. The zero
+        // capacity preserves the original one-message-per-scanner bound while
+        // removing timeout-based polling of lanes that have no page ready.
+        let (event_sender, event_receiver) = mpsc::sync_channel::<ColdWorkerEventV0>(0);
         let mut handles = Vec::with_capacity(worker_count);
 
         for (lane_index, jobs) in lane_jobs.into_iter().enumerate() {
-            let (sender, receiver) = mpsc::sync_channel::<ColdLaneMessageV0>(0);
-            receivers.push(receiver);
             let worker_cancellation = Arc::clone(&cancellation);
             let worker_scanner_activity = Arc::clone(&scanner_activity);
-            let worker_failure_sender = failure_sender.clone();
+            let worker_event_sender = event_sender.clone();
             #[cfg(test)]
             let worker_scanner_rendezvous = scanner_rendezvous.clone();
             handles.push((
@@ -311,7 +331,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
                         run_cold_scan_lane_v0(
                             lane_index,
                             jobs,
-                            &sender,
+                            &worker_event_sender,
                             &worker_cancellation,
                             &worker_scanner_activity,
                             cold_options,
@@ -320,24 +340,27 @@ pub(super) fn ingest_codex_cold_parallel_v0(
                         )
                     }));
                     match outcome {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            if !worker_cancellation.load(AtomicOrdering::Acquire) {
+                                let _ = worker_event_sender
+                                    .send(ColdWorkerEventV0::Finished { lane_index });
+                            }
+                        }
                         Ok(Err(error)) => {
-                            let _ = worker_failure_sender.send(ColdWorkerFailureV0 { error });
                             worker_cancellation.store(true, AtomicOrdering::Release);
+                            let _ = worker_event_sender
+                                .send(ColdWorkerEventV0::Failed { lane_index, error });
                         }
                         Err(_) => {
-                            let _ = worker_failure_sender.send(ColdWorkerFailureV0 {
-                                error: CodexSourceBackedErrorV0::ColdWorkerPanicked {
-                                    lane: lane_index,
-                                },
-                            });
                             worker_cancellation.store(true, AtomicOrdering::Release);
+                            let _ = worker_event_sender
+                                .send(ColdWorkerEventV0::Panicked { lane_index });
                         }
                     }
                 }),
             ));
         }
-        drop(failure_sender);
+        drop(event_sender);
 
         let mut lane_states = lane_source_indices
             .into_iter()
@@ -351,8 +374,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             })
             .collect::<Vec<_>>();
         let mut result = consume_cold_lanes_v0(
-            &receivers,
-            &failure_receiver,
+            &event_receiver,
             &cancellation,
             &mut lane_states,
             &plans,
@@ -364,7 +386,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
         if result.is_err() {
             cancellation.store(true, AtomicOrdering::Release);
         }
-        drop(receivers);
+        drop(event_receiver);
 
         let mut join_error = None;
         for (lane_index, handle) in handles {
@@ -374,9 +396,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             }
         }
         if result.is_ok() {
-            if let Ok(failure) = failure_receiver.try_recv() {
-                result = Err(failure.error);
-            } else if let Some(error) = join_error {
+            if let Some(error) = join_error {
                 result = Err(error);
             }
         }
@@ -414,7 +434,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
 fn run_cold_scan_lane_v0(
     lane_index: usize,
     jobs: Vec<ColdSourceJobV0>,
-    sender: &SyncSender<ColdLaneMessageV0>,
+    sender: &SyncSender<ColdWorkerEventV0>,
     cancellation: &AtomicBool,
     scanner_activity: &ColdScannerActivityV0,
     cold_options: ColdParallelOptionsV0,
@@ -493,6 +513,7 @@ fn run_cold_scan_lane_v0(
                         row,
                         &mut event_identity_state,
                         &mut repository_attributor,
+                        &job.outcome_lineage,
                     )?);
                     staged_documents = staged_documents
                         .checked_add(1)
@@ -575,12 +596,15 @@ fn invalid_changed_append_proof_v0(error: &CaptureError) -> bool {
 }
 
 fn send_cold_lane_message_v0(
-    sender: &SyncSender<ColdLaneMessageV0>,
+    sender: &SyncSender<ColdWorkerEventV0>,
     message: ColdLaneMessageV0,
     cancellation: &AtomicBool,
     lane_index: usize,
 ) -> CodexSourceBackedResultV0<bool> {
-    match sender.send(message) {
+    match sender.send(ColdWorkerEventV0::Message {
+        lane_index,
+        message,
+    }) {
         Ok(()) => Ok(true),
         Err(_) if cancellation.load(AtomicOrdering::Acquire) => Ok(false),
         Err(_) => Err(CodexSourceBackedErrorV0::ColdLaneDisconnected { lane: lane_index }),
@@ -589,8 +613,7 @@ fn send_cold_lane_message_v0(
 
 #[allow(clippy::too_many_arguments)]
 fn consume_cold_lanes_v0(
-    receivers: &[Receiver<ColdLaneMessageV0>],
-    failure_receiver: &Receiver<ColdWorkerFailureV0>,
+    event_receiver: &Receiver<ColdWorkerEventV0>,
     cancellation: &AtomicBool,
     lane_states: &mut [ColdLaneStateV0],
     plans: &[ColdSourcePlanV0],
@@ -600,34 +623,69 @@ fn consume_cold_lanes_v0(
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
     let mut completed_sources = 0_usize;
-    let mut next_lane = 0_usize;
-    while completed_sources < plans.len() {
-        if let Ok(failure) = failure_receiver.try_recv() {
-            return Err(failure.error);
-        }
-        if cancellation.load(AtomicOrdering::Acquire) {
-            return Err(wait_for_cold_worker_failure_v0(failure_receiver)?);
-        }
-
-        let lane_index = (0..lane_states.len())
-            .map(|offset| (next_lane + offset) % lane_states.len())
-            .find(|lane_index| lane_states[*lane_index].expected_source().is_some())
-            .ok_or(CodexSourceBackedErrorV0::ColdProtocolMismatch(
-                "no lane owns an incomplete source",
-            ))?;
-        next_lane = (lane_index + 1) % lane_states.len();
-        let message = match receivers[lane_index].recv_timeout(COLD_LANE_RECEIVE_TIMEOUT) {
-            Ok(message) => message,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
-                if let Ok(failure) = failure_receiver.recv_timeout(COLD_LANE_RECEIVE_TIMEOUT) {
-                    return Err(failure.error);
+    let mut finished_lane_count = 0_usize;
+    let mut finished_lanes = vec![false; lane_states.len()];
+    // A lane is not successful until its guarded worker body returns and emits
+    // Finished. Waiting for every terminal event also preserves a failure or
+    // panic that happens while the last source's scanner state is being
+    // dropped after its final Complete message.
+    while completed_sources < plans.len() || finished_lane_count < lane_states.len() {
+        let event = receive_cold_worker_event_v0(event_receiver, lane_states, &finished_lanes)?;
+        let (lane_index, message) = match event {
+            ColdWorkerEventV0::Message {
+                lane_index,
+                message,
+            } => (lane_index, message),
+            ColdWorkerEventV0::Finished { lane_index } => {
+                let lane_state = lane_states.get(lane_index).ok_or(
+                    CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "completion references an unknown lane",
+                    ),
+                )?;
+                let finished = finished_lanes.get_mut(lane_index).ok_or(
+                    CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "completion references an unknown lane",
+                    ),
+                )?;
+                if *finished {
+                    return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "lane completed more than once",
+                    ));
                 }
-                return Err(CodexSourceBackedErrorV0::ColdLaneDisconnected { lane: lane_index });
+                if lane_state.expected_source().is_some() {
+                    return Err(CodexSourceBackedErrorV0::ColdLaneDisconnected {
+                        lane: lane_index,
+                    });
+                }
+                *finished = true;
+                finished_lane_count = finished_lane_count
+                    .checked_add(1)
+                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+                continue;
+            }
+            ColdWorkerEventV0::Failed { .. } | ColdWorkerEventV0::Panicked { .. } => {
+                return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                    "worker failure event escaped receive validation",
+                ));
             }
         };
+        if cancellation.load(AtomicOrdering::Acquire) {
+            // A failing lane signals cancellation before publishing its error.
+            // At most one rendezvous message from each peer can already be
+            // waiting; discard those bounded messages until the error arrives.
+            continue;
+        }
+        if finished_lanes.get(lane_index).copied().ok_or(
+            CodexSourceBackedErrorV0::ColdProtocolMismatch("message references an unknown lane"),
+        )? {
+            return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                "lane emitted after worker completion",
+            ));
+        }
 
-        let lane_state = &mut lane_states[lane_index];
+        let lane_state = lane_states.get_mut(lane_index).ok_or(
+            CodexSourceBackedErrorV0::ColdProtocolMismatch("message references an unknown lane"),
+        )?;
         let expected_source =
             lane_state
                 .expected_source()
@@ -822,13 +880,45 @@ fn consume_cold_lanes_v0(
     Ok(())
 }
 
-fn wait_for_cold_worker_failure_v0(
-    failure_receiver: &Receiver<ColdWorkerFailureV0>,
-) -> CodexSourceBackedResultV0<CodexSourceBackedErrorV0> {
-    match failure_receiver.recv_timeout(COLD_LANE_RECEIVE_TIMEOUT) {
-        Ok(failure) => Ok(failure.error),
-        Err(_) => Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
-            "scanner cancellation was signaled without a worker failure",
-        )),
+fn receive_cold_worker_event_v0(
+    receiver: &Receiver<ColdWorkerEventV0>,
+    lane_states: &[ColdLaneStateV0],
+    finished_lanes: &[bool],
+) -> CodexSourceBackedResultV0<ColdWorkerEventV0> {
+    match receiver.recv() {
+        Ok(ColdWorkerEventV0::Failed { lane_index, error }) => {
+            if lane_index >= lane_states.len() {
+                return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                    "failure references an unknown lane",
+                ));
+            }
+            Err(error)
+        }
+        Ok(ColdWorkerEventV0::Panicked { lane_index }) => {
+            if lane_index >= lane_states.len() {
+                return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                    "panic references an unknown lane",
+                ));
+            }
+            Err(CodexSourceBackedErrorV0::ColdWorkerPanicked { lane: lane_index })
+        }
+        Ok(event) => Ok(event),
+        Err(_) => {
+            let lane = lane_states
+                .iter()
+                .enumerate()
+                .find(|(lane_index, state)| {
+                    state.expected_source().is_some()
+                        && !finished_lanes.get(*lane_index).copied().unwrap_or(false)
+                })
+                .map(|(lane_index, _)| lane_index)
+                .or_else(|| finished_lanes.iter().position(|finished| !finished))
+                .unwrap_or(0);
+            Err(CodexSourceBackedErrorV0::ColdLaneDisconnected { lane })
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "cold_tests.rs"]
+mod tests;

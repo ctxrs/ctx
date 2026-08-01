@@ -98,6 +98,120 @@ fn show_normalization_exposes_core_identity_and_content() {
 }
 
 #[test]
+fn show_session_defaults_to_unbounded_cli_streaming() {
+    let defaults = ShowSessionOptions::default();
+    assert_eq!(defaults.mode, "lite");
+    assert_eq!(defaults.limit, None);
+    assert_eq!(defaults.cursor, None);
+
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-fake");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$CTX_DATA_ROOT/argv.txt"
+printf '%s\n' '{"session":{"ctx_session_id":"session-1"},"events":[],"mode":"lite","format":"json"}'
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: Some(temp.path().to_path_buf()),
+        env: BTreeMap::new(),
+        timeout: Duration::from_secs(5),
+    });
+    client
+        .show_session("session-1", ShowSessionOptions::default())
+        .unwrap();
+
+    let argv = fs::read_to_string(temp.path().join("argv.txt")).unwrap();
+    assert_eq!(
+        argv.lines().collect::<Vec<_>>(),
+        vec![
+            "show",
+            "session",
+            "session-1",
+            "--mode",
+            "lite",
+            "--format",
+            "json"
+        ]
+    );
+}
+
+#[test]
+fn show_session_limit_and_cursor_use_existing_mcp_paging_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-fake");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$CTX_DATA_ROOT/argv.txt"
+cat > "$CTX_DATA_ROOT/stdin.jsonl"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"ctx"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[],"structuredContent":{"schema_version":1,"target":"session","payload_type":"session_transcript","ctx_session_id":"session-1","mode":"log","format":"json","session":{"ctx_session_id":"session-1"},"events":[],"pagination":{"limit":7,"returned":0,"has_more":true,"next_cursor":"page-2"}}}}'
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: Some(temp.path().to_path_buf()),
+        env: BTreeMap::new(),
+        timeout: Duration::from_secs(5),
+    });
+    let envelope = client
+        .show_session(
+            "session-1",
+            ShowSessionOptions {
+                mode: "log".to_owned(),
+                limit: Some(7),
+                cursor: Some("page-1".to_owned()),
+            },
+        )
+        .unwrap();
+
+    let argv = fs::read_to_string(temp.path().join("argv.txt")).unwrap();
+    assert_eq!(argv.lines().collect::<Vec<_>>(), vec!["mcp", "serve"]);
+    let requests = fs::read_to_string(temp.path().join("stdin.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "initialize");
+    assert_eq!(requests[1]["method"], "tools/call");
+    assert_eq!(requests[1]["params"]["name"], "show_session");
+    assert_eq!(
+        requests[1]["params"]["arguments"],
+        json!({
+            "ctx_session_id": "session-1",
+            "mode": "log",
+            "limit": 7,
+            "cursor": "page-1"
+        })
+    );
+
+    let session = envelope.session.unwrap();
+    assert_eq!(
+        session.extra["pagination"],
+        json!({
+            "limit": 7,
+            "returned": 0,
+            "hasMore": true,
+            "nextCursor": "page-2"
+        })
+    );
+}
+
+#[test]
 fn sources_and_import_preserve_legitimate_nested_source_semantics() {
     let sources = normalize(
         AgentHistoryOperation::Sources,

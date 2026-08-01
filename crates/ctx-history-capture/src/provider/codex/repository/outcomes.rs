@@ -1,12 +1,14 @@
 use ctx_history_core::{
-    RepositoryAbstentionReason, RepositoryAlias, RepositoryOutcomeObservation,
-    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    RepositoryAbstentionReason, RepositoryAlias, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use serde_json::{json, Value};
 
 use crate::{
     provider::codex::events::CodexToolCallContext,
-    repository_attribution::{linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput},
+    repository_attribution::{
+        linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput,
+        UnscopedOutcomeObservation,
+    },
     OutputOutcome, OutputOutcomeMetadata,
 };
 
@@ -19,7 +21,7 @@ pub(crate) struct CodexRepositoryResultEvidence {
     pub(crate) outcome_output_repository_path: Option<String>,
     pub(crate) structured_content: Value,
     pub(crate) provider_native_repository_aliases: Vec<RepositoryAlias>,
-    pub(crate) outcomes: Vec<RepositoryOutcomeObservation>,
+    pub(crate) outcomes: Vec<UnscopedOutcomeObservation>,
     pub(crate) abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
@@ -178,6 +180,15 @@ mod tests {
     use super::*;
     use ctx_history_core::RepositoryOutcomeKind;
 
+    fn exact_outcome(
+        value: &UnscopedOutcomeObservation,
+    ) -> &ctx_history_core::RepositoryOutcomeObservation {
+        match value {
+            UnscopedOutcomeObservation::Exact(outcome) => outcome,
+            UnscopedOutcomeObservation::DeferredCommit(_) => panic!("expected exact outcome"),
+        }
+    }
+
     fn context(command: &str) -> CodexToolCallContext {
         CodexToolCallContext {
             exact_command: Some(command.to_owned()),
@@ -209,8 +220,14 @@ mod tests {
             &success(),
         )
         .unwrap();
-        assert_eq!(captured.outcomes[0].kind, RepositoryOutcomeKind::Commit);
-        assert_eq!(captured.outcomes[0].produced_object_ids[0].hex, oid);
+        assert_eq!(
+            exact_outcome(&captured.outcomes[0]).kind,
+            RepositoryOutcomeKind::Commit
+        );
+        assert_eq!(
+            exact_outcome(&captured.outcomes[0]).produced_object_ids[0].hex,
+            oid
+        );
         assert_eq!(
             captured.structured_content["provider_native_tool_result"]["captured_outcomes"],
             1

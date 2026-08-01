@@ -6,8 +6,8 @@ use tantivy::schema::{
 };
 
 use ctx_history_core::{
-    CoreContent, CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey,
-    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreContent, CoreRecord, RepositoryVcsObservationKind, SourceKey, StableEntityId,
+    StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
 use crate::{Fields, IndexError, Result};
@@ -500,7 +500,18 @@ impl IndexDocument {
             .iter()
             .map(|observation| 1 + usize::from(observation.prior_relative_path.is_some()))
             .sum::<usize>();
-        let mut target = Self::with_capacity(BASE_FIELD_VALUES + repository_path_values);
+        let produced_object_values = record
+            .repository_vcs_observations
+            .iter()
+            .filter_map(|observation| match &observation.kind {
+                RepositoryVcsObservationKind::Outcome(outcome) => Some(outcome),
+                _ => None,
+            })
+            .map(|outcome| outcome.produced_object_ids.len())
+            .sum::<usize>();
+        let mut target = Self::with_capacity(
+            BASE_FIELD_VALUES + repository_path_values + produced_object_values,
+        );
         target.add_text(fields.event_id, record.event_id.to_string());
         target.add_text(
             fields.event_identity_digest,
@@ -548,6 +559,13 @@ impl IndexDocument {
         }
         if let Some(body) = record.content.normalized_body {
             target.add_text(fields.body_search, body);
+        }
+        for observation in record.repository_vcs_observations {
+            if let RepositoryVcsObservationKind::Outcome(outcome) = observation.kind {
+                for object_id in outcome.produced_object_ids {
+                    target.add_text(fields.repository_produced_object_id, object_id.hex);
+                }
+            }
         }
         if let Some(workspace) = record.workspace {
             target.add_text(fields.workspace_filter, workspace.to_lowercase());

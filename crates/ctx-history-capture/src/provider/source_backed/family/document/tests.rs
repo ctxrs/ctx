@@ -22,6 +22,9 @@ use crate::{
     AUGGIE_SESSION_JSON_SOURCE_FORMAT,
 };
 
+const SYNTHETIC_SCHEMA_V1: &str = "synthetic-document-family-v1";
+const SYNTHETIC_SCHEMA_V2: &str = "synthetic-document-family-v2";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SyntheticLeaf {
     physical_id: u8,
@@ -32,10 +35,14 @@ struct SyntheticLeaf {
 
 impl SyntheticLeaf {
     fn source(&self) -> SourceKey {
+        self.source_with_schema(SYNTHETIC_SCHEMA_V1)
+    }
+
+    fn source_with_schema(&self, schema_variant: &str) -> SourceKey {
         SourceKey::derive(
             CaptureProvider::Auggie.as_str(),
             AUGGIE_SESSION_JSON_SOURCE_FORMAT,
-            "synthetic-document-family-v1",
+            schema_variant,
             1,
             SourceAnchor::CatalogLineage([self.logical_id; 32]),
         )
@@ -61,7 +68,9 @@ struct SyntheticState {
     available: bool,
     leaves: Vec<SyntheticLeaf>,
     durable_replay: bool,
+    bind_durable_replay_descriptor: bool,
     parser_v2: bool,
+    schema_v2: bool,
     scan_counts: HashMap<u8, usize>,
     discovery_calls: usize,
     mutate_before_scan: Option<u8>,
@@ -108,14 +117,17 @@ impl SyntheticAdapter {
     }
 
     fn source(&self, logical_id: u8) -> SourceKey {
-        self.state
-            .lock()
-            .unwrap()
+        let state = self.state.lock().unwrap();
+        let leaf = state
             .leaves
             .iter()
             .find(|leaf| leaf.logical_id == logical_id)
-            .unwrap()
-            .source()
+            .unwrap();
+        leaf.source_with_schema(if state.schema_v2 {
+            SYNTHETIC_SCHEMA_V2
+        } else {
+            SYNTHETIC_SCHEMA_V1
+        })
     }
 
     fn reset_scan_counts(&self) {
@@ -148,6 +160,14 @@ impl SyntheticAdapter {
 
     fn use_logical_snapshot_scans(&self) {
         self.state.lock().unwrap().durable_replay = false;
+    }
+
+    fn use_schema_v2(&self) {
+        self.state.lock().unwrap().schema_v2 = true;
+    }
+
+    fn bind_durable_replay_descriptor(&self) {
+        self.state.lock().unwrap().bind_durable_replay_descriptor = true;
     }
 
     fn touch_physical_revision(&self, physical_id: u8, revision: u8) {
@@ -208,7 +228,10 @@ impl ReplacementDocumentTree for SyntheticAdapter {
     fn owns_source(&self, source: &SourceKey) -> bool {
         source.provider() == CaptureProvider::Auggie.as_str()
             && source.source_format() == AUGGIE_SESSION_JSON_SOURCE_FORMAT
-            && source.schema_variant() == "synthetic-document-family-v1"
+            && matches!(
+                source.schema_variant(),
+                SYNTHETIC_SCHEMA_V1 | SYNTHETIC_SCHEMA_V2
+            )
     }
 
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
@@ -220,7 +243,25 @@ impl ReplacementDocumentTree for SyntheticAdapter {
         _authority: &Self::TreeAuthority,
         leaf: &Self::Leaf,
     ) -> SourceBackedRouteResult<SourceKey> {
-        Ok(leaf.source())
+        let schema_v2 = self.state.lock().unwrap().schema_v2;
+        Ok(leaf.source_with_schema(if schema_v2 {
+            SYNTHETIC_SCHEMA_V2
+        } else {
+            SYNTHETIC_SCHEMA_V1
+        }))
+    }
+
+    fn durable_replay_source(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        let bind_descriptor = self.state.lock().unwrap().bind_durable_replay_descriptor;
+        if bind_descriptor {
+            self.independent_leaf_source(authority, leaf).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     fn discover_complete(
@@ -278,10 +319,15 @@ impl ReplacementDocumentTree for SyntheticAdapter {
         }
         *state.scan_counts.entry(leaf.physical_id).or_default() += 1;
         let durable_replay = state.durable_replay;
+        let schema_v2 = state.schema_v2;
         drop(state);
 
-        let source = leaf.source();
-        let record = synthetic_core_record(leaf);
+        let source = leaf.source_with_schema(if schema_v2 {
+            SYNTHETIC_SCHEMA_V2
+        } else {
+            SYNTHETIC_SCHEMA_V1
+        });
+        let record = synthetic_core_record(leaf, source.clone());
         sink.begin_source(source.clone())?;
         sink.emit_core_record(record)?;
         let revision = if durable_replay {
@@ -347,8 +393,7 @@ fn synthetic_tree_fingerprint(leaves: &[ObservedDocumentLeaf<SyntheticLeaf>]) ->
     digest.finalize().into()
 }
 
-fn synthetic_core_record(leaf: &SyntheticLeaf) -> CoreRecord {
-    let source = leaf.source();
+fn synthetic_core_record(leaf: &SyntheticLeaf, source: SourceKey) -> CoreRecord {
     let native_session_key =
         NativeSessionKey::native_id("synthetic.session", TypedKey::U64(leaf.logical_id as u64))
             .unwrap();
@@ -647,6 +692,138 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
 }
 
 #[test]
+fn durable_replay_rederives_exact_descriptor_before_reusing_unchanged_fingerprint() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let leaf = SyntheticLeaf {
+        physical_id: 1,
+        logical_id: 1,
+        revision: 1,
+        body: "unchanged descriptor migration document".to_owned(),
+    };
+    let fingerprint = leaf.fingerprint();
+    let adapter = SyntheticAdapter::new(vec![leaf]);
+    adapter.bind_durable_replay_descriptor();
+    let registry = fixture_registry(temp.path(), adapter.clone());
+    let original_tree = SyntheticAdapter::tree(&adapter.state.lock().unwrap());
+    assert_eq!(original_tree.leaves[0].fingerprint, fingerprint);
+
+    let descriptor_a = adapter.source(1);
+    let bound_descriptor_a = adapter
+        .durable_replay_source(
+            &original_tree.authority,
+            &original_tree.leaves[0].provider_leaf,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(bound_descriptor_a.exact_descriptor_eq(&descriptor_a));
+    let cold = publish(&index_root, &registry);
+    assert_eq!(adapter.scan_count(1), 1);
+
+    adapter.reset_scan_counts();
+    adapter.use_schema_v2();
+    let descriptor_b = adapter.source(1);
+    let current_tree = SyntheticAdapter::tree(&adapter.state.lock().unwrap());
+    assert_eq!(current_tree.leaves[0].fingerprint, fingerprint);
+    assert!(adapter.state.lock().unwrap().durable_replay);
+    assert_eq!(
+        current_tree.tree_fingerprint,
+        original_tree.tree_fingerprint
+    );
+    assert_eq!(descriptor_a.identity(), descriptor_b.identity());
+    assert!(!descriptor_a.exact_descriptor_eq(&descriptor_b));
+    assert_eq!(cold.sources[0].parser_revision(), adapter.parser_revision());
+
+    let replaced = publish(&index_root, &registry);
+    assert_eq!(adapter.scan_count(1), 1);
+    assert_ne!(replaced.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(replaced.sources.len(), 1);
+    assert!(replaced.sources[0]
+        .observation()
+        .source()
+        .exact_descriptor_eq(&descriptor_b));
+    assert!(replaced.removals.is_empty());
+
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(index.document_count(), 1);
+    assert!(matches!(
+        index.source_event_page(&descriptor_a, None, 8),
+        Err(ctx_history_index::IndexError::SourceEventSourceDescriptorMismatch(_))
+    ));
+    let event = index
+        .source_event_page(&descriptor_b, None, 8)
+        .unwrap()
+        .items
+        .remove(0);
+    let record = index
+        .core_record_by_id(event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert!(record.source.exact_descriptor_eq(&descriptor_b));
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some("unchanged descriptor migration document")
+    );
+}
+
+#[test]
+fn same_lineage_schema_descriptor_replacement_is_atomic_and_removes_stale_documents() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let adapter = SyntheticAdapter::new(vec![SyntheticLeaf {
+        physical_id: 1,
+        logical_id: 1,
+        revision: 1,
+        body: "stale descriptor A document".to_owned(),
+    }]);
+    adapter.use_logical_snapshot_scans();
+    let registry = fixture_registry(temp.path(), adapter.clone());
+
+    let descriptor_a = adapter.source(1);
+    let cold = publish(&index_root, &registry);
+    assert_eq!(cold.sources.len(), 1);
+    assert!(cold.sources[0]
+        .observation()
+        .source()
+        .exact_descriptor_eq(&descriptor_a));
+
+    adapter.replace(1, 2, "replacement descriptor B document");
+    adapter.use_schema_v2();
+    let descriptor_b = adapter.source(1);
+    assert_eq!(descriptor_a.identity(), descriptor_b.identity());
+    assert!(!descriptor_a.exact_descriptor_eq(&descriptor_b));
+    assert_eq!(descriptor_b.schema_variant(), SYNTHETIC_SCHEMA_V2);
+
+    let replaced = publish(&index_root, &registry);
+    assert_eq!(replaced.sources.len(), 1);
+    assert!(replaced.sources[0]
+        .observation()
+        .source()
+        .exact_descriptor_eq(&descriptor_b));
+    assert!(replaced.removals.is_empty());
+
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(index.document_count(), 1);
+    assert!(matches!(
+        index.source_event_page(&descriptor_a, None, 8),
+        Err(ctx_history_index::IndexError::SourceEventSourceDescriptorMismatch(_))
+    ));
+    let event = index
+        .source_event_page(&descriptor_b, None, 8)
+        .unwrap()
+        .items
+        .remove(0);
+    let record = index
+        .core_record_by_id(event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some("replacement descriptor B document")
+    );
+}
+
+#[test]
 fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_root = temp.path().join("index");
@@ -664,6 +841,18 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
             body: "bravo".to_owned(),
         },
     ]);
+    let unbound_tree = SyntheticAdapter::tree(&adapter.state.lock().unwrap());
+    assert_eq!(
+        adapter.leaf_execution_policy(),
+        DocumentLeafExecutionPolicy::Serial
+    );
+    assert!(adapter
+        .durable_replay_source(
+            &unbound_tree.authority,
+            &unbound_tree.leaves[0].provider_leaf,
+        )
+        .unwrap()
+        .is_none());
     let registry = fixture_registry(temp.path(), adapter.clone());
 
     let cold = publish(&index_root, &registry);

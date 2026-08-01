@@ -1,27 +1,32 @@
 use std::{
     io::{BufReader, Seek, SeekFrom},
-    path::{Path, PathBuf},
-    thread,
+    path::Path,
     time::SystemTime,
 };
+#[cfg(test)]
+use std::{path::PathBuf, thread};
 
 use ctx_history_core::{AgentType, CaptureProvider};
 use serde_json::{json, Value};
 
+#[cfg(test)]
 use crate::common::io::{
-    open_provider_source_file, read_provider_jsonl_line_or_skip_oversized,
-    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderJsonlLineRead,
-    ProviderSourceDirectory, ProviderSourceRoot, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
+    open_provider_source_file, OpenedProviderSourcePath, ProviderSourceDirectory,
+    ProviderSourceRoot, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
     PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
     PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
-use crate::common::time::{parse_rfc3339_utc, system_time_ms};
-use crate::{
-    CaptureError, CatalogSummary, ProviderImportFailure, Result, CODEX_SESSION_SOURCE_FORMAT,
+use crate::common::io::{
+    read_provider_jsonl_line_or_skip_oversized, OpenedProviderSourceFile, ProviderJsonlLineRead,
 };
+use crate::common::time::{parse_rfc3339_utc, system_time_ms};
+use crate::{CaptureError, Result, CODEX_SESSION_SOURCE_FORMAT};
+#[cfg(test)]
+use crate::{CatalogSummary, ProviderImportFailure};
 
 use crate::provider::codex::nativepath::{opened_codex_file_observation, CodexFileObservation};
 use crate::provider::codex::{CODEX_CAPTURE_REVISION, CODEX_POLICY_REVISION};
+#[cfg(test)]
 use crate::provider::provider_path_identity;
 
 pub(crate) const CODEX_CATALOG_MAX_SOURCES: usize = 131_072;
@@ -45,6 +50,7 @@ pub(crate) struct CatalogSession {
     pub(crate) metadata: Value,
 }
 
+#[cfg(test)]
 fn authority_path(path: &Path) -> Result<PathBuf> {
     use std::path::Component;
 
@@ -69,6 +75,7 @@ fn authority_path(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct CodexCatalogRoute {
     path: PathBuf,
@@ -76,6 +83,7 @@ struct CodexCatalogRoute {
     relative_path: Option<PathBuf>,
 }
 
+#[cfg(test)]
 impl CodexCatalogRoute {
     fn open(&self) -> Result<CodexCatalogFile> {
         let opened = match (&self.root, &self.relative_path) {
@@ -97,6 +105,7 @@ impl CodexCatalogRoute {
     }
 }
 
+#[cfg(test)]
 fn map_codex_catalog_open_error(path: &Path, error: CaptureError) -> CaptureError {
     match error {
         CaptureError::InvalidProviderTranscriptPath { .. } => {
@@ -115,17 +124,18 @@ fn map_codex_catalog_open_error(path: &Path, error: CaptureError) -> CaptureErro
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct CodexCatalogFile {
     path: PathBuf,
     opened: OpenedProviderSourceFile,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct RetainedCodexSessionCatalog {
     pub(crate) summary: CatalogSummary,
     pub(crate) sessions: Vec<CatalogSession>,
-    pub(crate) root: ProviderSourceRoot,
 }
 
 #[cfg(test)]
@@ -136,6 +146,7 @@ pub(crate) fn discover_codex_session_catalog(
     Ok((retained.summary, retained.sessions))
 }
 
+#[cfg(test)]
 pub(crate) fn discover_codex_session_catalog_retained(
     root: &Path,
 ) -> Result<RetainedCodexSessionCatalog> {
@@ -144,6 +155,7 @@ pub(crate) fn discover_codex_session_catalog_retained(
     build_retained_codex_session_catalog(root, authority, files)
 }
 
+#[cfg(test)]
 fn build_retained_codex_session_catalog(
     root: &Path,
     authority: ProviderSourceRoot,
@@ -156,13 +168,10 @@ fn build_retained_codex_session_catalog(
         None,
     )?;
     authority.revalidate()?;
-    Ok(RetainedCodexSessionCatalog {
-        summary,
-        sessions,
-        root: authority,
-    })
+    Ok(RetainedCodexSessionCatalog { summary, sessions })
 }
 
+#[cfg(test)]
 fn discover_codex_catalog_files(
     configured_root: &Path,
 ) -> Result<(ProviderSourceRoot, Vec<CodexCatalogRoute>)> {
@@ -172,6 +181,7 @@ fn discover_codex_catalog_files(
     Ok((root, routes))
 }
 
+#[cfg(test)]
 fn discover_codex_catalog_files_from_root(
     configured_root: &Path,
     root: &ProviderSourceRoot,
@@ -192,6 +202,7 @@ fn discover_codex_catalog_files_from_root(
     Ok(routes)
 }
 
+#[cfg(test)]
 fn discover_codex_catalog_directory(
     display_path: &Path,
     directory: ProviderSourceDirectory,
@@ -261,6 +272,7 @@ fn discover_codex_catalog_directory(
     Ok(())
 }
 
+#[cfg(test)]
 fn codex_catalog_observation(source: &CodexCatalogFile) -> Result<CodexFileObservation> {
     let observation = opened_codex_file_observation(&source.path, source.opened.file())?;
     source.opened.revalidate()?;
@@ -287,12 +299,14 @@ pub(crate) fn ensure_catalog_source_bound(source_count: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct CatalogWorkerBatch {
     pub(crate) summary: CatalogSummary,
     pub(crate) sessions: Vec<CatalogSession>,
     pub(crate) failures: Vec<String>,
 }
+#[cfg(test)]
 fn catalog_codex_session_routes(
     routes: Vec<CodexCatalogRoute>,
     source_root: &str,
@@ -348,6 +362,7 @@ fn catalog_codex_session_routes(
     }
     Ok((summary, sessions))
 }
+#[cfg(test)]
 fn catalog_codex_session_chunk(
     routes: Vec<CodexCatalogRoute>,
     source_root: String,
@@ -400,6 +415,7 @@ fn catalog_codex_session_chunk(
     }
     batch
 }
+#[cfg(test)]
 pub(crate) fn catalog_parallelism(
     path_count: usize,
     requested_parallelism: Option<usize>,
@@ -413,6 +429,7 @@ pub(crate) fn catalog_parallelism(
         .clamp(1, 32)
         .min(path_count)
 }
+#[cfg(test)]
 fn catalog_codex_session_file(
     source_file: &CodexCatalogFile,
     source_root: &str,
@@ -456,7 +473,21 @@ fn catalog_codex_session_opened(
         .and_then(|payload| payload.get("source"))
         .cloned()
         .unwrap_or(Value::Null);
-    let parent_external_session_id = codex_parent_session_id(&source);
+    let parent_external_session_id = codex_parent_session_id(&source)
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("parent_thread_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("forked_from_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+        });
     let external_session_id = payload
         .and_then(|payload| payload.get("id"))
         .and_then(Value::as_str)

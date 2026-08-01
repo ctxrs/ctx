@@ -2,11 +2,12 @@ use std::io::Write as _;
 
 use clap::Parser as _;
 use serde_json::{json, Value};
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     render_search_document, render_show_document, render_show_jsonl, render_show_markdown,
-    render_show_text,
+    render_show_text, search_snippet_fragment, SEARCH_SNIPPET_MAX_CHARS,
 };
 use crate::{
     cli::Cli,
@@ -19,6 +20,72 @@ use crate::{
 const SESSION_ID: &str = "01900000-0000-7000-8000-000000000001";
 const EVENT_ID: &str = "01900001-0000-7000-8000-000000000002";
 const SECOND_EVENT_ID: &str = "01900002-0000-7000-8000-000000000003";
+
+#[test]
+fn search_snippet_centers_the_actual_match_after_character_4000() {
+    let body = format!("{}NeEdLe{}", "a".repeat(4_500), "z".repeat(4_500));
+
+    let (snippet, truncated) = search_snippet_fragment(&body, &["needle"]);
+
+    assert!(truncated);
+    assert_eq!(snippet.graphemes(true).count(), SEARCH_SNIPPET_MAX_CHARS);
+    let match_offset = snippet.find("NeEdLe").expect("matched term stays visible");
+    assert_eq!(snippet[..match_offset].graphemes(true).count(), 157);
+}
+
+#[test]
+fn search_snippet_prefers_late_unique_identifier_over_early_generic_term() {
+    let oid = "0123456789abcdef0123456789abcdef01234567";
+    let body = format!("commit {} {oid} tail", "x".repeat(4_500));
+    let query = format!("commit {oid}");
+
+    let (snippet, truncated) = search_snippet_fragment(&body, &[&query]);
+
+    assert!(truncated);
+    assert!(snippet.contains(oid));
+    assert!(!snippet.starts_with("commit"));
+}
+
+#[test]
+fn search_snippet_keeps_combining_and_emoji_graphemes_intact() {
+    let combining = "e\u{301}";
+    let family = "👨‍👩‍👧‍👦";
+    let body = format!("{}目标{}", combining.repeat(400), family.repeat(400));
+
+    let (snippet, truncated) = search_snippet_fragment(&body, &["目标"]);
+    let graphemes = snippet.graphemes(true).collect::<Vec<_>>();
+
+    assert!(truncated);
+    assert_eq!(graphemes.len(), SEARCH_SNIPPET_MAX_CHARS);
+    assert_eq!(graphemes.first().copied(), Some(combining));
+    assert_eq!(graphemes.last().copied(), Some(family));
+    assert!(snippet.contains("目标"));
+}
+
+#[test]
+fn search_snippet_handles_start_end_and_no_match_fallback_truthfully() {
+    let at_start = format!("needle{}", "x".repeat(500));
+    let (snippet, truncated) = search_snippet_fragment(&at_start, &["needle"]);
+    assert!(truncated);
+    assert!(snippet.starts_with("needle"));
+    assert_eq!(snippet.graphemes(true).count(), SEARCH_SNIPPET_MAX_CHARS);
+
+    let at_end = format!("{}needle", "x".repeat(500));
+    let (snippet, truncated) = search_snippet_fragment(&at_end, &["needle"]);
+    assert!(truncated);
+    assert!(snippet.ends_with("needle"));
+    assert_eq!(snippet.graphemes(true).count(), SEARCH_SNIPPET_MAX_CHARS);
+
+    let no_match = "x".repeat(500);
+    let (snippet, truncated) = search_snippet_fragment(&no_match, &["absent"]);
+    assert!(truncated);
+    assert_eq!(snippet, "x".repeat(SEARCH_SNIPPET_MAX_CHARS));
+
+    let short = "short body";
+    let (snippet, truncated) = search_snippet_fragment(short, &[]);
+    assert!(!truncated);
+    assert_eq!(snippet, short);
+}
 
 fn context(width: usize, color: ColorMode) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))

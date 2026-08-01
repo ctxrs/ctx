@@ -1,8 +1,6 @@
-use std::{
-    collections::VecDeque,
-    fmt,
-    path::{Path, PathBuf},
-};
+mod mcp;
+
+use std::{collections::VecDeque, fmt, io::Write, path::PathBuf};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
@@ -10,8 +8,8 @@ use ctx_history_core::{
     MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use ctx_history_index::{
-    CoreEventPageBudget, CoreEventRecord, SessionRecord, VerifiedIndex,
-    MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+    CoreEventPageBudget, CoreEventRecord, SessionEventCursor, SessionRecord, VerifiedIndex,
+    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -24,21 +22,23 @@ use crate::{
         enforce_presentation_output_limit, serialized_json_bytes, CLI_PRESENTATION_MAX_OUTPUT_BYTES,
     },
     provider_args::ProviderArg,
-    transcript::TranscriptMode,
-    ui::{canonical_human_output_bytes, Ui},
+    transcript::{TranscriptMode, TranscriptOutput},
+    ui::{canonical_human_output_bytes, RenderContext, Ui},
     ShowArgs, ShowTarget,
 };
 
 use super::{
-    render::{enforce_json_output_limit, render_show_document, timestamp_json, write_show_value},
+    render::{render_show_document, timestamp_json, write_show_value},
     shared::{
-        open_index, resolve_core_event, resolve_lookup_for_output, resolve_session,
-        validate_ctx_id, validate_session_selector,
+        open_index, render_active_generation_race, resolve_core_event, resolve_lookup_for_output,
+        resolve_session, validate_ctx_id, validate_session_selector, ActiveGenerationRaceCommand,
     },
 };
 
-const CLI_PRESENTATION_MAX_SESSION_EVENTS: usize = MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS - 1;
+pub(crate) use mcp::{mcp_show_event, mcp_show_session};
+
 const CORE_PRESENTATION_FETCH_MAX_EVENTS: usize = 200;
+const CLI_SESSION_EVENT_PAGE_ITEMS: usize = CORE_PRESENTATION_FETCH_MAX_EVENTS;
 const PRESENTATION_MAX_EVENT_WINDOW_EVENTS: usize = MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +91,24 @@ pub(super) fn take_core_presentation_fetch_ids() -> Vec<Uuid> {
 }
 
 pub(crate) fn run_show(
+    args: ShowArgs,
+    data_root: PathBuf,
+    telemetry: &mut ShowTelemetry,
+    local_usage: &mut CliUsage,
+    ui: &mut Ui,
+) -> Result<()> {
+    let json_output = matches!(
+        &args.target,
+        ShowTarget::Event(args) if args.format == OutputFormat::Json
+    ) || matches!(
+        &args.target,
+        ShowTarget::Session(args) if args.format == OutputFormat::Json
+    );
+    let result = run_show_inner(args, data_root, telemetry, local_usage, ui);
+    render_show_error(result, json_output, ui)
+}
+
+fn run_show_inner(
     args: ShowArgs,
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
@@ -152,43 +170,465 @@ pub(crate) fn run_show(
                 r#"ctx search "<query>" --verbose"#,
                 ui,
             )?;
-            let value = session_json(
+            let result = stream_cli_session(
                 &index,
                 &session,
-                SessionJsonOptions {
-                    mode: args.mode,
-                    format: args.format,
-                    max_events: args.max_events,
-                    output_limit_bytes: CLI_PRESENTATION_MAX_OUTPUT_BYTES,
-                },
+                args.mode,
+                args.format,
+                args.max_events,
+                args.out,
+                ui,
             )?;
-            telemetry.events_returned = value["events"]
-                .as_array()
-                .map(|events| count_bucket(events.len() as u64));
-            let event_id = value["events"]
-                .as_array()
-                .and_then(|events| events.last())
-                .and_then(|event| event["ctx_event_id"].as_str())
-                .and_then(|id| Uuid::parse_str(id).ok())
-                .unwrap_or_else(|| session.session_id.as_uuid());
-            let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-            let result_count = events.len();
-            let content_bytes = serde_json::to_vec(&value["events"])?.len();
-            let output_bytes = if args.format == OutputFormat::Text && args.out.is_none() {
-                write_show_document(&value, event_id, ui)?
-            } else {
-                write_show_value(value, args.format, args.out, event_id)?
-            };
+            telemetry.events_returned = Some(count_bucket(result.events_returned as u64));
             local_usage.set_result_observation(
                 ResultObservationAction::OpenSession,
-                result_count,
+                result.events_returned,
                 0,
-                content_bytes,
+                result.content_bytes,
             );
-            local_usage.set_measured_output_bytes(output_bytes);
+            local_usage.set_measured_output_bytes(result.output_bytes);
             Ok(())
         }
     }
+}
+
+pub(super) fn render_show_error<T>(result: Result<T>, json_output: bool, ui: &mut Ui) -> Result<T> {
+    render_active_generation_race(result, json_output, ActiveGenerationRaceCommand::Show, ui)
+}
+
+pub(super) struct SessionStreamResult {
+    pub(super) events_returned: usize,
+    pub(super) content_bytes: usize,
+    pub(super) output_bytes: usize,
+}
+
+pub(super) fn stream_cli_session(
+    index: &VerifiedIndex,
+    session: &SessionRecord,
+    mode: TranscriptMode,
+    format: OutputFormat,
+    max_events: Option<usize>,
+    out: Option<PathBuf>,
+    ui: &mut Ui,
+) -> Result<SessionStreamResult> {
+    let writes_stdout = out.is_none();
+    let human_context =
+        (format == OutputFormat::Text && writes_stdout).then(|| *ui.stdout_context());
+    let output = TranscriptOutput::create(out, ui.stdout_writer())?;
+    let mut renderer = SessionStreamRenderer::new(
+        output,
+        session,
+        mode,
+        format,
+        max_events,
+        human_context,
+        writes_stdout,
+    )?;
+    let mut selector = SessionEventSelector::new(mode);
+    let mut cursor: Option<SessionEventCursor> = None;
+    let mut truncated = false;
+
+    'pages: loop {
+        renderer.begin_page();
+        let page = index.core_session_event_page_with_budget(
+            session.session_id.as_uuid(),
+            cursor.as_ref(),
+            CLI_SESSION_EVENT_PAGE_ITEMS,
+            CoreEventPageBudget::new(MAX_ENCODED_CORE_RECORD_BYTES, MAX_CORE_CONTENT_BYTES),
+        )?;
+        let terminal = page.terminal;
+        let next_cursor = page.next_cursor;
+        for event in page.items {
+            for selected in selector.push(event) {
+                if max_events.is_some_and(|maximum| renderer.events_returned() >= maximum) {
+                    truncated = true;
+                    break 'pages;
+                }
+                renderer.emit(selected)?;
+            }
+        }
+        if terminal {
+            if let Some(selected) = selector.finish() {
+                if max_events.is_some_and(|maximum| renderer.events_returned() >= maximum) {
+                    truncated = true;
+                } else {
+                    renderer.emit(selected)?;
+                }
+            }
+            break;
+        }
+        cursor = Some(next_cursor.ok_or_else(|| {
+            anyhow!("nonterminal Core session event page omitted its continuation cursor")
+        })?);
+    }
+
+    renderer.finish(truncated, max_events)
+}
+
+struct SessionEventSelector {
+    mode: TranscriptMode,
+    pending_assistant: Option<CoreEventRecord>,
+}
+
+impl SessionEventSelector {
+    const fn new(mode: TranscriptMode) -> Self {
+        Self {
+            mode,
+            pending_assistant: None,
+        }
+    }
+
+    fn push(&mut self, event: CoreEventRecord) -> Vec<CoreEventRecord> {
+        match self.mode {
+            TranscriptMode::Log => vec![event],
+            TranscriptMode::Full => {
+                if event.event_type == EventType::Message.as_str()
+                    && matches!(event.role.as_deref(), Some("user" | "assistant" | "system"))
+                {
+                    vec![event]
+                } else {
+                    Vec::new()
+                }
+            }
+            TranscriptMode::Lite => {
+                if event.event_type != EventType::Message.as_str() {
+                    return Vec::new();
+                }
+                match event.role.as_deref() {
+                    Some("user") => {
+                        let mut selected = Vec::with_capacity(2);
+                        if let Some(assistant) = self.pending_assistant.take() {
+                            selected.push(assistant);
+                        }
+                        selected.push(event);
+                        selected
+                    }
+                    Some("assistant") => {
+                        self.pending_assistant = Some(event);
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Option<CoreEventRecord> {
+        self.pending_assistant.take()
+    }
+}
+
+struct SessionStreamRenderer<'a> {
+    output: TranscriptOutput<'a>,
+    metadata: Value,
+    format: OutputFormat,
+    human_context: Option<RenderContext>,
+    writes_stdout: bool,
+    events_returned: usize,
+    content_bytes: usize,
+    page_output_bytes: usize,
+    last_event_id: Uuid,
+}
+
+impl<'a> SessionStreamRenderer<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        output: TranscriptOutput<'a>,
+        session: &SessionRecord,
+        mode: TranscriptMode,
+        format: OutputFormat,
+        max_events: Option<usize>,
+        human_context: Option<RenderContext>,
+        writes_stdout: bool,
+    ) -> Result<Self> {
+        let metadata =
+            session_transcript_value(session, mode, format, Vec::new(), false, max_events);
+        let mut renderer = Self {
+            output,
+            metadata,
+            format,
+            human_context,
+            writes_stdout,
+            events_returned: 0,
+            content_bytes: 2,
+            page_output_bytes: 0,
+            last_event_id: session.session_id.as_uuid(),
+        };
+        renderer.write_header()?;
+        Ok(renderer)
+    }
+
+    const fn events_returned(&self) -> usize {
+        self.events_returned
+    }
+
+    fn begin_page(&mut self) {
+        self.page_output_bytes = 0;
+    }
+
+    fn emit(&mut self, event: CoreEventRecord) -> Result<()> {
+        let event_id = event.event_id.as_uuid();
+        let value = render_event_value(&event);
+        let event_json = serde_json::to_vec(&value)?;
+        self.content_bytes = self
+            .content_bytes
+            .saturating_add(usize::from(self.events_returned > 0))
+            .saturating_add(event_json.len());
+        let fragment = match self.format {
+            OutputFormat::Text if self.human_context.is_some() => {
+                let context = self
+                    .human_context
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("human transcript rendering requires a context"))?;
+                render_show_document(
+                    &json!({
+                        "_stream_part": "session_event",
+                        "position": self.events_returned.saturating_add(1),
+                        "event": value,
+                    }),
+                    context,
+                )
+                .render(context)
+                .into_bytes()
+            }
+            OutputFormat::Text => render_stream_text_event(&value).into_bytes(),
+            OutputFormat::Markdown => render_stream_markdown_event(&value).into_bytes(),
+            OutputFormat::Json => {
+                let mut fragment = Vec::with_capacity(event_json.len().saturating_add(1));
+                if self.events_returned > 0 {
+                    fragment.push(b',');
+                }
+                fragment.extend(event_json);
+                fragment
+            }
+            OutputFormat::Jsonl => {
+                let line = compact_json(json!({
+                    "schema_version": 1,
+                    "payload_type": "session_transcript_event",
+                    "mode": self.metadata["mode"],
+                    "ctx_session_id": self.metadata["ctx_session_id"],
+                    "provider": self.metadata["provider"],
+                    "provider_session_id": self.metadata["provider_session_id"],
+                    "event": value,
+                }));
+                let mut fragment = serde_json::to_vec(&line)?;
+                fragment.push(b'\n');
+                fragment
+            }
+        };
+        let actual_page_bytes = self.page_output_bytes.saturating_add(fragment.len());
+        enforce_presentation_output_limit(
+            actual_page_bytes,
+            CLI_PRESENTATION_MAX_OUTPUT_BYTES,
+            event_id,
+        )?;
+        self.output.write_all(&fragment)?;
+        self.page_output_bytes = actual_page_bytes;
+        self.events_returned = self.events_returned.saturating_add(1);
+        self.last_event_id = event_id;
+        Ok(())
+    }
+
+    fn finish(mut self, truncated: bool, max_events: Option<usize>) -> Result<SessionStreamResult> {
+        if self.events_returned == 0 {
+            if let Some(context) = self.human_context.as_ref() {
+                self.output.write_all(
+                    render_show_document(&json!({"_stream_part": "session_empty"}), context)
+                        .render(context)
+                        .as_bytes(),
+                )?;
+            }
+        }
+        let max_events_u64 = max_events.map(|maximum| u64::try_from(maximum).unwrap_or(u64::MAX));
+        match self.format {
+            OutputFormat::Text if self.human_context.is_some() && truncated => {
+                let context = self
+                    .human_context
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("human transcript rendering requires a context"))?;
+                self.output.write_all(
+                    render_show_document(
+                        &json!({
+                            "_stream_part": "session_truncated",
+                            "max_events": max_events_u64,
+                        }),
+                        context,
+                    )
+                    .render(context)
+                    .as_bytes(),
+                )?;
+            }
+            OutputFormat::Text if truncated => {
+                self.output.write_all(
+                    format!(
+                        "transcript_truncated: true\nmax_events: {}\n",
+                        max_events.unwrap_or(self.events_returned)
+                    )
+                    .as_bytes(),
+                )?;
+            }
+            OutputFormat::Markdown if truncated => {
+                self.output.write_all(
+                    format!(
+                        "\n> Transcript is truncated after {} events.\n",
+                        max_events.unwrap_or(self.events_returned)
+                    )
+                    .as_bytes(),
+                )?;
+            }
+            OutputFormat::Json => {
+                self.output.write_all(b"]")?;
+                if truncated {
+                    self.output.write_all(b",\"truncated\":")?;
+                    serde_json::to_writer(
+                        &mut self.output,
+                        &json!({"events": true, "max_events": max_events}),
+                    )?;
+                }
+                self.output.write_all(b"}")?;
+                if self.writes_stdout {
+                    self.output.write_all(b"\n")?;
+                }
+            }
+            OutputFormat::Jsonl => {
+                let completion = compact_json(json!({
+                    "schema_version": 1,
+                    "payload_type": "session_transcript_completion",
+                    "mode": self.metadata["mode"],
+                    "ctx_session_id": self.metadata["ctx_session_id"],
+                    "provider": self.metadata["provider"],
+                    "provider_session_id": self.metadata["provider_session_id"],
+                    "events_returned": self.events_returned,
+                    "complete": !truncated,
+                    "truncated": truncated.then(|| json!({
+                        "events": true,
+                        "max_events": max_events,
+                    })),
+                }));
+                serde_json::to_writer(&mut self.output, &completion)?;
+                self.output.write_all(b"\n")?;
+            }
+            _ => {}
+        }
+        let events_returned = self.events_returned;
+        let content_bytes = self.content_bytes;
+        let output_bytes = self.output.finish()?;
+        Ok(SessionStreamResult {
+            events_returned,
+            content_bytes,
+            output_bytes,
+        })
+    }
+
+    fn write_header(&mut self) -> Result<()> {
+        match self.format {
+            OutputFormat::Text if self.human_context.is_some() => {
+                let context = self
+                    .human_context
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("human transcript rendering requires a context"))?;
+                let mut header = self.metadata.clone();
+                header["_stream_part"] = Value::String("session_header".to_owned());
+                self.output.write_all(
+                    render_show_document(&header, context)
+                        .render(context)
+                        .as_bytes(),
+                )?;
+            }
+            OutputFormat::Text => {
+                self.output
+                    .write_all(render_stream_text_header(&self.metadata).as_bytes())?;
+            }
+            OutputFormat::Markdown => {
+                self.output
+                    .write_all(render_stream_markdown_header(&self.metadata).as_bytes())?;
+            }
+            OutputFormat::Json => write_stream_json_header(&mut self.output, &self.metadata)?,
+            OutputFormat::Jsonl => {}
+        }
+        Ok(())
+    }
+}
+
+fn write_stream_json_header(writer: &mut impl Write, metadata: &Value) -> Result<()> {
+    writer.write_all(b"{")?;
+    let object = metadata
+        .as_object()
+        .ok_or_else(|| anyhow!("session transcript metadata must be a JSON object"))?;
+    let mut first = true;
+    for (key, value) in object {
+        if matches!(key.as_str(), "events" | "truncated") {
+            continue;
+        }
+        if !first {
+            writer.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *writer, key)?;
+        writer.write_all(b":")?;
+        serde_json::to_writer(&mut *writer, value)?;
+        first = false;
+    }
+    if !first {
+        writer.write_all(b",")?;
+    }
+    writer.write_all(b"\"events\":[")?;
+    Ok(())
+}
+
+fn render_stream_text_header(value: &Value) -> String {
+    let mut output = format!(
+        "ctx_session_id: {}\nprovider: {}\n",
+        value["ctx_session_id"].as_str().unwrap_or("unknown"),
+        value["provider"].as_str().unwrap_or("unknown")
+    );
+    if let Some(provider_session_id) = value["provider_session_id"].as_str() {
+        output.push_str(&format!("provider_session_id: {provider_session_id}\n"));
+    }
+    output.push_str(&format!(
+        "mode: {}\nformat: text\n\n",
+        value["mode"].as_str().unwrap_or("lite")
+    ));
+    output
+}
+
+fn render_stream_text_event(event: &Value) -> String {
+    let role = event["role"]
+        .as_str()
+        .unwrap_or_else(|| event["event_type"].as_str().unwrap_or("event"));
+    format!(
+        "[{}] {} {} {}\n{}\n\n",
+        event["occurred_at"].as_str().unwrap_or("-"),
+        role,
+        event["event_type"].as_str().unwrap_or("event"),
+        event["ctx_event_id"].as_str().unwrap_or("unknown"),
+        event["text"].as_str().unwrap_or_default()
+    )
+}
+
+fn render_stream_markdown_header(value: &Value) -> String {
+    format!(
+        "# {} session {}\n\n- ctx_session_id: `{}`\n",
+        value["provider"].as_str().unwrap_or("unknown"),
+        value["provider_session_id"]
+            .as_str()
+            .or_else(|| value["ctx_session_id"].as_str())
+            .unwrap_or("unknown"),
+        value["ctx_session_id"].as_str().unwrap_or("unknown")
+    )
+}
+
+fn render_stream_markdown_event(event: &Value) -> String {
+    let role = event["role"]
+        .as_str()
+        .unwrap_or_else(|| event["event_type"].as_str().unwrap_or("event"));
+    format!(
+        "\n## {} - {} - {}\n\nctx_event_id: `{}`\n\n{}\n",
+        role,
+        event["event_type"].as_str().unwrap_or("event"),
+        event["occurred_at"].as_str().unwrap_or("-"),
+        event["ctx_event_id"].as_str().unwrap_or("unknown"),
+        event["text"].as_str().unwrap_or_default()
+    )
 }
 
 fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {
@@ -267,110 +707,6 @@ fn select_show_provider_session(
             matches[1].session_id
         )),
     }
-}
-
-pub(crate) fn mcp_show_session(
-    data_root: &Path,
-    id: &str,
-    mode: TranscriptMode,
-    max_events: usize,
-    output_limit_bytes: usize,
-) -> Result<Value> {
-    let index = open_index(data_root)?;
-    let session = resolve_session(&index, id)?;
-    let value = session_json(
-        &index,
-        &session,
-        SessionJsonOptions {
-            mode,
-            format: OutputFormat::Json,
-            max_events: Some(max_events),
-            output_limit_bytes,
-        },
-    )?;
-    let event_id = value["events"]
-        .as_array()
-        .and_then(|events| events.last())
-        .and_then(|event| event["ctx_event_id"].as_str())
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .unwrap_or_else(|| session.session_id.as_uuid());
-    enforce_json_output_limit(&value, output_limit_bytes, event_id)?;
-    Ok(value)
-}
-
-pub(crate) fn mcp_show_event(
-    data_root: &Path,
-    id: &str,
-    before: usize,
-    after: usize,
-    window: Option<usize>,
-    output_limit_bytes: usize,
-) -> Result<Value> {
-    let index = open_index(data_root)?;
-    let selected = resolve_core_event(&index, id)?;
-    let events = event_window(&index, &selected, before, after, window, output_limit_bytes)?;
-    let value = event_window_json(&selected, &events, OutputFormat::Json, output_limit_bytes)?;
-    enforce_json_output_limit(&value, output_limit_bytes, selected.event_id.as_uuid())?;
-    Ok(value)
-}
-
-pub(super) struct SessionJsonOptions {
-    pub(super) mode: TranscriptMode,
-    pub(super) format: OutputFormat,
-    pub(super) max_events: Option<usize>,
-    pub(super) output_limit_bytes: usize,
-}
-
-pub(super) fn session_json(
-    index: &VerifiedIndex,
-    session: &SessionRecord,
-    options: SessionJsonOptions,
-) -> Result<Value> {
-    session_json_with_event_cap(index, session, options, CLI_PRESENTATION_MAX_SESSION_EVENTS)
-}
-
-pub(super) fn session_json_with_event_cap(
-    index: &VerifiedIndex,
-    session: &SessionRecord,
-    options: SessionJsonOptions,
-    absolute_maximum_events: usize,
-) -> Result<Value> {
-    let absolute_maximum_events = absolute_maximum_events.min(CLI_PRESENTATION_MAX_SESSION_EVENTS);
-    let maximum_events = options
-        .max_events
-        .unwrap_or(absolute_maximum_events)
-        .min(absolute_maximum_events);
-    let coordinate_limit = maximum_events.saturating_add(1);
-    let mut coordinates =
-        index.session_event_coordinate_prefix(session.session_id.as_uuid(), coordinate_limit)?;
-    let truncated = coordinates.len() > maximum_events;
-    if options.max_events.is_none() && coordinates.len() > maximum_events {
-        return Err(anyhow::Error::new(PresentationEventLimitError {
-            actual_events: coordinates.len(),
-            maximum_events,
-        }));
-    }
-    coordinates.truncate(maximum_events);
-    let selected_ids = coordinates
-        .iter()
-        .map(|coordinate| coordinate.event_id)
-        .collect::<Vec<_>>();
-    let events = core_events_by_ids_with_presentation_budget(
-        index,
-        &selected_ids,
-        maximum_events,
-        options.output_limit_bytes,
-    )?;
-    let selected = select_session_events(&events, options.mode);
-    let rendered = render_event_values(&selected, options.output_limit_bytes)?;
-    Ok(session_transcript_value(
-        session,
-        options.mode,
-        options.format,
-        rendered,
-        truncated,
-        options.max_events.map(|_| maximum_events),
-    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -646,43 +982,4 @@ pub(super) fn core_events_by_ids_with_presentation_limits(
         ));
     }
     Ok(events)
-}
-
-fn select_session_events(
-    events: &[CoreEventRecord],
-    mode: TranscriptMode,
-) -> Vec<&CoreEventRecord> {
-    match mode {
-        TranscriptMode::Log => events.iter().collect(),
-        TranscriptMode::Full => events
-            .iter()
-            .filter(|event| {
-                event.event_type == EventType::Message.as_str()
-                    && matches!(event.role.as_deref(), Some("user" | "assistant" | "system"))
-            })
-            .collect(),
-        TranscriptMode::Lite => {
-            let mut selected = Vec::new();
-            let mut pending_assistant = None;
-            for event in events {
-                if event.event_type != EventType::Message.as_str() {
-                    continue;
-                }
-                match event.role.as_deref() {
-                    Some("user") => {
-                        if let Some(assistant) = pending_assistant.take() {
-                            selected.push(assistant);
-                        }
-                        selected.push(event);
-                    }
-                    Some("assistant") => pending_assistant = Some(event),
-                    _ => {}
-                }
-            }
-            if let Some(assistant) = pending_assistant {
-                selected.push(assistant);
-            }
-            selected
-        }
-    }
 }

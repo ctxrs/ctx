@@ -1,11 +1,9 @@
 use super::*;
 use std::sync::Mutex;
 
-#[cfg(test)]
-use crate::provider::codex::nativepath::CodexCatalogWorkV0;
 use crate::provider::codex::nativepath::{
-    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
-    ingest_codex_sources_v0, CodexSessionTreeInventoryV0, CodexSourceBackedResultV0,
+    discover_codex_session_tree_inventory_v0, ingest_codex_sources_v0, CodexSessionTreeInventoryV0,
+    CodexSourceBackedResultV0,
 };
 
 #[path = "codex_prompt_terminal.rs"]
@@ -19,9 +17,19 @@ use prompt_terminal::{
 type ExplicitCodexStageHook = Box<dyn FnOnce(CodexSourceBackedCountersV0)>;
 
 #[cfg(test)]
+type CodexSessionTreeStageHook = Box<dyn FnOnce(CodexSourceBackedCountersV0)>;
+
+#[cfg(test)]
 std::thread_local! {
     static AFTER_EXPLICIT_CODEX_STAGE_HOOK:
         std::cell::RefCell<Option<ExplicitCodexStageHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_CODEX_SESSION_TREE_STAGE_HOOK:
+        std::cell::RefCell<Option<CodexSessionTreeStageHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -39,6 +47,27 @@ pub(crate) fn set_after_explicit_codex_stage_hook(
 }
 
 #[cfg(test)]
+pub(crate) fn set_after_codex_session_tree_stage_hook(
+    hook: impl FnOnce(CodexSourceBackedCountersV0) + 'static,
+) {
+    AFTER_CODEX_SESSION_TREE_STAGE_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex session-tree stage hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_session_tree_stage_hook(counters: CodexSourceBackedCountersV0) {
+    let hook = AFTER_CODEX_SESSION_TREE_STAGE_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(counters);
+    }
+}
+
+#[cfg(test)]
 fn run_after_explicit_codex_stage_hook(counters: CodexSourceBackedCountersV0) {
     let hook = AFTER_EXPLICIT_CODEX_STAGE_HOOK.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -50,6 +79,7 @@ fn run_after_explicit_codex_stage_hook(counters: CodexSourceBackedCountersV0) {
 struct CodexSessionTreeTerminalEvidence {
     inventory: CertifiedSourceInventory,
     sources: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+    deletions: Vec<SourceKey>,
 }
 
 #[derive(Clone, Default)]
@@ -226,6 +256,9 @@ fn register_codex_session_tree_route_with_indexer_threads(
                 None,
             )
             .map_err(route_error)?;
+            #[cfg(test)]
+            run_after_codex_session_tree_stage_hook(counters);
+            let mut deletions = Vec::new();
             for base in base_sources.values() {
                 let base_source = base.observation().source();
                 if managed_codex_session_source(base_source)
@@ -241,6 +274,7 @@ fn register_codex_session_tree_route_with_indexer_threads(
                             opening.certificate.clone(),
                         )
                         .map_err(route_coordinator_error)?;
+                    deletions.push(base_source.clone());
                     if disposition == SourceBackedDeletionDisposition::Deleted {
                         counters.deleted_sources = counters.deleted_sources.saturating_add(1);
                     }
@@ -254,6 +288,7 @@ fn register_codex_session_tree_route_with_indexer_threads(
             })? = Some(CodexSessionTreeTerminalEvidence {
                 inventory: opening.certificate,
                 sources: revalidation,
+                deletions,
             });
             Ok(())
         },
@@ -284,6 +319,10 @@ fn register_codex_session_tree_route_with_indexer_threads(
                 SourceBackedRevalidationTarget::Deletion(deletion) => {
                     deletion.verifies(&evidence.inventory)
                         && !evidence.sources.contains_key(deletion.source())
+                        && evidence
+                            .deletions
+                            .iter()
+                            .any(|source| source.exact_descriptor_eq(deletion.source()))
                 }
             }
         },
@@ -303,16 +342,44 @@ fn register_codex_session_tree_route_with_indexer_threads(
         else {
             return false;
         };
-        current.certificate == *expected
-            && current.sources.len() == terminal.sources.len()
-            && current.sources.iter().all(|(source, source_key, _)| {
-                terminal.sources.get(source_key).is_some_and(|certified| {
+        let mut current_by_descriptor = HashMap::<[u8; 32], Vec<_>>::new();
+        for current_source in &current.sources {
+            current_by_descriptor
+                .entry(current_source.1.exact_descriptor_digest())
+                .or_default()
+                .push(current_source);
+        }
+        let current_source_for = |source_key: &SourceKey| {
+            current_by_descriptor
+                .get(&source_key.exact_descriptor_digest())
+                .and_then(|candidates| {
+                    candidates
+                        .iter()
+                        .copied()
+                        .find(|(_, current_key, _)| current_key.exact_descriptor_eq(source_key))
+                })
+        };
+        // The inventory certificate binds the opening observations used to
+        // stage this generation. Active Codex sessions may append or a new
+        // session may begin afterward. Source-level evidence below certifies
+        // every frozen prefix and retained ordinary-file identity from that
+        // snapshot. New members are deferred to the next eventually-consistent
+        // refresh; a missing, replaced, truncated, or rewritten captured
+        // member still fails this fence. Requiring closing inventory equality
+        // would make a large cold import impossible while Codex is active.
+        terminal.sources.len() <= current.sources.len()
+            && terminal.sources.iter().all(|(source_key, certified)| {
+                current_source_for(source_key).is_some_and(|(source, _, _)| {
                     certified
                         .observation
                         .admits_append_only_growth(&source.catalog_observation)
                         && certified.revalidate()
                 })
             })
+            && terminal
+                .deletions
+                .iter()
+                .all(|deleted| current_source_for(deleted).is_none())
     });
     registry.register(executable_route(
         source,
@@ -334,15 +401,6 @@ fn codex_session_root_rank(root: &Path) -> u8 {
 fn discover_codex_route_inventory(
     roots: &[PathBuf],
 ) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
-    if let [root] = roots {
-        let inventory = discover_codex_root_inventory_v0(root)?;
-        return Ok(CodexSessionTreeInventoryV0 {
-            sources: inventory.sources,
-            certificate: inventory.certificate,
-            #[cfg(test)]
-            work: CodexCatalogWorkV0::default(),
-        });
-    }
     discover_codex_session_tree_inventory_v0(roots)
 }
 
@@ -378,7 +436,7 @@ pub(super) fn register_codex_explicit_session_route(
                 let inventory = opening.certify_against(&closing).map_err(route_error)?;
                 sink.certify_complete_inventory(inventory.clone())
                     .map_err(route_coordinator_error)?;
-                if let Some(base) = base {
+                if let Some(base) = base.as_ref() {
                     let deletion = CertifiedSourceDeletion::from_inventory(
                         base.observation().source().clone(),
                         &inventory,
@@ -395,6 +453,10 @@ pub(super) fn register_codex_explicit_session_route(
                 })? = Some(CodexSessionTreeTerminalEvidence {
                     inventory,
                     sources: HashMap::new(),
+                    deletions: base
+                        .iter()
+                        .map(|base| base.observation().source().clone())
+                        .collect(),
                 });
                 return Ok(());
             }
@@ -444,6 +506,7 @@ pub(super) fn register_codex_explicit_session_route(
             })? = Some(CodexSessionTreeTerminalEvidence {
                 inventory,
                 sources: revalidation,
+                deletions: Vec::new(),
             });
             Ok(())
         },

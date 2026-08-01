@@ -203,7 +203,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         &mut owners,
         &complete_inventory_owners,
     )?;
-    require_complete_base_source_ownership(&writer, &owners)?;
+    require_complete_base_source_ownership(&writer, &owners, &complete_inventory_owners)?;
     let scan_stage_duration = scan_started.elapsed();
     let commit_started = Instant::now();
     let commit = writer.commit_with_complete_inventory_revalidation(
@@ -293,6 +293,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
 fn require_complete_base_source_ownership(
     writer: &GenerationWriter,
     owners: &HashMap<[u8; 32], SourceOwner>,
+    complete_inventory_owners: &[CompleteInventoryOwner],
 ) -> SourceBackedCoordinatorResult<()> {
     let Some(base) = writer.base_manifest() else {
         return Ok(());
@@ -305,7 +306,9 @@ fn require_complete_base_source_ownership(
     {
         let claimed = owners
             .get(&source.identity().digest())
-            .is_some_and(|owner| owner.source.exact_descriptor_eq(source));
+            .is_some_and(|owner| {
+                source_owner_covers_base_source(source, owner, complete_inventory_owners)
+            });
         if !claimed {
             return Err(SourceBackedCoordinatorError::UnclaimedBaseSource {
                 source_id: source.identity().to_string(),
@@ -313,6 +316,27 @@ fn require_complete_base_source_ownership(
         }
     }
     Ok(())
+}
+
+fn source_owner_covers_base_source(
+    base: &SourceKey,
+    owner: &SourceOwner,
+    complete_inventory_owners: &[CompleteInventoryOwner],
+) -> bool {
+    if owner.source.exact_descriptor_eq(base) {
+        return true;
+    }
+    if !base.is_same_lineage_descriptor_replacement(&owner.source) {
+        return false;
+    }
+
+    let mut matching_inventories = complete_inventory_owners.iter().filter(|candidate| {
+        candidate.route_index == owner.route_index
+            && candidate.inventory.observation().provider() == owner.source.provider()
+            && candidate.inventory.validate_contract().is_ok()
+            && candidate.inventory.contains(&owner.source)
+    });
+    matching_inventories.next().is_some() && matching_inventories.next().is_none()
 }
 
 fn source_missing_observation_time() -> u64 {
@@ -431,5 +455,139 @@ fn retained_deletion_error(
     SourceBackedCoordinatorError::RetainedDeletionRecertification {
         source_id: source.identity().to_string(),
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use ctx_history_core::{
+        ProjectionContractError, SourceAnchor, SourceInventoryObservation, TypedKey,
+    };
+
+    use super::*;
+
+    fn descriptor(schema_variant: &str, lineage: u8) -> SourceKey {
+        SourceKey::derive(
+            CaptureProvider::Gemini.as_str(),
+            "ownership-test",
+            schema_variant,
+            1,
+            SourceAnchor::CatalogLineage([lineage; 32]),
+        )
+        .unwrap()
+    }
+
+    fn inventory_owner(
+        route_index: usize,
+        authority: u8,
+        sources: Vec<SourceKey>,
+    ) -> CompleteInventoryOwner {
+        let observation = SourceInventoryObservation::new(
+            CaptureProvider::Gemini.as_str(),
+            "ownership-test-root",
+            TypedKey::U64(u64::from(authority)),
+            "ownership-test-revision",
+            vec![authority],
+        )
+        .unwrap();
+        CompleteInventoryOwner {
+            route_index,
+            inventory: CertifiedSourceInventory::certify(
+                observation.clone(),
+                observation,
+                "ownership-test-discovery",
+                sources,
+            )
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn base_ownership_accepts_exact_or_one_inventory_certified_descriptor_replacement() {
+        let descriptor_a = descriptor("schema-a", 1);
+        let descriptor_b = descriptor("schema-b", 1);
+        let exact_owner = SourceOwner {
+            route_index: 3,
+            source: descriptor_a.clone(),
+        };
+        assert!(source_owner_covers_base_source(
+            &descriptor_a,
+            &exact_owner,
+            &[]
+        ));
+
+        let replacement_owner = SourceOwner {
+            route_index: 3,
+            source: descriptor_b.clone(),
+        };
+        let inventory = inventory_owner(3, 1, vec![descriptor_b]);
+        assert!(source_owner_covers_base_source(
+            &descriptor_a,
+            &replacement_owner,
+            &[inventory]
+        ));
+    }
+
+    #[test]
+    fn descriptor_replacement_ownership_rejects_absence_wrong_route_ambiguity_and_lineage() {
+        let descriptor_a = descriptor("schema-a", 1);
+        let descriptor_b = descriptor("schema-b", 1);
+        let replacement_owner = SourceOwner {
+            route_index: 3,
+            source: descriptor_b.clone(),
+        };
+
+        assert!(!source_owner_covers_base_source(
+            &descriptor_a,
+            &replacement_owner,
+            &[]
+        ));
+        assert!(!source_owner_covers_base_source(
+            &descriptor_a,
+            &replacement_owner,
+            &[inventory_owner(4, 1, vec![descriptor_b.clone()])]
+        ));
+        assert!(!source_owner_covers_base_source(
+            &descriptor_a,
+            &replacement_owner,
+            &[
+                inventory_owner(3, 1, vec![descriptor_b.clone()]),
+                inventory_owner(3, 2, vec![descriptor_b]),
+            ]
+        ));
+
+        let unrelated_owner = SourceOwner {
+            route_index: 3,
+            source: descriptor("schema-b", 2),
+        };
+        assert!(!source_owner_covers_base_source(
+            &descriptor_a,
+            &unrelated_owner,
+            &[inventory_owner(3, 3, vec![unrelated_owner.source.clone()])]
+        ));
+    }
+
+    #[test]
+    fn inventory_rejects_two_descriptors_for_one_canonical_lineage() {
+        let descriptor_a = descriptor("schema-a", 1);
+        let descriptor_b = descriptor("schema-b", 1);
+        let observation = SourceInventoryObservation::new(
+            CaptureProvider::Gemini.as_str(),
+            "ownership-test-root",
+            TypedKey::U64(1),
+            "ownership-test-revision",
+            vec![1],
+        )
+        .unwrap();
+        assert_eq!(
+            CertifiedSourceInventory::certify(
+                observation.clone(),
+                observation,
+                "ownership-test-discovery",
+                vec![descriptor_a, descriptor_b],
+            )
+            .unwrap_err(),
+            ProjectionContractError::DuplicateInventorySource
+        );
     }
 }

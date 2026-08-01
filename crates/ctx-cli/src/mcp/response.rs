@@ -38,6 +38,52 @@ pub(super) fn tool_result(structured: Value) -> Value {
 }
 
 pub(super) fn tool_error_result(err: Error) -> Value {
+    if crate::commands::source_index::is_active_generation_race(&err) {
+        let structured = crate::commands::source_index::active_generation_race_error_json();
+        return json!({
+            "isError": true,
+            "content": [
+                {
+                    "type": "text",
+                    "text": "History changed while ctx was opening the searchable generation. Retry the same request.",
+                }
+            ],
+            "structuredContent": structured,
+        });
+    }
+    if let Some(error) = err.downcast_ref::<ctx_history_index::IndexError>() {
+        let error_code = match error {
+            ctx_history_index::IndexError::SessionEventCursorGenerationMismatch { .. } => {
+                Some("cursor_stale")
+            }
+            ctx_history_index::IndexError::SessionEventCursorSessionMismatch => {
+                Some("cursor_mismatch")
+            }
+            ctx_history_index::IndexError::InvalidSessionEventCursorSessionIdentity
+            | ctx_history_index::IndexError::InvalidSessionEventCursorCoordinate => {
+                Some("invalid_cursor")
+            }
+            _ => None,
+        };
+        if let Some(error_code) = error_code {
+            let detail = error.to_string();
+            return json!({
+                "isError": true,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": detail.clone(),
+                    }
+                ],
+                "structuredContent": {
+                    "error": detail.clone(),
+                    "error_code": error_code,
+                    "detail": detail,
+                    "retryable": false,
+                },
+            });
+        }
+    }
     if let Some(error) =
         err.downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
     {
@@ -154,12 +200,35 @@ pub(super) fn json_rpc_error(code: i64, message: &str, data: Option<Value>) -> V
 
 #[cfg(test)]
 mod tests {
+    use ctx_history_index::IndexError;
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
         error_response, invalid_request_response, invalid_tool_request, tool_error_result,
     };
+
+    #[test]
+    fn generation_change_is_a_retryable_typed_tool_error() {
+        let error = anyhow::Error::new(IndexError::ConcurrentGenerationChange)
+            .context("opening the searchable generation");
+        let result = tool_error_result(error);
+
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["error"],
+            "generation_changed/active_generation_race"
+        );
+        assert_eq!(
+            result["structuredContent"]["error_code"],
+            "generation_changed"
+        );
+        assert_eq!(
+            result["structuredContent"]["failure_kind"],
+            "active_generation_race"
+        );
+        assert_eq!(result["structuredContent"]["retryable"], true);
+    }
 
     #[test]
     fn error_response_preserves_required_null_id_while_pruning_optional_data() {
@@ -227,5 +296,36 @@ mod tests {
         );
         assert_eq!(result["structuredContent"]["retryable"], false);
         assert_eq!(result["content"][0]["text"], error.to_string());
+    }
+
+    #[test]
+    fn session_cursor_failures_have_stable_typed_tool_errors() {
+        let cases = [
+            (
+                ctx_history_index::IndexError::SessionEventCursorGenerationMismatch {
+                    cursor_generation: "old".to_owned(),
+                    pinned_generation: "new".to_owned(),
+                },
+                "cursor_stale",
+            ),
+            (
+                ctx_history_index::IndexError::SessionEventCursorSessionMismatch,
+                "cursor_mismatch",
+            ),
+            (
+                ctx_history_index::IndexError::InvalidSessionEventCursorCoordinate,
+                "invalid_cursor",
+            ),
+        ];
+
+        for (error, code) in cases {
+            let message = error.to_string();
+            let result = tool_error_result(anyhow::Error::new(error));
+            assert_eq!(result["isError"], true);
+            assert_eq!(result["structuredContent"]["error_code"], code);
+            assert_eq!(result["structuredContent"]["retryable"], false);
+            assert_eq!(result["structuredContent"]["detail"], message);
+            assert_eq!(result["content"][0]["text"], message);
+        }
     }
 }

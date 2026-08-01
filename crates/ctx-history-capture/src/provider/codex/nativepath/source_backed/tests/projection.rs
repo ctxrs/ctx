@@ -175,6 +175,125 @@ fn codex_exact_commit_result_publishes_scoped_outcome_and_complete_raw_output() 
 }
 
 #[test]
+fn codex_forked_history_attributes_one_canonical_execution_origin() {
+    use ctx_history_core::{RepositoryAbstentionReason, RepositoryVcsObservationKind};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let parent_native_session_id = "019fa000-0000-7000-8000-000000000190";
+    let child_native_session_id = "019fa000-0000-7000-8000-000000000191";
+    let copied_oid = "518dedb053f04ab0b529c7d2e8dafb322974fbf6";
+    let child_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let copied_call = exec_call(
+        "call-canonical-execution",
+        "git commit -m exact && git rev-parse --verify HEAD",
+        &repository,
+    );
+    let copied_result = successful_result(
+        "call-canonical-execution",
+        Value::String(format!("[main 518dedb] exact\n{copied_oid}\n")),
+    );
+    write_session(
+        &sessions,
+        parent_native_session_id,
+        &[copied_call.clone(), copied_result.clone()],
+    );
+    write_forked_session(
+        &sessions,
+        child_native_session_id,
+        parent_native_session_id,
+        &[
+            copied_call,
+            copied_result,
+            exec_call(
+                "call-child-execution",
+                "git commit -m child && git rev-parse --verify HEAD",
+                &repository,
+            ),
+            successful_result(
+                "call-child-execution",
+                Value::String(format!("[main aaaaaaa] child\n{child_oid}\n")),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let parent_source = codex_source_key(parent_native_session_id).unwrap();
+    let parent_session = codex_session_identity(&parent_source, parent_native_session_id).unwrap();
+    let child_source = codex_source_key(child_native_session_id).unwrap();
+    let child_session = codex_session_identity(&child_source, child_native_session_id).unwrap();
+
+    let parent_result = outcome_for_sequence(&verified, parent_session, 2);
+    assert_eq!(parent_result.repository_vcs_observations.len(), 1);
+    let copied_child_result = outcome_for_sequence(&verified, child_session, 2);
+    assert!(copied_child_result.repository_vcs_observations.is_empty());
+    assert!(copied_child_result
+        .repository_abstentions
+        .iter()
+        .any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref()
+                    == Some("copied_provider_history_has_ancestor_execution")
+        }));
+
+    let unique_child_result = outcome_for_sequence(&verified, child_session, 4);
+    let RepositoryVcsObservationKind::Outcome(outcome) =
+        &unique_child_result.repository_vcs_observations[0].kind
+    else {
+        panic!("expected unique child outcome");
+    };
+    assert_eq!(outcome.produced_object_ids[0].hex, child_oid);
+    assert_eq!(outcome.linkage.origin_call_id, "call-child-execution");
+}
+
+#[test]
+fn codex_forked_history_abstains_when_parent_origin_is_unavailable() {
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let child_native_session_id = "019fa000-0000-7000-8000-000000000192";
+    let missing_parent = "019fa000-0000-7000-8000-000000000193";
+    let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    write_forked_session(
+        &sessions,
+        child_native_session_id,
+        missing_parent,
+        &[
+            exec_call(
+                "call-unproven-origin",
+                "git commit -m exact && git rev-parse --verify HEAD",
+                &repository,
+            ),
+            successful_result(
+                "call-unproven-origin",
+                Value::String(format!("[main bbbbbbb] exact\n{oid}\n")),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(child_native_session_id).unwrap();
+    let session = codex_session_identity(&source, child_native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let result = outcome_for_sequence(&verified, session, 2);
+    assert!(result.repository_vcs_observations.is_empty());
+    assert!(result.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+            && abstention.detail.as_deref() == Some("provider_execution_origin_lineage_unproven")
+    }));
+}
+
+#[test]
 fn codex_success_without_binding_and_failed_or_mismatched_results_fail_closed() {
     use ctx_history_core::RepositoryAbstentionReason;
 
@@ -962,6 +1081,7 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
     let mut records = Vec::new();
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let mut event_identity_state = CodexEventIdentityStateV0::default();
+    let outcome_lineage = CodexOutcomeLineageAuthorityV0::unscoped();
     while let Some(page) = scanner.next_page().unwrap() {
         let CodexNativeOwnedPage::Core(page) = page;
         let owner = page.owner.unwrap();
@@ -974,6 +1094,7 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
                     row,
                     &mut event_identity_state,
                     &mut repository_attributor,
+                    &outcome_lineage,
                 )
                 .unwrap(),
             );
@@ -1035,6 +1156,7 @@ fn codex_large_tool_arguments_keep_both_complete_core_representations() {
     let mut records = Vec::new();
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let mut event_identity_state = CodexEventIdentityStateV0::default();
+    let outcome_lineage = CodexOutcomeLineageAuthorityV0::unscoped();
     while let Some(page) = scanner.next_page().unwrap() {
         let CodexNativeOwnedPage::Core(page) = page;
         let owner = page.owner.unwrap();
@@ -1047,6 +1169,7 @@ fn codex_large_tool_arguments_keep_both_complete_core_representations() {
                     row,
                     &mut event_identity_state,
                     &mut repository_attributor,
+                    &outcome_lineage,
                 )
                 .unwrap(),
             );

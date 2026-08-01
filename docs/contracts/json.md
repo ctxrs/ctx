@@ -5,8 +5,8 @@ arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
-`ctx setup --format json`, `ctx stats --format json`, and
-`ctx import --format json`.
+`ctx setup --format json`, `ctx stats --format json`,
+`ctx import --format json`, and `ctx sql --format json`.
 The Pro status object embedded by `ctx status --format json` and exposed through MCP
 uses its own version 2 contract, described below. Progress-event JSON is stderr
 progress output and does not include `schema_version`.
@@ -432,19 +432,46 @@ the final command result from stdout when `--format json` is present.
 
 ```bash
 ctx show session <ctx-session-id> --format json
+ctx show session <ctx-session-id> --format jsonl
 ctx show event <ctx-event-id> --format json
 ```
 
-Writes nothing and returns:
+Show reads only the active verified Core generation. Session presentation walks
+bounded internal Core pages and writes each selected event as it is rendered;
+it does not retain the complete session. The CLI has no public session cursor
+or page limit. Without `--max-events`, `ctx show session` streams every event
+selected by the requested mode in deterministic order, so large transcripts
+are complete rather than silently capped.
+
+Session JSON is one `session_transcript` object containing:
 
 - `schema_version`;
-- `target`, either `session` or `event`;
-- `payload_type`, either `session_transcript` or `event_window`;
-- `mode` for session transcripts;
-- `format`;
+- `target: "session"`;
+- `payload_type: "session_transcript"`;
+- `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- `mode` and `format`;
 - `session` for session output;
-- `event` for event output;
 - `events[]`.
+
+`--max-events <N>` is an explicit terminal truncation control, not pagination.
+When it stops selection, JSON adds
+`truncated: {"events": true, "max_events": N}` and does not return a
+continuation cursor. Without that option, session JSON has no `pagination`,
+`has_more`, or `next_cursor` fields.
+
+Session JSONL emits zero or more event records followed by exactly one terminal
+completion record. An event record has
+`payload_type: "session_transcript_event"`, the session identity and mode, and
+one rendered `event`. The terminal record has
+`payload_type: "session_transcript_completion"`, the same session identity and
+mode, `events_returned`, `complete`, and, only after explicit `--max-events`
+truncation, `truncated: {"events": true, "max_events": N}`. A complete empty
+session therefore emits only a completion record with `events_returned: 0` and
+`complete: true`. JSONL completion metadata is terminal stream metadata; it is
+not an MCP pagination envelope.
+
+Event JSON remains one `event_window` object with `target: "event"`, `format`,
+`event`, and `events[]`.
 
 `session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
 `provider_session_id` when known. For Codex, `provider_session_id` is the resume
@@ -455,9 +482,22 @@ or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
 `content.policy_reason`.
 
-Show reads the active verified Core generation. It does not reopen provider
-transcript files at query time and does not return provider source paths,
-existence checks, or source cursors.
+Show does not reopen provider transcript files at query time and does not return
+provider source paths, existence checks, or source cursors. With `--out`, a
+session transcript is staged and atomically installed only after the complete
+stream succeeds; a failed stream does not replace an existing destination.
+
+The in-repo Rust SDK preserves this split. `ShowSessionOptions::default()` has
+no `limit` or `cursor` and uses the complete CLI stream. Supplying either option
+uses the existing local MCP `show_session` page contract; its returned
+`pagination` object is preserved in the SDK session result's additive fields.
+
+If the active generation changes while `show` or `search` is opening its
+verified reader, JSON mode exits nonzero and writes one error object to stderr
+with `error: "generation_changed/active_generation_race"`,
+`error_code: "generation_changed"`,
+`failure_kind: "active_generation_race"`, and `retryable: true`. Clients may
+retry the same command; this race is not returned as a successful result.
 
 ## Transcript Artifacts
 
@@ -468,8 +508,9 @@ ctx show session <ctx-session-id> --mode full --format json --out transcript.jso
 With `--out`, writes the requested transcript artifact to that path and prints
 nothing on success. Without `--out`, stdout is the requested transcript
 artifact. JSON and JSONL artifact rows use the same ctx-owned ID fields as
-`show`; JSONL rows include `payload_type: "session_transcript_event"` and wrap
-the transcript row in `event`.
+`show`; JSONL uses the event-plus-terminal-completion stream described above.
+Artifacts inherit the same complete-by-default behavior and explicit,
+non-resumable `--max-events` truncation contract.
 
 ## Search
 
@@ -649,6 +690,11 @@ projection and returns:
 - `payload_type: "sql_result"`;
 - `read_only: true`;
 - `share_safe: false`;
+- `snapshot.relational_core_generation_id`;
+- `snapshot.relational_build_generation`;
+- `snapshot.observed_core_generation_id`;
+- `snapshot.projection_status` (`empty`, `ready`, or `behind`);
+- `snapshot.stale`;
 - `columns[]`, ordered selected column names;
 - `rows[]`, ordered arrays matching `columns[]`;
 - `returned_rows`;
@@ -667,8 +713,18 @@ the configured value cap. Truncated text values are encoded as objects with
 encoded as objects with `type: "blob"`, `bytes`, `preview_hex`, and
 `truncated`.
 
-`share_safe` is required and is always `false` for schema-version-1 SQL
-results. `read_only: true` describes database mutation only. The relational
+Schema-version-2 SQL results add the required `snapshot` object. The last
+coherent relational projection remains readable when its generation is older
+than the observed active Core generation; that case reports `stale: true`.
+`projection_status: "behind"` means catch-up failed after that coherent
+generation was published, not that partially updated rows are visible. The
+canonical empty projection with no active Core generation reports
+`stale: false`; generation-ID fields are omitted when no generation exists.
+Each result binds rows and relational generation metadata to one SQLite read
+transaction; separate invocations may observe different coherent generations.
+
+`share_safe` is required and is always `false` for SQL results. `read_only:
+true` describes database mutation only. The relational
 projection and its stable/internal views are metadata-only: they do not
 contain event bodies, previews, command/result payloads, or transcript text,
 and SQL does not fetch those bodies. Selected metadata can still contain

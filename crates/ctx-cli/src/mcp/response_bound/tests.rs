@@ -11,13 +11,19 @@ fn expanded_response() -> (Value, Value, Uuid) {
     let expanded = "\"\\\n\r\t\u{0000}\u{001f}雪".repeat(200);
     let structured = json!({
         "schema_version": 1,
-        "payload_type": "event_window",
-        "ctx_event_id": event_id,
-        "event": {
+        "payload_type": "session_transcript",
+        "ctx_session_id": "018f45d0-0000-7000-8000-000000000001",
+        "mode": "log",
+        "events": [{
             "ctx_event_id": event_id,
             "text": expanded,
+        }],
+        "pagination": {
+            "limit": 1,
+            "returned": 1,
+            "has_more": true,
+            "next_cursor": "opaque-next-page"
         },
-        "events": [{"ctx_event_id": event_id}],
     });
     let response = success_response(response_id.clone(), tool_result(structured));
     (response, response_id, event_id)
@@ -92,6 +98,10 @@ fn show_tool_call_detection_covers_both_show_tools() {
 
 #[test]
 fn final_mcp_serialization_is_bounded_after_json_expansion() {
+    assert_eq!(
+        crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        8 * 1024 * 1024
+    );
     let (response, response_id, event_id) = expanded_response();
     let serialized_bytes = serialized_json_line_bytes(&response).unwrap();
     assert!(serialized_bytes > TEST_OUTPUT_LIMIT);
@@ -110,6 +120,13 @@ fn final_mcp_serialization_is_bounded_after_json_expansion() {
         decoded["result"]["structuredContent"]["ctx_event_id"],
         event_id.to_string()
     );
+    assert!(decoded["result"]["structuredContent"]
+        .get("pagination")
+        .is_none());
+    assert!(!decoded["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("opaque-next-page"));
     assert!(serialized_json_line_bytes(&decoded).unwrap() <= TEST_OUTPUT_LIMIT);
 }
 

@@ -41,7 +41,9 @@ use crate::{
     CaptureError, Result,
 };
 #[cfg(test)]
-pub(crate) use checkpoint::install_after_codex_prefix_hash_hook;
+pub(crate) use checkpoint::{
+    install_after_codex_prefix_hash_hook, install_after_codex_second_prefix_hash_hook,
+};
 const CHECKPOINT_READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_CODEX_PAGE_UNITS: usize = 64;
 const MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS: u64 = 4 * 1024;

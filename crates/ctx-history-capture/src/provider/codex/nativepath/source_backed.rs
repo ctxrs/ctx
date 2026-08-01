@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+        mpsc::{self, Receiver, SyncSender},
         Arc,
     },
     thread,
@@ -45,7 +45,7 @@ use crate::{
         PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
     },
     provider::codex::{
-        catalog::{catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained},
+        catalog::catalog_codex_explicit_session_opened,
         nativepath::{opened_codex_file_observation, revalidate_codex_source_observation},
     },
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
@@ -58,7 +58,7 @@ const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v7";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v6";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v7";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -67,7 +67,6 @@ const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inv
 const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v1";
 const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v1\0";
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
-const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Error)]
 pub enum CodexSourceBackedErrorV0 {
@@ -305,16 +304,20 @@ mod catalog;
 mod cold;
 mod identity;
 mod ingestion;
+mod lineage;
 
-pub(crate) use catalog::{
-    discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
-    managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
-    writer_base_sources, CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
-};
+use lineage::{CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
+
 #[cfg(test)]
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
-    discover_codex_session_tree_inventory_from_plans_v0, CodexCatalogWorkV0,
+    discover_codex_session_tree_inventory_from_plans_v0, install_after_codex_directory_visit_hook,
+    install_after_codex_metadata_inventory_hook, CodexCatalogWorkV0,
+};
+pub(crate) use catalog::{
+    discover_codex_session_tree_inventory_v0, managed_codex_session_source,
+    observe_codex_explicit_session_source_backed_v0, writer_base_sources,
+    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
 };
 use cold::{
     cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdIngestionTargetV0,

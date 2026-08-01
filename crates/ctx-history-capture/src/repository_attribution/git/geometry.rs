@@ -147,7 +147,7 @@ fn update_negative_entry(digest: &mut Sha256, path: &Path) -> Option<()> {
     Some(())
 }
 
-pub(super) fn validate_candidate_route(
+pub(in super::super) fn validate_candidate_route(
     path: &Path,
     kind: CandidateKind,
 ) -> Result<PathBuf, ProbeFailure> {

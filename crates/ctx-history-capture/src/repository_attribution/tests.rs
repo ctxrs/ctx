@@ -20,9 +20,12 @@ use super::git::ProbeFailure;
 use super::{
     attribute,
     git::{CandidateKind, GitCertifier},
-    AttributionInput, RepositoryAttributor, UnscopedFileObservation, UnscopedVcsObservation,
+    linked_outcome_evidence, AttributionInput, LinkedOutcomeInput, RepositoryAttributor,
+    UnscopedFileObservation, UnscopedVcsObservation,
 };
+use crate::OutputOutcome;
 
+mod certification;
 #[cfg(unix)]
 mod local_root_authorization;
 
@@ -36,6 +39,19 @@ fn run_git(path: &Path, arguments: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {:?} failed", arguments);
+}
+
+fn git_output(path: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(path)
+        .args(arguments)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {:?} failed", arguments);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn repository(parent: &Path, name: &str, remote: Option<&str>) -> PathBuf {
@@ -619,6 +635,174 @@ fn exact_pull_request_outcome(alias: RepositoryAlias) -> RepositoryOutcomeObserv
     }
 }
 
+fn linked_short_commit(
+    repository: &Path,
+    command: &str,
+    output: String,
+) -> super::LinkedOutcomeEvidence {
+    let repository = repository.to_string_lossy().into_owned();
+    let output = serde_json::Value::String(output);
+    linked_outcome_evidence(LinkedOutcomeInput {
+        provider: "fixture",
+        command,
+        session_cwd: Some(&repository),
+        declared_workdir: Some(&repository),
+        origin_call_id: "call-origin",
+        result_call_id: "call-result",
+        origin_event_sequence: 7,
+        continuation_call_id_sha256: &[],
+        result_record_sha256: [9; 32],
+        observed_at_unix_ms: 10,
+        result_outcome: OutputOutcome::Success,
+        result_output: &output,
+        structured_commit_oid: None,
+        output_repository_path: Some(&repository),
+    })
+    .unwrap()
+}
+
+#[test]
+fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "public-ctx",
+        Some("https://github.com/ctxrs/ctx.git"),
+    );
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+    fs::write(repo.join("src/new.rs"), "pub fn added() {}\n").unwrap();
+    run_git(&repo, &["add", "tracked.txt", "src/new.rs"]);
+    run_git(&repo, &["commit", "-qm", "Capture public ctx outcome"]);
+    let oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    let parent = git_output(&repo, &["rev-parse", "HEAD^"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git commit -m 'Capture public ctx outcome'",
+        format!(
+            "[main {short}] Capture public ctx outcome\n 2 files changed, 2 insertions(+), 1 deletion(-)\n"
+        ),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git commit -m 'Capture public ctx outcome'".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert_eq!(
+        annotation.repository_bindings[0].logical_repository_id,
+        "forge:github.com/ctxrs/ctx"
+    );
+    let commit = annotation
+        .repository_vcs_observations
+        .iter()
+        .find(|observation| observation.kind == RepositoryVcsObservationKind::Commit)
+        .unwrap();
+    assert_eq!(commit.object_id.as_ref().unwrap().hex, oid);
+    assert_eq!(commit.parent_object_ids.len(), 1);
+    assert_eq!(commit.parent_object_ids[0].hex, parent);
+    let mut files = annotation
+        .repository_file_observations
+        .iter()
+        .map(|observation| observation.relative_path.as_str())
+        .collect::<Vec<_>>();
+    files.sort_unstable();
+    assert_eq!(files, ["src/new.rs", "tracked.txt"]);
+    assert!(annotation.repository_abstentions.is_empty());
+}
+
+#[test]
+fn short_merge_resolves_ordered_parents_and_first_parent_files() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "merge", None);
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "docs"]);
+    fs::write(repo.join("docs.md"), "docs\n").unwrap();
+    run_git(&repo, &["add", "docs.md"]);
+    run_git(&repo, &["commit", "-qm", "Add docs"]);
+    run_git(&repo, &["checkout", "-q", &primary]);
+    run_git(&repo, &["merge", "--no-ff", "docs", "-m", "Merge docs"]);
+    let oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    let parents = git_output(&repo, &["show", "-s", "--format=%P", "HEAD"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git merge --no-ff docs",
+        format!("Merge made by the 'ort' strategy.\n*   {short} Merge docs\n"),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git merge --no-ff docs".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+    let commit = annotation
+        .repository_vcs_observations
+        .iter()
+        .find(|observation| observation.kind == RepositoryVcsObservationKind::Commit)
+        .unwrap();
+    assert_eq!(commit.object_id.as_ref().unwrap().hex, oid);
+    assert_eq!(
+        commit
+            .parent_object_ids
+            .iter()
+            .map(|parent| parent.hex.as_str())
+            .collect::<Vec<_>>(),
+        parents.split(' ').collect::<Vec<_>>()
+    );
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert_eq!(
+        annotation.repository_file_observations[0].relative_path,
+        "docs.md"
+    );
+}
+
+#[test]
+fn rewritten_unreachable_short_commit_remains_inadmissible() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "rewritten", None);
+    fs::write(repo.join("tracked.txt"), "transient\n").unwrap();
+    run_git(&repo, &["add", "tracked.txt"]);
+    run_git(&repo, &["commit", "-qm", "Transient outcome"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    run_git(&repo, &["commit", "--amend", "-qm", "Final outcome"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git commit -m 'Transient outcome'",
+        format!("[main {short}] Transient outcome\n"),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git commit -m 'Transient outcome'".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+    assert!(annotation
+        .repository_vcs_observations
+        .iter()
+        .all(|observation| observation.kind != RepositoryVcsObservationKind::Commit));
+    assert!(annotation.repository_file_observations.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+}
+
 #[test]
 fn opaque_command_routes_block_outcomes_but_retain_structured_workdir() {
     let temp = TempDir::new().unwrap();
@@ -647,7 +831,7 @@ fn opaque_command_routes_block_outcomes_but_retain_structured_workdir() {
             command: Some(command.to_owned()),
             outcome_operation_repository_path: Some(path.clone()),
             outcome_output_repository_path: Some(path.clone()),
-            outcome_observations: vec![exact_commit_outcome()],
+            outcome_observations: vec![exact_commit_outcome().into()],
             ..AttributionInput::default()
         });
         assert_eq!(annotation.repository_bindings.len(), 1, "{command}");
@@ -683,7 +867,7 @@ fn failed_explicit_outcome_route_never_uses_sole_provider_logical_binding() {
         )),
         outcome_operation_repository_path: Some(path.clone()),
         outcome_output_repository_path: Some(path),
-        outcome_observations: vec![exact_commit_outcome()],
+        outcome_observations: vec![exact_commit_outcome().into()],
         ..AttributionInput::default()
     });
     assert_eq!(annotation.repository_bindings.len(), 1);
@@ -707,7 +891,7 @@ fn exact_pull_request_outcome_uses_provider_binding_without_a_live_local_route()
         command: Some("gh pr create --repo acme/provider-only".to_owned()),
         outcome_operation_repository_path: Some(missing.to_string_lossy().into_owned()),
         outcome_output_repository_path: Some(missing.to_string_lossy().into_owned()),
-        outcome_observations: vec![exact_pull_request_outcome(alias)],
+        outcome_observations: vec![exact_pull_request_outcome(alias).into()],
         ..AttributionInput::default()
     });
 
@@ -987,479 +1171,6 @@ fn provider_prebounded_oversized_command_blocks_session_cwd_fallback() {
     assert!(annotation.repository_bindings.is_empty());
     assert!(has_reason(
         &annotation,
-        RepositoryAbstentionReason::CommandTooLarge
-    ));
-}
-
-#[test]
-fn candidate_products_abstain_before_any_git_probe() {
-    let file_observations = (0..33)
-        .map(|index| UnscopedFileObservation {
-            path: format!("/definitely-missing/ctx-candidate-{index}"),
-            prior_path: None,
-            kind: RepositoryFileObservationKind::Modified,
-        })
-        .collect();
-    let files = attribute(AttributionInput {
-        file_observations,
-        ..AttributionInput::default()
-    });
-    assert!(has_reason(
-        &files,
-        RepositoryAbstentionReason::CandidateLimitExceeded
-    ));
-    assert!(!has_reason(
-        &files,
-        RepositoryAbstentionReason::CandidateMissingBeforeCertification
-    ));
-    assert_eq!(
-        candidate_paths(&files, RepositoryCandidateKind::FileActivityPath).len(),
-        33
-    );
-
-    let command = (0..33)
-        .map(|index| format!("git -C /definitely-missing/ctx-command-{index} status"))
-        .collect::<Vec<_>>()
-        .join(" && ");
-    let commands = attribute(AttributionInput {
-        command: Some(command),
-        ..AttributionInput::default()
-    });
-    assert!(has_reason(
-        &commands,
-        RepositoryAbstentionReason::CandidateLimitExceeded
-    ));
-    assert!(!has_reason(
-        &commands,
-        RepositoryAbstentionReason::CandidateMissingBeforeCertification
-    ));
-}
-
-#[test]
-fn command_candidate_limit_preserves_independent_evidence() {
-    let temp = TempDir::new().unwrap();
-    let workdir = repository(
-        temp.path(),
-        "bounded-workdir",
-        Some("https://github.com/acme/bounded-workdir.git"),
-    );
-    let activity = repository(
-        temp.path(),
-        "bounded-activity",
-        Some("https://github.com/acme/bounded-activity.git"),
-    );
-    let command = (0..33)
-        .map(|index| format!("git -C /definitely-missing/ctx-command-{index} status"))
-        .collect::<Vec<_>>()
-        .join(" && ");
-    let independent = attribute(AttributionInput {
-        declared_tool_workdir: Some(workdir.to_string_lossy().into_owned()),
-        command: Some(command),
-        file_observations: vec![UnscopedFileObservation {
-            path: activity.join("tracked.txt").to_string_lossy().into_owned(),
-            prior_path: None,
-            kind: RepositoryFileObservationKind::Modified,
-        }],
-        ..AttributionInput::default()
-    });
-    assert_eq!(independent.repository_bindings.len(), 2);
-    assert_eq!(independent.repository_file_observations.len(), 1);
-    assert!(has_reason(
-        &independent,
-        RepositoryAbstentionReason::CandidateLimitExceeded
-    ));
-    assert!(!has_reason(
-        &independent,
-        RepositoryAbstentionReason::CandidateMissingBeforeCertification
-    ));
-}
-
-#[test]
-fn one_event_is_bounded_to_two_full_certificates_and_eight_git_subprocesses() {
-    let temp = TempDir::new().unwrap();
-    let repositories = [
-        repository(temp.path(), "first-budget", None),
-        repository(temp.path(), "second-budget", None),
-        repository(temp.path(), "third-budget", None),
-    ];
-    let command = repositories
-        .iter()
-        .map(|path| format!("git -C {} status", path.display()))
-        .collect::<Vec<_>>()
-        .join(" && ");
-    let mut attributor = RepositoryAttributor::default();
-    let annotation = attributor.attribute(AttributionInput {
-        command: Some(command),
-        ..AttributionInput::default()
-    });
-
-    assert_eq!(annotation.repository_bindings.len(), 2);
-    assert!(has_reason(
-        &annotation,
-        RepositoryAbstentionReason::ProbeBudgetExceeded
-    ));
-    assert_eq!(
-        attributor.full_certification_probe_count(),
-        super::git::MAX_FULL_CERTIFICATIONS_PER_EVENT
-    );
-    assert_eq!(
-        attributor.git_subprocess_count(),
-        super::git::MAX_GIT_SUBPROCESSES_PER_EVENT
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn every_candidate_route_is_revalidated_in_both_ancestor_descendant_orders() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().unwrap();
-    let repo = repository(temp.path(), "repo", None);
-    let outside = repository(temp.path(), "outside", None);
-    let descendant = repo.join("route");
-
-    let mut ancestor_first = RepositoryAttributor::default();
-    let root = ancestor_first.attribute(AttributionInput {
-        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(root.repository_bindings.len(), 1);
-    symlink(&outside, &descendant).unwrap();
-    let unsafe_descendant = ancestor_first.attribute(AttributionInput {
-        declared_tool_workdir: Some(descendant.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert!(unsafe_descendant.repository_bindings.is_empty());
-    assert!(has_reason(
-        &unsafe_descendant,
-        RepositoryAbstentionReason::UnsafePath
-    ));
-
-    let mut descendant_first = RepositoryAttributor::default();
-    let unsafe_descendant = descendant_first.attribute(AttributionInput {
-        declared_tool_workdir: Some(descendant.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert!(unsafe_descendant.repository_bindings.is_empty());
-    assert!(has_reason(
-        &unsafe_descendant,
-        RepositoryAbstentionReason::UnsafePath
-    ));
-    fs::remove_file(&descendant).unwrap();
-    fs::create_dir(&descendant).unwrap();
-    let safe_root = descendant_first.attribute(AttributionInput {
-        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(safe_root.repository_bindings.len(), 1);
-}
-
-#[cfg(unix)]
-#[test]
-fn certification_cache_is_constant_probe_for_repeated_events_and_invalidates_safely() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().unwrap();
-    let first = repository(temp.path(), "first", None);
-    let second = repository(temp.path(), "second", None);
-    let mut attributor = RepositoryAttributor::default();
-
-    for _ in 0..1_000 {
-        let annotation = attributor.attribute(AttributionInput {
-            declared_tool_workdir: Some(first.to_string_lossy().into_owned()),
-            ..AttributionInput::default()
-        });
-        assert_eq!(annotation.repository_bindings.len(), 1);
-    }
-    assert_eq!(attributor.full_certification_probe_count(), 1);
-
-    let file_evidence = attributor.attribute(AttributionInput {
-        file_observations: vec![UnscopedFileObservation {
-            path: first.join("tracked.txt").to_string_lossy().into_owned(),
-            prior_path: None,
-            kind: RepositoryFileObservationKind::Modified,
-        }],
-        ..AttributionInput::default()
-    });
-    assert_eq!(attributor.full_certification_probe_count(), 1);
-    assert_eq!(
-        file_evidence.repository_bindings[0].evidence[0].kind,
-        RepositoryEvidenceKind::FileActivity
-    );
-
-    for _ in 0..100 {
-        for path in [&first, &second] {
-            let annotation = attributor.attribute(AttributionInput {
-                declared_tool_workdir: Some(path.to_string_lossy().into_owned()),
-                ..AttributionInput::default()
-            });
-            assert_eq!(annotation.repository_bindings.len(), 1);
-        }
-    }
-    assert_eq!(attributor.full_certification_probe_count(), 2);
-
-    let moved = temp.path().join("moved-first");
-    fs::rename(&first, &moved).unwrap();
-    let moved_binding = attributor.attribute(AttributionInput {
-        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(moved_binding.repository_bindings.len(), 1);
-    assert_eq!(attributor.full_certification_probe_count(), 3);
-
-    let route = moved.join("route");
-    fs::create_dir(&route).unwrap();
-    let safe_route = attributor.attribute(AttributionInput {
-        declared_tool_workdir: Some(route.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(safe_route.repository_bindings.len(), 1);
-    assert_eq!(attributor.full_certification_probe_count(), 3);
-    fs::remove_dir(&route).unwrap();
-    symlink(&second, &route).unwrap();
-    let swapped_route = attributor.attribute(AttributionInput {
-        declared_tool_workdir: Some(route.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert!(swapped_route.repository_bindings.is_empty());
-    assert!(has_reason(
-        &swapped_route,
-        RepositoryAbstentionReason::UnsafePath
-    ));
-    assert_eq!(attributor.full_certification_probe_count(), 3);
-
-    let later_repo = temp.path().join("later-repo");
-    for _ in 0..2 {
-        let negative = attributor.attribute(AttributionInput {
-            declared_tool_workdir: Some(later_repo.to_string_lossy().into_owned()),
-            ..AttributionInput::default()
-        });
-        assert!(negative.repository_bindings.is_empty());
-    }
-    assert_eq!(attributor.full_certification_probe_count(), 4);
-    fs::create_dir(&later_repo).unwrap();
-    run_git(&later_repo, &["init", "-q"]);
-    run_git(&later_repo, &["config", "user.name", "ctx test"]);
-    run_git(
-        &later_repo,
-        &["config", "user.email", "ctx@example.invalid"],
-    );
-    fs::write(later_repo.join("tracked.txt"), "tracked\n").unwrap();
-    run_git(&later_repo, &["add", "tracked.txt"]);
-    run_git(&later_repo, &["commit", "-qm", "created later"]);
-    let discovered = attributor.attribute(AttributionInput {
-        declared_tool_workdir: Some(later_repo.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(discovered.repository_bindings.len(), 1);
-    assert_eq!(attributor.full_certification_probe_count(), 5);
-}
-
-#[cfg(unix)]
-#[test]
-fn independent_worker_caches_revalidate_replaced_git_identity() {
-    let temp = TempDir::new().unwrap();
-    let repo = repository(temp.path(), "repo", None);
-    let mut workers = [
-        RepositoryAttributor::default(),
-        RepositoryAttributor::default(),
-    ];
-    for worker in &mut workers {
-        let initial = worker.attribute(AttributionInput {
-            activity_at_unix_ms: Some(100),
-            declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
-            ..AttributionInput::default()
-        });
-        assert_eq!(initial.repository_bindings.len(), 1);
-        assert_eq!(worker.full_certification_probe_count(), 1);
-    }
-
-    fs::rename(repo.join(".git"), repo.join(".git-old")).unwrap();
-    run_git(&repo, &["init", "-q"]);
-    run_git(&repo, &["config", "user.name", "ctx test"]);
-    run_git(&repo, &["config", "user.email", "ctx@example.invalid"]);
-    run_git(&repo, &["add", "tracked.txt"]);
-    run_git(&repo, &["commit", "-qm", "replacement"]);
-
-    for worker in &mut workers {
-        let replaced = worker.attribute(AttributionInput {
-            activity_at_unix_ms: Some(200),
-            declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
-            ..AttributionInput::default()
-        });
-        assert_eq!(replaced.repository_bindings.len(), 1);
-        assert_eq!(worker.full_certification_probe_count(), 2);
-        assert_eq!(
-            replaced.repository_bindings[0]
-                .local_root_authorization
-                .as_ref()
-                .unwrap()
-                .observed_at_unix_ms,
-            200
-        );
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn provider_activity_time_is_exact_on_probe_and_cache_reuse() {
-    use std::cmp::Ordering;
-
-    let temp = TempDir::new().unwrap();
-    let old = repository(temp.path(), "old", None);
-    let mut attributor = RepositoryAttributor::default();
-    let older = attributor.attribute(AttributionInput {
-        activity_at_unix_ms: Some(100),
-        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    let cached = attributor.attribute(AttributionInput {
-        activity_at_unix_ms: Some(150),
-        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(attributor.full_certification_probe_count(), 1);
-    assert_eq!(
-        cached.repository_bindings[0]
-            .local_root_authorization
-            .as_ref()
-            .unwrap()
-            .observed_at_unix_ms,
-        150
-    );
-
-    let moved = temp.path().join("moved");
-    fs::rename(&old, &moved).unwrap();
-    let newer = attributor.attribute(AttributionInput {
-        activity_at_unix_ms: Some(200),
-        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    let older_root = older.repository_bindings[0]
-        .local_root_authorization
-        .as_ref()
-        .unwrap();
-    let newer_root = newer.repository_bindings[0]
-        .local_root_authorization
-        .as_ref()
-        .unwrap();
-    assert_eq!(
-        newer_root.provider_activity_order(older_root),
-        Some(Ordering::Greater)
-    );
-    assert_eq!(
-        older_root.provider_activity_order(newer_root),
-        Some(Ordering::Less)
-    );
-    let mut same_time = newer_root.clone();
-    same_time.local_root = "/different/root".to_owned();
-    assert_eq!(newer_root.provider_activity_order(&same_time), None);
-
-    let missing_time_a = attribute(AttributionInput {
-        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    let missing_time_b = attribute(AttributionInput {
-        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert_eq!(missing_time_a, missing_time_b);
-    let missing_a = missing_time_a.repository_bindings[0]
-        .local_root_authorization
-        .as_ref()
-        .unwrap();
-    let missing_b = missing_time_b.repository_bindings[0]
-        .local_root_authorization
-        .as_ref()
-        .unwrap();
-    assert_eq!(
-        missing_a.observed_at_unix_ms,
-        ctx_history_core::CORE_MISSING_ACTIVITY_TIME_UNIX_MS
-    );
-    assert_eq!(missing_a.provider_activity_order(missing_b), None);
-}
-
-#[cfg(unix)]
-#[test]
-fn symlink_deep_path_drift_timeout_and_output_bounds_fail_closed() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
-
-    let temp = TempDir::new().unwrap();
-    let repo = repository(temp.path(), "repo", None);
-    let link = temp.path().join("link");
-    symlink(&repo, &link).unwrap();
-    let unsafe_link = attribute(AttributionInput {
-        declared_tool_workdir: Some(link.to_string_lossy().into_owned()),
-        ..AttributionInput::default()
-    });
-    assert!(has_reason(
-        &unsafe_link,
-        RepositoryAbstentionReason::UnsafePath
-    ));
-
-    let deep = format!("/{}", vec!["x"; 65].join("/"));
-    let deep_result = attribute(AttributionInput {
-        declared_tool_workdir: Some(deep),
-        ..AttributionInput::default()
-    });
-    assert!(has_reason(
-        &deep_result,
-        RepositoryAbstentionReason::UnsafePath
-    ));
-
-    let certifier = GitCertifier::default();
-    let drift = certifier.certify_with_between_probe(
-        &repo,
-        CandidateKind::Directory,
-        RepositoryEvidenceKind::DeclaredToolWorkdir,
-        || {
-            run_git(
-                &repo,
-                &[
-                    "remote",
-                    "add",
-                    "later",
-                    "https://github.com/acme/later.git",
-                ],
-            );
-        },
-    );
-    assert!(matches!(drift, Err(ProbeFailure::ConcurrentDrift)));
-
-    for (name, body, expected, timeout) in [
-        (
-            "slow-git",
-            "#!/bin/sh\nsleep 1\n",
-            "git_timeout",
-            Duration::from_millis(30),
-        ),
-        (
-            "loud-git",
-            "#!/bin/sh\n/usr/bin/head -c 70000 /dev/zero | /usr/bin/tr '\\0' x\n",
-            "git_output_limit_exceeded",
-            Duration::from_secs(2),
-        ),
-    ] {
-        let script = temp.path().join(name);
-        fs::write(&script, body).unwrap();
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&script, permissions).unwrap();
-        let certifier = GitCertifier::for_test(&script, timeout);
-        let result = certifier.certify(
-            &repo,
-            CandidateKind::Directory,
-            RepositoryEvidenceKind::DeclaredToolWorkdir,
-        );
-        assert!(matches!(result, Err(ProbeFailure::Failed(detail)) if detail == expected));
-    }
-
-    let too_large = attribute(AttributionInput {
-        command: Some("x".repeat(super::shell::MAX_COMMAND_BYTES + 1)),
-        ..AttributionInput::default()
-    });
-    assert!(has_reason(
-        &too_large,
         RepositoryAbstentionReason::CommandTooLarge
     ));
 }

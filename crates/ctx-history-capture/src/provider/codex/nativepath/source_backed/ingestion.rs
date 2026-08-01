@@ -163,6 +163,7 @@ fn ingest_codex_sources_with_options_v0(
     indexer_threads: usize,
     cold_options: ColdParallelOptionsV0,
 ) -> CodexSourceBackedResultV0<()> {
+    let outcome_lineage = Arc::new(CodexOutcomeLineageAuthorityV0::from_sources(&sources));
     counters.catalog_sources =
         u64::try_from(sources.len()).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
     counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
@@ -218,6 +219,7 @@ fn ingest_codex_sources_with_options_v0(
     ingest_codex_cold_parallel_v0(
         changed_sources,
         base_event_lookup,
+        outcome_lineage,
         ColdIngestionTargetV0 {
             writer,
             revalidation,
@@ -237,6 +239,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
+    let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&sources);
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let base_event_lookup = writer.base_event_identity_lookup();
     for (source, source_key, native_session_id) in sources {
@@ -337,6 +340,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     row,
                     &mut event_identity_state,
                     &mut repository_attributor,
+                    &outcome_lineage,
                 )?;
                 timings.scanner_worker_busy += conversion_started.elapsed();
                 let add_started = Instant::now();

@@ -3,6 +3,9 @@ use super::*;
 impl VerifiedIndex {
     /// Searches full policy-selected event text using ordinary analyzed text.
     ///
+    /// A lone full canonical Git object ID first ranks certified typed outcome
+    /// producers, then falls back to ordinary lexical matches.
+    ///
     /// An analyzed token admits a partial match. Full query-term coverage ranks
     /// ahead of partial coverage, followed by ordinary lexical relevance.
     /// QueryParser operators and field syntax are intentionally not accepted.
@@ -53,6 +56,22 @@ impl VerifiedIndex {
         if ranking_terms.is_empty() {
             return Ok(Vec::new());
         }
+        let mut candidates = Vec::with_capacity(limit);
+        let mut seen = BTreeSet::new();
+        if let Some(object_id) = canonical_git_object_id_query(natural_texts) {
+            let exact_query = Box::new(TermQuery::new(
+                Term::from_field_text(fields.repository_produced_object_id, object_id),
+                IndexRecordOption::Basic,
+            ));
+            for candidate in self.collect_event_candidates(exact_query, filters, limit, fields)? {
+                if seen.insert(candidate.event.event_id.as_uuid()) {
+                    candidates.push(candidate);
+                }
+            }
+            if candidates.len() == limit {
+                return Ok(candidates);
+            }
+        }
         if ranking_terms.len() == 1 {
             #[cfg(test)]
             record_lexical_query_construction();
@@ -60,7 +79,20 @@ impl VerifiedIndex {
                 ranking_terms[0].clone(),
                 IndexRecordOption::WithFreqs,
             ));
-            return self.collect_event_candidates(body_query, filters, limit, fields);
+            let lexical_limit = limit
+                .checked_add(seen.len())
+                .ok_or(IndexError::CountOverflow)?;
+            for candidate in
+                self.collect_event_candidates(body_query, filters, lexical_limit, fields)?
+            {
+                if seen.insert(candidate.event.event_id.as_uuid()) {
+                    candidates.push(candidate);
+                    if candidates.len() == limit {
+                        break;
+                    }
+                }
+            }
+            return Ok(candidates);
         }
 
         // Rank by exact query-term coverage without constructing one
@@ -69,8 +101,6 @@ impl VerifiedIndex {
         // common terms even when the caller requested only a handful of
         // results. Tantivy's minimum-should-match query gives us the same
         // ordering as bounded tiers: all terms first, then N-1, down to one.
-        let mut candidates = Vec::with_capacity(limit);
-        let mut seen = BTreeSet::new();
         for minimum_required in (1..=ranking_terms.len()).rev() {
             #[cfg(test)]
             record_lexical_query_construction();
@@ -220,4 +250,17 @@ impl VerifiedIndex {
         }
         Ok(Some(Box::new(BooleanQuery::new(clauses))))
     }
+}
+
+fn canonical_git_object_id_query<'a>(natural_texts: &'a [&str]) -> Option<&'a str> {
+    let [natural_text] = natural_texts else {
+        return None;
+    };
+    matches!(natural_text.len(), 40 | 64)
+        .then_some(*natural_text)
+        .filter(|value| {
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }

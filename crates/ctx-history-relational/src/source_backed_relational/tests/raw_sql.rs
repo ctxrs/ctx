@@ -38,6 +38,33 @@ fn guarded_raw_sql_rejects_empty_parameters_writes_and_multiple_statements() {
 }
 
 #[test]
+fn preparation_limit_applies_before_tail_classification() {
+    let (_temp, projection) = projection();
+    let excessive_columns = (0..=RAW_SQL_MAX_COLUMNS_CAP)
+        .map(|index| format!("1 AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let error = projection
+        .raw_sql_query(
+            &format!("SELECT {excessive_columns}; SELECT 1"),
+            RawSqlOptions {
+                max_columns: RAW_SQL_MAX_COLUMNS_CAP,
+                ..RawSqlOptions::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(
+        !matches!(
+            error,
+            RelationalProjectionError::Sql(rusqlite::Error::MultipleStatement)
+        ),
+        "the tail parser must not prepare a statement above the fixed complexity cap"
+    );
+    assert!(error.to_string().contains("too many columns"), "{error}");
+}
+
+#[test]
 fn guarded_raw_sql_caps_rows_and_values() {
     let (_temp, projection) = projection();
     let result = projection
@@ -119,6 +146,48 @@ fn guarded_raw_sql_budgets_against_actual_column_count() {
 
     assert_eq!(result.returned_rows, 1);
     assert_eq!(result.rows[0][0], RawSqlValue::Integer(1));
+}
+
+#[test]
+fn max_columns_applies_to_final_shape_not_stable_view_expansion() {
+    let (_temp, projection) = projection();
+    let result = projection
+        .raw_sql_query(
+            "SELECT e.ctx_event_id, s.root_ctx_session_id
+             FROM ctx_events AS e
+             LEFT JOIN ctx_sessions AS s ON s.ctx_session_id = e.ctx_session_id
+             LIMIT 1",
+            RawSqlOptions {
+                max_columns: 2,
+                ..RawSqlOptions::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.columns.len(), 2);
+    assert!(result.rows.is_empty());
+}
+
+#[test]
+fn max_columns_still_rejects_a_wider_public_result_shape() {
+    let (_temp, projection) = projection();
+    let error = projection
+        .raw_sql_query(
+            "SELECT 1 AS one, 2 AS two",
+            RawSqlOptions {
+                max_columns: 1,
+                ..RawSqlOptions::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RelationalProjectionError::RawSqlTooManyColumns {
+            columns: 2,
+            max_columns: 1
+        }
+    ));
 }
 
 #[test]

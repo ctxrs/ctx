@@ -172,3 +172,385 @@ fn active_source_family_contract_explicit_codex_defers_append_after_staging() {
         1
     );
 }
+
+#[test]
+fn active_source_family_contract_codex_tree_defers_append_after_staging() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019facf0-3333-7777-8888-000000000005";
+    let selected = sessions.join(format!("rollout-{native_session_id}.jsonl"));
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["treefrozenmarker"]),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+
+    let append = codex_rollout_bytes(native_session_id, &["discarded", "treeappendmarker"]);
+    let appended_line = append
+        .split_inclusive(|byte| *byte == b'\n')
+        .nth(2)
+        .expect("fixture has a second message")
+        .to_vec();
+    let append_path = selected.clone();
+    super::super::set_after_codex_session_tree_stage_hook(move |_| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(append_path)
+            .unwrap();
+        file.write_all(&appended_line).unwrap();
+        file.sync_all().unwrap();
+    });
+
+    let frozen = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(frozen.commit.indexed_documents, 1);
+    assert!(VerifiedIndex::open(&index)
+        .unwrap()
+        .search_event_candidates("treeappendmarker", 8)
+        .unwrap()
+        .is_empty());
+
+    let caught_up = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(caught_up.commit.indexed_documents, 2);
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates("treeappendmarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn active_source_family_contract_codex_tree_admits_append_during_cold_catalog() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let archived_sessions = temp.path().join("archived_sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&archived_sessions).unwrap();
+    let native_session_id = "019facf0-3333-7777-8888-000000000006";
+    let selected = sessions.join(format!("rollout-{native_session_id}.jsonl"));
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["catalogfrozenmarker"]),
+    )
+    .unwrap();
+
+    let append = codex_rollout_bytes(native_session_id, &["discarded", "catalogappendmarker"]);
+    let appended_line = append
+        .split_inclusive(|byte| *byte == b'\n')
+        .nth(2)
+        .expect("fixture has a second message")
+        .to_vec();
+    let append_path = selected.clone();
+    crate::provider::codex::nativepath::install_after_codex_metadata_inventory_hook(move || {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(append_path)
+            .unwrap();
+        file.write_all(&appended_line).unwrap();
+        file.sync_all().unwrap();
+    });
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    super::super::register_codex_session_tree_routes(
+        &mut registry,
+        vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &archived_sessions,
+            ),
+        ],
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+
+    let cold = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(cold.commit.indexed_documents, 2);
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates("catalogappendmarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn active_source_family_contract_codex_tree_defers_new_session_after_staging() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let first_session_id = "019facf0-3333-7777-8888-000000000007";
+    fs::write(
+        sessions.join(format!("rollout-{first_session_id}.jsonl")),
+        codex_rollout_bytes(first_session_id, &["firsttreesessionmarker"]),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+
+    let second_session_id = "019facf0-3333-7777-8888-000000000008";
+    let second_path = sessions.join(format!("rollout-{second_session_id}.jsonl"));
+    super::super::set_after_codex_session_tree_stage_hook(move |_| {
+        fs::write(
+            second_path,
+            codex_rollout_bytes(second_session_id, &["deferredtreesessionmarker"]),
+        )
+        .unwrap();
+    });
+
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+    let frozen = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert_eq!(frozen.commit.indexed_documents, 1);
+    assert!(VerifiedIndex::open(&index)
+        .unwrap()
+        .search_event_candidates("deferredtreesessionmarker", 8)
+        .unwrap()
+        .is_empty());
+
+    let caught_up = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    assert_eq!(caught_up.commit.indexed_documents, 2);
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates("deferredtreesessionmarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn active_source_family_contract_codex_tree_rejects_captured_session_removal() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019facf0-3333-7777-8888-000000000009";
+    let selected = sessions.join(format!("rollout-{native_session_id}.jsonl"));
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["removedtreesessionmarker"]),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    super::super::set_after_codex_session_tree_stage_hook(move |_| {
+        fs::remove_file(selected).unwrap();
+    });
+
+    let error = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("changed"));
+    assert!(VerifiedIndex::open(&index).is_err());
+}
+
+#[test]
+fn active_source_family_contract_codex_tree_rejects_deleted_source_reappearance() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let nested = sessions.join("nested");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&nested).unwrap();
+    let native_session_id = "019facf0-3333-7777-8888-000000000010";
+    let selected = nested.join(format!("rollout-{native_session_id}.jsonl"));
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["deletionbasemarker"]),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+    let seeded = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    let seeded_generation = seeded.commit.generation_id.clone();
+    fs::remove_file(&selected).unwrap();
+
+    let recreate_path = selected.clone();
+    super::super::set_after_codex_session_tree_stage_hook(move |_| {
+        crate::provider::codex::nativepath::install_after_codex_directory_visit_hook(
+            PathBuf::from("nested"),
+            move || {
+                fs::write(
+                    recreate_path,
+                    codex_rollout_bytes(native_session_id, &["reappearedsourcemarker"]),
+                )
+                .unwrap();
+            },
+        );
+    });
+    let error = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap_err();
+    assert!(error.to_string().contains("inventory"));
+    let preserved = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(preserved.generation_id(), seeded_generation);
+    assert_eq!(
+        preserved
+            .search_event_candidates("deletionbasemarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(preserved
+        .search_event_candidates("reappearedsourcemarker", 8)
+        .unwrap()
+        .is_empty());
+
+    let recovered = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    assert_ne!(recovered.commit.generation_id, seeded_generation);
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates("reappearedsourcemarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn active_source_family_contract_codex_tree_rejects_root_replacement_with_same_leaf() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let moved_sessions = temp.path().join("moved-sessions");
+    let replacement = temp.path().join("replacement");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&replacement).unwrap();
+    let native_session_id = "019facf0-3333-7777-8888-000000000011";
+    let file_name = format!("rollout-{native_session_id}.jsonl");
+    let selected = sessions.join(&file_name);
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["retainedrootmarker"]),
+    )
+    .unwrap();
+    fs::hard_link(&selected, replacement.join(&file_name)).unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+
+    let replace_sessions = sessions.clone();
+    super::super::set_after_codex_session_tree_stage_hook(move |_| {
+        fs::rename(&replace_sessions, moved_sessions).unwrap();
+        fs::rename(replacement, replace_sessions).unwrap();
+    });
+    let error = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("inventory"));
+    assert!(VerifiedIndex::open(&index).is_err());
+}

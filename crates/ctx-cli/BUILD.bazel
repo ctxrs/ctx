@@ -623,6 +623,7 @@ ctx_cli_integration_test(
         "tests/support/search_show_locate_sql/import_paths.rs",
         "tests/support/search_show_locate_sql/pi_flow.rs",
         "tests/support/search_show_locate_sql/search_filters.rs",
+        "tests/support/search_show_locate_sql/search_flows.rs",
     ],
     test_support = [
         "base",
