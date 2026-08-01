@@ -48,7 +48,7 @@ pub(super) struct SourceBackedSemanticGeneration {
 }
 
 impl SourceBackedSemanticGeneration {
-    /// Binds semantic catch-up to one verified schema-v4 Core manifest.
+    /// Binds semantic catch-up to one verified schema-v13 Core manifest.
     ///
     /// `semantic_documents` is supplied by the stable semantic-record feed
     /// because a Core manifest counts all indexed event records, including

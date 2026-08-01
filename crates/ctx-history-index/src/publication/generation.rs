@@ -5,7 +5,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tantivy::{directory::Directory, Index, IndexSettings};
+use tantivy::{
+    directory::Directory,
+    store::{Compressor, ZstdCompressor},
+    Index, IndexSettings,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -17,6 +21,25 @@ pub(crate) const ACTIVE_GENERATION_POINTER_FILE: &str = "active-generation.json"
 pub(crate) const INDEX_GENERATIONS_DIRECTORY: &str = "index-generations";
 const ACTIVE_GENERATION_POINTER_VERSION: u32 = 1;
 const GENERATION_DIRECTORY_PREFIX: &str = "generation-";
+
+pub(crate) fn lexical_index_settings() -> IndexSettings {
+    IndexSettings {
+        docstore_compression: Compressor::Zstd(ZstdCompressor {
+            compression_level: Some(1),
+        }),
+        docstore_compress_dedicated_thread: true,
+        docstore_blocksize: 64 * 1024,
+    }
+}
+
+fn validate_lexical_index_settings(index: &Index) -> Result<()> {
+    if index.settings() != &lexical_index_settings() {
+        return Err(IndexError::IndexSettingsMismatch(
+            crate::LEXICAL_SCHEMA_VERSION,
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +148,7 @@ pub(crate) fn open_slot_index(root: &Path, slot: &GenerationSlot) -> Result<Inde
     let directory =
         DurableMmapDirectory::open(slot_path(root, slot)).map_err(tantivy::TantivyError::from)?;
     let index = Index::open(directory)?;
+    validate_lexical_index_settings(&index)?;
     register_body_analyzer(&index);
     Ok(index)
 }
@@ -146,8 +170,9 @@ pub(crate) fn create_candidate_generation(
     let index = if base.is_some() {
         Index::open(directory)?
     } else {
-        Index::create(directory, lexical_schema(), IndexSettings::default())?
+        Index::create(directory, lexical_schema(), lexical_index_settings())?
     };
+    validate_lexical_index_settings(&index)?;
     register_body_analyzer(&index);
     Ok(CandidateGeneration {
         directory_name,
@@ -244,4 +269,69 @@ fn is_generation_directory_name(name: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_mismatched_slot(root: &Path) -> GenerationSlot {
+        let directory_name = "generation-00000000000000000000000000000001";
+        let path = root.join(INDEX_GENERATIONS_DIRECTORY).join(directory_name);
+        fs::create_dir_all(&path).unwrap();
+        Index::create_in_dir(&path, lexical_schema()).unwrap();
+        GenerationSlot::new("0".repeat(64), directory_name.to_owned()).unwrap()
+    }
+
+    #[test]
+    fn lexical_index_settings_are_exact() {
+        let settings = lexical_index_settings();
+
+        assert_eq!(
+            settings.docstore_compression,
+            Compressor::Zstd(ZstdCompressor {
+                compression_level: Some(1),
+            })
+        );
+        assert_eq!(settings.docstore_blocksize, 64 * 1024);
+        assert!(settings.docstore_compress_dedicated_thread);
+    }
+
+    #[test]
+    fn candidate_settings_roundtrip_exactly() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = create_candidate_generation(root.path(), None).unwrap();
+        let slot = GenerationSlot::new("0".repeat(64), candidate.directory_name.clone()).unwrap();
+        assert_eq!(candidate.index.settings(), &lexical_index_settings());
+        drop(candidate.index);
+
+        let reopened = open_slot_index(root.path(), &slot).unwrap();
+        assert_eq!(reopened.settings(), &lexical_index_settings());
+    }
+
+    #[test]
+    fn opened_index_with_mismatched_settings_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let slot = create_mismatched_slot(root.path());
+
+        assert!(matches!(
+            open_slot_index(root.path(), &slot),
+            Err(IndexError::IndexSettingsMismatch(
+                crate::LEXICAL_SCHEMA_VERSION
+            ))
+        ));
+    }
+
+    #[test]
+    fn cloned_candidate_with_mismatched_settings_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let slot = create_mismatched_slot(root.path());
+
+        assert!(matches!(
+            create_candidate_generation(root.path(), Some(&slot)),
+            Err(IndexError::IndexSettingsMismatch(
+                crate::LEXICAL_SCHEMA_VERSION
+            ))
+        ));
+    }
 }
