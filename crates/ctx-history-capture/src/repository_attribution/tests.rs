@@ -769,6 +769,26 @@ fn conflicting_or_unbounded_provider_native_identities_abstain() {
         &ambiguous,
         RepositoryAbstentionReason::Ambiguous
     ));
+
+    let temp = TempDir::new().unwrap();
+    let repository = repository(
+        temp.path(),
+        "structured-repository",
+        Some("https://github.com/local/structured-repository.git"),
+    );
+    let independent = attribute(AttributionInput {
+        provider_native_repository_aliases: vec![forge("acme", "one"), forge("acme", "two")],
+        declared_tool_workdir: Some(repository.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(independent.repository_bindings.len(), 1);
+    assert!(independent.repository_bindings[0]
+        .local_root_authorization
+        .is_some());
+    assert!(has_reason(
+        &independent,
+        RepositoryAbstentionReason::ConflictingIdentity
+    ));
 }
 
 #[test]

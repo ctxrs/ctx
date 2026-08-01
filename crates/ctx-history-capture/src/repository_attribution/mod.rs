@@ -759,10 +759,10 @@ fn reconcile_provider_identity(
 ) {
     let provider = match resolution {
         ProviderIdentityResolution::Absent => return,
-        ProviderIdentityResolution::Abstained => {
-            certified.clear();
-            return;
-        }
+        // Invalid or ambiguous provider metadata is an abstention for that
+        // evidence lane only. Independently certified structured activity
+        // remains valid and must not be erased.
+        ProviderIdentityResolution::Abstained => return,
         ProviderIdentityResolution::Binding(provider) => provider,
     };
     let mut matched = false;
@@ -792,6 +792,11 @@ fn reconcile_provider_identity(
             "provider_native_identity_does_not_match_local_certificate",
         );
         certified.clear();
+        // Provider-native logical identity has precedence over a conflicting
+        // local candidate, but it remains useful without local authorization.
+        // Keep that independent binding while downstream outcome association
+        // abstains from inventing a route to it.
+        annotation.repository_bindings.push(*provider);
         return;
     }
     annotation.repository_bindings.push(*provider);
