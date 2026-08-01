@@ -71,8 +71,14 @@ case "${1:-}" in
   import)
     case "$0" in
       *ctx-v1*)
-        mkdir -p "${CTX_DATA_ROOT}/search/lexical/ctx-generations"
-        : > "${CTX_DATA_ROOT}/search/lexical/meta.json"
+        generation_directory=generation-11111111111111111111111111111111
+        mkdir -p \
+          "${CTX_DATA_ROOT}/search/lexical/ctx-generations" \
+          "${CTX_DATA_ROOT}/search/lexical/index-generations/${generation_directory}"
+        printf '%s' \
+          '{"version":1,"active":{"generation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","directory":"generation-11111111111111111111111111111111"},"previous":null}' \
+          > "${CTX_DATA_ROOT}/search/lexical/active-generation.json"
+        : > "${CTX_DATA_ROOT}/search/lexical/index-generations/${generation_directory}/meta.json"
         : > "${CTX_DATA_ROOT}/search/lexical/ctx-generations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
         printf '%s\n' '{"totals":{"current_source_count":1,"current_indexed_documents":2},"sources":[{"published_generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
         ;;

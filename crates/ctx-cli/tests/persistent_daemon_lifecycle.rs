@@ -323,7 +323,8 @@ mod native {
         {
             use std::os::unix::fs::PermissionsExt;
 
-            let retained_meta_path = harness.root().join("search/lexical/meta.json");
+            let retained_meta_path =
+                active_generation_meta_path(harness.root(), &append_generation);
             let retained_manifest_path =
                 generation_manifest_path(harness.root(), &append_generation);
             let retained_meta = snapshot_file(&retained_meta_path);
@@ -1098,6 +1099,24 @@ mod native {
     fn generation_manifest_path(root: &Path, generation: &str) -> PathBuf {
         root.join("search/lexical/ctx-generations")
             .join(format!("{generation}.json"))
+    }
+
+    fn active_generation_meta_path(root: &Path, expected_generation: &str) -> PathBuf {
+        let index_root = root.join("search/lexical");
+        let pointer_path = index_root.join("active-generation.json");
+        let pointer = read_json_file(&pointer_path);
+        assert_eq!(
+            pointer["active"]["generation_id"].as_str(),
+            Some(expected_generation),
+            "{pointer:#}"
+        );
+        let directory = pointer["active"]["directory"]
+            .as_str()
+            .expect("active generation pointer directory");
+        index_root
+            .join("index-generations")
+            .join(directory)
+            .join("meta.json")
     }
 
     fn wakeup_path(root: &Path) -> PathBuf {

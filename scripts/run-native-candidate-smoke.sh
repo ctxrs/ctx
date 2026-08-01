@@ -322,7 +322,7 @@ if [ -e "${data_root}/work.sqlite" ]; then
   exit 1
 fi
 if [ "${source_manifest_required}" = true ]; then
-  if [ ! -f "${data_root}/search/lexical/meta.json" ]; then
+  if [ ! -f "${data_root}/search/lexical/active-generation.json" ]; then
     printf 'candidate did not publish the fresh lexical generation\n' >&2
     exit 1
   fi
