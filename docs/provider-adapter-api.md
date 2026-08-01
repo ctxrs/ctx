@@ -15,8 +15,8 @@ Adapters should provide:
 - event type, timestamp, role, text, and metadata when known;
 - touched-file metadata when tool calls, outputs, or native provider fields
   expose file paths;
-- compact typed outcome/evidence and a full-body `ContentRef` for
-  tool/command results when the parser can normalize the complete body;
+- complete policy-selected normalized Core content plus compact typed
+  outcome/evidence when the provider exposes it;
 - clear errors for malformed or unsupported input.
 
 Adapters must be read-only with respect to provider-owned files. They should

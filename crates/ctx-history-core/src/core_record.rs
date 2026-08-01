@@ -566,17 +566,17 @@ impl CoreContent {
             structured_bytes,
             MAX_STRUCTURED_CONTENT_BYTES,
         )?;
-        let complete_content_bytes =
+        let selected_content_bytes =
             body_bytes
                 .checked_add(structured_bytes)
                 .ok_or(CoreRecordError::FieldTooLarge {
-                    field: "complete_content",
+                    field: "selected_content",
                     actual: usize::MAX,
                     maximum: MAX_CORE_CONTENT_BYTES,
                 })?;
         validate_size(
-            "complete_content",
-            complete_content_bytes,
+            "selected_content",
+            selected_content_bytes,
             MAX_CORE_CONTENT_BYTES,
         )?;
         match &self.policy_status {

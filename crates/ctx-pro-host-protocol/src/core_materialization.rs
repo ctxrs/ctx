@@ -641,7 +641,7 @@ impl CoreRecordPage {
             if content_bytes > MAX_CORE_RECORD_PAGE_CONTENT_BYTES {
                 return Err(ProtocolError::new(
                     ErrorClass::Bounds,
-                    "Core record page exceeds its complete-content byte bound",
+                    "Core record page exceeds its selected-content byte bound",
                 ));
             }
         }

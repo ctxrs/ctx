@@ -86,8 +86,8 @@ impl std::error::Error for OpenHandsEventDecodeError {}
 
 /// Decodes one bounded OpenHands event file into its authoritative semantics.
 ///
-/// Import, compatibility matching, and complete-content recovery all consume
-/// this result so event identity, type, role, and text cannot drift.
+/// Import and Core projection consume this result so event identity, type,
+/// role, and text cannot drift.
 pub(crate) fn decode_openhands_event(
     path: &Path,
     bytes: &[u8],
