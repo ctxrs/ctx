@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 4;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 5;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 10;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
@@ -52,7 +52,7 @@ pub struct LexicalGenerationPolicy {
     pub core_repository_observation_revision: u32,
     pub core_bounded_shell_subset_revision: u32,
     pub core_repository_outcome_capture_revision: u32,
-    pub core_repository_locator_fingerprint_revision: u32,
+    pub core_repository_local_root_authorization_fingerprint_revision: u32,
     pub included_event_classes: [SourceEventClass; 11],
     pub body_selection: LexicalBodySelection,
     pub indexed_body_limit: LexicalIndexedBodyLimit,
@@ -150,8 +150,8 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
                 ctx_history_core::CORE_BOUNDED_SHELL_SUBSET_REVISION,
             core_repository_outcome_capture_revision:
                 ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-            core_repository_locator_fingerprint_revision:
-                ctx_history_core::CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
+            core_repository_local_root_authorization_fingerprint_revision:
+                ctx_history_core::CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
             included_event_classes: [
                 SourceEventClass::Message,
                 SourceEventClass::ToolCall,
@@ -212,9 +212,13 @@ mod tests {
             first.canonical_sha256().unwrap(),
             second.canonical_sha256().unwrap()
         );
+        assert!(serde_json::to_value(&first).unwrap()["lexical"]
+            .as_object()
+            .unwrap()
+            .contains_key("core_repository_local_root_authorization_fingerprint_revision"));
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "b5caaf2850a3f88433fd03f8b84fb7077eee63e463bd550635a308bae31ba22c"
+            "46da5ba5a0c714f6461d66b134c16156f2a19af9cc19ca924b108a1c46a1e626"
         );
     }
 

@@ -23,7 +23,7 @@ use super::{
 };
 
 #[cfg(unix)]
-mod locator;
+mod local_root_authorization;
 
 fn run_git(path: &Path, arguments: &[&str]) {
     let status = Command::new("/usr/bin/git")

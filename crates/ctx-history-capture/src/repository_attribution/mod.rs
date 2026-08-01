@@ -10,7 +10,8 @@ use ctx_history_core::{
     RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryEvidence,
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservationKind,
     RepositoryOutcomeObservation, RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
-    CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
+    CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use serde_json::{json, Value};
@@ -28,7 +29,7 @@ pub(crate) use shell::{
     BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
 };
 
-pub(crate) const ASSOCIATION_POLICY_REVISION: u32 = 2;
+pub(crate) const ASSOCIATION_POLICY_REVISION: u32 = 3;
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
 const MAX_REPOSITORY_CANDIDATES: usize = 32;
 const MAX_POSITIVE_CERTIFICATION_CACHE_ENTRIES: usize = 32;
@@ -298,7 +299,7 @@ fn attribute_with_attributor(
                 "repository_observation_revision": CORE_REPOSITORY_OBSERVATION_REVISION,
                 "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
                 "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-                "locator_fingerprint_revision": CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
+                "local_root_authorization_fingerprint_revision": CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
                 "candidate_source": "bounded_structured_activity",
             }),
         )]),

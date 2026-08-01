@@ -121,8 +121,9 @@ fn binding() -> RepositoryBinding {
         git_object_format: Some(GitObjectFormat::Sha1),
         local_root_authorization: Some(RepositoryLocalRootAuthorization {
             local_root: "/work/ctx".to_owned(),
-            locator_fingerprint_revision: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
-            locator_fingerprint: [7; 32],
+            local_root_authorization_fingerprint_revision:
+                CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+            local_root_authorization_fingerprint: [7; 32],
             observed_at_unix_ms: 1_700_000_000_000,
         }),
         evidence: vec![
@@ -141,8 +142,15 @@ fn binding() -> RepositoryBinding {
 
 #[test]
 fn complete_record_round_trips_stored_encoding() {
-    let record = record();
+    let mut record = record();
+    record.repository_bindings.push(binding());
     let encoded = record.encode_stored().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    let authorization = wire["repository_bindings"][0]["local_root_authorization"]
+        .as_object()
+        .unwrap();
+    assert!(authorization.contains_key("local_root_authorization_fingerprint_revision"));
+    assert!(authorization.contains_key("local_root_authorization_fingerprint"));
     assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), record);
 }
 
@@ -352,8 +360,9 @@ fn logical_repository_binding_can_abstain_from_local_checkout_identity() {
     record.repository_bindings[0].local_root_authorization =
         Some(RepositoryLocalRootAuthorization {
             local_root: "/uncertified/checkout".to_owned(),
-            locator_fingerprint_revision: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
-            locator_fingerprint: [9; 32],
+            local_root_authorization_fingerprint_revision:
+                CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+            local_root_authorization_fingerprint: [9; 32],
             observed_at_unix_ms: 1_700_000_000_000,
         });
     assert!(matches!(
@@ -655,7 +664,7 @@ fn every_repository_revision_changes_the_core_contract_fingerprint() {
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "e425637155689c4046f57bf4efed5269b260c1b691e5f456f158aa8efdbea739"
+        "f85156e7951c36b4a069c25f80f2dfe5e9079232b290519349bfd352531d5d3e"
     );
     for changed in [
         CoreContractRevisions {
@@ -675,7 +684,9 @@ fn every_repository_revision_changes_the_core_contract_fingerprint() {
             ..current
         },
         CoreContractRevisions {
-            repository_locator_fingerprint: current.repository_locator_fingerprint + 1,
+            repository_local_root_authorization_fingerprint: current
+                .repository_local_root_authorization_fingerprint
+                + 1,
             ..current
         },
     ] {
