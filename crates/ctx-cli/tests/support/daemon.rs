@@ -9,7 +9,8 @@ use std::{
 use tempfile::TempDir;
 
 use super::runner::{
-    ctx_from_binary, data_root, tempdir, test_binary_copy_path, PERSISTENT_DAEMON_TEST_ROOT_MARKER,
+    ctx, ctx_from_binary, data_root, json_output, tempdir, test_binary_copy_path,
+    PERSISTENT_DAEMON_TEST_ROOT_MARKER,
 };
 
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -82,6 +83,23 @@ pub(crate) fn wait_for_test_daemon_source_refresh(temp: &TempDir) {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for test daemon source refresh to become terminal"
+        );
+        thread::sleep(DAEMON_STOP_POLL_INTERVAL);
+    }
+}
+
+pub(crate) fn wait_for_test_relational_projection(temp: &TempDir, generation: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(temp).args(["status", "--format=json"]));
+        if status["relational"]["status"] == "ready"
+            && status["relational"]["active_core_generation_id"] == generation
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for relational projection at generation {generation}: {status:#}"
         );
         thread::sleep(DAEMON_STOP_POLL_INTERVAL);
     }
