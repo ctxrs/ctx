@@ -150,7 +150,7 @@ fn multi_repository_candidate_evidence_is_complete_and_input_order_independent()
         forward.repository_candidate_evidence,
         reverse.repository_candidate_evidence
     );
-    let mut expected = vec![
+    let mut expected = [
         first.join("tracked.txt").to_string_lossy().into_owned(),
         second.join("tracked.txt").to_string_lossy().into_owned(),
     ];

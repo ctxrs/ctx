@@ -372,6 +372,40 @@ impl WarpNativePageAccumulator {
     }
 }
 
+pub(super) struct WarpNativeDigestChain {
+    domain: &'static [u8],
+    state: [u8; 32],
+}
+
+impl WarpNativeDigestChain {
+    pub(super) fn new(domain: &'static [u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(WARP_DIGEST_CHAIN_DOMAIN);
+        hasher.update(domain);
+        let state = hasher.finalize().into();
+        Self { domain, state }
+    }
+
+    pub(super) fn push(&mut self, label: &[u8], digest: [u8; 32]) -> Result<()> {
+        let mut hasher = Sha256::new();
+        hasher.update(WARP_DIGEST_CHAIN_DOMAIN);
+        hasher.update(self.domain);
+        hash_bytes(&mut hasher, label)?;
+        hasher.update(self.state);
+        hasher.update(digest);
+        self.state = hasher.finalize().into();
+        Ok(())
+    }
+
+    pub(super) fn state(&self) -> [u8; 32] {
+        self.state
+    }
+}
+
+pub(in super::super) fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,38 +450,4 @@ mod tests {
         assert_eq!(page.events[0].lexical_body, body);
         assert!(page.estimated_bytes > WARP_NATIVE_PAGE_MAX_BYTES);
     }
-}
-
-pub(super) struct WarpNativeDigestChain {
-    domain: &'static [u8],
-    state: [u8; 32],
-}
-
-impl WarpNativeDigestChain {
-    pub(super) fn new(domain: &'static [u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(WARP_DIGEST_CHAIN_DOMAIN);
-        hasher.update(domain);
-        let state = hasher.finalize().into();
-        Self { domain, state }
-    }
-
-    pub(super) fn push(&mut self, label: &[u8], digest: [u8; 32]) -> Result<()> {
-        let mut hasher = Sha256::new();
-        hasher.update(WARP_DIGEST_CHAIN_DOMAIN);
-        hasher.update(self.domain);
-        hash_bytes(&mut hasher, label)?;
-        hasher.update(self.state);
-        hasher.update(digest);
-        self.state = hasher.finalize().into();
-        Ok(())
-    }
-
-    pub(super) fn state(&self) -> [u8; 32] {
-        self.state
-    }
-}
-
-pub(in super::super) fn hex_digest(digest: [u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
