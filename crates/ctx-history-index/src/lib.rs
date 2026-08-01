@@ -25,8 +25,8 @@ pub use contracts::{
     CommitReceipt, ConsecutiveSourceMissingCount, GenerationManifest, GenerationRemoval,
     IndexError, Result, RevalidationTarget, SourceCatalogCheckpoint, SourceCatalogMissingState,
     SourceCoreRecordAggregate, SourceMissingObservationPoint, WriterOptions,
-    GENERATION_MANIFEST_VERSION,
-    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
+    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
+    LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
@@ -140,6 +140,37 @@ fn reclaim_orphaned_managed_files(index: &mut Index, base_metas: &IndexMeta) -> 
 
 const WRITER_HANDOFF_RETRY_WINDOW: Duration = Duration::from_millis(500);
 const WRITER_HANDOFF_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+fn acquire_preflight_writer_lock_with_retry(directory: &impl Directory) -> Result<DirectoryLock> {
+    let deadline = Instant::now() + WRITER_HANDOFF_RETRY_WINDOW;
+    loop {
+        match directory.acquire_lock(&INDEX_WRITER_LOCK) {
+            Ok(lock) => return Ok(lock),
+            Err(error @ LockError::LockBusy) if Instant::now() >= deadline => {
+                return Err(tantivy::TantivyError::LockFailure(
+                    error,
+                    Some(
+                        "Failed to acquire index lock. If you are using a regular directory, this \
+                         means there is already an `IndexWriter` working on this `Directory`, in \
+                         this process or in a different process."
+                            .to_owned(),
+                    ),
+                )
+                .into());
+            }
+            Err(LockError::LockBusy) => {
+                std::thread::sleep(WRITER_HANDOFF_RETRY_INTERVAL);
+            }
+            Err(error) => {
+                return Err(tantivy::TantivyError::LockFailure(
+                    error,
+                    Some("failed to acquire the index preflight lock".to_owned()),
+                )
+                .into());
+            }
+        }
+    }
+}
 
 fn construct_index_writer_with_retry(
     index: &Index,
@@ -277,19 +308,7 @@ impl GenerationWriter {
         // Hold Tantivy's real writer lock while capturing and staging against
         // the base, but defer construction of IndexWriter and its worker/memory
         // floor until the first actual mutation.
-        let preflight_lock = directory
-            .acquire_lock(&INDEX_WRITER_LOCK)
-            .map_err(|error| {
-                tantivy::TantivyError::LockFailure(
-                    error,
-                    Some(
-                        "Failed to acquire index lock. If you are using a regular directory, this \
-                         means there is already an `IndexWriter` working on this `Directory`, in \
-                         this process or in a different process."
-                            .to_owned(),
-                    ),
-                )
-            })?;
+        let preflight_lock = acquire_preflight_writer_lock_with_retry(&directory)?;
         let base_metas = index.load_metas()?;
         let (base_manifest, base_searcher) = if base_metas.payload.is_some() {
             let manifest = load_manifest_for_metas(&root, &base_metas)?;
