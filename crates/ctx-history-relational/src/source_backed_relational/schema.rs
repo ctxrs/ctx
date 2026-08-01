@@ -416,24 +416,20 @@ pub(super) fn verify(conn: &Connection) -> Result<()> {
 }
 
 fn existing_schema_versions(conn: &Connection) -> Result<Option<(i64, i64)>> {
-    let table = ["core_relational_state", "source_backed_relational_state"]
-        .into_iter()
-        .find(|table| {
-            conn.query_row(
-                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [table],
-                |_| Ok(()),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .is_some()
-        });
-    let Some(table) = table else {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            ["core_relational_state"],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
         return Ok(None);
-    };
+    }
     conn.query_row(
-        &format!("SELECT schema_version, contract_version FROM {table} WHERE singleton = 1"),
+        "SELECT schema_version, contract_version
+         FROM core_relational_state WHERE singleton = 1",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )

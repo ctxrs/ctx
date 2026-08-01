@@ -779,7 +779,7 @@ fn crush_high_bit_event_sequences_round_trip_and_keep_unsigned_order() {
 }
 
 #[test]
-fn pre_cutover_relational_schema_is_classified_for_disposable_rebuild() {
+fn old_only_relational_schema_is_missing_and_requires_disposable_rebuild() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("relational.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -796,16 +796,10 @@ fn pre_cutover_relational_schema_is_classified_for_disposable_rebuild() {
     drop(conn);
 
     let error = match SourceBackedRelationalProjection::open_read_only(&path) {
-        Ok(_) => panic!("pre-cutover schema must require a disposable rebuild"),
+        Ok(_) => panic!("old-only schema must require a disposable rebuild"),
         Err(error) => error,
     };
-    assert!(matches!(
-        error,
-        RelationalProjectionError::UnsupportedSchema {
-            schema_version: 5,
-            contract_version: 5
-        }
-    ));
+    assert!(matches!(error, RelationalProjectionError::MissingSchema));
 }
 
 #[test]
