@@ -698,6 +698,47 @@ fn enable_receipts_distinguish_managed_and_limited_persistence() {
         "status": "fallback",
         "limitation": "native restart registration requires the hosted installer"
     });
+    let limited_wide = concat!(
+        "! Daemon running; persistence not verified\n",
+        "Hint: Check supervisor status.\n",
+        "\n",
+        "Next\n",
+        "  ctx daemon status\n",
+    );
+    assert_exact_cross_width(
+        |context| {
+            render_daemon_enable_receipt(
+                context,
+                true,
+                false,
+                &limited,
+                Path::new("/tmp/ctx/config.toml"),
+            )
+        },
+        [
+            (
+                32,
+                concat!(
+                    "! Daemon running; persistence\n",
+                    "  not verified\n",
+                    "Hint: Check supervisor status.\n",
+                    "\n",
+                    "Next\n",
+                    "  ctx daemon status\n",
+                ),
+            ),
+            (48, limited_wide),
+            (80, limited_wide),
+            (120, limited_wide),
+        ],
+        concat!(
+            "\u{1b}[33m!\u{1b}[0m \u{1b}[1mDaemon running; persistence not verified\u{1b}[0m\n",
+            "\u{1b}[2mHint\u{1b}[0m: Check supervisor status.\n",
+            "\n",
+            "\u{1b}[2mNext\u{1b}[0m\n",
+            "  \u{1b}[36mctx daemon status\u{1b}[0m\n",
+        ),
+    );
     let limited_rendered = render_daemon_enable_receipt(
         &context(80),
         true,
@@ -706,12 +747,9 @@ fn enable_receipts_distinguish_managed_and_limited_persistence() {
         Path::new("/tmp/ctx/config.toml"),
     )
     .render_plain();
-    assert!(limited_rendered.starts_with("! Daemon enabled with limited persistence\n"));
-    assert!(limited_rendered.contains("Persistence  not verified\n"));
-    assert!(limited_rendered
-        .contains("Caveat       native restart registration requires the hosted installer\n"));
-    assert!(limited_rendered.contains("Config       /tmp/ctx/config.toml\n"));
-    assert!(!limited_rendered.contains("\nNext\n"));
+    assert_eq!(limited_rendered.lines().count(), 5);
+    assert!(!limited_rendered.contains("config.toml"));
+    assert!(!limited_rendered.contains("hosted installer"));
 }
 
 #[test]

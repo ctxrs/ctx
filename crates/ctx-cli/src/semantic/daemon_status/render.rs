@@ -393,18 +393,33 @@ fn render_daemon_enabled_receipt(
     supervisor: &Value,
     config_path: &Path,
 ) -> Document {
+    if enabled && running && !persistent {
+        let mut document = outcome(
+            context,
+            Outcome {
+                state: OutcomeState::Warning,
+                title: "Daemon running; persistence not verified",
+                detail: None,
+            },
+        );
+        document.append(hint(
+            context,
+            Hint {
+                text: "Check supervisor status.",
+            },
+            Some(Action {
+                command: "ctx daemon status",
+            }),
+        ));
+        return document;
+    }
+
     let supervisor_disabled = supervisor.get("status").and_then(Value::as_str) == Some("disabled");
     let (state, title, detail) = if enabled && running && persistent {
         (
             OutcomeState::Success,
             "Daemon enabled",
             "Background history refresh will continue after this terminal closes.",
-        )
-    } else if enabled && running {
-        (
-            OutcomeState::Warning,
-            "Daemon enabled with limited persistence",
-            "It is running now, but automatic restart after sign-in or reboot was not verified.",
         )
     } else if enabled {
         (
