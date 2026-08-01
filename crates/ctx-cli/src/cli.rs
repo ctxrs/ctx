@@ -350,7 +350,7 @@ pub(crate) struct SearchArgs {
         long,
         value_enum,
         help = "Search backend override: hybrid, semantic, or lexical",
-        long_help = "Search backend override. By default ctx uses lexical search unless local semantic search is enabled in config, then hybrid. hybrid combines Tantivy source-backed lexical evidence and semantic vector evidence; lexical uses only the Tantivy source-backed lexical index; semantic requires local semantic search to be enabled and ready."
+        long_help = "Search backend override. By default ctx uses lexical search unless local semantic search is enabled in config, then hybrid. hybrid combines self-contained Core lexical evidence and semantic vector evidence; lexical uses only the Tantivy Core index; semantic requires local semantic search to be enabled and ready."
     )]
     pub(crate) backend: Option<SearchBackendArg>,
     #[arg(

@@ -340,12 +340,7 @@ fn open_exact_index(
 ) -> std::result::Result<VerifiedIndex, SourceBackedProCatchUpError> {
     let index_root = source_backed_index_root(data_root);
     let index = open_verified_index(&index_root)
-        .with_context(|| {
-            format!(
-                "open verified source-backed lexical index {}",
-                index_root.display()
-            )
-        })
+        .with_context(|| format!("open verified Core index {}", index_root.display()))
         .map_err(|error| SourceBackedProCatchUpError::IndexUnavailable(format!("{error:#}")))?;
     require_generation(
         core_generation_id,
