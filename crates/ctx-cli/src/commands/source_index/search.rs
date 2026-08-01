@@ -9,6 +9,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_history_index::{
     CoreEventRecord, EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex,
+    MAX_LEXICAL_QUERY_RESULTS,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -654,7 +655,9 @@ fn collect_search_hits(
     filters: &EventSearchFilters,
 ) -> Result<SearchCollection> {
     let document_count = usize::try_from(index.document_count()).unwrap_or(usize::MAX);
-    let maximum = document_count.min(MAX_SESSION_DIVERSITY_CANDIDATES);
+    let maximum = document_count
+        .min(MAX_SESSION_DIVERSITY_CANDIDATES)
+        .min(MAX_LEXICAL_QUERY_RESULTS);
     let mut candidate_limit = limit
         .saturating_mul(CANDIDATE_OVERSAMPLE)
         .max(MIN_CANDIDATE_BATCH)

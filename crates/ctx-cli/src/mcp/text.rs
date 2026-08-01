@@ -54,7 +54,6 @@ fn render_status_text(value: &Value) -> String {
         );
     }
     push_component_summary(&mut out, "catalog", value.get("catalog"));
-    push_component_summary(&mut out, "resolver", value.get("resolver"));
     push_component_summary(&mut out, "source_refresh", value.get("refresh"));
     if let Some(refresh) = value.get("refresh") {
         push_object_summary(

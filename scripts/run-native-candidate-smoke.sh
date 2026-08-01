@@ -266,7 +266,7 @@ run_bounded "${root}/setup.out" "${root}/setup.err" \
   cat "${root}/setup.err" >&2
   exit 1
 }
-source_manifest_required="${fresh_epoch_required}"
+core_manifest_required="${fresh_epoch_required}"
 if ! run_bounded "${root}/import.json" "${root}/import.err" ctx import \
   --input-format ctx-history-jsonl-v1 \
   --path "${fixture}" \
@@ -277,7 +277,7 @@ if ! run_bounded "${root}/import.json" "${root}/import.err" ctx import \
     cat "${root}/import.err" >&2
     exit 1
   fi
-  source_manifest_required=true
+  core_manifest_required=true
   run_bounded "${root}/import.json" "${root}/import.err" ctx_source_refresh import \
     --input-format ctx-history-jsonl-v1 \
     --path "${fixture}" \
@@ -291,7 +291,7 @@ if [ "${fresh_epoch_required}" = true ]; then
   if ! grep -Eq '"current_source_count"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
     || ! grep -Eq '"current_indexed_documents"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
     || ! grep -Eq '"published_generation"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "${root}/import.json"; then
-    printf 'candidate fixture import did not publish source-manifest authority\n' >&2
+    printf 'candidate fixture import did not publish Core-generation authority\n' >&2
     exit 1
   fi
 elif ! grep -Eq '"imported_events"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
@@ -315,26 +315,26 @@ grep -Eq '"effective_mode"[[:space:]]*:[[:space:]]*"lexical"' "${root}/search.js
 grep -Fq 'Add a parser test.' "${root}/search.json" \
   || { printf 'candidate search did not return the fixture event\n' >&2; exit 1; }
 # Import and search execute in separate candidate processes. The expected hit
-# plus the absence of the old Store proves that the fresh source manifest, not
+# plus the absence of the old Store proves that the fresh Core generation, not
 # pre-v0.26 SQLite authority, carried the fixture across that boundary.
 if [ -e "${data_root}/work.sqlite" ]; then
   printf 'candidate created or opened the pre-v0.26 Store\n' >&2
   exit 1
 fi
-if [ "${source_manifest_required}" = true ]; then
+if [ "${core_manifest_required}" = true ]; then
   if [ ! -f "${data_root}/search/lexical/active-generation.json" ]; then
     printf 'candidate did not publish the fresh lexical generation\n' >&2
     exit 1
   fi
-  source_manifest_found=false
-  for source_manifest in "${data_root}/search/lexical/ctx-generations/"*.json; do
-    if [ -f "${source_manifest}" ]; then
-      source_manifest_found=true
+  core_manifest_found=false
+  for core_manifest in "${data_root}/search/lexical/ctx-generations/"*.json; do
+    if [ -f "${core_manifest}" ]; then
+      core_manifest_found=true
       break
     fi
   done
-  if [ "${source_manifest_found}" != true ]; then
-    printf 'candidate did not publish source-manifest authority\n' >&2
+  if [ "${core_manifest_found}" != true ]; then
+    printf 'candidate did not publish Core-generation authority\n' >&2
     exit 1
   fi
 fi

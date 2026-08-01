@@ -170,11 +170,9 @@ They do not reopen provider transcript files at query time. Provider-file
 changes become visible after import or daemon refresh publishes a new Core
 generation.
 
-Pre-v0.26 history is never opened, migrated, or used as fallback. After a
-Core/Tantivy generation is verified and active, ctx deletes old
-history artifacts safely and idempotently. A failed source build does not
-delete them; the next successful setup or refresh completes the fix-forward
-cleanup.
+Pre-v0.26 history is never opened, migrated, used as fallback, or deleted by
+the new architecture. Old Store files are inert and may be removed explicitly
+by their owner.
 
 ## Local Pro Storage
 
@@ -303,7 +301,7 @@ local upsert as described above.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; after verified activation it deletes old history artifacts without opening them |
+| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; old Store artifacts are neither opened nor deleted |
 | `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, relational projection metadata, daemon state, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate provider history, Core generations, or local Pro graph data |
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
@@ -495,11 +493,9 @@ treated as fixed provider homes.
 
 ## v0.26 epoch transition
 
-v0.26 starts a fresh self-contained Core history epoch. It does not migrate or
-read the legacy canonical Store or use it as fallback. Once a rebuilt Tantivy
-generation is verified and active, ctx deletes the old `work.sqlite` family.
-Cleanup is idempotent and never runs before verified activation; an interrupted
-or failed rebuild is recovered by completing the next forward setup or refresh.
+v0.26 starts a fresh self-contained Core history epoch. It does not migrate,
+read, or delete the legacy canonical Store or use it as fallback. An old
+`work.sqlite` family is inert and remains an explicit owner-managed artifact.
 
 Setup discovers current provider sources and builds new derived generations.
 If a source needed for rebuilding no longer exists, ctx reports that source as
