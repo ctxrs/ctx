@@ -22,9 +22,13 @@ the local retrieval product.
   missing stores stay missing, and existing stores are not migrated, repaired,
   or used to create search projections. Pro entitlement authorization may
   advance nonsecret anti-clock-rollback security metadata.
-- `ctx sql` opens only the existing relational metadata projection, rejects
-  write statements and multiple statements, and does not run background
-  upgrade checks.
+- On a completely fresh data root, `ctx sql` may initialize only an empty
+  relational metadata projection. It does not create Core or import provider
+  history. Otherwise it admits only a ready projection bound to the active Core
+  generation, or the canonical empty projection when Core is absent; stale
+  populated or generation-bound projections fail closed. SQL rejects write
+  statements and multiple statements and does not run background upgrade
+  checks.
 - In local-only security mode, setup/import/default search do not use network
   access or API keys. Explicit semantic use still must not call hosted model
   APIs, and search must not download the local embedding model when the required

@@ -1,13 +1,19 @@
 # SQL
 
-`ctx sql` runs read-only SQL against the existing local SQLite metadata
-projection. Use it for counts, audits, joins, and metadata lookups that normal
-`ctx search` does not express.
+`ctx sql` runs read-only SQL against the local SQLite metadata projection. Use
+it for counts, audits, joins, and metadata lookups that normal `ctx search` does
+not express.
 
-`ctx sql` does not refresh provider history, import files, initialize storage,
-return Core event bodies, or rebuild projections. Run `ctx setup` or `ctx
-import` first when daemon-owned maintenance needs to create or rebuild the
-projection.
+On a completely fresh data root, `ctx sql "SELECT 1"` initializes only an empty
+`relational.sqlite` schema so the query can run. It does not create a Core
+generation, refresh provider history, import files, return Core event bodies,
+or populate the projection. Run `ctx setup` or `ctx import` when you need
+history rows or daemon-owned projection maintenance.
+
+When an active Core generation exists, SQL admits only a ready relational
+projection bound to that exact generation. When Core is absent, only the
+canonical empty projection is accepted; a populated or generation-bound
+projection fails closed instead of exposing stale rows.
 
 The projection contains metadata only. It does not store event bodies,
 previews, command or result payloads, structured content, or transcript text.
