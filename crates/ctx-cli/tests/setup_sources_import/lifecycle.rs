@@ -416,7 +416,7 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
         generation
     };
     let lexical_root = data_root(&temp).join("search/lexical");
-    let publication_pointer = lexical_root.join("meta.json");
+    let publication_pointer = lexical_root.join("active-generation.json");
     assert!(publication_pointer.is_file());
     let manifest_path = lexical_root
         .join("ctx-generations")

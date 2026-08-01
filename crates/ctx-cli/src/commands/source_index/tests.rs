@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(requested_mode.get(), Some(SourceBackedRefreshMode::Off));
         let generation = outcome.pin.generation_id().to_owned();
 
-        fs::remove_file(index_root(temp.path()).join("meta.json")).unwrap();
+        fs::remove_file(index_root(temp.path()).join("active-generation.json")).unwrap();
         let (value, collection, index) = search_existing_generation(
             &request(RefreshArg::Off),
             outcome.pin.into_index(),

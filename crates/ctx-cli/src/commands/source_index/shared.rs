@@ -189,14 +189,15 @@ pub(super) fn validate_session_selector(
 
 pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
     let root = index_root(data_root);
-    if !root.join("meta.json").is_file() {
-        return Err(anyhow!(
-            "Core index is not initialized at {}",
-            root.display()
-        ));
+    match VerifiedIndex::open_pinned(&root) {
+        Ok(index) => Ok(index),
+        Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => Err(anyhow!(
+            "the Core index does not exist; retry with daemon refresh enabled"
+        )),
+        Err(error) => {
+            Err(error).with_context(|| format!("open verified Core index {}", root.display()))
+        }
     }
-    VerifiedIndex::open_pinned(&root)
-        .with_context(|| format!("open verified Core index {}", root.display()))
 }
 
 pub(super) fn index_root(data_root: &Path) -> PathBuf {

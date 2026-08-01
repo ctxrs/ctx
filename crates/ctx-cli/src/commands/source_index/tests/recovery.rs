@@ -168,8 +168,9 @@ fn search_not_ready_offers_setup_and_import_without_changing_machine_error() {
     assert_eq!(captured.text(), "");
 
     let stale_root = index_root(temp.path());
-    fs::create_dir_all(&stale_root).unwrap();
-    fs::write(stale_root.join("meta.json"), "{}").unwrap();
+    let stale_candidate = stale_root.join("index-generations/stale");
+    fs::create_dir_all(&stale_candidate).unwrap();
+    fs::write(stale_candidate.join("meta.json"), "{}").unwrap();
 
     for width in [32, 48, 80, 100] {
         let (mut ui, captured) = test_ui(width);

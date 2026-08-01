@@ -76,9 +76,9 @@ mod tests {
     }
 
     fn retained_generation(index_root: &Path) -> Option<VerifiedIndex> {
-        index_root
-            .join("meta.json")
-            .is_file()
+        VerifiedIndex::active_generation_id(index_root)
+            .unwrap()
+            .is_some()
             .then(|| VerifiedIndex::open(index_root).unwrap())
     }
 
