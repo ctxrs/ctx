@@ -1,16 +1,10 @@
 use super::*;
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, RepositoryCandidateEvidence, SessionIdentityInput,
-    SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
-    CORE_RECORD_VERSION,
+    core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
+    CoreContentPolicyStatus, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    RepositoryCandidateEvidence, RepositoryCandidateKind, SessionIdentityInput, SourceAnchor,
+    TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
-
-// The public/private Pro fixture remains on the last mirrored Core contract. A
-// CoreRecord contract upgrade must update both sides in its own change.
-const GOLDEN_CORE_RECORD_CONTRACT_FINGERPRINT: &str =
-    "e425637155689c4046f57bf4efed5269b260c1b691e5f456f158aa8efdbea739";
-const GOLDEN_REPOSITORY_CONTRACT_REVISION: u32 = 3;
 
 pub(super) fn source(lineage: u8) -> SourceKey {
     SourceKey::derive(
@@ -48,19 +42,17 @@ pub(super) fn source_deltas() -> Vec<CoreSourceDelta> {
 }
 
 pub(super) fn head() -> CoreGenerationHead {
-    let mut head = CoreGenerationHead::new(
+    CoreGenerationHead::new(
         "a".repeat(64),
         4,
         1,
-        GOLDEN_CORE_RECORD_CONTRACT_FINGERPRINT,
+        core_record_contract_fingerprint(),
         3,
         2,
         "c".repeat(64),
         &[source_state(1, 1, 1)],
     )
-    .expect("golden head");
-    head.repository_contract_revision = GOLDEN_REPOSITORY_CONTRACT_REVISION;
-    head
+    .expect("golden head")
 }
 
 pub(super) fn receipt() -> CoreMaterializationReceipt {
@@ -115,6 +107,15 @@ pub(super) fn record() -> CoreRecord {
         subrecord_selector: None,
     })
     .expect("event ID");
+    let mut repository_candidate_evidence = RepositoryCandidateEvidence::default();
+    repository_candidate_evidence.insert(
+        RepositoryCandidateKind::FileActivityPath,
+        "/golden/repo/src/lib.rs".to_owned(),
+    );
+    repository_candidate_evidence.insert(
+        RepositoryCandidateKind::SessionCwd,
+        "/golden/repo".to_owned(),
+    );
     CoreRecord {
         record_version: CORE_RECORD_VERSION,
         event_id,
@@ -142,7 +143,7 @@ pub(super) fn record() -> CoreRecord {
             structured_content: None,
         },
         metadata: BTreeMap::new(),
-        repository_candidate_evidence: RepositoryCandidateEvidence::default(),
+        repository_candidate_evidence,
         repository_bindings: Vec::new(),
         repository_abstentions: Vec::new(),
         repository_file_observations: Vec::new(),
