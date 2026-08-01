@@ -135,8 +135,8 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "41ef12d599e6ebb8769b23e0e47e47a40e6939dd835b82aa2cc145038ac2d417",
-            "repository_contract_revision": 5,
+            "fingerprint": "68991e8e9894e3ea16a752af306adb66fceda6667eb802637a9e14ed776c5cae",
+            "repository_contract_revision": 6,
             "repository_observation_revision": 2,
             "bounded_shell_subset_revision": 1,
             "repository_association_policy_revision": 3,
