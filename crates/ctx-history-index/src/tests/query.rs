@@ -1161,6 +1161,83 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
     );
 }
 
+fn lexical_query_limit_fixture() -> (TempDir, VerifiedIndex) {
+    let temp = tempdir().unwrap();
+    let source = source("query-limits.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "bounded lexical query"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    (temp, index)
+}
+
+fn assert_no_lexical_query_was_constructed_or_executed() {
+    assert_eq!(crate::query::lexical_query_constructions(), 0);
+    assert_eq!(crate::query::lexical_query_executions(), 0);
+}
+
+#[test]
+fn oversized_single_query_is_rejected_before_query_construction() {
+    let (_temp, index) = lexical_query_limit_fixture();
+    let oversized = "x".repeat(LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1);
+    crate::query::reset_lexical_query_work();
+
+    let error = index.search_event_candidates(&oversized, 10).unwrap_err();
+
+    assert!(matches!(
+        error,
+        IndexError::LexicalQueryBytesTooLarge {
+            actual,
+            maximum,
+        } if actual == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1
+            && maximum == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes
+    ));
+    assert_no_lexical_query_was_constructed_or_executed();
+}
+
+#[test]
+fn repeated_terms_are_rejected_before_query_construction() {
+    let (_temp, index) = lexical_query_limit_fixture();
+    let alternatives = vec!["bounded"; LEXICAL_QUERY_LIMITS.maximum_alternatives + 1];
+    crate::query::reset_lexical_query_work();
+
+    let error = index
+        .search_event_candidates_any_with_filters(&alternatives, &EventSearchFilters::default(), 10)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        IndexError::LexicalQueryAlternativesTooMany { observed, maximum }
+            if observed == LEXICAL_QUERY_LIMITS.maximum_alternatives + 1
+                && maximum == LEXICAL_QUERY_LIMITS.maximum_alternatives
+    ));
+    assert_no_lexical_query_was_constructed_or_executed();
+}
+
+#[test]
+fn analyzed_unique_tokens_are_rejected_before_query_construction() {
+    let (_temp, index) = lexical_query_limit_fixture();
+    let query = (0..=LEXICAL_QUERY_LIMITS.maximum_unique_tokens)
+        .map(|index| format!("uniquetoken{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::query::reset_lexical_query_work();
+
+    let error = index.search_event_candidates(&query, 10).unwrap_err();
+
+    assert!(matches!(
+        error,
+        IndexError::LexicalQueryTokensTooMany { observed, maximum }
+            if observed == LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 1
+                && maximum == LEXICAL_QUERY_LIMITS.maximum_unique_tokens
+    ));
+    assert_no_lexical_query_was_constructed_or_executed();
+}
+
 #[test]
 fn session_event_budget_declines_before_materializing_an_oversized_session() {
     let temp = tempdir().unwrap();

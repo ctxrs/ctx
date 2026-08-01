@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{CaptureProvider, EventType};
-use ctx_history_index::{AgentScope, EventSearchFilters, ExcludedSessionTree, VerifiedIndex};
+use ctx_history_index::{
+    AgentScope, EventSearchFilters, ExcludedSessionTree, VerifiedIndex, LEXICAL_QUERY_LIMITS,
+};
 
 use crate::{
     config,
@@ -136,6 +138,7 @@ fn normalized_query_alternative(value: &str) -> Option<String> {
 }
 
 pub(super) fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
+    validate_lexical_query_limits(request)?;
     if request
         .workspace
         .as_deref()
@@ -177,6 +180,7 @@ pub(super) fn validate_search_request(request: &SourceSearchRequest) -> Result<(
 }
 
 pub(super) fn normalize_search_request(request: &mut SourceSearchRequest) -> Result<()> {
+    validate_lexical_query_limits(request)?;
     if request.workspace.is_some() {
         request.workspace = normalized_optional_text(request.workspace.as_deref())
             .map(Some)
@@ -187,6 +191,15 @@ pub(super) fn normalize_search_request(request: &mut SourceSearchRequest) -> Res
             .ok_or_else(|| anyhow!("query filter file is empty"))?;
         request.file = Some(PathBuf::from(file));
     }
+    Ok(())
+}
+
+fn validate_lexical_query_limits(request: &SourceSearchRequest) -> Result<()> {
+    let positional = (!request.query.is_empty()).then_some(request.query.as_str());
+    let alternatives = positional
+        .into_iter()
+        .chain(request.terms.iter().map(String::as_str));
+    LEXICAL_QUERY_LIMITS.validate_texts(alternatives)?;
     Ok(())
 }
 
