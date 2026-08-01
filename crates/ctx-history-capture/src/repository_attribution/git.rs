@@ -27,6 +27,10 @@ const MAX_PARENT_COMPONENTS: usize = 64;
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_REMOTES: usize = 64;
 const GIT_TIMEOUT: Duration = Duration::from_secs(2);
+// Two repositories, each checked by two snapshots of two Git subprocesses.
+pub(super) const MAX_FULL_CERTIFICATIONS_PER_EVENT: usize = 2;
+pub(super) const MAX_GIT_SUBPROCESSES_PER_EVENT: usize = 8;
+const MAX_GIT_PROBE_TIME_PER_EVENT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum CandidateKind {
@@ -42,6 +46,48 @@ pub(super) enum ProbeFailure {
     Failed(&'static str),
     ConcurrentDrift,
     PlatformUnsupported,
+    BudgetExceeded,
+}
+
+pub(super) struct EventProbeBudget {
+    full_certifications: usize,
+    git_subprocesses: usize,
+    deadline: Instant,
+}
+
+impl EventProbeBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            full_certifications: 0,
+            git_subprocesses: 0,
+            deadline: Instant::now() + MAX_GIT_PROBE_TIME_PER_EVENT,
+        }
+    }
+
+    fn start_full_certification(&mut self) -> Result<(), ProbeFailure> {
+        if self.full_certifications >= MAX_FULL_CERTIFICATIONS_PER_EVENT
+            || Instant::now() >= self.deadline
+        {
+            return Err(ProbeFailure::BudgetExceeded);
+        }
+        self.full_certifications += 1;
+        Ok(())
+    }
+
+    fn start_git_subprocess(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(Duration, bool), ProbeFailure> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(ProbeFailure::BudgetExceeded)?;
+        if self.git_subprocesses >= MAX_GIT_SUBPROCESSES_PER_EVENT || remaining.is_zero() {
+            return Err(ProbeFailure::BudgetExceeded);
+        }
+        self.git_subprocesses += 1;
+        Ok((timeout.min(remaining), remaining <= timeout))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +106,7 @@ pub(super) struct GitCertifier {
     timeout: Duration,
     output_limit: usize,
     full_certification_probes: Arc<AtomicUsize>,
+    git_subprocesses: Arc<AtomicUsize>,
 }
 
 impl Default for GitCertifier {
@@ -73,6 +120,7 @@ impl Default for GitCertifier {
             timeout: GIT_TIMEOUT,
             output_limit: MAX_GIT_OUTPUT_BYTES,
             full_certification_probes: Arc::new(AtomicUsize::new(0)),
+            git_subprocesses: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -85,6 +133,7 @@ impl GitCertifier {
             timeout,
             output_limit: MAX_GIT_OUTPUT_BYTES,
             full_certification_probes: Arc::new(AtomicUsize::new(0)),
+            git_subprocesses: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -110,7 +159,33 @@ impl GitCertifier {
         evidence_kind: RepositoryEvidenceKind,
         observed_at_unix_ms: i64,
     ) -> Result<CertifiedCandidate, ProbeFailure> {
-        self.certify_with_between_probe_at(path, kind, evidence_kind, observed_at_unix_ms, || {})
+        let mut budget = EventProbeBudget::new();
+        self.certify_with_between_probe_at(
+            path,
+            kind,
+            evidence_kind,
+            observed_at_unix_ms,
+            &mut budget,
+            || {},
+        )
+    }
+
+    pub(super) fn certify_at_with_budget(
+        &self,
+        path: &Path,
+        kind: CandidateKind,
+        evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
+        budget: &mut EventProbeBudget,
+    ) -> Result<CertifiedCandidate, ProbeFailure> {
+        self.certify_with_between_probe_at(
+            path,
+            kind,
+            evidence_kind,
+            observed_at_unix_ms,
+            budget,
+            || {},
+        )
     }
 
     #[cfg(test)]
@@ -126,6 +201,7 @@ impl GitCertifier {
             kind,
             evidence_kind,
             ctx_history_core::CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+            &mut EventProbeBudget::new(),
             between_probe,
         )
     }
@@ -136,14 +212,16 @@ impl GitCertifier {
         kind: CandidateKind,
         evidence_kind: RepositoryEvidenceKind,
         observed_at_unix_ms: i64,
+        budget: &mut EventProbeBudget,
         between_probe: impl FnOnce(),
     ) -> Result<CertifiedCandidate, ProbeFailure> {
+        budget.start_full_certification()?;
         self.full_certification_probes
             .fetch_add(1, Ordering::Relaxed);
         let probe_directory = validate_candidate_route(path, kind)?;
-        let opening = self.inspect_once(&probe_directory)?;
+        let opening = self.inspect_once(&probe_directory, budget)?;
         between_probe();
-        let closing = self.inspect_once(&probe_directory)?;
+        let closing = self.inspect_once(&probe_directory, budget)?;
         if opening != closing {
             return Err(ProbeFailure::ConcurrentDrift);
         }
@@ -154,7 +232,15 @@ impl GitCertifier {
         self.full_certification_probes.load(Ordering::Relaxed)
     }
 
-    fn inspect_once(&self, directory: &Path) -> Result<GitSnapshot, ProbeFailure> {
+    pub(super) fn git_subprocess_count(&self) -> usize {
+        self.git_subprocesses.load(Ordering::Relaxed)
+    }
+
+    fn inspect_once(
+        &self,
+        directory: &Path,
+        budget: &mut EventProbeBudget,
+    ) -> Result<GitSnapshot, ProbeFailure> {
         route_fingerprint(directory)?;
         let geometry = self.run_git(
             directory,
@@ -167,6 +253,7 @@ impl GitCertifier {
                 "--show-object-format",
             ],
             false,
+            budget,
         )?;
         let lines = utf8_lines(&geometry)?;
         if lines.len() != 4 {
@@ -190,10 +277,7 @@ impl GitCertifier {
             _ => return Err(ProbeFailure::Failed("unsupported_git_object_format")),
         };
 
-        let head_output = self.run_git(directory, &["rev-parse", "--verify", "HEAD"], true)?;
-        let head = parse_optional_oid(&head_output, object_format)?;
-        let branch_output = self.run_git(directory, &["symbolic-ref", "-q", "HEAD"], true)?;
-        let branch = parse_optional_line(&branch_output)?;
+        let branch = repository_head_branch(&git_dir, object_format)?;
         let remotes_output = self.run_git(
             directory,
             &[
@@ -204,6 +288,7 @@ impl GitCertifier {
                 "^remote\\..*\\.url$",
             ],
             true,
+            budget,
         )?;
         let aliases = parse_aliases(&remotes_output)?;
         let mutable_evidence_state =
@@ -216,7 +301,6 @@ impl GitCertifier {
             git_dir,
             common_dir,
             object_format,
-            head,
             branch,
             aliases,
             locator_fingerprint,
@@ -229,7 +313,9 @@ impl GitCertifier {
         directory: &Path,
         arguments: &[&str],
         allow_empty_status: bool,
+        budget: &mut EventProbeBudget,
     ) -> Result<Vec<u8>, ProbeFailure> {
+        let (timeout, event_deadline_limited) = budget.start_git_subprocess(self.timeout)?;
         let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
         let mut command = Command::new(&self.executable);
         command
@@ -259,6 +345,7 @@ impl GitCertifier {
         let mut child = command
             .spawn()
             .map_err(|_| ProbeFailure::PlatformUnsupported)?;
+        self.git_subprocesses.fetch_add(1, Ordering::Relaxed);
         let stdout = child
             .stdout
             .take()
@@ -278,12 +365,16 @@ impl GitCertifier {
             {
                 break status;
             }
-            if started.elapsed() >= self.timeout {
+            if started.elapsed() >= timeout {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
-                return Err(ProbeFailure::Failed("git_timeout"));
+                return Err(if event_deadline_limited {
+                    ProbeFailure::BudgetExceeded
+                } else {
+                    ProbeFailure::Failed("git_timeout")
+                });
             }
             thread::sleep(Duration::from_millis(5));
         };
@@ -306,7 +397,6 @@ struct GitSnapshot {
     git_dir: PathBuf,
     common_dir: PathBuf,
     object_format: GitObjectFormat,
-    head: Option<GitObjectId>,
     branch: Option<String>,
     aliases: Vec<RepositoryAlias>,
     locator_fingerprint: [u8; 32],
@@ -694,11 +784,7 @@ fn repository_mutable_evidence_state(
         update_mutable_evidence_entry(&mut digest, label.as_bytes(), &path)?;
     }
     if let Some(branch) = branch {
-        if !branch.starts_with("refs/")
-            || branch
-                .split('/')
-                .any(|part| part.is_empty() || matches!(part, "." | ".."))
-        {
+        if !canonical_symbolic_branch(branch) {
             return Err(ProbeFailure::Unsafe("git_branch_is_not_canonical"));
         }
         update_mutable_evidence_entry(&mut digest, b"symbolic_branch", &common_dir.join(branch))?;
@@ -865,6 +951,44 @@ fn parse_optional_oid(
         .validate_contract()
         .map_err(|_| ProbeFailure::Failed("invalid_git_head"))?;
     Ok(Some(object))
+}
+
+fn repository_head_branch(
+    git_dir: &Path,
+    format: GitObjectFormat,
+) -> Result<Option<String>, ProbeFailure> {
+    let head_path = git_dir.join("HEAD");
+    let metadata = fs::symlink_metadata(&head_path)
+        .map_err(|_| ProbeFailure::Failed("git_head_metadata_failed"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProbeFailure::Unsafe("git_head_is_not_regular_file"));
+    }
+    if metadata.len() > MAX_GIT_OUTPUT_BYTES as u64 {
+        return Err(ProbeFailure::Failed("git_head_limit_exceeded"));
+    }
+    let value = fs::read(&head_path).map_err(|_| ProbeFailure::Failed("git_head_read_failed"))?;
+    let line = parse_optional_line(&value)?.ok_or(ProbeFailure::Failed("git_head_is_empty"))?;
+    if let Some(branch) = line.strip_prefix("ref: ") {
+        if !canonical_symbolic_branch(branch) {
+            return Err(ProbeFailure::Unsafe("git_branch_is_not_canonical"));
+        }
+        return Ok(Some(branch.to_owned()));
+    }
+    if parse_optional_oid(&value, format)?.is_some() {
+        Ok(None)
+    } else {
+        Err(ProbeFailure::Failed("invalid_git_head"))
+    }
+}
+
+fn canonical_symbolic_branch(branch: &str) -> bool {
+    branch.starts_with("refs/")
+        && !branch
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        && !branch
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'\\')
 }
 
 fn parse_aliases(value: &[u8]) -> Result<Vec<RepositoryAlias>, ProbeFailure> {

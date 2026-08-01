@@ -214,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "4547118d091c76cfb5ee5c13bb1eaac920f6f398fa46c112923c7450a4b988cc"
+            "67ba61cbfc8d992b57d32ac1214cb4d43a6dfde8a59326457b0691e9ab1e4111"
         );
     }
 

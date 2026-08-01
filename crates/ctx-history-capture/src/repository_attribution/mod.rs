@@ -21,16 +21,17 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use git::{
-    negative_route_geometry_state, CandidateKind, CertifiedCandidate, GitCertifier, ProbeFailure,
+    negative_route_geometry_state, CandidateKind, CertifiedCandidate, EventProbeBudget,
+    GitCertifier, ProbeFailure,
 };
-pub(crate) use outcome::{linked_outcome_evidence, LinkedOutcomeInput};
+pub(crate) use outcome::{linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput};
 use shell::analyze;
 pub(crate) use shell::{
     bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
     BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
 };
 
-pub(crate) const ASSOCIATION_POLICY_REVISION: u32 = 1;
+pub(crate) const ASSOCIATION_POLICY_REVISION: u32 = 2;
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
 const MAX_REPOSITORY_CANDIDATES: usize = 32;
 const MAX_POSITIVE_CERTIFICATION_CACHE_ENTRIES: usize = 32;
@@ -115,6 +116,7 @@ impl RepositoryAttributor {
         &mut self,
         candidate: &Candidate,
         observed_at_unix_ms: i64,
+        budget: &mut EventProbeBudget,
     ) -> Result<CertifiedCandidate, ProbeFailure> {
         self.cache_clock = self.cache_clock.saturating_add(1);
         let now = self.cache_clock;
@@ -157,11 +159,12 @@ impl RepositoryAttributor {
                 .retain(|cached| cached.path != candidate.path || cached.kind != candidate.kind);
         }
 
-        let result = self.certifier.certify_at(
+        let result = self.certifier.certify_at_with_budget(
             &candidate.path,
             candidate.kind,
             candidate.evidence_kind,
             observed_at_unix_ms,
+            budget,
         );
         match &result {
             Ok(certificate) => {
@@ -197,6 +200,10 @@ impl RepositoryAttributor {
 
     pub(crate) fn full_certification_probe_count(&self) -> usize {
         self.certifier.full_certification_probe_count()
+    }
+
+    pub(crate) fn git_subprocess_count(&self) -> usize {
+        self.certifier.git_subprocess_count()
     }
 }
 
@@ -281,7 +288,7 @@ fn attribute_with_attributor(
     let activity_at_unix_ms = input
         .activity_at_unix_ms
         .unwrap_or(CORE_MISSING_ACTIVITY_TIME_UNIX_MS);
-    let outcome_observations = input.outcome_observations.clone();
+    let mut outcome_observations = input.outcome_observations.clone();
     let outcome_operation_repository_path = input.outcome_operation_repository_path.clone();
     let outcome_output_repository_path = input.outcome_output_repository_path.clone();
     let mut annotation = CoreRecordAnnotation {
@@ -372,6 +379,16 @@ fn attribute_with_attributor(
         })
         .map(|candidate| path_string(&candidate.path));
 
+    if command_analysis.blocks_session_fallback && !outcome_observations.is_empty() {
+        push_abstention(
+            &mut annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+            "opaque_command_has_no_certified_operation_route",
+        );
+        outcome_observations.clear();
+    }
+
     if command_analysis
         .abstentions
         .iter()
@@ -426,19 +443,23 @@ fn attribute_with_attributor(
                     evidence_kind: candidate.evidence_kind,
                 }),
         );
-    } else if let Some(workdir) = &declared_workdir {
-        candidates.push(Candidate {
-            path: workdir.clone(),
-            kind: CandidateKind::Directory,
-            evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
-        });
+    } else if !command_analysis.blocks_session_fallback {
+        if let Some(workdir) = &declared_workdir {
+            candidates.push(Candidate {
+                path: workdir.clone(),
+                kind: CandidateKind::Directory,
+                evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+            });
+        }
     }
-    if let Some(path) = &outcome_operation_path {
-        candidates.push(Candidate {
-            path: path.clone(),
-            kind: CandidateKind::Directory,
-            evidence_kind: RepositoryEvidenceKind::ProviderNativeResult,
-        });
+    if !command_analysis.blocks_session_fallback {
+        if let Some(path) = &outcome_operation_path {
+            candidates.push(Candidate {
+                path: path.clone(),
+                kind: CandidateKind::Directory,
+                evidence_kind: RepositoryEvidenceKind::ProviderNativeResult,
+            });
+        }
     }
 
     let file_base = declared_workdir.as_deref().or(session_cwd.as_deref());
@@ -545,8 +566,9 @@ fn attribute_with_attributor(
     dedupe_candidates(&mut candidates);
 
     let mut certified = Vec::new();
+    let mut probe_budget = EventProbeBudget::new();
     for candidate in candidates {
-        match attributor.certify(&candidate, activity_at_unix_ms) {
+        match attributor.certify(&candidate, activity_at_unix_ms, &mut probe_budget) {
             Ok(certificate) => merge_certificate(&mut certified, certificate),
             Err(failure) => push_probe_failure(
                 &mut annotation,
@@ -659,6 +681,10 @@ fn push_probe_failure(
         ProbeFailure::PlatformUnsupported => (
             RepositoryAbstentionReason::PlatformUnsupported,
             "safe_git_probe_unavailable",
+        ),
+        ProbeFailure::BudgetExceeded => (
+            RepositoryAbstentionReason::ProbeBudgetExceeded,
+            "per_event_git_probe_budget_exceeded",
         ),
     };
     push_abstention(annotation, evidence_kind, reason, detail);
@@ -943,13 +969,7 @@ fn scope_outcomes(
     }
 
     let selected_binding_id = most_specific_certificate(certified, operation_path)
-        .map(|certificate| certificate.binding.binding_id.clone())
-        .or_else(|| match annotation.repository_bindings.as_slice() {
-            [binding] if binding.local_root_authorization.is_none() => {
-                Some(binding.binding_id.clone())
-            }
-            _ => None,
-        });
+        .map(|certificate| certificate.binding.binding_id.clone());
     let Some(selected_binding_id) = selected_binding_id else {
         push_abstention(
             annotation,

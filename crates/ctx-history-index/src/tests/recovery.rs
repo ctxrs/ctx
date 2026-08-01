@@ -426,6 +426,8 @@ fn current_manifest_roundtrips_with_exact_policy_hash() {
 
 #[test]
 fn verified_open_rejects_mismatched_core_contract_fingerprint() {
+    const PRIOR_REPOSITORY_CONTRACT_FINGERPRINT: &str =
+        "e4a46c8bac8fce97b984f4cf11b92ab926f69993e20176873cbfc03739f5b6cc";
     let temp = tempdir().unwrap();
     let source = source("core-fingerprint-mismatch.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -438,7 +440,8 @@ fn verified_open_rejects_mismatched_core_contract_fingerprint() {
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let mut mismatched_manifest = pinned.manifest().clone();
-    mismatched_manifest.core_record_contract_fingerprint = "0".repeat(64);
+    mismatched_manifest.core_record_contract_fingerprint =
+        PRIOR_REPOSITORY_CONTRACT_FINGERPRINT.to_owned();
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(temp.path(), &index, mismatched_manifest, &[], Vec::new());
 
@@ -450,7 +453,7 @@ fn verified_open_rejects_mismatched_core_contract_fingerprint() {
         error,
         IndexError::CoreRecordContractMismatch { expected, actual }
             if expected == ctx_history_core::core_record_contract_fingerprint()
-                && actual == "0".repeat(64)
+                && actual == PRIOR_REPOSITORY_CONTRACT_FINGERPRINT
     ));
 }
 
