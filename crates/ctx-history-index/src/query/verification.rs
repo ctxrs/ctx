@@ -4,7 +4,7 @@ use tantivy::{schema::Value as _, DocAddress, TantivyDocument};
 use super::records::stored_core_verification_record;
 use crate::{source_token, Fields, IndexError, Result, LEXICAL_SCHEMA_VERSION};
 
-const VERIFY_CORE_RECORD: u32 = 26;
+const VERIFY_CORE_RECORD: u32 = 27;
 
 pub(crate) struct VerificationRecord {
     pub(crate) source_owner: String,
