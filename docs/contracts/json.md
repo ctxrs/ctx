@@ -1005,8 +1005,12 @@ OSS `show` and `locate` JSON for session/event retrieval is unchanged. There
 are no Pro `show`, `locate`, `timeline`, `facts`, or `related` payloads or
 compatibility aliases.
 
-CLI failures exit nonzero with a stable error token on stderr. MCP failures set
-`isError: true` and return `error` plus `error_code` in `structuredContent`.
+Human CLI failures exit nonzero with a stable error token on stderr. When a Pro
+or referral command is explicitly invoked with `--format json`, a classified
+failure instead writes one compact JSON object to stderr with matching `error`
+and `error_code` strings. It contains no untrusted service or helper detail and
+is never ANSI-decorated. MCP failures set `isError: true` and return `error`
+plus `error_code` in `structuredContent`.
 Stable codes include `pro_not_installed`, `commercial_unavailable`,
 `entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
 `key_store_locked`, `not_materialized`, `protocol_mismatch`,
