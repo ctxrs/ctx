@@ -4,7 +4,7 @@ use support::*;
 
 fn import_ready_history(temp: &TempDir) {
     let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(temp).args([
+    let imported = json_output(ctx(temp).args([
         "import",
         "--provider",
         "codex",
@@ -12,6 +12,10 @@ fn import_ready_history(temp: &TempDir) {
         &fixture,
         "--format=json",
     ]));
+    let generation = imported["sources"][0]["published_generation"]
+        .as_str()
+        .expect("import should publish a Core generation");
+    wait_for_test_relational_projection(temp, generation);
 }
 
 fn strip_ansi(rendered: &[u8]) -> Vec<u8> {
