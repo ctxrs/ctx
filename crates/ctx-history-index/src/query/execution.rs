@@ -186,126 +186,68 @@ impl VerifiedIndex {
     fn semantic_event_addresses_after(
         &self,
         after: Option<StableEntityId>,
-        eligibility: SemanticEligibility,
         capacity: usize,
     ) -> Result<Vec<EventAddressCandidate>> {
         let fields = fields_from_schema(self.searcher.schema())?;
-        let after_digest = after.map(|identity| hex(&identity.digest()));
-        let candidate_capacity = capacity
-            .checked_mul(self.searcher.segment_readers().len())
-            .ok_or(IndexError::CountOverflow)?;
-        let mut candidates = Vec::with_capacity(candidate_capacity);
-        let message_term = Term::from_field_text(fields.event_type, "message");
-        let user_term = Term::from_field_text(fields.role, "user");
-
-        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
-            let inverted = segment.inverted_index(fields.event_identity_digest)?;
-            let Some(message_postings) = segment
-                .inverted_index(fields.event_type)?
-                .read_postings(&message_term, IndexRecordOption::Basic)?
-            else {
-                continue;
-            };
-            let Some(user_postings) = segment
-                .inverted_index(fields.role)?
-                .read_postings(&user_term, IndexRecordOption::Basic)?
-            else {
-                continue;
-            };
-            let terms = inverted.terms();
-            let mut stream = match after_digest.as_deref() {
-                Some(digest) => terms.range().gt(digest.as_bytes()).into_stream()?,
-                None => terms.stream()?,
-            };
-            let mut segment_candidates = 0_usize;
-            while segment_candidates < capacity && stream.advance() {
-                let identity_digest = decode_identity_digest_term(stream.key())?;
-                let mut postings = inverted
-                    .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
+        let after_order = after.map(SemanticEventOrderKey::for_event).transpose()?;
+        let segments = self.searcher.segment_readers();
+        let inverted_indexes = segments
+            .iter()
+            .map(|segment| segment.inverted_index(fields.semantic_event_order))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let streams = inverted_indexes
+            .iter()
+            .map(|inverted| match after_order.as_ref() {
+                Some(after) => inverted.terms().range().gt(after.as_bytes()).into_stream(),
+                None => inverted.terms().stream(),
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut merged = TermMerger::new(streams);
+        let mut candidates = Vec::with_capacity(capacity);
+        while candidates.len() < capacity && merged.advance() {
+            #[cfg(test)]
+            SEMANTIC_EVENT_ORDER_TERM_VISITS
+                .set(SEMANTIC_EVENT_ORDER_TERM_VISITS.get().saturating_add(1));
+            let order = SemanticEventOrderKey::decode(merged.key())?;
+            let mut address = None;
+            for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
+                let inverted = inverted_indexes.get(segment_ord).ok_or(
+                    IndexError::InvalidStoredDocumentField(SEMANTIC_EVENT_ORDER_FIELD),
+                )?;
+                let segment =
+                    segments
+                        .get(segment_ord)
+                        .ok_or(IndexError::InvalidStoredDocumentField(
+                            SEMANTIC_EVENT_ORDER_FIELD,
+                        ))?;
+                let mut postings =
+                    inverted.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
                 let mut doc_id = postings.doc();
-                while doc_id != TERMINATED && segment_candidates < capacity {
+                while doc_id != TERMINATED {
                     if !segment.is_deleted(doc_id) {
-                        let mut messages = message_postings.clone();
-                        let mut users = user_postings.clone();
-                        let message_doc = messages.doc();
-                        let user_doc = users.doc();
-                        let is_message = message_doc == doc_id
-                            || (message_doc < doc_id && messages.seek(doc_id) == doc_id);
-                        let is_user = user_doc == doc_id
-                            || (user_doc < doc_id && users.seek(doc_id) == doc_id);
-                        if is_message && is_user {
-                            debug_assert_eq!(eligibility, SemanticEligibility::CURRENT);
-                            candidates.push(EventAddressCandidate {
-                                identity_digest,
-                                address: DocAddress::new(segment_ord as u32, doc_id),
-                                source_order: None,
-                            });
-                            segment_candidates = segment_candidates
-                                .checked_add(1)
-                                .ok_or(IndexError::CountOverflow)?;
+                        let segment_ord =
+                            u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+                        if address
+                            .replace(DocAddress::new(segment_ord, doc_id))
+                            .is_some()
+                        {
+                            return Err(IndexError::InvalidStoredDocumentField(
+                                SEMANTIC_EVENT_ORDER_FIELD,
+                            ));
                         }
                     }
                     doc_id = postings.advance();
                 }
             }
-        }
-
-        candidates.sort_by_key(|candidate| candidate.identity_digest);
-        if candidates
-            .windows(2)
-            .any(|pair| pair[0].identity_digest == pair[1].identity_digest)
-        {
-            return Err(IndexError::InvalidStoredDocumentField(
-                EVENT_IDENTITY_DIGEST_FIELD,
-            ));
-        }
-        Ok(candidates)
-    }
-
-    fn count_semantic_eligible_events(
-        &self,
-        fields: Fields,
-        eligibility: SemanticEligibility,
-    ) -> Result<u64> {
-        let message_term = Term::from_field_text(fields.event_type, "message");
-        let user_term = Term::from_field_text(fields.role, "user");
-        let mut count = 0_u64;
-
-        for segment in self.searcher.segment_readers() {
-            let Some(mut messages) = segment
-                .inverted_index(fields.event_type)?
-                .read_postings(&message_term, IndexRecordOption::Basic)?
-            else {
-                continue;
-            };
-            let Some(mut users) = segment
-                .inverted_index(fields.role)?
-                .read_postings(&user_term, IndexRecordOption::Basic)?
-            else {
-                continue;
-            };
-            let mut message_doc = messages.doc();
-            let mut user_doc = users.doc();
-            while message_doc != TERMINATED && user_doc != TERMINATED {
-                if message_doc < user_doc {
-                    message_doc = messages.seek(user_doc);
-                    continue;
-                }
-                if user_doc < message_doc {
-                    user_doc = users.seek(message_doc);
-                    continue;
-                }
-                let doc_id = message_doc;
-                message_doc = messages.advance();
-                user_doc = users.advance();
-                if segment.is_deleted(doc_id) {
-                    continue;
-                }
-                debug_assert_eq!(eligibility, SemanticEligibility::CURRENT);
-                count = count.checked_add(1).ok_or(IndexError::CountOverflow)?;
+            if let Some(address) = address {
+                candidates.push(EventAddressCandidate {
+                    identity_digest: order.event_digest(),
+                    address,
+                    source_order: None,
+                });
             }
         }
-        Ok(count)
+        Ok(candidates)
     }
 
     fn event_record(&self, address: DocAddress, fields: Fields) -> Result<EventRecord> {
@@ -510,35 +452,4 @@ fn core_event_page_budget_admits(
         && retained_content_bytes
             .checked_add(candidate_content_bytes)
             .is_some_and(|total| total <= budget.maximum_content_bytes)
-}
-
-fn decode_identity_digest_term(term: &[u8]) -> Result<[u8; 32]> {
-    if term.len() != 64 {
-        return Err(IndexError::InvalidStoredDocumentField(
-            EVENT_IDENTITY_DIGEST_FIELD,
-        ));
-    }
-    let mut digest = [0_u8; 32];
-    for (index, pair) in term.chunks_exact(2).enumerate() {
-        let Some(high) = decode_hex_digit(pair[0]) else {
-            return Err(IndexError::InvalidStoredDocumentField(
-                EVENT_IDENTITY_DIGEST_FIELD,
-            ));
-        };
-        let Some(low) = decode_hex_digit(pair[1]) else {
-            return Err(IndexError::InvalidStoredDocumentField(
-                EVENT_IDENTITY_DIGEST_FIELD,
-            ));
-        };
-        digest[index] = (high << 4) | low;
-    }
-    Ok(digest)
-}
-
-fn decode_hex_digit(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        _ => None,
-    }
 }

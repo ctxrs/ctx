@@ -54,9 +54,16 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
         writer.add_core_record(document).unwrap();
     }
     writer.certify_source(certificate(&source, 1, 10)).unwrap();
-    writer.commit(|_| true).unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+    assert_eq!(receipt.semantic_eligible_documents, 4);
+    assert_eq!(receipt.manifest().semantic_eligible_documents, 4);
+    assert_eq!(
+        receipt.manifest().core_record_aggregates[0].semantic_eligible_documents(),
+        4
+    );
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(index.manifest().semantic_eligible_documents, 4);
     let mut expected = [
         first.event_id,
         second.event_id,
@@ -155,6 +162,131 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     assert!(final_page.next_cursor.is_none());
     assert!(core_final_page.next_cursor.is_none());
     assert_eq!(index.semantic_eligible_event_count().unwrap(), 4);
+}
+
+#[test]
+fn semantic_first_pages_visit_only_the_bounded_eligible_order_range() {
+    const INELIGIBLE_EVENTS: u64 = 2_048;
+    let temp = tempdir().unwrap();
+    let first_source = source("semantic-bounded-first-page.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(first_source.clone()).unwrap();
+    for sequence in 1..=INELIGIBLE_EVENTS {
+        let mut event = document(&first_source, sequence, "irrelevant assistant message");
+        event.role = Some("assistant".to_owned());
+        writer.add_core_record(event).unwrap();
+    }
+    for sequence in INELIGIBLE_EVENTS + 1..=INELIGIBLE_EVENTS + 2 {
+        writer
+            .add_core_record(document(&first_source, sequence, "eligible user message"))
+            .unwrap();
+    }
+    writer
+        .certify_source(certificate(&first_source, 1, INELIGIBLE_EVENTS + 2))
+        .unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+    assert_eq!(receipt.indexed_documents, INELIGIBLE_EVENTS + 2);
+    assert_eq!(receipt.semantic_eligible_documents, 2);
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    crate::query::reset_semantic_event_order_term_visits();
+    crate::query::reset_stored_core_event_record_materializations();
+    let page = index.core_semantic_event_page(None, 1).unwrap();
+    assert_eq!(page.eligible_total, 2);
+    assert_eq!(page.items.len(), 1);
+    assert!(!page.terminal);
+    assert_eq!(crate::query::semantic_event_order_term_visits(), 2);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+
+    let empty_temp = tempdir().unwrap();
+    let empty_source = source("semantic-bounded-empty-page.jsonl");
+    let mut empty_writer =
+        GenerationWriter::open(empty_temp.path(), WriterOptions::default()).unwrap();
+    empty_writer.begin_source(empty_source.clone()).unwrap();
+    for sequence in 1..=INELIGIBLE_EVENTS {
+        let mut event = document(&empty_source, sequence, "irrelevant assistant message");
+        event.role = Some("assistant".to_owned());
+        empty_writer.add_core_record(event).unwrap();
+    }
+    empty_writer
+        .certify_source(certificate(&empty_source, 1, INELIGIBLE_EVENTS))
+        .unwrap();
+    let empty_receipt = empty_writer.commit(|_| true).unwrap();
+    assert_eq!(empty_receipt.semantic_eligible_documents, 0);
+
+    let empty = VerifiedIndex::open_pinned(empty_temp.path()).unwrap();
+    crate::query::reset_semantic_event_order_term_visits();
+    crate::query::reset_stored_core_event_record_materializations();
+    let page = empty.core_semantic_event_page(None, 1).unwrap();
+    assert_eq!(page.eligible_total, 0);
+    assert!(page.items.is_empty());
+    assert!(page.terminal);
+    assert_eq!(crate::query::semantic_event_order_term_visits(), 0);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+}
+
+#[test]
+fn semantic_manifest_count_composes_across_append_retain_and_delete() {
+    let temp = tempdir().unwrap();
+    let source = source("semantic-manifest-count.jsonl");
+    let first_user = document(&source, 1, "first user message");
+    let mut first_assistant = document(&source, 2, "first assistant message");
+    first_assistant.role = Some("assistant".to_owned());
+
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    first.begin_source(source.clone()).unwrap();
+    first.add_core_record(first_user).unwrap();
+    first.add_core_record(first_assistant).unwrap();
+    first
+        .certify_source(appendable_certificate(&source, 1, 2, 20))
+        .unwrap();
+    let first_receipt = first.commit(|_| true).unwrap();
+    assert_eq!(first_receipt.semantic_eligible_documents, 1);
+
+    let mut second_user = document(&source, 3, "second user message");
+    second_user.workspace = Some("append".to_owned());
+    let mut second_assistant = document(&source, 4, "second assistant message");
+    second_assistant.role = Some("assistant".to_owned());
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let base = append.begin_source_append(source.clone()).unwrap().clone();
+    append.add_core_record(second_assistant).unwrap();
+    append.add_core_record(second_user).unwrap();
+    append
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&source, 2, 4, 40),
+                20,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let append_receipt = append.commit(|_| true).unwrap();
+    assert_eq!(append_receipt.semantic_eligible_documents, 2);
+    assert_eq!(
+        append_receipt.manifest().core_record_aggregates[0].semantic_eligible_documents(),
+        2
+    );
+
+    let retained_certificate = append_receipt.manifest().sources[0].clone();
+    let mut retain = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    retain.retain_source(retained_certificate).unwrap();
+    let retain_receipt = retain.commit(|_| true).unwrap();
+    assert_eq!(retain_receipt.semantic_eligible_documents, 2);
+
+    let mut deletion = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let (proof, inventory) = deletion_evidence(&source, 3);
+    deletion.delete_source(proof, inventory).unwrap();
+    let deletion_receipt = deletion.commit(|_| true).unwrap();
+    assert_eq!(deletion_receipt.semantic_eligible_documents, 0);
+    assert_eq!(
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .semantic_eligible_event_count()
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

@@ -204,7 +204,7 @@ impl SemanticEligibility {
     pub fn includes(self, event: &EventRecord) -> bool {
         match self {
             Self::UserMessageCandidateV2 => {
-                event.event_type == "message" && event.role.as_deref() == Some("user")
+                crate::policy::is_semantic_candidate(&event.event_type, event.role.as_deref())
             }
         }
     }
