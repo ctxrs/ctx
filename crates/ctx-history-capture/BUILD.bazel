@@ -24,6 +24,11 @@ filegroup(
     ),
 )
 
+filegroup(
+    name = "test_fixtures",
+    srcs = glob(["tests/fixtures/**"]),
+)
+
 COMMON_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/ctx-history-capture",
 }
@@ -62,6 +67,7 @@ ctx_rust_test(
         "//:provider_import_policy",
         "//:provider_support_matrix",
         "//:public_test_fixtures",
+        ":test_fixtures",
     ],
     edition = crate_edition(),
     aliases = aliases(

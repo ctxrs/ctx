@@ -832,14 +832,10 @@ fn contract(error: impl std::fmt::Display) -> CaptureError {
 mod tests {
     use super::*;
 
-    const HISTORY: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/repository_attribution/openclaw-native.jsonl"
-    ));
-    const SESSIONS: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/repository_attribution/openclaw-sessions.json"
-    ));
+    const HISTORY: &str =
+        include_str!("../../../../../tests/fixtures/repository_attribution/openclaw-native.jsonl");
+    const SESSIONS: &str =
+        include_str!("../../../../../tests/fixtures/repository_attribution/openclaw-sessions.json");
 
     #[test]
     fn native_tool_call_result_and_spawned_family_are_exact() {

@@ -602,10 +602,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    const FIXTURE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/repository_attribution/claude-native.jsonl"
-    ));
+    const FIXTURE: &str =
+        include_str!("../../../../../tests/fixtures/repository_attribution/claude-native.jsonl");
 
     fn locator() -> ClaudePhysicalLocator {
         ClaudePhysicalLocator {
