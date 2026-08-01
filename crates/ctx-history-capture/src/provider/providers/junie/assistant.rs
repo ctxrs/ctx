@@ -179,8 +179,7 @@ pub(super) fn junie_step_output_projection(
     };
     Some(JunieStepOutputProjection {
         details,
-        // The record-set locator addresses StepOutput by first-seen step order. Use the same
-        // stable association instead of a mutable provider update ID.
+        // Associate output with the first-seen step order rather than a mutable provider update ID.
         call_id: format!("step:{}", step.order),
         tool_name: if step.command.is_some() {
             "Bash"

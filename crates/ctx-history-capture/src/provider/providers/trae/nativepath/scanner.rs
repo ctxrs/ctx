@@ -70,7 +70,6 @@ impl TraeFrontier {
 
 pub(super) struct TraeSourceAuthority {
     pub(super) database: TraeSqliteDatabase,
-    pub(super) raw_source_path: String,
     pub(super) workspace_id: String,
     pub(super) workspace_folder: Option<String>,
     pub(super) schema_evidence: Vec<u8>,
@@ -326,7 +325,6 @@ pub(super) fn acquire_source(
     })?;
     Ok(TraeSourceAuthority {
         database,
-        raw_source_path: path.display().to_string(),
         workspace_id: trae_workspace_id(path),
         workspace_folder: trae_workspace_folder(path),
         schema_evidence,

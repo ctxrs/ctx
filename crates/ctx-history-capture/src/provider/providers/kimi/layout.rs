@@ -1,16 +1,18 @@
 use std::{
-    fs::{self, File, Metadata},
+    fs::{self, Metadata},
     io::{BufReader, Cursor, Read},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
+
+#[cfg(test)]
+use std::fs::File;
 
 use serde_json::{json, Value};
 
-use crate::common::io::{
-    ensure_regular_provider_transcript_file, read_provider_jsonl_line_or_skip_oversized,
-    read_text_file_limited, ProviderJsonlLineRead,
-};
+#[cfg(test)]
+use crate::common::io::{ensure_regular_provider_transcript_file, read_text_file_limited};
+use crate::common::io::{read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead};
 use crate::provider::normalization::provider_local_preview;
 use crate::{CaptureError, Result, PROVIDER_MAX_TEXT_CHARS};
 
@@ -45,15 +47,13 @@ pub(super) struct KimiFrozenFileMetadata {
 }
 
 impl KimiFrozenFileMetadata {
-    // Direct reads remain a safety oracle for the admitted-handle path and its
-    // cross-platform metadata revalidation tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn read(path: &Path) -> Result<Self> {
         ensure_regular_provider_transcript_file(path)?;
         Self::from_metadata(&fs::symlink_metadata(path)?)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn read_optional(path: &Path) -> Result<Option<Self>> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -87,26 +87,7 @@ impl KimiFrozenFileMetadata {
         })
     }
 
-    pub(super) fn revision_component(&self) -> String {
-        let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        format!(
-            "length={};modified={side}{seconds}.{nanos:09};readonly={};device={};inode={}",
-            self.length,
-            self.readonly,
-            self.device
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            self.inode
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        )
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn revalidate(&self, path: &Path) -> Result<bool> {
         match Self::read(path) {
             Ok(current) => Ok(current == *self),
@@ -118,7 +99,7 @@ impl KimiFrozenFileMetadata {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn revalidate_optional(expected: &Option<Self>, path: &Path) -> Result<bool> {
         match Self::read_optional(path) {
             Ok(current) => Ok(current == *expected),
@@ -197,18 +178,20 @@ impl KimiWireRoute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KimiWireLayout {
     route: KimiWireRoute,
+    #[cfg(test)]
     canonical_wire_path: PathBuf,
+    #[cfg(test)]
     wire: KimiFrozenFileMetadata,
+    #[cfg(test)]
     state_file: Option<KimiFrozenFileMetadata>,
     state: Value,
+    #[cfg(test)]
     index_file: Option<KimiFrozenFileMetadata>,
     index_entry: Option<KimiSessionIndexEntry>,
 }
 
 impl KimiWireLayout {
-    // Retain the path-based oracle for parity checks against production's
-    // already-admitted file-handle construction.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn read(path: &Path) -> Result<Self> {
         let wire = KimiFrozenFileMetadata::read(path)?;
         let canonical_wire_path = fs::canonicalize(path)?;
@@ -276,23 +259,21 @@ impl KimiWireLayout {
             }
             None => (None, None),
         };
+        #[cfg(not(test))]
+        let _ = (wire, state_file, index_file);
         Ok(Self {
             route,
+            #[cfg(test)]
             canonical_wire_path,
+            #[cfg(test)]
             wire,
+            #[cfg(test)]
             state_file,
             state,
+            #[cfg(test)]
             index_file,
             index_entry,
         })
-    }
-
-    pub(super) fn canonical_wire_path(&self) -> &Path {
-        &self.canonical_wire_path
-    }
-
-    pub(super) fn wire(&self) -> &KimiFrozenFileMetadata {
-        &self.wire
     }
 
     pub(super) fn agent_id(&self) -> &str {
@@ -311,7 +292,7 @@ impl KimiWireLayout {
         self.index_entry.take()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
         let canonical_path = match fs::canonicalize(path) {
             Ok(path) => path,
@@ -336,7 +317,7 @@ impl KimiWireLayout {
     }
 }
 
-pub(super) fn complete_content_auxiliary_paths(path: &Path) -> Result<(PathBuf, PathBuf)> {
+pub(super) fn auxiliary_paths(path: &Path) -> Result<(PathBuf, PathBuf)> {
     let route = KimiWireRoute::parse(path)?;
     Ok((route.state_path, route.index_path))
 }
@@ -357,7 +338,7 @@ pub(super) fn canonical_source_root_for_wire(path: &Path) -> Result<PathBuf> {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn read_kimi_state(path: &Path, file: &KimiFrozenFileMetadata) -> Result<Value> {
     if file.length > KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64 {
         return Err(CaptureError::InvalidPayload(format!(
@@ -373,7 +354,7 @@ fn read_kimi_state(path: &Path, file: &KimiFrozenFileMetadata) -> Result<Value> 
     Ok(serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn read_kimi_session_index_entry(
     path: &Path,
     file: &KimiFrozenFileMetadata,

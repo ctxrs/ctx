@@ -356,11 +356,10 @@ fn admit_metadata(
         metadata: FileStamp::from_metadata(metadata.metadata())?,
         messages: FileStamp::from_metadata(messages.metadata())?,
         metadata_sha256: Sha256::digest(&bytes).into(),
-        exact_content_revision:
-            super::super::source::mistral_vibe_complete_content_revision_from_admitted(
-                metadata.metadata(),
-                messages.metadata(),
-            )?,
+        exact_content_revision: super::super::source::mistral_vibe_source_revision_from_admitted(
+            metadata.metadata(),
+            messages.metadata(),
+        )?,
     };
     metadata.revalidate()?;
     messages.revalidate()?;

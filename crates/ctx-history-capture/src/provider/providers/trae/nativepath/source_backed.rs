@@ -10,7 +10,6 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SubrecordSelector,
     TypedKey,
 };
-use sha2::Digest;
 use thiserror::Error;
 
 use super::scanner::{

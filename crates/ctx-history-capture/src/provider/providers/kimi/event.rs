@@ -1,15 +1,12 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::normalization::{
-    provider_capped_json, provider_explicit_result_value_text, provider_policy_body,
-    provider_policy_event_text, provider_result_identifier_evidence,
-    provider_result_outcome_evidence, provider_role, provider_timestamp_seconds_to_datetime,
+    provider_explicit_result_value_text, provider_role, provider_timestamp_seconds_to_datetime,
     provider_value_text,
 };
-use crate::{KIMI_CODE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
 
 pub(super) fn kimi_legacy_provider_event_hash(
     record_type: &str,
@@ -25,26 +22,6 @@ pub(super) fn kimi_legacy_provider_event_hash(
             .map(|time| time.to_string())
             .unwrap_or_else(|| line_number.to_string())
     )
-}
-
-pub(super) fn kimi_normalized_event_payload(
-    record_type: &str,
-    value: &Value,
-    event_type: EventType,
-) -> Value {
-    let text = kimi_event_text(record_type, value, event_type);
-    let retained_text = provider_policy_event_text(event_type, &text, value);
-    let retained_body = provider_policy_body(event_type, value);
-    let result_evidence = provider_result_identifier_evidence(event_type, &text, value);
-    let result_outcome = provider_result_outcome_evidence(event_type, value);
-    json!({
-        "text": retained_text.text,
-        "text_retention": retained_text.retention.as_json(),
-        "result_evidence": result_evidence,
-        "result_outcome": result_outcome,
-        "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
-        "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-    })
 }
 
 pub(crate) fn kimi_event_type(record_type: &str, value: &Value) -> EventType {

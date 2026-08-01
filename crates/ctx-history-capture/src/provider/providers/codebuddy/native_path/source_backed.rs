@@ -34,34 +34,6 @@ const CODEBUDDY_CLI_NATIVE_COORDINATE_TAG: &str = "codebuddy-jsonl-range-v1";
 const CODEBUDDY_EXTENSION_NATIVE_COORDINATE_TAG: &str = "codebuddy-structured-message-v1";
 const EXTENSION_CANONICAL_DOMAIN: &[u8] = b"ctx-codebuddy-structured-source-v1\0";
 
-pub(crate) fn codebuddy_cli_complete_content_record(
-    value: &Value,
-    physical_line: usize,
-) -> Option<(String, String)> {
-    let text = cli_message_text(value);
-    if !codebuddy_is_message_record(
-        value.get("role").and_then(Value::as_str),
-        value.get("type").and_then(Value::as_str),
-    ) || text.trim().is_empty()
-    {
-        return None;
-    }
-    let native_record_id = codebuddy_cli_explicit_native_message_id(value)
-        .unwrap_or_else(|| format!("line-{physical_line}"));
-    Some((text, native_record_id))
-}
-
-pub(crate) fn codebuddy_cli_complete_content_source_from_admitted(
-    metadata: &Metadata,
-    path_identity: String,
-) -> Result<(String, String)> {
-    let frozen = CodeBuddyFrozenFile::from_metadata(metadata)?;
-    Ok((
-        frozen.source_revision_with_policy("cli-jsonl", CODEBUDDY_CLI_POLICY_REVISION),
-        path_identity,
-    ))
-}
-
 #[derive(Debug)]
 struct CodeBuddyDocumentAdapter {
     root: PathBuf,

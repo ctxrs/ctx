@@ -1,35 +1,19 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::EventType;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::provider::normalization::{
-    provider_capped_json, provider_policy_body, provider_policy_event_text,
-    provider_result_identifier_evidence, provider_result_outcome_evidence,
-};
 use crate::provider::providers::task_json::{task_json_string_field, task_json_time_field};
-use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 use super::TRAE_CN_INPUT_HISTORY_KEY;
 
 #[derive(Debug, Clone)]
 pub(super) struct TraeEventInput {
-    pub(super) provider_event_index: u64,
     pub(super) native_message_id: String,
     pub(super) native_message_id_from_provider: bool,
     pub(super) role: Option<String>,
     pub(super) occurred_at: DateTime<Utc>,
     pub(super) text: String,
-    pub(super) raw_message: Value,
-}
-
-pub(super) struct TraeCoreEvent {
-    pub(super) provider_event_index: u64,
-    pub(super) provider_event_hash: String,
-    pub(super) cursor: String,
-    pub(super) event_type: EventType,
-    pub(super) payload: Value,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -69,13 +53,11 @@ pub(super) fn trae_event_from_owned_message(
         role = Some("user".to_owned());
     }
     Some(TraeEventInput {
-        provider_event_index: u64::try_from(message_index).unwrap_or(u64::MAX),
         native_message_id,
         native_message_id_from_provider: provider_native_message_id.is_some(),
         role,
         occurred_at,
         text,
-        raw_message: message,
     })
 }
 
@@ -202,35 +184,5 @@ pub(super) fn trae_content_text(value: &Value) -> Option<String> {
             None
         }
         _ => None,
-    }
-}
-
-pub(super) fn trae_core_event(
-    provider_session_id: &str,
-    workspace_id: &str,
-    chat_key: &str,
-    event: &TraeEventInput,
-) -> TraeCoreEvent {
-    let event_type = EventType::Message;
-    let retained_text = provider_policy_event_text(event_type, &event.text, &event.raw_message);
-    let result_evidence =
-        provider_result_identifier_evidence(event_type, &event.text, &event.raw_message);
-    let result_outcome = provider_result_outcome_evidence(event_type, &event.raw_message);
-    let event_id = format!("{provider_session_id}:{}", event.native_message_id);
-    TraeCoreEvent {
-        provider_event_index: event.provider_event_index,
-        provider_event_hash: event_id.clone(),
-        cursor: format!("{chat_key}:{event_id}"),
-        event_type,
-        payload: json!({
-            "event_id": event_id,
-            "native_workspace_id": workspace_id,
-            "native_message_id": event.native_message_id,
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "body": provider_capped_json(&provider_policy_body(event_type, &event.raw_message), PROVIDER_MAX_PREVIEW_CHARS),
-        }),
     }
 }
