@@ -116,7 +116,7 @@ type EventStates = BTreeMap<[u8; 32], BTreeMap<[u8; 32], CoreEventState>>;
 #[derive(Default)]
 struct Consumer {
     revision: String,
-    known_revisions: BTreeMap<[u8; 32], String>,
+    known_accumulators: BTreeMap<[u8; 32], String>,
     known_events: EventStates,
     replay_begin: bool,
     replay_pages: bool,
@@ -170,21 +170,21 @@ impl CoreMaterializationConsumer for Consumer {
         let mut reconcile_sources = Vec::new();
         let mut changed_sources = 0_u32;
         let mut removed_sources = 0_u32;
-        for (source_index, delta) in page.deltas.iter().enumerate() {
+        for delta in &page.deltas {
             let identity = delta.source().identity().digest();
             let reconcile = match delta {
                 CoreSourceDelta::Present(state) => {
-                    let changed =
-                        self.known_revisions.get(&identity) != Some(&state.source_revision_sha256);
-                    self.known_revisions
-                        .insert(identity, state.source_revision_sha256.clone());
+                    let changed = self.known_accumulators.get(&identity)
+                        != Some(&state.core_record_accumulator);
+                    self.known_accumulators
+                        .insert(identity, state.core_record_accumulator.clone());
                     if changed {
                         changed_sources = changed_sources.saturating_add(1);
                     }
                     changed
                 }
                 CoreSourceDelta::Removed(_) => {
-                    let existed = self.known_revisions.remove(&identity).is_some()
+                    let existed = self.known_accumulators.remove(&identity).is_some()
                         || self.known_events.contains_key(&identity);
                     if existed {
                         removed_sources = removed_sources.saturating_add(1);
@@ -194,7 +194,6 @@ impl CoreMaterializationConsumer for Consumer {
             };
             if reconcile {
                 reconcile_sources.push(CoreSourceReconciliation {
-                    source_index: u32::try_from(source_index).unwrap(),
                     delta: delta.clone(),
                 });
             }
@@ -297,7 +296,7 @@ impl CoreMaterializationConsumer for Consumer {
         let response = CoreEventDeltaPageApplied {
             materialization_id: page.materialization_id.clone(),
             core_generation_id: page.core_generation_id.clone(),
-            source_index: page.reconciliation.source_index,
+            source: page.reconciliation.delta.source().clone(),
             page_index: if self.wrong_event_page_index {
                 page.page_index.saturating_add(1)
             } else {
@@ -337,7 +336,7 @@ impl CoreMaterializationConsumer for Consumer {
 }
 
 #[test]
-fn one_event_change_emits_one_atomic_replacement_without_source_wide_sweep() {
+fn same_certificate_and_count_with_changed_core_record_is_reconciled() {
     let temp = tempdir().unwrap();
     let source = source("changed.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -349,6 +348,10 @@ fn one_event_change_emits_one_atomic_replacement_without_source_wide_sweep() {
     );
     writer.commit(|_| true).unwrap();
     let first = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let first_certificate_sha256 = canonical_sha256(&first.manifest().sources[0]).unwrap();
+    let first_accumulator = first.manifest().core_record_aggregates[0]
+        .core_record_accumulator()
+        .to_owned();
     let prior = receipt_for(&first, "test-core-materializer-v1");
     let mut consumer = Consumer::new();
     sync_core_feed(&first, None, &mut consumer).unwrap();
@@ -359,7 +362,7 @@ fn one_event_change_emits_one_atomic_replacement_without_source_wide_sweep() {
     add_source(
         &mut writer,
         &source,
-        2,
+        1,
         vec![
             "one".to_owned(),
             "two revised".to_owned(),
@@ -368,6 +371,20 @@ fn one_event_change_emits_one_atomic_replacement_without_source_wide_sweep() {
     );
     writer.commit(|_| true).unwrap();
     let second = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert_eq!(
+        canonical_sha256(&second.manifest().sources[0]).unwrap(),
+        first_certificate_sha256
+    );
+    assert_ne!(
+        second.manifest().core_record_aggregates[0].core_record_accumulator(),
+        first_accumulator
+    );
+    let second_sources = core_source_states(second.manifest()).unwrap();
+    let second_head = core_generation_head(&second, &second_sources).unwrap();
+    assert_ne!(
+        prior.source_snapshot_sha256,
+        second_head.source_snapshot_sha256
+    );
     let report = sync_core_feed(&second, Some(&prior), &mut consumer).unwrap();
 
     assert_eq!(report.changed_sources, 1);
@@ -397,12 +414,12 @@ fn unchanged_large_source_is_not_resent_when_another_source_changes() {
         .iter()
         .find(|state| state.source.exact_descriptor_eq(&large))
         .unwrap();
-    consumer.known_revisions.insert(
+    consumer.known_accumulators.insert(
         large.identity().digest(),
-        large_state.source_revision_sha256.clone(),
+        large_state.core_record_accumulator.clone(),
     );
     consumer
-        .known_revisions
+        .known_accumulators
         .insert(changed.identity().digest(), "0".repeat(64));
 
     let report = sync_core_feed(&index, None, &mut consumer).unwrap();

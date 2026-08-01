@@ -1,10 +1,16 @@
 use super::*;
 use ctx_history_core::{
-    core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
-    CoreContentPolicyStatus, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    RepositoryCandidateEvidence, SessionIdentityInput, SourceAnchor, TypedKey,
-    CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, RepositoryCandidateEvidence, SessionIdentityInput,
+    SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
+    CORE_RECORD_VERSION,
 };
+
+// The public/private Pro fixture remains on the last mirrored Core contract. A
+// CoreRecord contract upgrade must update both sides in its own change.
+const GOLDEN_CORE_RECORD_CONTRACT_FINGERPRINT: &str =
+    "e425637155689c4046f57bf4efed5269b260c1b691e5f456f158aa8efdbea739";
+const GOLDEN_REPOSITORY_CONTRACT_REVISION: u32 = 3;
 
 pub(super) fn source(lineage: u8) -> SourceKey {
     SourceKey::derive(
@@ -20,7 +26,7 @@ pub(super) fn source(lineage: u8) -> SourceKey {
 pub(super) fn source_state(lineage: u8, revision: u8, event_count: u64) -> CoreSourceState {
     CoreSourceState {
         source: source(lineage),
-        source_revision_sha256: format!("{revision:064x}"),
+        core_record_accumulator: format!("{revision:064x}"),
         event_count,
     }
 }
@@ -42,17 +48,19 @@ pub(super) fn source_deltas() -> Vec<CoreSourceDelta> {
 }
 
 pub(super) fn head() -> CoreGenerationHead {
-    CoreGenerationHead::new(
+    let mut head = CoreGenerationHead::new(
         "a".repeat(64),
         4,
         1,
-        core_record_contract_fingerprint(),
+        GOLDEN_CORE_RECORD_CONTRACT_FINGERPRINT,
         3,
         2,
         "c".repeat(64),
         &[source_state(1, 1, 1)],
     )
-    .expect("golden head")
+    .expect("golden head");
+    head.repository_contract_revision = GOLDEN_REPOSITORY_CONTRACT_REVISION;
+    head
 }
 
 pub(super) fn receipt() -> CoreMaterializationReceipt {
@@ -144,7 +152,6 @@ pub(super) fn record() -> CoreRecord {
 
 pub(super) fn reconciliation() -> CoreSourceReconciliation {
     CoreSourceReconciliation {
-        source_index: 0,
         delta: CoreSourceDelta::Present(source_state(1, 1, 1)),
     }
 }

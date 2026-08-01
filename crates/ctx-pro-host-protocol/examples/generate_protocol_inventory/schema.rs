@@ -107,7 +107,7 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "ProAccessStatus": fields(&["entitlement", "graph_key", "local_repository"], &[]),
             "CoreSourceState": fields(
-                &["source", "source_revision_sha256", "event_count"], &[]),
+                &["source", "core_record_accumulator", "event_count"], &[]),
             "CoreSourceRemoval": fields(&["source", "removal_revision_sha256"], &[]),
             "CoreGenerationHead": fields(&[
                 "contract_version", "core_generation_id", "generation_manifest_version",
@@ -137,7 +137,7 @@ pub(super) fn inventory() -> Value {
                 "materialization_id", "core_generation_id", "page_index", "changed_sources",
                 "removed_sources", "reconcile_sources", "replayed"
             ], &[]),
-            "CoreSourceReconciliation": fields(&["source_index", "delta"], &[]),
+            "CoreSourceReconciliation": fields(&["delta"], &[]),
             "CoreEventState": fields(
                 &["event_id", "core_record_sha256", "requires_replacement"], &[]),
             "CoreEventStatePageRequest": fields(&[
@@ -156,7 +156,7 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "ApplyCoreEventDeltaPageRequest": fields(&["page"], &[]),
             "CoreEventDeltaPageApplied": fields(&[
-                "materialization_id", "core_generation_id", "source_index", "page_index",
+                "materialization_id", "core_generation_id", "source", "page_index",
                 "additions", "replacements", "tombstones", "terminal", "replayed"
             ], &[]),
             "FinishCoreMaterializationRequest": fields(&[

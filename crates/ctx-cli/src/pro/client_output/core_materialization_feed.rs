@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use anyhow::{anyhow, bail, Result};
-use ctx_history_core::{CertifiedSource, MAX_ENCODED_CORE_RECORD_BYTES};
+use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use ctx_history_index::{
     CoreEventPageBudget, GenerationManifest, SourceEventCursor, VerifiedIndex,
 };
@@ -220,9 +220,11 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
             reconcile_sources.extend(applied.reconcile_sources);
         }
 
-        reconcile_sources.sort_by_key(|item| item.source_index);
+        reconcile_sources.sort_by_key(|item| item.delta.source().identity().digest());
         for pair in reconcile_sources.windows(2) {
-            if pair[0].source_index >= pair[1].source_index {
+            if pair[0].delta.source().identity().digest()
+                >= pair[1].delta.source().identity().digest()
+            {
                 bail!("invalid_response: Core reconciliations are not strictly ordered");
             }
         }
@@ -283,10 +285,11 @@ fn core_source_states(manifest: &GenerationManifest) -> Result<Vec<CoreSourceSta
     let mut states = manifest
         .sources
         .iter()
-        .map(|source| {
+        .zip(&manifest.core_record_aggregates)
+        .map(|(source, aggregate)| {
             Ok(CoreSourceState {
                 source: source.observation().source().clone(),
-                source_revision_sha256: certified_source_revision_sha256(source)?,
+                core_record_accumulator: aggregate.core_record_accumulator().to_owned(),
                 event_count: source.counts().indexed_documents,
             })
         })
@@ -664,11 +667,6 @@ fn send_event_delta_page<C: CoreMaterializationConsumer>(
     response
         .validate_for(&request.page)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))
-}
-
-fn certified_source_revision_sha256(source: &CertifiedSource) -> Result<String> {
-    source.validate_contract()?;
-    canonical_sha256(source)
 }
 
 fn canonical_sha256(value: &impl serde::Serialize) -> Result<String> {

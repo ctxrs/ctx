@@ -103,11 +103,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
         .deltas
         .iter()
         .cloned()
-        .enumerate()
-        .map(|(source_index, delta)| CoreSourceReconciliation {
-            source_index: u32::try_from(source_index).expect("golden source index"),
-            delta,
-        })
+        .map(|delta| CoreSourceReconciliation { delta })
         .collect();
     let state_page = event_state_page();
     let delta_page = event_delta_page();
@@ -189,7 +185,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             HelperMessage::CoreEventDeltaPageApplied(CoreEventDeltaPageApplied {
                 materialization_id: delta_page.materialization_id,
                 core_generation_id: delta_page.core_generation_id,
-                source_index: delta_page.reconciliation.source_index,
+                source: delta_page.reconciliation.delta.source().clone(),
                 page_index: delta_page.page_index,
                 additions: 1,
                 replacements: 0,
