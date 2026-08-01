@@ -27,15 +27,32 @@ pub(crate) fn codex_command_preview(
     let command = tool_input::command(value)?;
     Some(codex_local_preview(&command, PROVIDER_MAX_PREVIEW_CHARS).0)
 }
-pub(crate) fn codex_value_preview(value: &Value, max_chars: usize) -> (String, bool) {
-    let rendered = match value {
+/// The exact/complete-content counterpart of [`codex_command_preview`]: the
+/// full command text with no preview char cap.
+pub(crate) fn codex_command_exact(
+    tool_name: &str,
+    argument_value: Option<&Value>,
+) -> Option<String> {
+    if !codex_is_command_tool(tool_name) {
+        return None;
+    }
+    tool_input::command(argument_value?)
+}
+fn codex_render_value_text(value: &Value) -> String {
+    match value {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
         _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
-    };
-    codex_local_preview(&rendered, max_chars)
+    }
 }
-pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool) {
+pub(crate) fn codex_value_preview(value: &Value, max_chars: usize) -> (String, bool) {
+    codex_local_preview(&codex_render_value_text(value), max_chars)
+}
+enum CodexToolArgumentsProjection {
+    FileTouchSummary(String, bool),
+    RedactedValue(Value, bool),
+}
+fn codex_tool_arguments_projection(value: &Value) -> CodexToolArgumentsProjection {
     let parsed = codex_parse_embedded_json(value);
     let parsed = parsed.as_ref().unwrap_or(value);
     let mut retained_paths = Vec::with_capacity(12);
@@ -56,11 +73,36 @@ pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool
         Err(never) => match never {},
     }
     if file_touch_count != 0 {
-        return codex_file_touch_arguments_preview(retained_paths, file_touch_count);
+        let (text, truncated, _) =
+            codex_file_touch_arguments_preview(retained_paths, file_touch_count);
+        return CodexToolArgumentsProjection::FileTouchSummary(text, truncated);
     }
     let (retained, fields_omitted) = codex_tool_argument_value_with_omissions(parsed, None);
-    let (preview, truncated) = codex_value_preview(&retained, PROVIDER_MAX_PREVIEW_CHARS);
-    (preview, truncated, !fields_omitted)
+    CodexToolArgumentsProjection::RedactedValue(retained, fields_omitted)
+}
+pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool) {
+    match codex_tool_arguments_projection(value) {
+        CodexToolArgumentsProjection::FileTouchSummary(text, truncated) => (text, truncated, false),
+        CodexToolArgumentsProjection::RedactedValue(retained, fields_omitted) => {
+            let (preview, truncated) = codex_value_preview(&retained, PROVIDER_MAX_PREVIEW_CHARS);
+            (preview, truncated, !fields_omitted)
+        }
+    }
+}
+/// The exact/complete-content counterpart of [`codex_tool_arguments_preview`].
+///
+/// Complete-content hydration must reproduce the full verified provider
+/// payload, so this applies the same file-touch summarization and
+/// patch/diff-field redaction, but never applies the preview's char-level
+/// cap: cutting a rendered JSON object mid-string would silently return
+/// invalid, truncated JSON while still being reported as complete.
+pub(crate) fn codex_tool_arguments_exact(value: &Value) -> String {
+    match codex_tool_arguments_projection(value) {
+        CodexToolArgumentsProjection::FileTouchSummary(text, _) => text,
+        CodexToolArgumentsProjection::RedactedValue(retained, _) => {
+            codex_render_value_text(&retained)
+        }
+    }
 }
 fn codex_file_touch_arguments_preview(
     retained_paths: Vec<String>,

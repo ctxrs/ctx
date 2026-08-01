@@ -10,9 +10,9 @@ use super::record::{
     CodexStructuralOutput,
 };
 use crate::provider::codex::events::{
-    codex_command_preview, codex_content_text, codex_local_preview, codex_message_body,
-    codex_provider_event, codex_result_content, codex_tool_arguments_preview, codex_tool_name,
-    CodexNativeEvent, CodexToolCallContext,
+    codex_command_exact, codex_command_preview, codex_content_text, codex_local_preview,
+    codex_message_body, codex_provider_event, codex_result_content, codex_tool_arguments_exact,
+    codex_tool_arguments_preview, codex_tool_name, CodexNativeEvent, CodexToolCallContext,
 };
 use crate::{
     CaptureError, OutputOutcome, OutputOutcomeMetadata, Result as CaptureResult,
@@ -458,20 +458,29 @@ fn source_backed_tool_call_text(
         .or_else(|| payload.get("input"))
         .or_else(|| payload.get("action"))
         .or_else(|| payload.get("execution"));
+    // The exact display text backing `--content complete` hydration must
+    // reproduce the full verified provider payload, so it is built from the
+    // uncapped command/arguments text rather than the preview projection
+    // (which caps at `PROVIDER_MAX_PREVIEW_CHARS` for the short lexical/index
+    // summary used elsewhere). See issue #224.
+    let command_exact = codex_command_exact(&tool_name, arguments);
+    let arguments_exact = arguments
+        .map(codex_tool_arguments_exact)
+        .unwrap_or_default();
+    let text = command_exact
+        .as_deref()
+        .map(|command| format!("{tool_name}: {command}"))
+        .unwrap_or_else(|| {
+            if arguments_exact.is_empty() {
+                format!("{tool_name} tool call")
+            } else {
+                format!("{tool_name}: {arguments_exact}")
+            }
+        });
     let command_preview = codex_command_preview(&tool_name, arguments);
     let (arguments_preview, _, _) = arguments
         .map(codex_tool_arguments_preview)
         .unwrap_or_else(|| (String::new(), false, false));
-    let text = command_preview
-        .as_deref()
-        .map(|command| format!("{tool_name}: {command}"))
-        .unwrap_or_else(|| {
-            if arguments_preview.is_empty() {
-                format!("{tool_name} tool call")
-            } else {
-                format!("{tool_name}: {arguments_preview}")
-            }
-        });
     let tool_context = call_id.map(|call_id| {
         (
             call_id.to_owned(),

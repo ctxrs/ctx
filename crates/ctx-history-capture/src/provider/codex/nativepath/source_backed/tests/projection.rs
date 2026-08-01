@@ -114,6 +114,59 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
 }
 
 #[test]
+fn source_backed_tool_call_complete_content_is_not_preview_truncated() {
+    // Regression test for issue #224: `--content complete` (source-backed
+    // exact hydration) must return the full verified provider tool-call
+    // payload, not the `PROVIDER_MAX_PREVIEW_CHARS`-capped preview used for
+    // the indexed/lexical summary.
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000031";
+    let long_identifier = "z".repeat(crate::PROVIDER_MAX_PREVIEW_CHARS + 512);
+    let arguments = serde_json::json!({
+        "cmd": format!("echo {long_identifier}"),
+    })
+    .to_string();
+    let tool_record = serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "long-arguments-call",
+            "arguments": arguments,
+        }
+    })
+    .to_string();
+    write_session(&sessions, native_session_id, &[tool_record]);
+
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let index = temp.path().join("global-index");
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let events = VerifiedIndex::open(&index)
+        .unwrap()
+        .events_for_session(session_id.as_uuid())
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::ToolCall.as_str());
+
+    let hydrated = hydrate_codex_locator(&sessions, &events[0].locator).unwrap();
+    let text = hydrated
+        .decoded_display_text
+        .expect("tool-call event must have exact display text");
+    assert!(
+        text.contains(&long_identifier),
+        "complete content must retain the full argument text, not a preview-truncated prefix"
+    );
+    assert!(
+        text.len() > crate::PROVIDER_MAX_PREVIEW_CHARS,
+        "complete content must exceed the preview cap when the source payload does"
+    );
+}
+
+#[test]
 fn source_backed_codex_adapter_has_no_store_or_preview_body_fallback() {
     let adapter = [
         include_str!("../../source_backed.rs"),
