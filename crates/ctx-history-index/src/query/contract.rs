@@ -55,6 +55,23 @@ pub const LEXICAL_QUERY_LIMITS: LexicalQueryLimits = LexicalQueryLimits {
     maximum_unique_tokens: 32,
 };
 
+/// Maximum number of metadata candidates retained by one lexical search.
+///
+/// Coverage ranking can temporarily request one additional bounded result set
+/// for already-seen higher-coverage hits, so the internal collector ceiling is
+/// at most twice this public limit.
+pub const MAX_LEXICAL_QUERY_RESULTS: usize = 4_096;
+
+pub(crate) fn validate_lexical_result_limit(limit: usize) -> Result<()> {
+    if limit > MAX_LEXICAL_QUERY_RESULTS {
+        return Err(IndexError::InvalidLexicalResultLimit {
+            requested: limit,
+            maximum: MAX_LEXICAL_QUERY_RESULTS,
+        });
+    }
+    Ok(())
+}
+
 /// Maximum number of complete semantic event records retained in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
 

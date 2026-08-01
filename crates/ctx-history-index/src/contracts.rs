@@ -182,6 +182,8 @@ pub enum IndexError {
         "lexical query has too many unique analyzed tokens: observed {observed}, maximum {maximum}"
     )]
     LexicalQueryTokensTooMany { observed: usize, maximum: usize },
+    #[error("lexical result limit must not exceed {maximum} items, requested {requested}")]
+    InvalidLexicalResultLimit { requested: usize, maximum: usize },
     #[error(
         "semantic event page size must be between 1 and {maximum} items, requested {requested}"
     )]
@@ -286,6 +288,22 @@ pub enum IndexError {
     },
     #[error("generation writer invariant violated: {0}")]
     WriterInvariant(&'static str),
+    #[error("the active-generation rebuild marker is malformed")]
+    InvalidActiveGenerationRebuildMarker,
+    #[error(
+        "physical integrity receipt for generation {generation_id} is missing or invalid: {detail}"
+    )]
+    GenerationPhysicalIntegrityMismatch {
+        generation_id: String,
+        detail: String,
+    },
+    #[error(
+        "active lexical generation {generation_id} failed its physical integrity check and requires a source-authoritative rebuild: {detail}"
+    )]
+    ActiveGenerationNeedsRebuild {
+        generation_id: String,
+        detail: String,
+    },
     #[error("generation {generation_id} committed but failed {stage} verification: {detail}")]
     CommittedGenerationNeedsRecovery {
         generation_id: String,
