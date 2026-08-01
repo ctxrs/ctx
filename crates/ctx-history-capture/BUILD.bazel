@@ -91,6 +91,17 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
+ctx_rust_test(
+    name = "self_contained_core_final_locator_removal_tests",
+    srcs = [
+        "tests/self_contained_core_final_locator_removal.rs",
+        "//crates/ctx-history-core:src/lib.rs",
+    ] + PROD_SRCS,
+    crate_name = "self_contained_core_final_locator_removal",
+    crate_root = "tests/self_contained_core_final_locator_removal.rs",
+    edition = crate_edition(),
+)
+
 sh_test(
     name = "active_source_family_contract_tests",
     srcs = ["tests/run-active-source-family-contracts.sh"],
