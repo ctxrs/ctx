@@ -331,11 +331,7 @@ fn source_backed_replacement_keeps_ids_and_replaces_complete_core() {
 }
 
 fn record_for_only_message(source: &OpenedSource) -> CoreRecord {
-    let frontier = CrushNativeFrontier {
-        phase: CrushNativePhase::Messages,
-        after_rowid: None,
-        next_ordinal: 0,
-    };
+    let frontier = CrushNativeFrontier { after_rowid: None };
     let candidate = super::super::query::next_candidate(
         source.connection().unwrap(),
         &source.schema,
@@ -343,24 +339,25 @@ fn record_for_only_message(source: &OpenedSource) -> CoreRecord {
     )
     .unwrap()
     .unwrap();
-    let CrushLoadedRow::Message {
+    let CrushLoadedRow {
         row,
         session: Some(session),
         ..
-    } = super::super::query::load_row_from_connection(
+    } = super::super::query::load_message_batch(
         source.connection().unwrap(),
         &source.schema,
-        CrushNativePhase::Messages,
-        candidate.rowid,
-        candidate.observed_bytes,
+        &[candidate],
     )
+    .unwrap()
+    .remove(&candidate.rowid)
+    .unwrap()
     .unwrap()
     else {
         panic!("expected one parented Crush message row");
     };
     let projection = match project_message(&row, Some(&session)).unwrap() {
         CrushRecordProjection::Message(projection) => projection,
-        CrushRecordProjection::Rejection { .. } => {
+        CrushRecordProjection::Rejection => {
             panic!("expected the test message to project")
         }
     };

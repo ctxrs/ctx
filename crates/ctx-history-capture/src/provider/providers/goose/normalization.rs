@@ -4,7 +4,6 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::FileChangeKind;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::file_touches::{
@@ -48,12 +47,6 @@ pub(super) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> Dat
                 .map(|timestamp| provider_timestamp_seconds(Some(timestamp), fallback))
         })
         .unwrap_or(fallback)
-}
-
-fn goose_content_text(content: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    goose_collect_text(content, &mut parts);
-    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 /// Returns complete normalized Goose tool-response bodies in native array
@@ -368,29 +361,6 @@ pub(super) struct GooseNativeEvent {
     pub(super) retained_content_bytes: u64,
     pub(super) logical_row_digest: Option<[u8; 32]>,
     pub(super) file_touches: Vec<GooseNativeFileTouch>,
-}
-
-pub(super) fn goose_event_payload_hash(event: &GooseNativeEvent) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-goose-nativepath-canonical-event-v1\0");
-    digest.update(event.native_order.to_le_bytes());
-    digest.update(event.native_identity.as_bytes());
-    digest.update(event.provider_message_identity.as_bytes());
-    digest.update(event.session_identity.as_bytes());
-    digest.update(event.role.as_bytes());
-    digest.update(event.content.to_string().as_bytes());
-    digest.update(event.searchable_text.as_bytes());
-    digest.update(event.created_timestamp.unwrap_or_default().to_le_bytes());
-    if let Some(timestamp) = &event.timestamp {
-        digest.update(timestamp.as_bytes());
-    }
-    if let Some(tokens) = &event.tokens_json {
-        digest.update(tokens.as_bytes());
-    }
-    if let Some(metadata) = &event.metadata_json {
-        digest.update(metadata.as_bytes());
-    }
-    format!("{:x}", digest.finalize())
 }
 
 pub(super) fn normalize_goose_native_message(

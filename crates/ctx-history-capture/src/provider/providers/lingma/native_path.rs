@@ -10,8 +10,6 @@ mod records;
 mod source_backed;
 
 use records::{hash_optional_bytes, hash_optional_i64, hash_optional_u64};
-#[cfg(test)]
-pub(crate) use source_backed::scan_lingma_source_backed_v0;
 pub(crate) use source_backed::{
     reject_duplicate_paths, scan_lingma_snapshot_v0, LingmaDatabaseSourceV0,
     LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
@@ -29,7 +27,6 @@ pub(crate) struct LingmaQueryCounters {
     pub(crate) candidate_set_reads: u64,
     pub(crate) raw_row_set_reads: u64,
     pub(crate) raw_rows_read: u64,
-    pub(crate) identity_set_reads: u64,
 }
 
 #[cfg(test)]
@@ -39,7 +36,6 @@ thread_local! {
             candidate_set_reads: 0,
             raw_row_set_reads: 0,
             raw_rows_read: 0,
-            identity_set_reads: 0,
         }) };
 }
 
@@ -76,15 +72,6 @@ fn record_raw_row_read() {
     LINGMA_QUERY_COUNTERS.with(|slot| {
         let mut counters = slot.get();
         counters.raw_rows_read += 1;
-        slot.set(counters);
-    });
-}
-
-fn record_identity_set_read() {
-    #[cfg(test)]
-    LINGMA_QUERY_COUNTERS.with(|slot| {
-        let mut counters = slot.get();
-        counters.identity_set_reads += 1;
         slot.set(counters);
     });
 }

@@ -1,15 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{EventRole, EventType};
-use rusqlite::{params_from_iter, types::Value as SqlValue, Connection, Row};
+use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::native_source::NativeSqliteValue;
-use crate::provider::normalization::{
-    capped_text, provider_capped_json, provider_json_text, text_id_index,
-};
-use crate::{CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS};
+use crate::provider::normalization::{provider_json_text, text_id_index};
+use crate::{CaptureError, Result};
 
 use super::{SHELLEY_CONVERSATION_VALUE_COUNT, SHELLEY_MESSAGE_VALUE_COUNT};
 
@@ -127,58 +125,6 @@ pub(crate) fn decode_shelley_conversation(
     })
 }
 
-pub(crate) fn shelley_message_values(row: &Row<'_>) -> rusqlite::Result<Vec<NativeSqliteValue>> {
-    Ok(vec![
-        NativeSqliteValue::Integer(row.get(0)?),
-        NativeSqliteValue::Text(row.get(1)?),
-        NativeSqliteValue::Text(row.get(2)?),
-        NativeSqliteValue::Integer(row.get(3)?),
-        NativeSqliteValue::Text(row.get(4)?),
-        shelley_optional_text_value(row.get(5)?),
-        shelley_optional_text_value(row.get(6)?),
-        shelley_optional_text_value(row.get(7)?),
-        shelley_optional_text_value(row.get(8)?),
-        shelley_optional_text_value(row.get(9)?),
-        shelley_optional_integer_value(row.get(10)?),
-        shelley_optional_integer_value(row.get(11)?),
-        shelley_optional_text_value(row.get(12)?),
-        shelley_optional_text_value(row.get(13)?),
-        shelley_optional_text_value(row.get(14)?),
-    ])
-}
-
-pub(crate) fn shelley_conversation_values(
-    row: &Row<'_>,
-) -> rusqlite::Result<Vec<NativeSqliteValue>> {
-    Ok(vec![
-        NativeSqliteValue::Integer(row.get(0)?),
-        shelley_optional_text_value(row.get(1)?),
-        shelley_optional_text_value(row.get(2)?),
-        shelley_optional_integer_value(row.get(3)?),
-        shelley_optional_text_value(row.get(4)?),
-        shelley_optional_text_value(row.get(5)?),
-        shelley_optional_text_value(row.get(6)?),
-        shelley_optional_integer_value(row.get(7)?),
-        shelley_optional_text_value(row.get(8)?),
-        shelley_optional_text_value(row.get(9)?),
-        shelley_optional_text_value(row.get(10)?),
-        shelley_optional_integer_value(row.get(11)?),
-        shelley_optional_integer_value(row.get(12)?),
-        shelley_optional_text_value(row.get(13)?),
-        shelley_optional_integer_value(row.get(14)?),
-        shelley_optional_text_value(row.get(15)?),
-        shelley_optional_text_value(row.get(16)?),
-    ])
-}
-
-fn shelley_optional_text_value(value: Option<String>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
-}
-
-fn shelley_optional_integer_value(value: Option<i64>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
-}
-
 fn shelley_value<'a>(
     values: &'a [NativeSqliteValue],
     index: usize,
@@ -256,23 +202,7 @@ pub(super) fn shelley_message_body(message: &ShelleyMessageRow) -> Value {
     })
 }
 
-pub(super) fn shelley_message_text(message: &ShelleyMessageRow, body: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    for pointer in ["/user_data", "/llm_data", "/display_data"] {
-        if let Some(text) = body.pointer(pointer).and_then(shelley_value_text) {
-            parts.push(text);
-        }
-    }
-    if parts.is_empty() && message.entry_type == "system" {
-        Some("Shelley system message".to_owned())
-    } else if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n"))
-    }
-}
-
-/// Renders the exact source-backed text for message and result hydration.
+/// Renders the exact source-backed text for direct Core projection.
 ///
 /// The ordinary importer deliberately bounds its indexed preview; this path
 /// preserves every selected source string and is never persisted in SQLite.
@@ -519,21 +449,6 @@ pub(crate) fn shelley_event_index(message: &ShelleyMessageRow) -> u64 {
     sequence.saturating_mul(4_096).saturating_add(bucket)
 }
 
-/// Returns the bounded native identity used by locators and output records.
-///
-/// Shelley message IDs are not documented as globally unique, and the released
-/// event index deliberately compressed the conversation/message tuple. Keep
-/// the complete native tuple in this domain-separated digest instead of
-/// treating either lossy component as the native record identity.
-pub(crate) fn shelley_native_record_id(message: &ShelleyMessageRow) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-shelley-native-message-id-v1\0");
-    hash_identity_text(&mut digest, &message.conversation_id);
-    digest.update(message.sequence_id.to_be_bytes());
-    hash_identity_text(&mut digest, &message.message_id);
-    format!("shelley-message-v1:{:x}", digest.finalize())
-}
-
 /// Resolves the released compact event index, using a deterministic full-tuple
 /// alternate only when two distinct native messages actually collide.
 ///
@@ -714,11 +629,6 @@ fn shelley_native_identity_bytes(
     identity
 }
 
-fn hash_identity_text(digest: &mut Sha256, value: &str) {
-    digest.update((value.len() as u64).to_be_bytes());
-    digest.update(value.as_bytes());
-}
-
 fn shelley_value_has_tool_use(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.iter().any(shelley_value_has_tool_use),
@@ -745,143 +655,6 @@ fn shelley_value_has_tool_result(value: &Value) -> bool {
         }
         _ => false,
     }
-}
-
-pub(crate) fn shelley_value_text(value: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    shelley_collect_text(value, &mut parts);
-    (!parts.is_empty()).then(|| parts.join("\n"))
-}
-
-fn shelley_collect_text(value: &Value, parts: &mut Vec<String>) {
-    match value {
-        Value::String(text) => shelley_push_text(parts, text),
-        Value::Array(items) => {
-            for item in items {
-                if shelley_text_budget_remaining(parts) == 0 {
-                    break;
-                }
-                shelley_collect_text(item, parts);
-            }
-        }
-        Value::Object(object) => {
-            if let Some(kind) = shelley_content_type(value) {
-                let handled = match kind.as_str() {
-                    "text" => {
-                        if let Some(text) = object.get("Text").and_then(Value::as_str) {
-                            shelley_push_text(parts, text);
-                        }
-                        true
-                    }
-                    "thinking" | "redacted_thinking" => {
-                        if let Some(text) = object.get("Thinking").and_then(Value::as_str) {
-                            shelley_push_text(parts, text);
-                        }
-                        true
-                    }
-                    "tool_use" | "server_tool_use" => {
-                        let name = object
-                            .get("ToolName")
-                            .and_then(Value::as_str)
-                            .unwrap_or("tool");
-                        shelley_push_text(parts, &format!("tool call: {name}"));
-                        if let Some(input) = object.get("ToolInput") {
-                            if !input.is_null() {
-                                let input = provider_capped_json(input, PROVIDER_MAX_PREVIEW_CHARS);
-                                shelley_push_text(parts, &format!("tool input: {input}"));
-                            }
-                        }
-                        true
-                    }
-                    "tool_result" | "web_search_tool_result" => {
-                        shelley_push_text(parts, "tool result");
-                        if let Some(results) = object.get("ToolResult") {
-                            shelley_collect_text(results, parts);
-                        }
-                        if let Some(display) = object.get("Display") {
-                            shelley_collect_text(display, parts);
-                        }
-                        true
-                    }
-                    "web_search_result" => {
-                        for key in ["Title", "URL", "PageAge"] {
-                            if let Some(text) = object.get(key).and_then(Value::as_str) {
-                                shelley_push_text(parts, text);
-                            }
-                        }
-                        true
-                    }
-                    _ => false,
-                };
-                if handled {
-                    return;
-                }
-            }
-
-            let mut selected_child = false;
-            for key in [
-                "Text",
-                "text",
-                "Thinking",
-                "thinking",
-                "content",
-                "Content",
-                "output",
-                "Output",
-                "summary",
-                "Summary",
-                "message",
-                "Message",
-                "error",
-                "Error",
-                "LLMContent",
-                "ToolResult",
-                "Display",
-            ] {
-                if shelley_text_budget_remaining(parts) == 0 {
-                    break;
-                }
-                if let Some(child) = object.get(key) {
-                    selected_child = true;
-                    shelley_collect_text(child, parts);
-                }
-            }
-            if !selected_child {
-                for child in object
-                    .values()
-                    .filter(|child| matches!(child, Value::Array(_) | Value::Object(_)))
-                {
-                    if shelley_text_budget_remaining(parts) == 0 {
-                        break;
-                    }
-                    shelley_collect_text(child, parts);
-                }
-            }
-        }
-        Value::Number(_) | Value::Bool(_) | Value::Null => {}
-    }
-}
-
-fn shelley_push_text(parts: &mut Vec<String>, text: &str) {
-    let text = text.trim();
-    if !text.is_empty() {
-        let remaining = shelley_text_budget_remaining(parts);
-        if remaining == 0 {
-            return;
-        }
-        let separator_budget = usize::from(!parts.is_empty());
-        if remaining <= separator_budget {
-            return;
-        }
-        let (text, _) = capped_text(text, remaining - separator_budget);
-        parts.push(text);
-    }
-}
-
-fn shelley_text_budget_remaining(parts: &[String]) -> usize {
-    let used = parts.iter().map(|part| part.chars().count()).sum::<usize>()
-        + parts.len().saturating_sub(1);
-    (PROVIDER_MAX_TEXT_CHARS + 1).saturating_sub(used)
 }
 
 fn shelley_content_type(value: &Value) -> Option<String> {

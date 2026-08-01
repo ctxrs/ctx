@@ -33,24 +33,6 @@ pub(super) fn message_columns(conn: &Connection) -> Result<BTreeSet<String>> {
     Ok(columns)
 }
 
-pub(super) fn optional_file_columns(conn: &Connection) -> Result<Option<BTreeSet<String>>> {
-    if !sqlite_table_exists(conn, "files")? {
-        return Ok(None);
-    }
-    let columns = sqlite_table_columns(conn, "files")?;
-    ensure_sqlite_table_columns(&columns, "Crush files table", &["path"])?;
-    Ok(Some(columns))
-}
-
-pub(super) fn optional_read_file_columns(conn: &Connection) -> Result<Option<BTreeSet<String>>> {
-    if !sqlite_table_exists(conn, "read_files")? {
-        return Ok(None);
-    }
-    let columns = sqlite_table_columns(conn, "read_files")?;
-    ensure_sqlite_table_columns(&columns, "Crush read_files table", &["session_id", "path"])?;
-    Ok(Some(columns))
-}
-
 fn optional_qualified(
     columns: &BTreeSet<String>,
     alias: &str,
@@ -90,22 +72,6 @@ pub(super) fn message_projection(columns: &BTreeSet<String>, alias: &str) -> Str
         optional("model", "NULL"),
         optional("is_summary_message", "0"),
     )
-}
-
-pub(super) fn file_projection(columns: &BTreeSet<String>, alias: &str) -> String {
-    let optional = |column, fallback| optional_qualified(columns, alias, column, fallback);
-    format!(
-        "{alias}.rowid, {}, {alias}.path, {}, {}, {}",
-        optional("session_id", "NULL"),
-        optional("version", "NULL"),
-        optional("created_at", "NULL"),
-        optional("updated_at", "NULL"),
-    )
-}
-
-pub(super) fn read_file_projection(columns: &BTreeSet<String>, alias: &str) -> String {
-    let read_at = optional_qualified(columns, alias, "read_at", "NULL");
-    format!("{alias}.rowid, {alias}.session_id, {alias}.path, {read_at}")
 }
 
 pub(super) fn message_session_join() -> &'static str {

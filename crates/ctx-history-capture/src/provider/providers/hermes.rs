@@ -58,18 +58,9 @@ fn prepare_hermes_core_message(
     })
 }
 
-fn hermes_message_revision(row: &HermesMessageRow) -> Result<String> {
-    let event = hermes_native_event(row, 0)?;
-    ctx_history_core::compute_payload_hash(&event.payload).map_err(Into::into)
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct HermesNativeEvent {
     pub(super) provider_event_index: u64,
-    // Preserve the provider hash in the exact native event shape for staging
-    // Pro and diagnostic materializers.
-    #[allow(dead_code)]
-    pub(super) provider_event_hash: Option<String>,
     pub(super) cursor: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
@@ -122,7 +113,6 @@ pub(in crate::provider::providers::hermes) fn hermes_native_event(
     let result_outcome = provider_result_outcome_evidence(event_type, &body);
     Ok(HermesNativeEvent {
         provider_event_index: provider_nonnegative_i64_to_u64(row.id, "Hermes message id")?,
-        provider_event_hash: Some(format!("message:{}", row.id)),
         cursor: format!("messages:id:{}", row.id),
         event_type,
         role: Some(provider_role(Some(&row.role))),

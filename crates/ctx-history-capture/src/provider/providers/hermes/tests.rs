@@ -5,10 +5,7 @@ use serde_json::Value;
 
 use super::{
     layout::HermesSchema,
-    sqlite::{
-        HermesFrontier, HermesNativeRecord, HermesPhase, HermesRowReader, HERMES_FRONTIER_VERSION,
-        HERMES_LOCATOR_KIND,
-    },
+    sqlite::{HermesFrontier, HermesNativeRecord, HermesPhase, HermesRowReader},
     *,
 };
 use crate::test_support_paths::tempdir;
@@ -65,22 +62,6 @@ fn create_fixture(path: &Path, session: &str) {
     )
     .unwrap();
 }
-#[test]
-fn provider_frontier_and_locator_are_exact_and_versioned() {
-    let frontier = HermesFrontier {
-        phase: HermesPhase::Messages,
-        next_ordinal: 42,
-        rowid: -7,
-    };
-    assert_eq!(
-        HermesFrontier::decode(&frontier.encode()).unwrap(),
-        frontier
-    );
-    assert_eq!(HERMES_FRONTIER_VERSION, 1);
-    assert_eq!(HERMES_LOCATOR_KIND, "hermes-sqlite-row-v1");
-    assert!(HermesFrontier::decode(&frontier.encode()[..16]).is_err());
-}
-
 #[test]
 fn minimum_sqlite_rowid_is_distinct_from_the_initial_frontier() {
     let temp = tempdir().unwrap();

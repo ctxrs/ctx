@@ -26,11 +26,9 @@ use crate::{
         sqlite::sqlite_schema_fingerprint,
     },
     provider_sources::{
-        discover_provider_sources_for_provider_with_context,
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        DiscoveryContext, DiscoveryIssue, ProviderSource, ProviderSourceStatus,
-        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
-        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        ProviderSource, SqliteLogicalSnapshot, SqliteSourceAccessError,
+        SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -51,7 +49,6 @@ const HERMES_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-db-v1";
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Hermes SQLite source must have an authorized parent and database leaf";
 const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
-const HERMES_SESSION_RELATION: &str = "sessions";
 const HERMES_SESSION_METADATA_MAX_CHARS: usize = 8 * 1024;
 const HERMES_PARENT_CHAIN_MAX_DEPTH: usize = 256;
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-snapshot-v1\0";
@@ -181,18 +178,13 @@ fn project_hermes_snapshot(
                     digest.update(observed_bytes.to_be_bytes());
                     digest.update(logical_digest);
 
-                    let phase = native.locator.phase;
-                    let rowid = native.locator.rowid;
-                    let ordinal = native.ordinal;
                     let record = project_native_row(
                         &candidate.source,
                         &source_path,
                         native,
-                        logical_digest,
                         &session_contexts,
                     )?;
-                    let (record, owned_bytes) =
-                        bound_projected_record(record, phase, rowid, ordinal)?;
+                    let (record, owned_bytes) = bound_projected_record(record)?;
 
                     match &record {
                         HermesSourceBackedRecord::Session(_) => {
@@ -217,10 +209,7 @@ fn project_hermes_snapshot(
                             u64::try_from(records.len())
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
-                        emit(HermesSourceBackedPage {
-                            records,
-                            owned_bytes: page_owned_bytes,
-                        })?;
+                        emit(HermesSourceBackedPage { records })?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
                     }
@@ -232,10 +221,7 @@ fn project_hermes_snapshot(
                             u64::try_from(records.len())
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
-                        emit(HermesSourceBackedPage {
-                            records,
-                            owned_bytes: page_owned_bytes,
-                        })?;
+                        emit(HermesSourceBackedPage { records })?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
                     }
@@ -248,7 +234,6 @@ fn project_hermes_snapshot(
                 );
                 emit(HermesSourceBackedPage {
                     records: page_records,
-                    owned_bytes: page_owned_bytes,
                 })?;
                 emitted_pages = checked_add(emitted_pages, 1)?;
             }
@@ -408,31 +393,26 @@ fn project_native_row(
     source: &SourceKey,
     source_path: &str,
     native: HermesNativeRow,
-    logical_digest: [u8; 32],
     session_contexts: &BTreeMap<String, HermesSessionResolution>,
 ) -> HermesSourceBackedResult<HermesSourceBackedRecord> {
-    let phase = native.locator.phase;
-    let rowid = native.locator.rowid;
     let ordinal = native.ordinal;
     match native.record {
         HermesNativeRecord::Session(row) => {
             let context = match session_contexts.get(&row.id) {
                 Some(HermesSessionResolution::Context(context)) => context.as_ref().clone(),
                 Some(HermesSessionResolution::Rejected(reason)) => {
-                    return Ok(rejected(phase, rowid, ordinal, reason.clone()));
+                    return Ok(rejected(reason.clone()));
                 }
                 Some(HermesSessionResolution::Missing) | None => {
-                    return Ok(rejected(
-                        phase,
-                        rowid,
-                        ordinal,
-                        format!("Hermes session {} disappeared during projection", row.id),
-                    ));
+                    return Ok(rejected(format!(
+                        "Hermes session {} disappeared during projection",
+                        row.id
+                    )));
                 }
             };
-            match project_session(source, source_path, row, context, logical_digest) {
+            match project_session(source_path, row, context) {
                 Ok(session) => Ok(HermesSourceBackedRecord::Session(session)),
-                Err(error) => Ok(rejected(phase, rowid, ordinal, error.to_string())),
+                Err(error) => Ok(rejected(error.to_string())),
             }
         }
         HermesNativeRecord::Message {
@@ -443,68 +423,39 @@ fn project_native_row(
             let context = match session_contexts.get(&row.session_id) {
                 Some(HermesSessionResolution::Context(context)) => context.as_ref().clone(),
                 Some(HermesSessionResolution::Rejected(reason)) => {
-                    return Ok(rejected(phase, rowid, ordinal, reason.clone()));
+                    return Ok(rejected(reason.clone()));
                 }
                 Some(HermesSessionResolution::Missing) | None => {
-                    return Ok(rejected(
-                        phase,
-                        rowid,
-                        ordinal,
-                        format!(
-                            "Hermes message {} depends on missing session {}",
-                            row.id, row.session_id
-                        ),
-                    ));
+                    return Ok(rejected(format!(
+                        "Hermes message {} depends on missing session {}",
+                        row.id, row.session_id
+                    )));
                 }
             };
             match project_message(source, ordinal, row, prepared, context) {
                 Ok(document) => Ok(HermesSourceBackedRecord::Event(document)),
-                Err(error) => Ok(rejected(phase, rowid, ordinal, error.to_string())),
+                Err(error) => Ok(rejected(error.to_string())),
             }
         }
-        HermesNativeRecord::Rejected(reason) => Ok(rejected(phase, rowid, ordinal, reason)),
+        HermesNativeRecord::Rejected(reason) => Ok(rejected(reason)),
     }
 }
 
-fn rejected(
-    phase: HermesPhase,
-    rowid: i64,
-    ordinal: u64,
-    reason: String,
-) -> HermesSourceBackedRecord {
-    HermesSourceBackedRecord::Rejected(HermesSourceBackedRejection {
-        phase,
-        rowid,
-        ordinal,
-        reason,
-    })
+fn rejected(reason: String) -> HermesSourceBackedRecord {
+    HermesSourceBackedRecord::Rejected(HermesSourceBackedRejection { reason })
 }
 
 fn project_session(
-    _source: &SourceKey,
     source_path: &str,
     row: HermesSessionRow,
     context: HermesSessionContext,
-    _record_digest: [u8; 32],
 ) -> HermesSourceBackedResult<HermesSourceBackedSession> {
-    let started_at =
-        provider_required_timestamp_seconds(row.started_at, "Hermes session started_at")?;
-    let ended_at = row
-        .ended_at
-        .map(|value| provider_required_timestamp_seconds(value, "Hermes session ended_at"))
-        .transpose()?;
     Ok(HermesSourceBackedSession {
-        session_id: context.session_id,
-        parent_session_id: context.parent_session_id,
-        root_session_id: context.root_session_id,
         provider_session_id: row.id,
         provider_parent_session_id: row.parent_session_id,
         branch: context.branch,
         source_path: source_path.to_owned(),
         agent_type: context.agent_type,
-        is_primary: context.is_primary,
-        started_at_unix_ms: started_at.timestamp_millis(),
-        ended_at_unix_ms: ended_at.map(|value| value.timestamp_millis()),
         workspace: context.workspace,
         cwd: context.cwd,
     })
@@ -752,23 +703,15 @@ fn root_provider_session_id(
 
 fn bound_projected_record(
     record: HermesSourceBackedRecord,
-    phase: HermesPhase,
-    rowid: i64,
-    ordinal: u64,
 ) -> HermesSourceBackedResult<(HermesSourceBackedRecord, usize)> {
     let owned_bytes = projected_owned_bytes(&record)?;
     if owned_bytes <= NATIVE_INGESTION_PAGE_MAX_BYTES {
         return Ok((record, owned_bytes));
     }
-    let record = rejected(
-        phase,
-        rowid,
-        ordinal,
-        format!(
-            "Hermes projected row requires {owned_bytes} bytes and exceeds the {}-byte page limit",
-            NATIVE_INGESTION_PAGE_MAX_BYTES
-        ),
-    );
+    let record = rejected(format!(
+        "Hermes projected row requires {owned_bytes} bytes and exceeds the {}-byte page limit",
+        NATIVE_INGESTION_PAGE_MAX_BYTES
+    ));
     let owned_bytes = projected_owned_bytes(&record)?;
     Ok((record, owned_bytes))
 }

@@ -86,8 +86,8 @@ pub(crate) type ShelleySourceBackedResult<T> = Result<T, ShelleySourceBackedErro
 /// The one automatic Shelley source admitted for an invocation.
 #[derive(Debug, Clone)]
 pub(crate) struct ShelleySourceBackedAdapter {
+    #[cfg(test)]
     data_root: PathBuf,
-    exact_cwd: PathBuf,
     database_path: PathBuf,
     source: SourceKey,
 }
@@ -191,8 +191,8 @@ pub(crate) fn discover_shelley_source_backed_exact_cwd(
         anchor,
     )?;
     Ok(Some(ShelleySourceBackedAdapter {
+        #[cfg(test)]
         data_root: data_root.to_path_buf(),
-        exact_cwd,
         database_path,
         source,
     }))

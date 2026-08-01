@@ -13,24 +13,27 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    discover_provider_sources_for_provider_with_context, DiscoveryContext, ProviderSourceStatus,
+    ASTRBOT_SQLITE_SOURCE_FORMAT,
+};
+
+#[cfg(test)]
+use crate::{
     common::io::ProviderSourceRoot,
-    discover_provider_sources_for_provider_with_context,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceReadSnapshot,
     },
-    CaptureError, DiscoveryContext, ProviderSourceStatus, ASTRBOT_SQLITE_SOURCE_FORMAT,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
-#[cfg(test)]
-use super::INVENTORY_DISCOVERY_REVISION;
 use super::{
     AstrBotSourceBackedErrorV0, AstrBotSourceBackedResultV0, INVENTORY_AUTHORITY_KEY,
     INVENTORY_AUTHORITY_NAMESPACE, INVENTORY_REVISION_KIND, LAUNCHER_SOURCE_NAMESPACE,
     SELECTED_SOURCE_NAMESPACE, SOURCE_IDENTITY_VERSION, SOURCE_SCHEMA_VARIANT,
-    SQLITE_SOURCE_INVALID_REASON,
 };
+#[cfg(test)]
+use super::{INVENTORY_DISCOVERY_REVISION, SQLITE_SOURCE_INVALID_REASON};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AstrBotSourceIdentityV0 {
@@ -144,6 +147,7 @@ impl AstrBotSourceBackedInventoryV0 {
     }
 }
 
+#[cfg(test)]
 pub(super) fn open_root_authorized_snapshot(
     data_root: &Path,
     path: &Path,
@@ -151,6 +155,7 @@ pub(super) fn open_root_authorized_snapshot(
     open_root_authorized_snapshot_with_hook(data_root, path, || {})
 }
 
+#[cfg(test)]
 pub(super) fn open_root_authorized_snapshot_with_hook(
     data_root: &Path,
     path: &Path,
