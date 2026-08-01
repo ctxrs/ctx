@@ -1,7 +1,7 @@
 use std::fmt;
 
-/// A provider-native command or tool result retained for source-backed
-/// projection and exact hydration.
+/// A provider-native command or tool result retained during acquisition for
+/// exact private projection and linked outcome extraction.
 pub struct ProOutputObservation {
     pub kind: OutputObservationKind,
     pub coordinate: OutputNativeCoordinate,

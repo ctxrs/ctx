@@ -647,10 +647,6 @@ impl NanoClawSourceBackedProject {
         })
     }
 
-    pub(super) fn root_path(&self) -> &Path {
-        self.root.named_path()
-    }
-
     pub(super) fn snapshot(&self) -> &NanoClawProjectSnapshot {
         &self.snapshot
     }

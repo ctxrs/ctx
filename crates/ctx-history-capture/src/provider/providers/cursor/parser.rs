@@ -692,10 +692,6 @@ impl<'de> Visitor<'de> for CursorPathsVisitor {
     }
 }
 
-struct BoundedStringSeed {
-    max_chars: usize,
-}
-
 struct ExactBoundedStringSeed {
     max_chars: usize,
 }
@@ -709,19 +705,6 @@ impl<'de> DeserializeSeed<'de> for ExactBoundedStringSeed {
     {
         let value = String::deserialize(deserializer)?;
         Ok((value.chars().count() <= self.max_chars).then_some(value))
-    }
-}
-
-impl<'de> DeserializeSeed<'de> for BoundedStringSeed {
-    type Value = String;
-
-    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_string(BoundedStringVisitor {
-            max_chars: self.max_chars,
-        })
     }
 }
 
