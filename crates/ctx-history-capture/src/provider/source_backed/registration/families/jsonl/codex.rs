@@ -1,10 +1,11 @@
 use super::*;
 use std::sync::Mutex;
 
+#[cfg(test)]
+use crate::provider::codex::nativepath::CodexCatalogWorkV0;
 use crate::provider::codex::nativepath::{
     discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
-    ingest_codex_sources_v0, CodexCatalogWorkV0, CodexSessionTreeInventoryV0,
-    CodexSourceBackedResultV0,
+    ingest_codex_sources_v0, CodexSessionTreeInventoryV0, CodexSourceBackedResultV0,
 };
 
 #[path = "codex_prompt_terminal.rs"]
@@ -338,6 +339,7 @@ fn discover_codex_route_inventory(
         return Ok(CodexSessionTreeInventoryV0 {
             sources: inventory.sources,
             certificate: inventory.certificate,
+            #[cfg(test)]
             work: CodexCatalogWorkV0::default(),
         });
     }

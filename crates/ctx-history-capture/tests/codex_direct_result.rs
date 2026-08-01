@@ -1,7 +1,12 @@
 use std::{fs, path::Path};
 
-use ctx_history_capture::ingest_codex_source_backed_v0;
-use ctx_history_index::VerifiedIndex;
+use ctx_history_capture::{
+    provider_source_for_path, refresh_source_backed_generation,
+    register_landed_source_backed_route, SourceBackedProviderRegistry, SourceBackedRefreshReceipt,
+    SourceBackedRouteSelection,
+};
+use ctx_history_core::CaptureProvider;
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
 fn write_session(root: &Path, native_session_id: &str, events: &[Value]) {
@@ -28,6 +33,17 @@ fn write_session(root: &Path, native_session_id: &str, events: &[Value]) {
         contents,
     )
     .unwrap();
+}
+
+fn publish_codex_sessions(session_root: &Path, index_root: &Path) -> SourceBackedRefreshReceipt {
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        provider_source_for_path(CaptureProvider::Codex, session_root.to_path_buf()),
+        SourceBackedRouteSelection::ExplicitManual,
+    )
+    .unwrap();
+    refresh_source_backed_generation(index_root, &registry, WriterOptions::default()).unwrap()
 }
 
 fn mcp_result(call_id: &str, result: Value) -> Value {
@@ -72,7 +88,7 @@ fn over_8_mib_mcp_result_is_admitted_once_and_indexable() {
         )],
     );
 
-    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    publish_codex_sessions(&sessions, &index);
     let verified = VerifiedIndex::open(&index).unwrap();
     let candidate = verified
         .search_event_candidates(result_tail, 10)
@@ -153,9 +169,8 @@ fn malformed_mcp_results_are_rejected_without_hiding_later_valid_content() {
     }));
     write_session(&sessions, native_session_id, &events);
 
-    let receipt = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
-    assert_eq!(receipt.counters.rejected_records_scanned, 7);
-    assert_eq!(receipt.counters.retained_records_scanned, 3);
+    let receipt = publish_codex_sessions(&sessions, &index);
+    assert_eq!(receipt.commit.indexed_documents, 3);
     let verified = VerifiedIndex::open(&index).unwrap();
     assert!(verified
         .search_event_candidates(rejected_marker, 10)
@@ -198,8 +213,8 @@ fn redacted_real_shape_fixture_is_admitted_with_linkage_and_metadata() {
     )
     .unwrap();
 
-    let receipt = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
-    assert_eq!(receipt.counters.rejected_records_scanned, 0);
+    let receipt = publish_codex_sessions(&sessions, &index);
+    assert_eq!(receipt.commit.indexed_documents, 1);
     let verified = VerifiedIndex::open(&index).unwrap();
     let candidate = verified
         .search_event_candidates("REAL_SHAPE_DIRECT_RESULT", 10)

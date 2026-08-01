@@ -1,6 +1,7 @@
 use super::*;
 
-pub fn ingest_codex_source_backed_v0(
+#[cfg(test)]
+pub(super) fn ingest_codex_source_backed_v0(
     session_root: impl AsRef<Path>,
     global_index_root: impl AsRef<Path>,
 ) -> CodexSourceBackedResultV0<CodexSourceBackedIngestReceiptV0> {
@@ -11,6 +12,7 @@ pub fn ingest_codex_source_backed_v0(
     )
 }
 
+#[cfg(test)]
 pub(super) fn ingest_codex_source_backed_inner_v0(
     session_root: &Path,
     global_index_root: &Path,

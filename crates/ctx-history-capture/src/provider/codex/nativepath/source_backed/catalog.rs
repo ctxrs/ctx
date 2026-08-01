@@ -14,6 +14,7 @@ pub(crate) struct CodexRootInventoryV0 {
 pub(crate) struct CodexSessionTreeInventoryV0 {
     pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     pub(crate) certificate: CertifiedSourceInventory,
+    #[cfg(test)]
     pub(crate) work: CodexCatalogWorkV0,
 }
 
@@ -284,6 +285,7 @@ pub(super) fn bind_source_keys(
     Ok(bound)
 }
 
+#[cfg(test)]
 pub(crate) fn discover_codex_session_tree_inventory_from_base_v0(
     session_roots: &[PathBuf],
     base_sources: &HashMap<SourceKey, CertifiedSource>,
@@ -343,6 +345,7 @@ fn build_codex_root_inventory_v0(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn discover_codex_session_tree_inventory_from_plans_v0(
     session_roots: &[PathBuf],
     prior_inventory: &CodexSessionTreeInventoryV0,
@@ -383,6 +386,7 @@ struct CodexMetadataInventoryLeafV0 {
     authority: ProviderSourceRoot,
 }
 
+#[cfg(test)]
 fn incremental_seed_from_certificate(
     certificate: &CertifiedSource,
 ) -> Option<CodexSourceBackedResultV0<CodexIncrementalInventorySeedV0>> {
@@ -493,6 +497,7 @@ fn discover_codex_session_tree_inventory_incremental_v0(
     Ok(CodexSessionTreeInventoryV0 {
         sources,
         certificate,
+        #[cfg(test)]
         work,
     })
 }

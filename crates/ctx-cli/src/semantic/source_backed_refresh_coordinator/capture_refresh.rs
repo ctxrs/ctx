@@ -130,16 +130,6 @@ pub(super) fn refresh_all_provider_sources(
         .unwrap_or_default();
     reject_blocking_automatic_registry_issues(&build.issues)?;
     reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
-    if build.registry.executable_route_count() == 0 {
-        return refresh_without_executable_routes(
-            &build.registry,
-            index_root,
-            retained_generation.as_ref(),
-            discovery_duration,
-            published_explicit_source_catalog,
-            report_progress,
-        );
-    }
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let receipt = executor
         .refresh(index_root, report_progress)
@@ -166,61 +156,6 @@ pub(super) fn refresh_all_provider_sources(
             discovery_us: nonzero_duration_micros(receipt.discovery_duration),
             scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
             commit_us: nonzero_duration_micros(receipt.commit_duration),
-        },
-    })
-}
-
-fn refresh_without_executable_routes(
-    registry: &SourceBackedProviderRegistry,
-    index_root: &Path,
-    retained_generation: Option<&VerifiedIndex>,
-    discovery_duration: StdDuration,
-    published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
-    report_progress: &mut dyn FnMut(
-        CaptureSourceBackedRefreshProgress,
-    ) -> SourceBackedRouteResult<()>,
-) -> Result<SourceBackedRefreshPublication> {
-    if let Some(retained) = retained_generation {
-        if !retained.manifest().sources.is_empty() || !retained.manifest().removals.is_empty() {
-            bail!(
-                "{TERMINAL_COVERAGE_ERROR_CODE}: no executable source-backed route can revalidate the retained source or removal authority"
-            );
-        }
-    }
-
-    let commit_started = StdInstant::now();
-    let generation = if let Some(retained) = retained_generation {
-        retained.generation_id().to_owned()
-    } else {
-        ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default())?
-            .commit(|_| false)?
-            .generation_id
-    };
-    let commit_duration = commit_started.elapsed();
-    report_progress(CaptureSourceBackedRefreshProgress {
-        phase: "committed",
-        completed_sources: 0,
-        total_sources: 0,
-        current_source: None,
-        stage_duration: commit_duration,
-        elapsed: discovery_duration.saturating_add(commit_duration),
-        certified_source_count: Some(0),
-        certified_source_bytes: Some(0),
-    })
-    .map_err(|error| anyhow!("report empty source-backed publication progress: {error}"))?;
-
-    Ok(SourceBackedRefreshPublication {
-        generation_id: generation,
-        published_explicit_source_catalog,
-        scanned_routes: 0,
-        unsupported_routes: registry.unsupported_route_count(),
-        certified_source_count: 0,
-        certified_source_bytes: 0,
-        current: SourceBackedRefreshCurrent::default(),
-        timings: SourceBackedRefreshTimings {
-            discovery_us: nonzero_duration_micros(discovery_duration),
-            scan_stage_us: 1,
-            commit_us: nonzero_duration_micros(commit_duration),
         },
     })
 }
