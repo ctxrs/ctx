@@ -106,6 +106,68 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
 }
 
 #[test]
+fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    assert_eq!(
+        canonical["dto_fields"]["RepositoryCandidateEvidence"]["required"],
+        serde_json::json!([
+            "repository_observation_revision",
+            "bounded_shell_subset_revision",
+            "association_policy_revision",
+            "outcome_capture_revision",
+            "candidates"
+        ])
+    );
+    assert_eq!(
+        canonical["enums"]["repository_candidate_kind"],
+        serde_json::json!([
+            "session_cwd",
+            "declared_tool_workdir",
+            "derived_effective_cwd",
+            "command_specific_repository_path",
+            "file_activity_path",
+            "vcs_activity_path",
+            "outcome_operation_repository_path",
+            "outcome_output_repository_path"
+        ])
+    );
+    assert_eq!(
+        canonical["core_record_contract"],
+        serde_json::json!({
+            "fingerprint": "41ef12d599e6ebb8769b23e0e47e47a40e6939dd835b82aa2cc145038ac2d417",
+            "repository_contract_revision": 5,
+            "repository_observation_revision": 2,
+            "bounded_shell_subset_revision": 1,
+            "repository_association_policy_revision": 3,
+            "repository_outcome_capture_revision": 2,
+            "repository_local_root_authorization_fingerprint_revision": 1,
+            "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs"
+        })
+    );
+
+    let frame = unhex(
+        value["golden_vectors"]["host_frames"]["apply_core_event_delta_page"]
+            .as_str()
+            .unwrap(),
+    );
+    let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
+    let evidence =
+        &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
+    assert_eq!(evidence["repository_observation_revision"], 2);
+    assert_eq!(evidence["association_policy_revision"], 3);
+    assert_eq!(evidence["outcome_capture_revision"], 2);
+    assert_eq!(
+        evidence["candidates"],
+        serde_json::json!([
+            {"kind": "session_cwd", "path": "/golden/repo"},
+            {"kind": "file_activity_path", "path": "/golden/repo/src/lib.rs"}
+        ])
+    );
+    assert!(evidence.get("declared_tool_workdir").is_none());
+}
+
+#[test]
 fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
     let value = inventory();
     for (name, encoded) in value["golden_vectors"]["host_frames"].as_object().unwrap() {

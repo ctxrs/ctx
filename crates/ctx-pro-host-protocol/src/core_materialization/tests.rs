@@ -7,7 +7,7 @@ use ctx_history_core::{
     RepositoryCandidateEvidence, RepositoryEvidence, RepositoryEvidenceConfidence,
     RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
     RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
-    TypedKey, CORE_CONTENT_POLICY_REVISION,
+    TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 
 use super::*;
@@ -50,7 +50,7 @@ fn binding(id: &str, repository: &str) -> RepositoryBinding {
             kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
             confidence: RepositoryEvidenceConfidence::High,
         }],
-        association_policy_revision: 1,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     }
 }
 

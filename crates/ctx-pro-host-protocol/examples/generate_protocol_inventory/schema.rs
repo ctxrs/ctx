@@ -1,4 +1,10 @@
 use super::*;
+use ctx_history_core::{
+    core_record_contract_fingerprint, CORE_BOUNDED_SHELL_SUBSET_REVISION,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_CONTRACT_REVISION,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+    CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+};
 
 fn wire_names<T: Copy>(values: &[T], name: impl Fn(T) -> &'static str) -> Vec<&'static str> {
     values.iter().copied().map(name).collect()
@@ -90,6 +96,11 @@ pub(super) fn inventory() -> Value {
             "pro_operation": ["file_blame", "commit_blame", "pull_request_blame"],
             "core_source_delta_kind": ["present", "removed"],
             "core_event_delta_kind": ["added", "replaced", "tombstoned"],
+            "repository_candidate_kind": [
+                "session_cwd", "declared_tool_workdir", "derived_effective_cwd",
+                "command_specific_repository_path", "file_activity_path", "vcs_activity_path",
+                "outcome_operation_repository_path", "outcome_output_repository_path"
+            ],
             "query_snapshot_expectation_kind": ["core"],
             "resource_kind": ResourceKind::ALL.map(ResourceKind::wire_name)
         },
@@ -177,7 +188,24 @@ pub(super) fn inventory() -> Value {
                 "normalization_revision", "content", "metadata", "repository_candidate_evidence",
                 "repository_bindings", "repository_abstentions", "repository_file_observations",
                 "repository_vcs_observations"
-            ], &[])
+            ], &[]),
+            "RepositoryCandidateEvidence": fields(&[
+                "repository_observation_revision", "bounded_shell_subset_revision",
+                "association_policy_revision", "outcome_capture_revision", "candidates"
+            ], &[]),
+            "RepositoryCandidate": fields(&["kind", "path"], &[])
+        },
+        "core_record_contract": {
+            "fingerprint": core_record_contract_fingerprint(),
+            "repository_contract_revision": CORE_REPOSITORY_CONTRACT_REVISION,
+            "repository_observation_revision": CORE_REPOSITORY_OBSERVATION_REVISION,
+            "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            "repository_association_policy_revision":
+                CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+            "repository_outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            "repository_local_root_authorization_fingerprint_revision":
+                CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+            "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs"
         },
         "core_materialization": {
             "contract_version": CORE_MATERIALIZATION_CONTRACT_VERSION,
