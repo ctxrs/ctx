@@ -103,11 +103,10 @@ one-line diff previews as generic searchable text. Users can search actual line
 changes in Git or in the original provider transcript when they need patch
 content.
 
-Tool output is metadata-only in durable ctx storage. Neither successful nor
-failed result body text is stored or indexed. A parser may emit a
-provider-independent `ContentRef` containing the SHA-256 and exact byte length
-of the full normalized output, plus compact typed outcome/evidence. Query-time
-surfaces do not reconstruct excluded result bodies from provider files.
+Tool output is metadata-only when the shared content policy excludes it.
+Parsers retain compact typed outcome/evidence, including exact linked commit
+or pull-request identities when available. Query-time surfaces read committed
+Core records and never reconstruct excluded result bodies from provider files.
 
 ## Native Retention Metadata
 
