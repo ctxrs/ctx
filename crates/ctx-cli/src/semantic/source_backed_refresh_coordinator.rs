@@ -22,7 +22,9 @@ use ctx_history_capture::{
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
 use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
-use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
+use ctx_history_index::{
+    generation_incompatibility_requires_rebuild, IndexError, VerifiedIndex, WriterOptions,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -237,6 +239,7 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
             }
             Ok(None)
         }
+        Err(error) if generation_incompatibility_requires_rebuild(&error) => Ok(None),
         Err(error) => {
             Err(error).with_context(|| format!("open verified Core index {}", index_root.display()))
         }
@@ -300,9 +303,9 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
         }
         return Ok(None);
     }
-    match VerifiedIndex::active_generation_id(&index_root)? {
-        Some(generation_id) => Ok(Some(generation_id)),
-        None => {
+    match VerifiedIndex::active_generation_id(&index_root) {
+        Ok(Some(generation_id)) => Ok(Some(generation_id)),
+        Ok(None) => {
             let Some(generation_id) = receipt_generation else {
                 return Ok(None);
             };
@@ -311,6 +314,8 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
                 index_root.display()
             )
         }
+        Err(error) if generation_incompatibility_requires_rebuild(&error) => Ok(receipt_generation),
+        Err(error) => Err(error.into()),
     }
 }
 

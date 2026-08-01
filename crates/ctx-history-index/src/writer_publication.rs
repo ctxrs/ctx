@@ -219,9 +219,11 @@ impl GenerationWriter {
         let active = GenerationSlot::new(generation_id.clone(), directory_name)?;
         let next_pointer = ActiveGenerationPointer::new(
             active,
-            self.active_pointer
-                .as_ref()
-                .map(|pointer| pointer.active().clone()),
+            self.base_manifest.as_ref().and_then(|_| {
+                self.active_pointer
+                    .as_ref()
+                    .map(|pointer| pointer.active().clone())
+            }),
         )?;
         if let Err(error) = publish_active_generation_pointer(&root, &next_pointer) {
             return Err(self.classify_pointer_failure(&generation_id, &next_pointer, error));

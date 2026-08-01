@@ -559,6 +559,112 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
     ));
 }
 
+fn assert_active_meta_incompatibility_is_rebuilt(
+    source_name: &str,
+    mutate_meta: impl FnOnce(&mut serde_json::Value),
+    assert_incompatibility: impl FnOnce(&IndexError),
+) {
+    let temp = tempdir().unwrap();
+    let source = source(source_name);
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "source authoritative body"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_path = temp.path().join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let old_generation_path = active_generation_path(temp.path());
+    let meta_path = old_generation_path.join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    mutate_meta(&mut meta);
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+    let error = match VerifiedIndex::open(temp.path()) {
+        Ok(_) => panic!("incompatible generation unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert_incompatibility(&error);
+
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert!(
+        rebuild.base_manifest().is_none(),
+        "incompatible generation was exposed as reusable base state"
+    );
+    assert_eq!(
+        fs::read(&pointer_path).unwrap(),
+        pointer_before,
+        "writer open changed the active pointer before replacement"
+    );
+    let candidate_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(rebuild.candidate_directory_name.as_deref().unwrap());
+    let candidate = Index::open_in_dir(&candidate_path).unwrap();
+    assert!(candidate.load_metas().unwrap().segments.is_empty());
+    assert_eq!(
+        candidate.settings(),
+        &publication::lexical_index_settings(),
+        "replacement candidate did not use current settings"
+    );
+    drop(candidate);
+
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, 1, "source authoritative body"))
+        .unwrap();
+    rebuild.certify_source(certificate(&source, 1, 1)).unwrap();
+    let rebuilt = rebuild.commit(|_| true).unwrap();
+
+    assert_eq!(rebuilt.generation_id, baseline.generation_id);
+    assert_ne!(active_generation_path(temp.path()), old_generation_path);
+    assert!(
+        !old_generation_path.exists(),
+        "incompatible slot survived as a retained clone or rollback base"
+    );
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.count_term("authoritative").unwrap(), 1);
+}
+
+#[test]
+fn pre_settings_generation_is_rebuilt_without_clone_or_pointer_churn() {
+    assert_active_meta_incompatibility_is_rebuilt(
+        "pre-settings.jsonl",
+        |meta| {
+            assert!(meta
+                .as_object_mut()
+                .unwrap()
+                .remove("index_settings")
+                .is_some());
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::IndexSettingsMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
+}
+
+#[test]
+fn incompatible_schema_generation_is_rebuilt_without_interpretation() {
+    assert_active_meta_incompatibility_is_rebuilt(
+        "schema-mismatch-rebuild.jsonl",
+        |meta| {
+            meta["schema"] =
+                serde_json::to_value(tantivy::schema::Schema::builder().build()).unwrap();
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
+}
+
 #[test]
 fn current_manifest_roundtrips_with_exact_policy_hash() {
     let source = source("manifest-roundtrip.jsonl");
@@ -646,7 +752,7 @@ fn verified_open_rejects_mismatched_active_policy() {
         .add_core_record(document(&source, 1, "body"))
         .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
-    writer.commit(|_| true).unwrap();
+    let baseline = writer.commit(|_| true).unwrap();
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let mut mismatched_policy = current_source_generation_policy();
@@ -669,6 +775,27 @@ fn verified_open_rejects_mismatched_active_policy() {
         } if expected == current_source_generation_policy_hash().unwrap()
             && actual == mismatched_policy_hash
     ));
+
+    let pointer_path = temp.path().join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let incompatible_path = active_generation_path(temp.path());
+    drop(pinned);
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert!(rebuild.base_manifest().is_none());
+    assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
+    rebuild.certify_source(certificate(&source, 1, 1)).unwrap();
+    let rebuilt = rebuild.commit(|_| true).unwrap();
+
+    assert_eq!(rebuilt.generation_id, baseline.generation_id);
+    assert!(!incompatible_path.exists());
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        baseline.generation_id
+    );
 }
 
 #[test]
