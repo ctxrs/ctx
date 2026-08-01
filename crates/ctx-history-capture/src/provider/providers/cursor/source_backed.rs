@@ -1,8 +1,9 @@
 //! Thin Cursor adapter for the shared certified-append JSONL family.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs, io,
+    collections::BTreeMap,
+    fs,
+    io::{self, BufRead, BufReader, Read},
     path::Path,
     sync::Arc,
 };
@@ -10,14 +11,20 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    EventType, NativeItemKey, NativeSessionKey, PositionStability, RepositoryAbstention,
-    RepositoryAbstentionReason, RepositoryEvidenceKind, RepositoryFileObservationKind,
-    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, SubrecordSelector, TypedKey,
+    EventType, NativeItemKey, NativeSessionKey, RepositoryAbstention, RepositoryAbstentionReason,
+    RepositoryEvidenceKind, RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor,
+    SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     discover_cursor_transcripts,
+    layout::CursorTranscriptPath,
     parser::project_cursor_jsonl_record,
     projection::{CursorEventBody, CursorNativeEvent},
 };
@@ -27,24 +34,54 @@ use crate::{
         JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
         JsonlFamilyProjector, JsonlRecordRef,
     },
-    CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+    CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
 const NATIVE_SESSION_NAMESPACE: &str = "cursor.session";
-const NATIVE_EVENT_POSITION_KIND: &str = "cursor.physical-ordinal";
-const NATIVE_SUBRECORD_POSITION_KIND: &str = "cursor.part-ordinal";
+const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v2";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v3-repository-attribution";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v4-complete-logical-identity";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
+
+#[cfg(test)]
+static CURSOR_PROJECTED_RECORDS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static CURSOR_SIGNATURE_RECORDS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_cursor_projected_records() {
+    CURSOR_PROJECTED_RECORDS.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn cursor_projected_records() -> u64 {
+    CURSOR_PROJECTED_RECORDS.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn reset_cursor_signature_records() {
+    CURSOR_SIGNATURE_RECORDS.set(0);
+}
+
+#[cfg(test)]
+fn cursor_signature_records() -> u64 {
+    CURSOR_SIGNATURE_RECORDS.get()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CursorBinding {
     native_session_id: String,
+    logical_transcript_sha256: Option<[u8; 32]>,
+    selected_route_sha256: [u8; 32],
+    alias_route_sha256: Vec<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,8 +136,7 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
                 })?
                 .clone(),
         );
-        let mut native_sessions = BTreeSet::new();
-        let mut leaves = Vec::with_capacity(inventory.transcripts.len());
+        let mut native_sessions = BTreeMap::<String, Vec<_>>::new();
         for transcript in inventory.transcripts {
             if transcript.authority().named_path() != authority.named_path()
                 || transcript.authority().authority_fingerprint()
@@ -108,19 +144,43 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             {
                 return Err(CaptureError::SourceChangedDuringCapture);
             }
-            let native_session_id = transcript.native_session_id().to_owned();
-            if !native_sessions.insert(native_session_id.clone()) {
-                return Err(CaptureError::InvalidPayload(format!(
-                    "Cursor native session ID {native_session_id:?} resolves more than once"
-                )));
-            }
+            native_sessions
+                .entry(transcript.native_session_id().to_owned())
+                .or_default()
+                .push(transcript);
+        }
+        let mut leaves = Vec::with_capacity(native_sessions.len());
+        for (native_session_id, mut routes) in native_sessions {
+            routes.sort_by(|left, right| left.path().cmp(right.path()));
+            let logical_transcript_sha256 = if routes.len() > 1 {
+                let signature = cursor_transcript_signature(&routes[0])?;
+                for route in routes.iter().skip(1) {
+                    if cursor_transcript_signature(route)? != signature {
+                        return Err(CaptureError::InvalidPayload(format!(
+                            "Cursor native session ID {native_session_id:?} has conflicting transcript copies"
+                        )));
+                    }
+                }
+                Some(signature)
+            } else {
+                None
+            };
             let source = source_key(&native_session_id)?;
-            let binding = CursorBinding { native_session_id };
+            let selected = routes.remove(0);
+            let binding = CursorBinding {
+                native_session_id,
+                logical_transcript_sha256,
+                selected_route_sha256: cursor_route_sha256(selected.path()),
+                alias_route_sha256: routes
+                    .iter()
+                    .map(|route| cursor_route_sha256(route.path()))
+                    .collect(),
+            };
             leaves.push(JsonlFamilyLeaf::observe(
                 source,
-                transcript.path().to_path_buf(),
+                selected.path().to_path_buf(),
                 Arc::clone(&authority),
-                transcript.authority_relative_path().to_path_buf(),
+                selected.authority_relative_path().to_path_buf(),
                 TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?,
             )?);
         }
@@ -175,6 +235,8 @@ impl JsonlFamilyProjector for CursorProjector {
         record: JsonlRecordRef<'_>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
+        #[cfg(test)]
+        CURSOR_PROJECTED_RECORDS.fetch_add(1, Ordering::SeqCst);
         let evidence = record.evidence();
         let Some(events) = project_cursor_jsonl_record(
             record.bytes(),
@@ -211,8 +273,9 @@ impl CursorProjector {
             .occurred_at
             .map(|occurred_at| occurred_at.timestamp_millis());
         let structured_content = match &event.body {
+            CursorEventBody::ToolCall { native_content, .. }
+            | CursorEventBody::ToolOutput { native_content, .. } => Some(native_content.clone()),
             CursorEventBody::Text { .. } | CursorEventBody::None => None,
-            body => serde_json::to_value(body).ok(),
         };
         let mut input = crate::repository_attribution::AttributionInput {
             activity_at_unix_ms,
@@ -267,6 +330,7 @@ impl CursorProjector {
             CursorEventBody::ToolOutput {
                 call_id,
                 ambiguous_linkage,
+                ..
             } => {
                 let context = if *ambiguous_linkage {
                     None
@@ -406,6 +470,111 @@ fn cursor_outcome_abstentions(
     }
 }
 
+fn cursor_transcript_signature(transcript: &CursorTranscriptPath) -> Result<[u8; 32]> {
+    let source = transcript
+        .authority()
+        .open_file(transcript.authority_relative_path())?;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.cursor.logical-transcript.v1\0");
+    let mut event_count = 0_u64;
+    visit_cursor_events(&source, |event| {
+        #[cfg(test)]
+        CURSOR_SIGNATURE_RECORDS.set(CURSOR_SIGNATURE_RECORDS.get().saturating_add(1));
+        digest.update(event_count.to_be_bytes());
+        digest.update(event.provider_event_hash.as_bytes());
+        event_count = event_count
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "Cursor logical transcript event count overflowed",
+            ))?;
+        Ok(())
+    })?;
+    digest.update(event_count.to_be_bytes());
+    Ok(digest.finalize().into())
+}
+
+fn cursor_route_sha256(path: &Path) -> [u8; 32] {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.cursor.transcript-route.v1\0");
+    digest.update(path.as_os_str().as_encoded_bytes());
+    digest.finalize().into()
+}
+
+fn visit_cursor_events(
+    source: &OpenedProviderSourceFile,
+    mut visit: impl FnMut(CursorNativeEvent) -> Result<()>,
+) -> Result<()> {
+    let mut reader = BufReader::new(source.file().try_clone()?);
+    let mut line = Vec::new();
+    let mut physical_ordinal = 0_u64;
+    while read_cursor_line(&mut reader, &mut line)? {
+        if !line.is_empty() {
+            if let Some(events) = project_cursor_jsonl_record(
+                &line,
+                physical_ordinal,
+                physical_ordinal,
+                0,
+                u64::try_from(line.len()).map_err(|_| {
+                    CaptureError::InvalidPayload("Cursor line length exceeds u64".to_owned())
+                })?,
+            )? {
+                for event in events {
+                    visit(event)?;
+                }
+            }
+        }
+        physical_ordinal = physical_ordinal
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "Cursor physical ordinal overflowed",
+            ))?;
+    }
+    source.revalidate_leaf()
+}
+
+fn read_cursor_line(reader: &mut BufReader<std::fs::File>, line: &mut Vec<u8>) -> io::Result<bool> {
+    line.clear();
+    let limit = MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2);
+    let read = {
+        let mut bounded = (&mut *reader).take(u64::try_from(limit).unwrap_or(u64::MAX));
+        bounded.read_until(b'\n', line)?
+    };
+    if read == 0 {
+        return Ok(false);
+    }
+    if !line.ends_with(b"\n") {
+        discard_through_newline(reader)?;
+        line.clear();
+        return Ok(true);
+    }
+    line.pop();
+    if line.ends_with(b"\r") {
+        line.pop();
+    }
+    if line.len() > MAX_PROVIDER_JSONL_LINE_BYTES {
+        line.clear();
+    }
+    Ok(true)
+}
+
+fn discard_through_newline(reader: &mut BufReader<std::fs::File>) -> io::Result<()> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position.saturating_add(1));
+        let reached_newline = available.get(consumed.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(consumed);
+        if reached_newline {
+            return Ok(());
+        }
+    }
+}
+
 fn core_record(
     source: &SourceKey,
     session_id: StableEntityId,
@@ -415,30 +584,10 @@ fn core_record(
 ) -> Result<Option<CoreRecord>> {
     let text = match &event.body {
         CursorEventBody::Text { text } if event.event_type == EventType::Message => text.clone(),
-        CursorEventBody::ToolCall {
-            tool_name,
-            command,
-            input_paths,
-            ..
-        } => {
-            let mut body = format!(
-                "Cursor {} tool call",
-                tool_name.as_deref().unwrap_or("native")
-            );
-            if let Some(command) = command {
-                body.push('\n');
-                body.push_str(command);
-            }
-            for path in input_paths {
-                body.push('\n');
-                body.push_str(path);
-            }
-            body
+        CursorEventBody::ToolCall { native_content, .. }
+        | CursorEventBody::ToolOutput { native_content, .. } => {
+            serde_json::to_string(native_content)?
         }
-        CursorEventBody::ToolOutput { call_id, .. } => call_id.as_deref().map_or_else(
-            || "Cursor tool result".to_owned(),
-            |call_id| format!("Cursor tool result {call_id}"),
-        ),
         CursorEventBody::None | CursorEventBody::Text { .. } => return Ok(None),
     };
     if text.is_empty() {
@@ -450,17 +599,8 @@ fn core_record(
             "Cursor record exceeds the stable event-sequence part bound".to_owned(),
         ));
     }
-    let event_id = event_id(
-        source,
-        session_id,
-        event.native_order.semantic_ordinal,
-        part_ordinal,
-    )?;
-    let native_event_key = TypedKey::composite(vec![
-        TypedKey::U64(event.native_order.semantic_ordinal),
-        TypedKey::U64(u64::from(part_ordinal)),
-    ])
-    .map_err(contract)?;
+    let native_event_key = event_identity_key(&event)?;
+    let event_id = event_id(source, session_id, &native_event_key)?;
     let event_sequence = event
         .native_order
         .semantic_ordinal
@@ -469,6 +609,7 @@ fn core_record(
         .ok_or(CaptureError::SystemInvariant(
             "Cursor event sequence overflowed",
         ))?;
+    let normalized_body_bytes = text.len();
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
@@ -488,7 +629,16 @@ fn core_record(
         .occurred_at
         .map(|occurred_at| occurred_at.timestamp_millis());
     record.role = Some(event.role.as_str().to_owned());
-    record.content.structured_content = annotation.structured_content;
+    record.content.structured_content = annotation.structured_content.and_then(|structured| {
+        serde_json::to_vec(&structured)
+            .ok()
+            .and_then(|encoded| {
+                normalized_body_bytes
+                    .checked_add(encoded.len())
+                    .filter(|bytes| *bytes <= MAX_CORE_CONTENT_BYTES)
+            })
+            .map(|_| structured)
+    });
     record.metadata = annotation.metadata;
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
     record.repository_bindings = annotation.repository_bindings;
@@ -532,28 +682,36 @@ fn session_id(source: &SourceKey, native_session_id: &str) -> Result<StableEntit
 fn event_id(
     source: &SourceKey,
     session_id: StableEntityId,
-    semantic_ordinal: u64,
-    part_ordinal: u32,
+    native_event_key: &TypedKey,
 ) -> Result<StableEntityId> {
-    let native_item_key = NativeItemKey::certified_position(
-        NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(semantic_ordinal),
-        PositionStability::AppendStable,
-    )
-    .map_err(contract)?;
-    let subrecord = SubrecordSelector::certified_position(
-        NATIVE_SUBRECORD_POSITION_KIND,
-        TypedKey::U64(u64::from(part_ordinal)),
-        PositionStability::StableSlot,
-    )
-    .map_err(contract)?;
+    let TypedKey::Composite(parts) = native_event_key else {
+        return Err(contract("Cursor logical event key is not composite"));
+    };
+    let native_item_key =
+        NativeItemKey::composite(NATIVE_EVENT_LOGICAL_KIND, parts.clone()).map_err(contract)?;
     derive_event_id(EventIdentityInput {
         source,
         session_id,
         logical_item_kind: LOGICAL_EVENT_KIND,
         native_item_key: &native_item_key,
-        subrecord_selector: Some(&subrecord),
+        subrecord_selector: None,
     })
+    .map_err(contract)
+}
+
+fn event_identity_key(event: &CursorNativeEvent) -> Result<TypedKey> {
+    // Cursor exposes no stable native ID for these blocks. Logical content and
+    // fields therefore form the key. An exact duplicate deliberately collides
+    // and makes publication fail closed instead of smuggling position into ID.
+    TypedKey::composite(vec![
+        TypedKey::utf8(NATIVE_EVENT_LOGICAL_KIND).map_err(contract)?,
+        TypedKey::utf8(event.event_type.as_str()).map_err(contract)?,
+        TypedKey::utf8(event.role.as_str()).map_err(contract)?,
+        event.occurred_at.map_or(TypedKey::Null, |occurred_at| {
+            TypedKey::I64(occurred_at.timestamp_millis())
+        }),
+        TypedKey::utf8(&event.provider_event_hash).map_err(contract)?,
+    ])
     .map_err(contract)
 }
 
@@ -562,7 +720,9 @@ fn validate_binding(
     binding: &CursorBinding,
     _source_file: &OpenedProviderSourceFile,
 ) -> Result<()> {
-    if !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source()) {
+    if !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source())
+        || cursor_route_sha256(leaf.source_path()) != binding.selected_route_sha256
+    {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     Ok(())
@@ -765,5 +925,368 @@ mod repository_tests {
             &annotation,
             RepositoryAbstentionReason::UnscopedFileActivity
         ));
+    }
+}
+
+#[cfg(test)]
+mod fidelity_identity_tests {
+    use std::{
+        collections::BTreeMap,
+        fs::{self, OpenOptions},
+        io::Write,
+        path::PathBuf,
+    };
+
+    use ctx_history_core::{CoreRecord, StableEntityId};
+    use ctx_history_index::WriterOptions;
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        provider::source_backed::{
+            refresh_source_backed_generation, register_landed_source_backed_route,
+            SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        },
+        ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+        ProviderSourceStatus,
+    };
+
+    fn transcript_path(root: &Path, project: &str, session: &str) -> PathBuf {
+        root.join("projects")
+            .join(project)
+            .join("agent-transcripts")
+            .join(session)
+            .join(format!("{session}.jsonl"))
+    }
+
+    fn write_transcript(path: &Path, rows: &[Value]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut encoded = Vec::new();
+        for row in rows {
+            serde_json::to_writer(&mut encoded, row).unwrap();
+            encoded.push(b'\n');
+        }
+        fs::write(path, encoded).unwrap();
+    }
+
+    fn append_transcript(path: &Path, row: &Value) {
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        serde_json::to_writer(&mut file, row).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn registry(root: &Path) -> SourceBackedProviderRegistry {
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route(
+            &mut registry,
+            ProviderSource {
+                provider: CaptureProvider::Cursor,
+                path: root.to_path_buf(),
+                exists: true,
+                source_format: CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedRouteSelection::Automatic,
+        )
+        .unwrap();
+        registry
+    }
+
+    fn writer_options() -> WriterOptions {
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        }
+    }
+
+    fn event(row: &Value, ordinal: u64) -> CursorNativeEvent {
+        let encoded = serde_json::to_vec(row).unwrap();
+        project_cursor_jsonl_record(&encoded, ordinal, ordinal, 0, encoded.len() as u64)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    fn projector() -> CursorProjector {
+        let native_session_id = "cursor-fidelity-test".to_owned();
+        let source = source_key(&native_session_id).unwrap();
+        let session_id = session_id(&source, &native_session_id).unwrap();
+        CursorProjector {
+            source,
+            native_session_id,
+            session_id,
+            repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
+            tool_contexts: BTreeMap::new(),
+            linkage_capacity_exceeded: false,
+        }
+    }
+
+    fn projected_core(row: &Value) -> CoreRecord {
+        let mut projector = projector();
+        let event = event(row, 0);
+        let annotation = projector.attribution_for_event(&event);
+        core_record(
+            &projector.source,
+            projector.session_id,
+            &projector.native_session_id,
+            event,
+            annotation,
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn message(role: &str, timestamp: &str, text: &str) -> Value {
+        json!({
+            "timestamp": timestamp,
+            "role": role,
+            "message": {
+                "role": role,
+                "content": [{"type": "text", "text": text}]
+            }
+        })
+    }
+
+    fn event_ids(rows: &[Value]) -> Vec<StableEntityId> {
+        let native_session_id = "cursor-identity-test";
+        let source = source_key(native_session_id).unwrap();
+        let session_id = session_id(&source, native_session_id).unwrap();
+        let mut ids = Vec::new();
+        for (ordinal, row) in rows.iter().enumerate() {
+            let encoded = serde_json::to_vec(row).unwrap();
+            let events = project_cursor_jsonl_record(
+                &encoded,
+                ordinal as u64,
+                ordinal as u64,
+                0,
+                encoded.len() as u64,
+            )
+            .unwrap()
+            .unwrap();
+            for event in events {
+                let key = event_identity_key(&event).unwrap();
+                ids.push(event_id(&source, session_id, &key).unwrap());
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn cursor_write_file_core_content_preserves_complete_input() {
+        let row = json!({
+            "timestamp": "2026-07-31T12:00:00Z",
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "write-1",
+                "name": "write_file",
+                "input": {
+                    "path": "src/main.rs",
+                    "contents": "fn main() { println!(\"complete\"); }\n",
+                    "overwrite": true
+                }
+            }]}
+        });
+        let expected = row.pointer("/message/content/0").unwrap().clone();
+        let core = projected_core(&row);
+
+        assert_eq!(core.content.structured_content, Some(expected.clone()));
+        assert_eq!(
+            serde_json::from_str::<Value>(core.content.normalized_body.as_deref().unwrap())
+                .unwrap(),
+            expected
+        );
+        assert!(core
+            .content
+            .normalized_body
+            .as_deref()
+            .unwrap()
+            .contains("println!"));
+    }
+
+    #[test]
+    fn cursor_shell_result_core_content_preserves_complete_stdout() {
+        let stdout = "first line\nsecond line\nexit marker";
+        let row = json!({
+            "timestamp": "2026-07-31T12:00:01Z",
+            "role": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "shell-1",
+                "content": stdout,
+                "is_error": false
+            }]}
+        });
+        let expected = row.pointer("/message/content/0").unwrap().clone();
+        let core = projected_core(&row);
+
+        assert_eq!(core.content.structured_content, Some(expected.clone()));
+        assert_eq!(
+            serde_json::from_str::<Value>(core.content.normalized_body.as_deref().unwrap())
+                .unwrap(),
+            expected
+        );
+        let normalized: Value =
+            serde_json::from_str(core.content.normalized_body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            normalized.get("content").and_then(Value::as_str),
+            Some(stdout)
+        );
+    }
+
+    #[test]
+    fn cursor_provider_redaction_is_retained_without_invented_result_content() {
+        let row = json!({
+            "timestamp": "2026-07-31T12:00:01Z",
+            "role": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "redacted-1",
+                "content": null,
+                "redacted": true
+            }]}
+        });
+        let expected = row.pointer("/message/content/0").unwrap().clone();
+        let core = projected_core(&row);
+
+        assert_eq!(core.content.structured_content, Some(expected.clone()));
+        assert_eq!(
+            serde_json::from_str::<Value>(core.content.normalized_body.as_deref().unwrap())
+                .unwrap(),
+            expected
+        );
+        assert!(!core
+            .content
+            .normalized_body
+            .as_deref()
+            .unwrap()
+            .contains("Cursor tool result"));
+    }
+
+    #[test]
+    fn cursor_logical_event_ids_survive_insert_before_and_collide_fail_closed_for_duplicates() {
+        let first = message("user", "2026-07-31T12:00:00Z", "first");
+        let second = message("assistant", "2026-07-31T12:00:01Z", "second");
+        let inserted = message("user", "2026-07-31T11:59:59Z", "inserted");
+
+        let original = event_ids(&[first.clone(), second.clone()]);
+        let with_insert = event_ids(&[inserted, first.clone(), second]);
+        assert_eq!(original, with_insert[1..]);
+
+        let duplicates = event_ids(&[first.clone(), first]);
+        assert_eq!(duplicates[0], duplicates[1]);
+    }
+
+    #[test]
+    fn cursor_append_projects_only_suffix_and_exact_duplicate_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cursor-data");
+        let transcript = transcript_path(&root, "project", "native-session");
+        let first = message("user", "2026-07-31T12:00:00Z", "first");
+        let second = message("assistant", "2026-07-31T12:00:01Z", "second");
+        write_transcript(&transcript, &[first]);
+        let registry = registry(&root);
+        let index = temp.path().join("index");
+
+        reset_cursor_projected_records();
+        reset_cursor_signature_records();
+        let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+        assert_eq!(cold.commit.indexed_documents, 1);
+        assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(
+            cursor_signature_records(),
+            0,
+            "a singleton native session must not be pre-parsed for route comparison"
+        );
+
+        append_transcript(&transcript, &second);
+        reset_cursor_projected_records();
+        reset_cursor_signature_records();
+        let appended =
+            refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+        assert_eq!(appended.commit.indexed_documents, 2);
+        assert_eq!(
+            cursor_projected_records(),
+            1,
+            "Cursor append work must remain bounded to the validated suffix"
+        );
+        assert_eq!(
+            cursor_signature_records(),
+            0,
+            "singleton append discovery must not rescan transcript content"
+        );
+
+        append_transcript(&transcript, &second);
+        assert!(
+            refresh_source_backed_generation(&index, &registry, writer_options()).is_err(),
+            "an indistinguishable logical duplicate must fail closed instead of using position as identity"
+        );
+    }
+
+    #[test]
+    fn cursor_equivalent_duplicate_routes_cover_move_overlap_deterministically() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cursor-data");
+        let session = "native-session";
+        let first = transcript_path(&root, "project-a", session);
+        let second = transcript_path(&root, "project-b", session);
+        let rows = [message("user", "2026-07-31T12:00:00Z", "same")];
+        write_transcript(&first, &rows);
+
+        reset_cursor_signature_records();
+        let initial = CursorJsonlAdapter.discover(&root).unwrap();
+        assert_eq!(initial.leaves().len(), 1);
+        let initial_source = initial.leaves()[0].source().clone();
+        assert_eq!(initial.leaves()[0].source_path(), first);
+        assert_eq!(cursor_signature_records(), 0);
+
+        write_transcript(&second, &rows);
+        reset_cursor_signature_records();
+        let overlap = CursorJsonlAdapter.discover(&root).unwrap();
+        assert_eq!(overlap.leaves().len(), 1);
+        assert_eq!(overlap.leaves()[0].source_path(), first);
+        let overlap_binding = decode_binding(&overlap.leaves()[0]).unwrap();
+        assert_eq!(overlap_binding.alias_route_sha256.len(), 1);
+        assert_eq!(cursor_signature_records(), 2);
+
+        fs::remove_file(&first).unwrap();
+        reset_cursor_signature_records();
+        let moved = CursorJsonlAdapter.discover(&root).unwrap();
+        assert_eq!(moved.leaves().len(), 1);
+        assert_eq!(moved.leaves()[0].source_path(), second);
+        assert_eq!(cursor_signature_records(), 0);
+        assert!(moved.leaves()[0]
+            .source()
+            .exact_descriptor_eq(&initial_source));
+        assert!(decode_binding(&moved.leaves()[0])
+            .unwrap()
+            .alias_route_sha256
+            .is_empty());
+    }
+
+    #[test]
+    fn cursor_conflicting_duplicate_transcripts_are_rejected() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cursor-data");
+        let session = "native-session";
+        write_transcript(
+            &transcript_path(&root, "project-a", session),
+            &[message("user", "2026-07-31T12:00:00Z", "first")],
+        );
+        write_transcript(
+            &transcript_path(&root, "project-b", session),
+            &[message("user", "2026-07-31T12:00:00Z", "conflict")],
+        );
+
+        let error = CursorJsonlAdapter.discover(&root).unwrap_err();
+        assert!(error.to_string().contains("conflicting transcript copies"));
     }
 }

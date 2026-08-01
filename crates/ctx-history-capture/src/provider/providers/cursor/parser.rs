@@ -4,6 +4,7 @@ use ctx_history_core::{EventRole, EventType};
 use serde::de::{
     self, Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
+use serde_json::{value::RawValue, Value};
 use sha2::{Digest, Sha256};
 
 use crate::Result;
@@ -31,6 +32,7 @@ pub(super) enum CursorSafePart {
     },
     ToolUse {
         role: EventRole,
+        native_content: Value,
         call_id: Option<String>,
         tool_name: Option<String>,
         command: Option<String>,
@@ -40,6 +42,7 @@ pub(super) enum CursorSafePart {
     },
     ToolResult {
         role: EventRole,
+        native_content: Value,
         call_id: Option<String>,
         ambiguous_linkage: bool,
     },
@@ -340,13 +343,9 @@ impl<'de> DeserializeSeed<'de> for CursorBlockRetainedSeed<'_> {
             CursorBlockKind::Text => deserializer.deserialize_map(CursorTextBlockVisitor {
                 classification: self.classification,
             }),
-            CursorBlockKind::ToolUse => deserializer.deserialize_map(CursorToolUseBlockVisitor {
-                classification: self.classification,
-            }),
+            CursorBlockKind::ToolUse => decode_tool_use_block(deserializer, self.classification),
             CursorBlockKind::ToolResult => {
-                deserializer.deserialize_map(CursorToolResultBlockVisitor {
-                    classification: self.classification,
-                })
+                decode_tool_result_block(deserializer, self.classification)
             }
             CursorBlockKind::Excluded => {
                 IgnoredAny::deserialize(deserializer)?;
@@ -354,6 +353,60 @@ impl<'de> DeserializeSeed<'de> for CursorBlockRetainedSeed<'_> {
             }
         }
     }
+}
+
+fn decode_tool_use_block<'de, D>(
+    deserializer: D,
+    classification: &CursorLineClassification,
+) -> std::result::Result<Option<CursorSafePart>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    let native_content = serde_json::from_str(raw.get()).map_err(de::Error::custom)?;
+    let mut evidence_deserializer = serde_json::Deserializer::from_str(raw.get());
+    let evidence = evidence_deserializer
+        .deserialize_map(CursorToolUseBlockVisitor)
+        .map_err(de::Error::custom)?;
+    evidence_deserializer.end().map_err(de::Error::custom)?;
+    Ok(Some(CursorSafePart::ToolUse {
+        role: match cursor_role(classification.role.as_deref()) {
+            EventRole::Unknown => EventRole::Assistant,
+            role => role,
+        },
+        native_content,
+        call_id: evidence.call_id,
+        tool_name: evidence.tool_name,
+        command: evidence.input.command,
+        declared_workdir: evidence.input.declared_workdir,
+        input_paths: evidence.input.paths,
+        ambiguous_native_fields: evidence.ambiguous_native_fields,
+    }))
+}
+
+fn decode_tool_result_block<'de, D>(
+    deserializer: D,
+    classification: &CursorLineClassification,
+) -> std::result::Result<Option<CursorSafePart>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    let native_content = serde_json::from_str(raw.get()).map_err(de::Error::custom)?;
+    let mut evidence_deserializer = serde_json::Deserializer::from_str(raw.get());
+    let evidence = evidence_deserializer
+        .deserialize_map(CursorToolResultBlockVisitor)
+        .map_err(de::Error::custom)?;
+    evidence_deserializer.end().map_err(de::Error::custom)?;
+    Ok(Some(CursorSafePart::ToolResult {
+        role: match cursor_role(classification.role.as_deref()) {
+            EventRole::Unknown | EventRole::User => EventRole::Tool,
+            role => role,
+        },
+        native_content,
+        call_id: evidence.call_id,
+        ambiguous_linkage: evidence.ambiguous_linkage,
+    }))
 }
 
 struct CursorTextBlockVisitor<'a> {
@@ -433,12 +486,18 @@ impl Visitor<'_> for CursorMessageTextVisitor {
     }
 }
 
-struct CursorToolUseBlockVisitor<'a> {
-    classification: &'a CursorLineClassification,
+#[derive(Debug)]
+struct CursorToolUseEvidence {
+    call_id: Option<String>,
+    tool_name: Option<String>,
+    input: CursorToolInput,
+    ambiguous_native_fields: bool,
 }
 
-impl<'de> Visitor<'de> for CursorToolUseBlockVisitor<'_> {
-    type Value = Option<CursorSafePart>;
+struct CursorToolUseBlockVisitor;
+
+impl<'de> Visitor<'de> for CursorToolUseBlockVisitor {
+    type Value = CursorToolUseEvidence;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a Cursor tool_use content block")
@@ -481,27 +540,25 @@ impl<'de> Visitor<'de> for CursorToolUseBlockVisitor<'_> {
                 }
             }
         }
-        Ok(Some(CursorSafePart::ToolUse {
-            role: match cursor_role(self.classification.role.as_deref()) {
-                EventRole::Unknown => EventRole::Assistant,
-                role => role,
-            },
+        Ok(CursorToolUseEvidence {
             call_id,
             tool_name,
-            command: input.command,
-            declared_workdir: input.declared_workdir,
-            input_paths: input.paths,
+            input,
             ambiguous_native_fields,
-        }))
+        })
     }
 }
 
-struct CursorToolResultBlockVisitor<'a> {
-    classification: &'a CursorLineClassification,
+#[derive(Debug)]
+struct CursorToolResultEvidence {
+    call_id: Option<String>,
+    ambiguous_linkage: bool,
 }
 
-impl<'de> Visitor<'de> for CursorToolResultBlockVisitor<'_> {
-    type Value = Option<CursorSafePart>;
+struct CursorToolResultBlockVisitor;
+
+impl<'de> Visitor<'de> for CursorToolResultBlockVisitor {
+    type Value = CursorToolResultEvidence;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a Cursor tool_result content block")
@@ -526,14 +583,10 @@ impl<'de> Visitor<'de> for CursorToolResultBlockVisitor<'_> {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        Ok(Some(CursorSafePart::ToolResult {
-            role: match cursor_role(self.classification.role.as_deref()) {
-                EventRole::Unknown | EventRole::User => EventRole::Tool,
-                role => role,
-            },
+        Ok(CursorToolResultEvidence {
             call_id,
             ambiguous_linkage,
-        }))
+        })
     }
 }
 
