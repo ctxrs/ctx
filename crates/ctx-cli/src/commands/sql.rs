@@ -225,13 +225,21 @@ fn render_sql_truncation(
     if result.truncated.values {
         values.push(Field::new("Value-byte limit", value_bytes.as_str()));
     }
-    let detail = match (result.truncated.rows, result.truncated.values) {
-        (true, true) => {
-            "Rerun the original query with larger --max-rows and --max-value-bytes limits."
+    let action_omits_a_truncated_limit = action.is_some_and(|command| {
+        (result.truncated.rows && !command.contains("--max-rows"))
+            || (result.truncated.values && !command.contains("--max-value-bytes"))
+    });
+    let detail = if action_omits_a_truncated_limit {
+        "Rerun the original query with larger preview limits."
+    } else {
+        match (result.truncated.rows, result.truncated.values) {
+            (true, true) => {
+                "Rerun the original query with larger --max-rows and --max-value-bytes limits."
+            }
+            (true, false) => "Rerun the original query with a larger --max-rows limit.",
+            (false, true) => "Rerun the original query with a larger --max-value-bytes limit.",
+            (false, false) => unreachable!("truncation was checked above"),
         }
-        (true, false) => "Rerun the original query with a larger --max-rows limit.",
-        (false, true) => "Rerun the original query with a larger --max-value-bytes limit.",
-        (false, false) => unreachable!("truncation was checked above"),
     };
     Some(diagnostic(
         context,
@@ -673,6 +681,11 @@ mod ui_tests {
                 assert_eq!(command_line, format!("  {action}"), "width {width}");
 
                 let plain = document.render_plain();
+                assert!(
+                    plain.contains("Rerun the original query with larger preview limits."),
+                    "{plain}"
+                );
+                assert!(!plain.contains("larger --max-rows"), "{plain}");
                 assert!(plain.contains(&format!("Next\n  {action}\n")), "{plain}");
                 assert!(plain
                     .lines()
