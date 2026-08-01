@@ -314,7 +314,14 @@ fn render_status_human(
 }
 
 fn humanize_code(value: &str) -> String {
-    value.replace('_', " ")
+    match value {
+        "projection_missing" => "still being prepared".to_owned(),
+        "generation_not_published" => "history has not been indexed yet".to_owned(),
+        "catalog_publication_pending" => "catalog is still being prepared".to_owned(),
+        "lexical_generation_unavailable" => "search index unavailable".to_owned(),
+        "path_shadowed" => "another ctx binary appears earlier in PATH".to_owned(),
+        _ => value.replace('_', " "),
+    }
 }
 
 fn counted(count: u64, singular: &str, plural: &str) -> String {
@@ -509,7 +516,9 @@ mod tests {
         let rendered = document.render_plain();
         let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(rendered.starts_with("! ctx needs attention\n"));
-        assert!(rendered.contains("Automatic upgrades  blocked (path shadowed)\n"));
+        assert!(normalized
+            .contains("Automatic upgrades blocked (another ctx binary appears earlier in PATH)"));
+        assert!(!rendered.contains("path shadowed"));
         assert!(rendered.contains("Local usage"));
         assert!(rendered.contains("local_usage_config_unavailable"));
         assert!(normalized.contains("local usage configuration could not be read"));
@@ -547,9 +556,10 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("pending (projection missing)"),
+            rendered.contains("pending (still being prepared)"),
             "{rendered}"
         );
+        assert!(!rendered.contains("projection missing"), "{rendered}");
     }
 
     #[test]

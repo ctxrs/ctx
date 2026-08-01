@@ -70,6 +70,57 @@ pub(super) fn render_outcome(
     Ok(())
 }
 
+pub(super) fn render_error(result: Result<()>, human_output: bool, ui: &mut Ui) -> Result<()> {
+    if !human_output {
+        return result;
+    }
+    let error = match result {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let Some(document) = render_upgrade_integrity_error_human(ui.stderr_context(), &error) else {
+        return Err(error);
+    };
+    ui.write_stderr(&document)?;
+    Err(crate::dispatch::rendered_cli_error())
+}
+
+fn render_upgrade_integrity_error_human(
+    context: &RenderContext,
+    error: &anyhow::Error,
+) -> Option<Document> {
+    let integrity_failure = error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("artifact checksum mismatch")
+            || message.contains("checksum does not match signed metadata")
+    });
+    if !integrity_failure {
+        return None;
+    }
+
+    let mut document = outcome(
+        context,
+        UiOutcome {
+            state: OutcomeState::Error,
+            title: "Upgrade integrity check failed",
+            detail: Some(
+                "The artifact did not match signed release metadata. The installed ctx version was not changed.",
+            ),
+        },
+    );
+    document.push_blank();
+    document.append(hint(
+        context,
+        Hint {
+            text: "Retry the signed download; ctx will verify it before installation.",
+        },
+        Some(Action {
+            command: "ctx upgrade",
+        }),
+    ));
+    Some(document)
+}
+
 fn render_upgrade_outcome_human(context: &RenderContext, upgrade: &UpgradeOutcome) -> Document {
     let state = match upgrade.status {
         "up_to_date" | "applied" => OutcomeState::Success,
@@ -86,13 +137,15 @@ fn render_upgrade_outcome_human(context: &RenderContext, upgrade: &UpgradeOutcom
     );
 
     if let Some(plan) = &upgrade.plan {
+        let current_version =
+            displayed_current_version(upgrade.applied, &plan.current_version, &plan.latest_version);
         document.push_blank();
         document.append(section(
             "Release",
             fields(
                 context,
                 &[
-                    Field::new("Current", &plan.current_version),
+                    Field::new("Current", current_version),
                     Field::new("Latest", &plan.latest_version),
                     Field::new("Channel", &plan.channel),
                 ],
@@ -117,6 +170,18 @@ fn render_upgrade_outcome_human(context: &RenderContext, upgrade: &UpgradeOutcom
     document
 }
 
+fn displayed_current_version<'a>(
+    applied: bool,
+    current_version: &'a str,
+    latest_version: &'a str,
+) -> &'a str {
+    if applied {
+        latest_version
+    } else {
+        current_version
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use unicode_width::UnicodeWidthStr as _;
@@ -126,6 +191,16 @@ mod tests {
 
     fn context(width: usize) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
+    }
+
+    fn assert_fits(document: &Document, context: &RenderContext) {
+        let available = context.content_width().unwrap_or(1);
+        for line in document.render_plain().lines() {
+            assert!(
+                line.width() <= available,
+                "{line:?} exceeded {available} columns"
+            );
+        }
     }
 
     #[test]
@@ -146,13 +221,7 @@ mod tests {
             let rendered = document.render_plain();
             assert!(rendered.starts_with("ctx 1.1.0 is available"));
             assert!(rendered.contains("ctx upgrade\n"));
-            let available = context.content_width().unwrap_or(1);
-            for line in rendered.lines() {
-                assert!(
-                    line.width() <= available,
-                    "{line:?} exceeded {available} columns"
-                );
-            }
+            assert_fits(&document, &context);
         }
     }
 
@@ -170,6 +239,78 @@ mod tests {
         };
         let rendered = render_upgrade_outcome_human(&context(80), &upgrade).render_plain();
         assert_eq!(rendered, "✓ Upgraded ctx 1.0.0 to 1.1.0.\n");
+        assert_eq!(displayed_current_version(true, "1.0.0", "1.1.0"), "1.1.0");
+        assert_eq!(displayed_current_version(false, "1.0.0", "1.1.0"), "1.0.0");
+    }
+
+    #[test]
+    fn checksum_failure_reports_signed_metadata_mismatch_and_unchanged_install() {
+        let error = anyhow::anyhow!(
+            "artifact checksum mismatch: expected {}, got {}",
+            "a".repeat(64),
+            "b".repeat(64)
+        )
+        .context("download https://cli.ctx.rs/releases/ctx-linux-x64.tar.gz");
+        let expected_words = concat!(
+            "✗ Upgrade integrity check failed ",
+            "The artifact did not match signed release metadata. ",
+            "The installed ctx version was not changed. ",
+            "Hint: Retry the signed download; ctx will verify it before installation. ",
+            "Next ctx upgrade"
+        );
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width);
+            let document = render_upgrade_integrity_error_human(&context, &error).unwrap();
+            let rendered = document.render_plain();
+            assert_eq!(
+                rendered.split_whitespace().collect::<Vec<_>>().join(" "),
+                expected_words,
+                "width {width}"
+            );
+            assert_eq!(rendered.matches("ctx upgrade").count(), 1, "width {width}");
+            assert!(!rendered.contains("https://"), "{rendered}");
+            assert!(!rendered.contains(&"a".repeat(64)), "{rendered}");
+            assert_fits(&document, &context);
+        }
+
+        assert!(render_upgrade_integrity_error_human(
+            &context(80),
+            &anyhow::anyhow!("download release metadata")
+        )
+        .is_none());
+        assert!(render_upgrade_integrity_error_human(
+            &context(80),
+            &anyhow::anyhow!("ctx artifact checksum does not match signed metadata")
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn machine_integrity_error_remains_unrendered() {
+        let stdout_context =
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never));
+        let stderr_context =
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never));
+        let mut ui = Ui::with_writers(
+            std::io::sink(),
+            stdout_context,
+            std::io::sink(),
+            stderr_context,
+        );
+        let error = render_error(
+            Err(anyhow::anyhow!(
+                "artifact checksum mismatch: machine output sentinel"
+            )),
+            false,
+            &mut ui,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "artifact checksum mismatch: machine output sentinel"
+        );
     }
 
     #[test]

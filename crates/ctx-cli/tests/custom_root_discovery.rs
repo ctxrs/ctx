@@ -172,10 +172,12 @@ fn unsupported_discovery_is_human_only_and_provider_filtered_import_does_not_dis
         "--provider",
         "mux",
     ]));
+    let concise_sessions = Path::new("~").join("custom-mux/sessions");
     assert!(
-        stdout.contains(mux_root.join("sessions").to_str().unwrap()),
+        stdout.contains(&concise_sessions.display().to_string()),
         "{stdout}"
     );
+    assert!(!stdout.contains(temp.path().to_str().unwrap()), "{stdout}");
     assert!(stdout.contains("unsupported"), "{stdout}");
     assert!(stdout.contains("Mux chat-archive.jsonl"), "{stdout}");
     assert!(

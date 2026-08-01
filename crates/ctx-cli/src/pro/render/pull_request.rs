@@ -4,7 +4,7 @@ use crate::ui::{Document, RenderContext, Token};
 
 use super::{
     layout::{
-        confidence_token, enum_text, push_authored, push_enum_field, push_field, push_heading,
+        confidence_token, enum_heading, push_authored, push_enum_field, push_field, push_heading,
         push_references, push_resource_primary, push_role_resource, state_token, timestamp_text,
         METADATA_LABEL_WIDTH,
     },
@@ -61,7 +61,7 @@ fn render_commit(document: &mut Document, context: &RenderContext, value: &PullR
     let PullRequestBlameRelationship::Commit(commit) = &value.relationship else {
         return;
     };
-    push_heading(document, 2, &enum_text(commit.relationship));
+    push_heading(document, 2, &enum_heading(commit.relationship));
     push_resource_primary(document, context, 4, &commit.commit);
     push_references(
         document,
@@ -95,7 +95,7 @@ fn render_activity(
     let PullRequestBlameRelationship::Activity(activity) = &value.relationship else {
         return;
     };
-    push_heading(document, 2, &enum_text(activity.action));
+    push_heading(document, 2, &enum_heading(activity.action));
     push_resource_primary(document, context, 4, &activity.session);
     if let Some(actor) = &activity.direct_actor {
         push_role_resource(document, context, 6, "direct actor", actor);

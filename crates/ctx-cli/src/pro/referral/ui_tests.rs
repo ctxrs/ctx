@@ -97,6 +97,37 @@ impl ReferralService for FakeReferralService {
     }
 }
 
+struct FailingReferralService(&'static str);
+
+impl ReferralService for FailingReferralService {
+    fn create(
+        &mut self,
+        _codename: &str,
+        _auth_mode: ReferralAuthMode,
+        _ui: &mut Ui,
+    ) -> Result<ReferralCreateResult> {
+        Err(anyhow::anyhow!(self.0))
+    }
+
+    fn status(
+        &mut self,
+        _auth_mode: ReferralAuthMode,
+        _ui: &mut Ui,
+    ) -> Result<ReferralStatusResult> {
+        Err(anyhow::anyhow!(self.0))
+    }
+
+    fn payout(
+        &mut self,
+        _country: Option<&str>,
+        _entity_type: Option<&str>,
+        _auth_mode: ReferralAuthMode,
+        _ui: &mut Ui,
+    ) -> Result<ReferralPayoutResult> {
+        Err(anyhow::anyhow!(self.0))
+    }
+}
+
 fn parse(args: &[&str]) -> ReferralArgs {
     let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied())).unwrap();
     let CommandRoot::Referral(args) = cli.command else {
@@ -352,4 +383,58 @@ fn every_json_command_uses_cached_auth_and_bypasses_ui() {
         assert!(stdout.text().is_empty());
         assert!(stderr.text().is_empty());
     }
+}
+
+#[test]
+fn service_failures_use_human_recovery_without_changing_machine_errors() {
+    let human_cases = [
+        (
+            parse(&["referral", "create", "agent-smith"]),
+            "referral_codename_conflict",
+            "This account already has a different referral codename",
+            "ctx referral status",
+        ),
+        (
+            parse(&["referral", "status"]),
+            "service_unavailable",
+            "Referral status is temporarily unavailable",
+            "ctx referral status",
+        ),
+        (
+            parse(&["referral", "payout", "--no-open"]),
+            "invalid_response: referral payout result is invalid",
+            "Referral payout returned an invalid response",
+            "ctx referral payout --no-open",
+        ),
+    ];
+    for (args, error, title, action) in human_cases {
+        let mut service = FailingReferralService(error);
+        let mut output = Vec::new();
+        let (mut ui, stdout, stderr) = test_ui(80);
+        let result = run_with_service(args, &mut service, &mut output, &mut ui, &|_| Ok(()));
+        assert!(result.is_err());
+        assert!(output.is_empty());
+        assert!(stdout.text().is_empty());
+        let rendered = stderr.text();
+        assert!(rendered.contains(title), "{rendered}");
+        assert!(rendered.contains(action), "{rendered}");
+        assert!(!rendered.contains(error), "{rendered}");
+    }
+
+    let raw_error = "service_unavailable: upstream unavailable";
+    let mut service = FailingReferralService(raw_error);
+    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    let error = run_with_service(
+        parse(&["referral", "status", "--format=json"]),
+        &mut service,
+        &mut output,
+        &mut ui,
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), raw_error);
+    assert!(output.is_empty());
+    assert!(stdout.text().is_empty());
+    assert!(stderr.text().is_empty());
 }

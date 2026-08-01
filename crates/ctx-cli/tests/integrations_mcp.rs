@@ -148,6 +148,19 @@ fn integrations_mcp_refuses_conflicting_ctx_entry_unless_forced() {
     )
     .unwrap();
 
+    ctx(&temp)
+        .args(["integrations", "install", "mcp", "--agent", "cursor"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("rerun with --force").not())
+        .stderr(
+            predicate::str::contains("Cursor MCP configuration was not changed")
+                .and(predicate::str::contains(
+                    "ctx integrations install mcp --agent cursor --force",
+                ))
+                .and(predicate::str::contains("failed to install MCP integration").not()),
+        );
+
     let output = ctx(&temp)
         .args([
             "integrations",
@@ -168,6 +181,10 @@ fn integrations_mcp_refuses_conflicting_ctx_entry_unless_forced() {
         .as_str()
         .unwrap()
         .contains("--force"));
+    assert_eq!(
+        output.stderr,
+        b"Error: failed to install MCP integration for 1 target(s)\n"
+    );
     assert!(fs::read_to_string(cursor_dir.join("mcp.json"))
         .unwrap()
         .contains("old-ctx"));

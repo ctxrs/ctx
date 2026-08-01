@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use serde_json::json;
@@ -110,6 +113,7 @@ pub(crate) fn run_sources(
         print_json(value)?;
         output_bytes
     } else {
+        let home = crate::identity::home_dir();
         let document = render_sources_human(
             ui.stdout_context(),
             &visible_sources,
@@ -117,6 +121,7 @@ pub(crate) fn run_sources(
             &plugin_sources,
             &plugin_failures,
             hidden_missing_sources,
+            home.as_deref(),
         );
         let output_bytes = canonical_human_output_bytes(|context| {
             render_sources_human(
@@ -126,6 +131,7 @@ pub(crate) fn run_sources(
                 &plugin_sources,
                 &plugin_failures,
                 hidden_missing_sources,
+                home.as_deref(),
             )
         });
         ui.write_stdout(&document)?;
@@ -178,6 +184,7 @@ fn render_sources_human(
     plugin_sources: &[crate::history_source_plugins::HistorySourcePluginSource],
     plugin_failures: &[crate::history_source_plugins::HistorySourcePluginManifestFailure],
     hidden_missing_sources: usize,
+    home: Option<&Path>,
 ) -> Document {
     if sources.is_empty()
         && issues.is_empty()
@@ -244,13 +251,14 @@ fn render_sources_human(
     );
 
     if !sources.is_empty() || !plugin_sources.is_empty() {
-        let mut locations = Table::new(["Source", "Status", "Location", "Format"]);
+        let mut locations = Table::new(["Source", "Status", "Location", "Format"])
+            .keep_columns_intact([0, 1, 2, 3]);
         for source in sources {
             locations.push_row([
                 source_provider_cli_name(source.provider).to_owned(),
                 source.status.as_str().to_owned(),
-                source.path.display().to_string(),
-                source.source_format.to_owned(),
+                human_path(&source.path, home),
+                human_source_format(&source.source_format),
             ]);
         }
         for source in plugin_sources {
@@ -260,9 +268,9 @@ fn render_sources_human(
                 report.status.as_str().to_owned(),
                 report.durable_path.map_or_else(
                     || "no durable provider path".to_owned(),
-                    |path| path.display().to_string(),
+                    |path| human_path(path, home),
                 ),
-                source.source_format.clone(),
+                human_source_format(&source.source_format),
             ]);
         }
         document.push_blank();
@@ -275,7 +283,7 @@ fn render_sources_human(
     {
         let provider = source_provider_cli_name(source.provider);
         let summary = format!("{provider} history cannot be imported automatically");
-        let location = source.path.display().to_string();
+        let location = human_path(&source.path, home);
         let reason = source
             .unsupported_reason
             .unwrap_or("this source format is unsupported");
@@ -301,11 +309,10 @@ fn render_sources_human(
             continue;
         }
         let summary = format!("custom/{} history cannot be imported", source.label());
-        let manifest = source.manifest_path.display().to_string();
-        let location = report.durable_path.map_or_else(
-            || "not declared".to_owned(),
-            |path| path.display().to_string(),
-        );
+        let manifest = human_path(&source.manifest_path, home);
+        let location = report
+            .durable_path
+            .map_or_else(|| "not declared".to_owned(), |path| human_path(path, home));
         let reason = report
             .unsupported_reason
             .unwrap_or("this history source plugin is unsupported");
@@ -330,7 +337,7 @@ fn render_sources_human(
         document.append(render_discovery_issue(context, issue));
     }
     for failure in plugin_failures {
-        let manifest = failure.manifest_path.display().to_string();
+        let manifest = human_path(&failure.manifest_path, home);
         document.push_blank();
         document.append(diagnostic(
             context,
@@ -361,6 +368,38 @@ fn render_sources_human(
         ));
     }
     document
+}
+
+fn human_path(path: &Path, home: Option<&Path>) -> String {
+    let Some(home) = home else {
+        return path.display().to_string();
+    };
+    let Ok(relative) = path.strip_prefix(home) else {
+        return path.display().to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        "~".to_owned()
+    } else {
+        Path::new("~").join(relative).display().to_string()
+    }
+}
+
+fn human_source_format(format: &str) -> String {
+    if format == "ctx-history-jsonl-v1" {
+        "ctx history".to_owned()
+    } else if format.contains("sqlite") || format.contains("database") {
+        "Session database".to_owned()
+    } else if format.contains("transcript") || format.contains("trajectory") {
+        "Agent transcripts".to_owned()
+    } else if format.contains("history") && !format.contains("session") {
+        "Prompt history".to_owned()
+    } else if format.contains("event") {
+        "Session events".to_owned()
+    } else if format.contains("session") || format.contains("project") {
+        "Session history".to_owned()
+    } else {
+        format.replace(['_', '-'], " ")
+    }
 }
 
 fn render_discovery_issue(context: &RenderContext, issue: &DiscoveryIssue) -> Document {
@@ -421,7 +460,14 @@ mod ui_tests {
     fn assert_fits(document: &Document, context: &RenderContext) {
         let width = context.content_width().unwrap_or(1);
         for line in document.render_plain().lines() {
-            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
+            let copyable_path = {
+                let atom = line.trim_start();
+                atom.starts_with("~/") || atom.starts_with('/')
+            };
+            assert!(
+                line.width() <= width || copyable_path,
+                "{line:?} exceeded {width} columns"
+            );
         }
     }
 
@@ -475,19 +521,114 @@ mod ui_tests {
 
     #[test]
     fn sources_success_is_outcome_first_and_responsive() {
+        let home = PathBuf::from("private-capture-root");
+        let location = home.join(".codex/sessions/and/a/long/location");
         let sources = vec![source(
             ProviderSourceStatus::Available,
-            "/tmp/history with spaces/and/a/long/location",
+            &location.to_string_lossy(),
         )];
-        for width in [32, 48, 80, 120] {
+        let concise_prefix = Path::new("~").join(".codex").display().to_string();
+        for width in [32, 48, 80, 100, 120] {
             let context = context(width, ColorMode::Never);
-            let document = render_sources_human(&context, &sources, &[], &[], &[], 2);
+            let document = render_sources_human(&context, &sources, &[], &[], &[], 2, Some(&home));
             let rendered = document.render_plain();
             assert!(rendered.starts_with("✓ 1 history source is ready\n"));
             assert!(rendered.contains("Locations\n"));
-            assert!(rendered.contains("/tmp/history"));
-            assert!(rendered.contains("spaces/and/a/long/location"));
+            assert!(rendered.contains(&concise_prefix), "{width}: {rendered}");
+            assert!(
+                !rendered.contains("private-capture-root"),
+                "{width}: {rendered}"
+            );
             assert!(rendered.contains("ctx sources --all"));
+            for atom in ["codex", "available"] {
+                assert_eq!(
+                    rendered
+                        .split_whitespace()
+                        .filter(|token| *token == atom)
+                        .count(),
+                    1,
+                    "{atom:?} did not remain intact at {width} columns: {rendered}"
+                );
+            }
+            assert!(rendered.contains("Session history"), "{width}: {rendered}");
+            assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
+            if width < 80 {
+                assert!(
+                    rendered.contains("Source\n  codex\nStatus\n  available\n"),
+                    "{width}: {rendered}"
+                );
+            } else {
+                assert!(
+                    rendered.contains("Source  Status     Location"),
+                    "{width}: {rendered}"
+                );
+            }
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn human_paths_only_abbreviate_complete_home_prefixes() {
+        let home = PathBuf::from("test-home/example");
+        assert_eq!(human_path(&home, Some(&home)), "~");
+        let nested = home.join(".codex/sessions");
+        assert_eq!(
+            human_path(&nested, Some(&home)),
+            Path::new("~").join(".codex/sessions").display().to_string()
+        );
+        let sibling = PathBuf::from("test-home/example-other/history");
+        assert_eq!(
+            human_path(&sibling, Some(&home)),
+            sibling.display().to_string()
+        );
+    }
+
+    #[test]
+    fn sources_stack_when_fixed_columns_do_not_fit_and_keep_atoms_whole() {
+        let home = PathBuf::from("test-home");
+        let factory_path = home.join(".factory/sessions");
+        let mut factory = source(
+            ProviderSourceStatus::Available,
+            &factory_path.to_string_lossy(),
+        );
+        factory.provider = CaptureProvider::FactoryAiDroid;
+        factory.source_format = "factory_ai_droid_sessions_jsonl";
+        let windsurf_path = home.join(".codeium/windsurf/trajectories");
+        let mut windsurf = source(
+            ProviderSourceStatus::Available,
+            &windsurf_path.to_string_lossy(),
+        );
+        windsurf.provider = CaptureProvider::Windsurf;
+        windsurf.source_format = "windsurf_cascade_hook_transcript_jsonl_tree";
+        let sources = [factory, windsurf];
+
+        for width in [80, 100, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_sources_human(&context, &sources, &[], &[], &[], 0, Some(&home));
+            let rendered = document.render_plain();
+            for atom in ["factory-ai-droid", "available", "windsurf"] {
+                assert!(
+                    rendered.split_whitespace().any(|token| token == atom),
+                    "{atom:?} did not remain intact at {width} columns: {rendered}"
+                );
+            }
+            assert!(rendered.contains("Session history"), "{width}: {rendered}");
+            assert!(
+                rendered.contains("Agent transcripts"),
+                "{width}: {rendered}"
+            );
+            assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
+            if width == 80 {
+                assert!(
+                    rendered.contains("Source\n  factory-ai-droid\nStatus\n  available\n"),
+                    "{rendered}"
+                );
+            } else {
+                assert!(
+                    rendered.contains("Source            Status     Location"),
+                    "{width}: {rendered}"
+                );
+            }
             assert_fits(&document, &context);
         }
     }
@@ -495,7 +636,7 @@ mod ui_tests {
     #[test]
     fn sources_empty_state_is_actionable() {
         let context = context(48, ColorMode::Never);
-        let rendered = render_sources_human(&context, &[], &[], &[], &[], 0).render_plain();
+        let rendered = render_sources_human(&context, &[], &[], &[], &[], 0, None).render_plain();
         assert!(rendered.starts_with("No history sources found\n"));
         assert!(rendered.contains("Next\n  ctx sources --all\n"));
     }
@@ -509,7 +650,7 @@ mod ui_tests {
             reason: "selector contained \u{1b}[31mcontrol",
         };
         let context = context(48, ColorMode::Never);
-        let document = render_sources_human(&context, &[], &[issue], &[], &[], 0);
+        let document = render_sources_human(&context, &[], &[issue], &[], &[], 0, None);
         let rendered = document.render_plain();
         assert!(rendered.contains("\\x1b[31mcontrol"));
         assert!(rendered.contains("ctx import --provider codex --path <path>"));
@@ -521,7 +662,7 @@ mod ui_tests {
     fn sources_plain_output_matches_ansi_stripped_output() {
         let sources = vec![source(ProviderSourceStatus::Available, "/tmp/codex")];
         let context = context(80, ColorMode::Always);
-        let document = render_sources_human(&context, &sources, &[], &[], &[], 0);
+        let document = render_sources_human(&context, &sources, &[], &[], &[], 0, None);
         assert_eq!(
             strip_ansi(&document.render(&context)),
             document.render_plain()

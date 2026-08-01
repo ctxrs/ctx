@@ -113,7 +113,7 @@ impl CommercialApiClient {
 }
 
 impl ReferralCreateResult {
-    pub(super) fn validate(&self, requested_codename: &str) -> Result<()> {
+    pub(in crate::pro) fn validate(&self, requested_codename: &str) -> Result<()> {
         if !super::super::referral::valid_referral_codename(&self.codename)
             || self.codename != requested_codename
             || !matches!(self.disposition.as_str(), "created" | "existing")
@@ -125,7 +125,7 @@ impl ReferralCreateResult {
 }
 
 impl ReferralStatusResult {
-    pub(super) fn validate(&self) -> Result<()> {
+    pub(in crate::pro) fn validate(&self) -> Result<()> {
         let amounts = [
             self.earned_cents,
             self.pending_cents,

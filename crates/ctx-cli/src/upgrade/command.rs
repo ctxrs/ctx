@@ -49,7 +49,7 @@ pub(crate) use daemon::{
     finish_daemon_auto_upgrade, prepare_daemon_auto_upgrade, PreparedDaemonUpgrade,
 };
 mod human;
-use human::{render_auto_mode, render_outcome};
+use human::{render_auto_mode, render_error, render_outcome};
 mod status;
 use status::render_status;
 
@@ -269,7 +269,7 @@ pub fn run(
     if let Err(error) = &result {
         insert_upgrade_error_analytics(telemetry, error);
     }
-    result
+    render_error(result, !args.json_output(), ui)
 }
 
 fn insert_upgrade_outcome_analytics(telemetry: &mut UpgradeTelemetry, outcome: &UpgradeOutcome) {

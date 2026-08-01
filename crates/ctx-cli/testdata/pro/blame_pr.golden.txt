@@ -3,7 +3,7 @@ Repository    ctxrs/ctx
 Selector      https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42
 
 Code produced
-  contains_commit
+  Contains commit
     commit deadbeef
       evidence      [1]
       Produced by
@@ -21,7 +21,7 @@ Code produced
           evidence      [3]
 
 PR activity
-  reviewed
+  Reviewed
     session reviewer
       direct actor  agent review-agent
       owning root   run review-root

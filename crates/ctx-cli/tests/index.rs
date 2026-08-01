@@ -34,6 +34,33 @@ fn contains_cursor_up(rendered: &[u8]) -> bool {
     })
 }
 
+fn assert_single_human_diagnosis(
+    output: &std::process::Output,
+    expected_title: &str,
+    expected_action: &str,
+) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout.matches(expected_title).count(),
+        1,
+        "expected exactly one {expected_title:?} diagnosis: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches(expected_action).count(),
+        1,
+        "expected exactly one {expected_action:?} action: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Error:"),
+        "human diagnosis must stay structured: {stdout}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "structured human diagnosis must not be forwarded again: {stderr}"
+    );
+}
+
 #[test]
 fn index_status_and_watch_are_read_only_for_missing_store() {
     let temp = tempdir();
@@ -50,17 +77,57 @@ fn index_status_and_watch_are_read_only_for_missing_store() {
         "index status must not initialize the store"
     );
 
-    let stderr = failure_stderr(ctx(&temp).args([
-        "index",
-        "watch",
-        "--format=jsonl",
-        "--interval-seconds",
-        "1",
-    ]));
-    assert!(stderr.contains("ctx index does not exist yet"), "{stderr}");
+    let watch_machine = ctx(&temp)
+        .args([
+            "index",
+            "watch",
+            "--format=jsonl",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let watch_snapshot: Value = serde_json::from_slice(&watch_machine.stdout).unwrap();
+    assert_eq!(watch_snapshot["lexical"]["status"], "missing");
+    assert_eq!(
+        String::from_utf8(watch_machine.stderr).unwrap(),
+        "Error: ctx index does not exist yet; run `ctx setup` first\n"
+    );
+
+    let wait_machine = ctx(&temp)
+        .args(["index", "wait", "--format=json", "--interval-seconds", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let wait_snapshot: Value = serde_json::from_slice(&wait_machine.stdout).unwrap();
+    assert_eq!(wait_snapshot["status"], "blocked");
+    assert_eq!(wait_snapshot["index"]["lexical"]["status"], "missing");
+    assert_eq!(
+        String::from_utf8(wait_machine.stderr).unwrap(),
+        "Error: ctx index does not exist yet; run `ctx setup` first\n"
+    );
+
+    let watch_human = ctx(&temp)
+        .args(["--color=never", "index", "watch", "--interval-seconds", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_single_human_diagnosis(&watch_human, "Search index is not set up", "ctx setup");
+
+    let wait_human = ctx(&temp)
+        .args(["--color=never", "index", "wait", "--interval-seconds", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_single_human_diagnosis(&wait_human, "Search index is not set up", "ctx setup");
     assert!(
         !data_root(&temp).join("work.sqlite").exists(),
-        "index watch failure must not initialize the store"
+        "index watch/wait failures must not initialize the store"
     );
 }
 
@@ -114,12 +181,19 @@ fn index_watch_exits_when_background_indexing_has_terminally_failed() {
     assert_eq!(status["semantic"]["status"], "pending", "{status:#}");
     assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains(
-            "background indexing stopped before the index was ready; run `ctx doctor` for details"
-        ),
-        "{stderr}"
+    assert_eq!(
+        stderr,
+        "Error: background indexing stopped before the index was ready; run `ctx doctor` for details\n"
     );
+
+    let human = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args(["--color=never", "index", "watch", "--interval-seconds", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_single_human_diagnosis(&human, "Background indexing stopped", "ctx doctor");
 }
 
 #[test]
@@ -161,9 +235,9 @@ fn index_watch_reports_missing_generation_before_stale_daemon_failure() {
     assert_eq!(status["lexical"]["status"], "missing", "{status:#}");
     assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("ctx index does not exist yet; run `ctx setup` first"),
-        "{stderr}"
+    assert_eq!(
+        stderr,
+        "Error: ctx index does not exist yet; run `ctx setup` first\n"
     );
 }
 
@@ -318,7 +392,7 @@ fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
     assert_eq!(stdout["selection"]["lexical"], false);
     assert_eq!(stdout["selection"]["semantic"], true);
     assert_eq!(stdout["index"]["semantic"]["enabled"], false);
-    assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+    assert_eq!(stderr, "Error: semantic indexing is disabled\n");
 }
 
 #[test]
@@ -349,7 +423,88 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
     assert_eq!(stdout["selection"]["semantic"], true);
     assert_eq!(stdout["index"]["lexical"]["status"], "ready");
     assert_eq!(stdout["index"]["semantic"]["enabled"], false);
-    assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+    assert_eq!(stderr, "Error: semantic indexing is disabled\n");
+}
+
+#[test]
+fn semantic_model_cache_missing_is_an_immediate_terminal_wait() {
+    let temp = daemon_test_root();
+    import_ready_history(&temp);
+    ctx(&temp)
+        .args(["daemon", "disable", "--format=json"])
+        .assert()
+        .success();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+    let jobs = data_root(&temp).join("daemon/jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    fs::write(
+        jobs.join("semantic-index.json"),
+        json!({
+            "status": "skipped",
+            "reason": "model_cache_missing",
+            "last_run_at_ms": 1,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
+    assert_eq!(
+        status["daemon"]["jobs"]["semantic_index"]["status"], "skipped",
+        "{status:#}"
+    );
+    assert_eq!(
+        status["daemon"]["jobs"]["semantic_index"]["reason"], "model_cache_missing",
+        "{status:#}"
+    );
+
+    let output = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args([
+            "index",
+            "wait",
+            "--semantic",
+            "--format=json",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let wait: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(wait["status"], "blocked", "{wait:#}");
+    assert_eq!(wait["selection"]["semantic"], true, "{wait:#}");
+    assert_eq!(
+        wait["index"]["daemon"]["jobs"]["semantic_index"]["reason"], "model_cache_missing",
+        "{wait:#}"
+    );
+    assert_eq!(
+        stderr,
+        "Error: semantic indexing is skipped because the local embedding model cache is missing\n"
+    );
+    assert!(!stderr.contains("timed out"), "{stderr}");
+
+    let human = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args([
+            "--color=never",
+            "index",
+            "wait",
+            "--semantic",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_single_human_diagnosis(&human, "Semantic search needs attention", "ctx doctor");
 }
 
 #[test]
@@ -397,7 +552,7 @@ fn human_status_and_wait_share_the_ready_document() {
 }
 
 #[test]
-fn human_wait_blocked_renders_the_final_searchable_snapshot() {
+fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
 
@@ -416,20 +571,30 @@ fn human_wait_blocked_renders_the_final_searchable_snapshot() {
         .failure()
         .get_output()
         .clone();
+    assert_single_human_diagnosis(
+        &output,
+        "Semantic indexing is blocked",
+        "ctx setup --semantic",
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(
-        stdout.starts_with("✓ Your history is searchable\n")
-            || stdout.starts_with("OK Your history is searchable\n"),
+        stdout.starts_with("✗ Semantic indexing is blocked\n")
+            || stdout.starts_with("ERROR Semantic indexing is blocked\n"),
         "{stdout}"
     );
-    assert!(stdout.contains("Semantic search  Off"));
-    assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+    assert!(stdout.contains("Keyword search remains available."));
+    assert!(stdout.contains("\nKeyword search\n"));
+    assert!(stdout.contains("\nSemantic search\nStatus  Off\n"));
+    assert!(stdout.ends_with("\nNext\n  ctx setup --semantic\n"));
+    assert!(!stdout.contains("Your history is searchable"));
+    assert!(!stdout.contains("ctx doctor"));
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
-fn human_wait_timeout_renders_the_final_active_snapshot() {
+fn human_wait_timeout_renders_unchanged_active_snapshot_once() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
     fs::write(
@@ -457,7 +622,12 @@ fn human_wait_timeout_renders_the_final_active_snapshot() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert!(stdout.matches("Semantic search").count() >= 2, "{stdout}");
+    assert_eq!(stdout.matches("Semantic search").count(), 1, "{stdout}");
+    assert_eq!(
+        stdout.matches("Your history is searchable").count(),
+        1,
+        "{stdout}"
+    );
     assert!(stdout.contains("Your history is searchable"), "{stdout}");
     assert!(stdout.contains("Embedded"));
     assert!(stdout.contains("Throughput"));

@@ -13,9 +13,12 @@ use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry,
 use crate::config::{self, CONFIG_FILE};
 use crate::output::{compact_json, print_json, JsonOutputFormat};
 use crate::semantic::source_epoch_status_report;
-use crate::ui::{RenderContext, Ui};
+use crate::ui::{Document, RenderContext, Ui};
 
-use super::index_dashboard::IndexDashboard;
+use super::index_dashboard::{render_semantic_disabled_wait, IndexDashboard};
+
+#[cfg(any(test, ctx_pro_test_helper))]
+pub(crate) mod dashboard_fixture;
 
 #[derive(Debug, Args)]
 pub(crate) struct IndexArgs {
@@ -143,7 +146,10 @@ fn run_index_watch(
             break;
         }
         if let Some(message) = index_terminal_error(&status, selection) {
-            return Err(anyhow!(message));
+            return Err(forward_index_terminal_error(
+                message,
+                !jsonl_output && !quiet,
+            ));
         }
         thread::sleep(interval);
     }
@@ -227,6 +233,37 @@ impl<W: io::Write> IndexWatchOutput<W> {
     }
 }
 
+#[derive(Default)]
+struct IndexWaitHumanOutput {
+    dashboard: IndexDashboard,
+    last_frame: Option<String>,
+}
+
+impl IndexWaitHumanOutput {
+    fn print(&mut self, ui: &mut Ui, status: &Value) -> Result<()> {
+        let (document, frame) = self.render(ui, status);
+        ui.write_stdout(&document)?;
+        self.last_frame = Some(frame);
+        Ok(())
+    }
+
+    fn print_final(&mut self, ui: &mut Ui, status: &Value) -> Result<()> {
+        let (document, frame) = self.render(ui, status);
+        if self.last_frame.as_ref() != Some(&frame) {
+            ui.write_stdout(&document)?;
+            self.last_frame = Some(frame);
+        }
+        Ok(())
+    }
+
+    fn render(&mut self, ui: &Ui, status: &Value) -> (Document, String) {
+        let context = *ui.stdout_context();
+        let document = self.dashboard.render(status, &context);
+        let frame = document.render(&context);
+        (document, frame)
+    }
+}
+
 fn run_index_wait(
     args: IndexWaitArgs,
     data_root: &Path,
@@ -237,7 +274,7 @@ fn run_index_wait(
     let explicit_selection = IndexSelection::from_wait_args(&args);
     let interval = Duration::from_secs(args.interval_seconds);
     let started = Instant::now();
-    let mut dashboard = IndexDashboard::default();
+    let mut human_output = IndexWaitHumanOutput::default();
     loop {
         let status = index_status_snapshot(data_root)?;
         let selection = explicit_selection.unwrap_or_else(|| IndexSelection::default_for(&status));
@@ -249,7 +286,7 @@ fn run_index_wait(
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "ready"))?;
             } else if !quiet {
-                write_index_status_human(ui, &mut dashboard, &status)?;
+                human_output.print(ui, &status)?;
             }
             return Ok(());
         }
@@ -258,9 +295,20 @@ fn run_index_wait(
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "blocked"))?;
             } else if !quiet {
-                write_index_status_human(ui, &mut dashboard, &status)?;
+                if selection.semantic
+                    && !bool_at(&status, &["semantic", "enabled"])
+                    && lexical_ready(&status)
+                {
+                    let document = render_semantic_disabled_wait(&status, ui.stdout_context());
+                    ui.write_stdout(&document)?;
+                } else {
+                    human_output.print(ui, &status)?;
+                }
             }
-            return Err(anyhow!(message));
+            return Err(forward_index_terminal_error(
+                message,
+                !args.format.is_json() && !quiet,
+            ));
         }
         if args
             .timeout_seconds
@@ -270,14 +318,14 @@ fn run_index_wait(
             if args.format.is_json() {
                 print_json(index_wait_json(status, selection, "timeout"))?;
             } else if !quiet {
-                write_index_status_human(ui, &mut dashboard, &status)?;
+                human_output.print_final(ui, &status)?;
             }
             return Err(anyhow!(
                 "ctx index wait timed out before indexing was ready"
             ));
         }
         if !quiet && !args.format.is_json() {
-            write_index_status_human(ui, &mut dashboard, &status)?;
+            human_output.print(ui, &status)?;
             ui.write_stdout(&crate::ui::Document::from_line(crate::ui::Line::new()))?;
         }
         thread::sleep(interval);
@@ -407,14 +455,14 @@ fn lexical_index_status(
     pending_inventory_units: usize,
     failed_inventory_units: usize,
 ) -> &'static str {
-    if !initialized {
-        "missing"
-    } else if failed_inventory_units > 0 {
+    if failed_inventory_units > 0 {
         "failed"
     } else if pending_inventory_units > 0 && indexed_items > 0 {
         "partial"
     } else if pending_inventory_units > 0 {
         "pending"
+    } else if !initialized {
+        "missing"
     } else if indexed_items > 0 {
         "ready"
     } else if inventory_units == 0 {
@@ -500,8 +548,13 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
     }
     if selection.semantic {
         let semantic_status = semantic_job_status(status);
+        let semantic_job_status = string_at(
+            status,
+            &["daemon", "jobs", "semantic_index", "status"],
+            "unknown",
+        );
         let reason = string_at(status, &["daemon", "jobs", "semantic_index", "reason"], "");
-        if semantic_status == "skipped" && reason == "model_cache_missing" {
+        if semantic_job_status == "skipped" && reason == "model_cache_missing" {
             return Some(
                 "semantic indexing is skipped because the local embedding model cache is missing"
                     .to_owned(),
@@ -524,6 +577,14 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
         );
     }
     None
+}
+
+fn forward_index_terminal_error(message: String, human_output_rendered: bool) -> anyhow::Error {
+    if human_output_rendered {
+        crate::dispatch::rendered_cli_error()
+    } else {
+        anyhow!(message)
+    }
 }
 
 fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) -> Value {

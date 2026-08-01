@@ -3,8 +3,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::ui::{
-    fields, hint, outcome, section, Action, Document, Field, Hint, Line, Outcome, OutcomeState,
-    RenderContext, Span, Token,
+    fields, hint, outcome, section, Action, Document, Field, Hint, Outcome, OutcomeState,
+    RenderContext, Token,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +13,7 @@ enum DaemonPresentation {
     Partial,
     Failed,
     Completed,
+    NotStarted,
     Stopped,
     Disabled,
 }
@@ -91,6 +92,8 @@ pub(in crate::semantic) fn render_daemon_status_human(
         DaemonPresentation::Completed
     } else if !enabled || status == "disabled" {
         DaemonPresentation::Disabled
+    } else if !running && status == "unknown" {
+        DaemonPresentation::NotStarted
     } else if service_failed {
         DaemonPresentation::Failed
     } else if running
@@ -133,7 +136,17 @@ pub(in crate::semantic) fn render_daemon_status_human(
         DaemonPresentation::Failed if recoverable => (
             OutcomeState::Error,
             "Daemon failed but can recover",
-            Some("Lifecycle ownership is stale; restarting the daemon is safe."),
+            Some("The previous daemon did not shut down cleanly. Restarting it is safe."),
+        ),
+        DaemonPresentation::Failed if history_failed => (
+            OutcomeState::Error,
+            "History refresh failed",
+            Some("No new history generation was published."),
+        ),
+        DaemonPresentation::Failed if semantic_failed => (
+            OutcomeState::Error,
+            "Semantic indexing failed",
+            Some("Keyword search remains available."),
         ),
         DaemonPresentation::Failed => (
             OutcomeState::Error,
@@ -141,6 +154,11 @@ pub(in crate::semantic) fn render_daemon_status_human(
             Some("Automatic history refresh is not running."),
         ),
         DaemonPresentation::Completed => (OutcomeState::Success, "Daemon run completed", None),
+        DaemonPresentation::NotStarted => (
+            OutcomeState::Warning,
+            "Daemon is enabled but has not started",
+            Some("No daemon lifecycle state has been observed yet."),
+        ),
         DaemonPresentation::Stopped => (OutcomeState::Neutral, "Daemon is not running", None),
         DaemonPresentation::Disabled => (
             OutcomeState::Neutral,
@@ -158,7 +176,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
     );
 
     let (service_state, service_token) = service_state(enabled, running, recoverable, status);
-    let mut service = state_field("Status", service_state, service_token);
+    let mut service = vec![state_field("Status", service_state, service_token)];
     let mut service_details = Vec::new();
     if let Some(mode) = daemon
         .get("mode")
@@ -168,7 +186,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
         service_details.push(("Mode", humanize_code(mode)));
     }
     if let Some(issue) = supervisor_issue.as_deref() {
-        service.append(state_field("Persistence", "not verified", Token::Warning));
+        service.push(state_field("Persistence", "not verified", Token::Warning));
         service_details.push(("Caveat", issue.to_owned()));
     }
     if config_issue {
@@ -177,7 +195,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
             .and_then(|reload| reload.get("status"))
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        service.append(state_field(
+        service.push(state_field(
             "Configuration",
             config_state(reload_status),
             Token::Warning,
@@ -204,13 +222,13 @@ pub(in crate::semantic) fn render_daemon_status_human(
     if let Some(error) = daemon
         .get("last_error")
         .and_then(Value::as_str)
-        .filter(|error| !error.is_empty())
+        .filter(|error| !error.is_empty() && !history_failed && !semantic_failed)
     {
         push_unique_detail(&mut service_details, "Error", error);
     }
-    append_details(context, &mut service, &service_details);
+    append_details(&mut service, &service_details);
     document.push_blank();
-    document.append(section("Service", service));
+    document.append(section("Service", fields(context, &service)));
 
     if core_refresh.is_some() {
         let (history_state, history_token) = core_refresh_state(
@@ -218,7 +236,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
             enabled || matches!(presentation, DaemonPresentation::Completed),
             rejected_records,
         );
-        let mut history_document = state_field("Status", history_state, history_token);
+        let mut history_fields = vec![state_field("Status", history_state, history_token)];
         let mut history_details = Vec::new();
         if history_catching_up {
             if let Some(phase) = core_refresh
@@ -245,12 +263,19 @@ pub(in crate::semantic) fn render_daemon_status_human(
         if rejected_records > 0 {
             history_details.push(("Rejected", counted(rejected_records, "record", "records")));
         }
-        for error in [job_error(core_refresh)].into_iter().flatten() {
-            push_unique_detail(&mut history_details, "Error", error);
+        if history_failed {
+            history_details.push((
+                "Issue",
+                "One or more history sources could not be refreshed.".to_owned(),
+            ));
+        } else {
+            for error in [job_error(core_refresh)].into_iter().flatten() {
+                push_unique_detail(&mut history_details, "Error", error);
+            }
         }
-        append_details(context, &mut history_document, &history_details);
+        append_details(&mut history_fields, &history_details);
         document.push_blank();
-        document.append(section("Core refresh", history_document));
+        document.append(section("History refresh", fields(context, &history_fields)));
     }
 
     if semantic.is_some() || daemon.get("semantic_runtime_active").is_some() {
@@ -260,7 +285,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
             .unwrap_or(false);
         let (semantic_state, semantic_token) =
             semantic_state(semantic, runtime_active, semantic_fallback);
-        let mut semantic_document = state_field("Status", semantic_state, semantic_token);
+        let mut semantic_fields = vec![state_field("Status", semantic_state, semantic_token)];
         let mut semantic_details = Vec::new();
         if let Some(fallback) = semantic_fallback {
             let runtime = semantic.and_then(|job| job.get("embedding_runtime"));
@@ -292,19 +317,21 @@ pub(in crate::semantic) fn render_daemon_status_human(
         {
             semantic_details.push(("Reason", humanize_code(reason)));
         }
-        if let Some(error) = job_error(semantic) {
+        if semantic_failed {
+            semantic_details.push(("Issue", "Semantic indexing could not complete.".to_owned()));
+        } else if let Some(error) = job_error(semantic) {
             push_unique_detail(&mut semantic_details, "Error", error);
         }
-        append_details(context, &mut semantic_document, &semantic_details);
+        append_details(&mut semantic_fields, &semantic_details);
         document.push_blank();
-        document.append(section("Semantic", semantic_document));
+        document.append(section("Semantic", fields(context, &semantic_fields)));
     }
 
     if let Some(pro_status) = pro_status {
         document.push_blank();
         document.append(section(
             "Pro",
-            state_field("Status", pro_status, Token::Text),
+            fields(context, &[state_field("Status", pro_status, Token::Text)]),
         ));
     }
 
@@ -357,18 +384,33 @@ fn render_daemon_enabled_receipt(
     supervisor: &Value,
     config_path: &Path,
 ) -> Document {
+    if enabled && running && !persistent {
+        let mut document = outcome(
+            context,
+            Outcome {
+                state: OutcomeState::Warning,
+                title: "Daemon running; persistence not verified",
+                detail: None,
+            },
+        );
+        document.append(hint(
+            context,
+            Hint {
+                text: "Check supervisor status.",
+            },
+            Some(Action {
+                command: "ctx daemon status",
+            }),
+        ));
+        return document;
+    }
+
     let supervisor_disabled = supervisor.get("status").and_then(Value::as_str) == Some("disabled");
     let (state, title, detail) = if enabled && running && persistent {
         (
             OutcomeState::Success,
             "Daemon enabled",
             "Background history refresh will continue after this terminal closes.",
-        )
-    } else if enabled && running {
-        (
-            OutcomeState::Warning,
-            "Daemon enabled with limited persistence",
-            "It is running now, but native supervisor restart was not verified.",
         )
     } else if enabled {
         (
@@ -398,7 +440,7 @@ fn render_daemon_enabled_receipt(
         },
     );
 
-    let mut service = if enabled {
+    let mut service = vec![if enabled {
         state_field(
             "Status",
             if running { "running" } else { "not running" },
@@ -410,8 +452,8 @@ fn render_daemon_enabled_receipt(
         )
     } else {
         state_field("Status", "disabled", Token::Text)
-    };
-    service.append(state_field(
+    }];
+    service.push(state_field(
         "Persistence",
         if enabled && persistent {
             "managed"
@@ -441,9 +483,9 @@ fn render_daemon_enabled_receipt(
         details.push(("Caveat", issue));
         details.push(("Config", config_path.display().to_string()));
     }
-    append_details(context, &mut service, &details);
+    append_details(&mut service, &details);
     document.push_blank();
-    document.append(section("Service", service));
+    document.append(section("Service", fields(context, &service)));
 
     if enabled && !running {
         document.push_blank();
@@ -550,6 +592,8 @@ fn service_state(
         ("failed (recoverable)", Token::Error)
     } else if running {
         ("running", Token::Success)
+    } else if status == "unknown" {
+        ("not started", Token::Warning)
     } else {
         ("failed", Token::Error)
     }
@@ -613,24 +657,16 @@ fn semantic_state(
     }
 }
 
-fn state_field(label: &str, value: &str, token: Token) -> Document {
-    Document::from_line(
-        Line::new()
-            .with(Span::new(label, Token::Label))
-            .with(Span::text("  "))
-            .with(Span::new(value, token)),
-    )
+fn state_field<'a>(label: &'a str, value: &'a str, token: Token) -> Field<'a> {
+    Field::new(label, value).with_value_token(token)
 }
 
-fn append_details(context: &RenderContext, document: &mut Document, details: &[(&str, String)]) {
-    if details.is_empty() {
-        return;
-    }
-    let values = details
-        .iter()
-        .map(|(label, value)| Field::new(label, value))
-        .collect::<Vec<_>>();
-    document.append(fields(context, &values));
+fn append_details<'a>(table: &mut Vec<Field<'a>>, details: &'a [(&'a str, String)]) {
+    table.extend(
+        details
+            .iter()
+            .map(|(label, value)| Field::new(label, value)),
+    );
 }
 
 fn push_unique_detail(details: &mut Vec<(&'static str, String)>, label: &'static str, value: &str) {
@@ -657,9 +693,12 @@ fn recovery_action(
             "ctx daemon enable",
         ));
     }
-    if recoverable || presentation == DaemonPresentation::Failed {
+    if presentation == DaemonPresentation::NotStarted {
+        return Some(("Check daemon startup and service health.", "ctx doctor"));
+    }
+    if recoverable {
         return Some((
-            "Restart the daemon and verify lifecycle ownership.",
+            "Restart the daemon and check its health.",
             "ctx daemon enable",
         ));
     }
@@ -671,6 +710,9 @@ fn recovery_action(
     }
     if semantic_failed || service_issue {
         return Some(("Inspect the affected service.", "ctx doctor"));
+    }
+    if presentation == DaemonPresentation::Failed {
+        return Some(("Inspect the failed daemon service.", "ctx doctor"));
     }
     if history_catching_up {
         return Some(("Watch history refresh progress.", "ctx index watch"));

@@ -49,7 +49,10 @@ enum ReferralCommand {
 
 #[derive(Debug, Args)]
 struct ReferralCreateArgs {
-    #[arg(value_parser = parse_referral_codename_unchecked)]
+    #[arg(
+        value_parser = parse_referral_codename_unchecked,
+        help = "Public codename used in the share command"
+    )]
     codename: ReferralCodename,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     format: JsonOutputFormat,
@@ -67,9 +70,13 @@ struct ReferralPayoutArgs {
     no_open: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     format: JsonOutputFormat,
-    #[arg(long, value_parser = parse_country_code)]
+    #[arg(
+        long,
+        value_parser = parse_country_code,
+        help = "Two-letter country code for payout onboarding"
+    )]
     country: Option<CountryCode>,
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help = "Legal entity that will receive payouts")]
     entity_type: Option<ReferralEntityType>,
 }
 
@@ -86,6 +93,30 @@ impl ReferralArgs {
             ReferralCommand::Create(args) => args.format.is_json(),
             ReferralCommand::Status(args) => args.format.is_json(),
             ReferralCommand::Payout(args) => args.format.is_json(),
+        }
+    }
+
+    fn retry_command(&self) -> String {
+        match &self.command {
+            ReferralCommand::Create(args) => {
+                format!("ctx referral create {}", args.codename.as_str())
+            }
+            ReferralCommand::Status(_) => "ctx referral status".to_owned(),
+            ReferralCommand::Payout(args) => {
+                let mut command = "ctx referral payout".to_owned();
+                if args.no_open {
+                    command.push_str(" --no-open");
+                }
+                if let Some(country) = &args.country {
+                    command.push_str(" --country ");
+                    command.push_str(country.as_str());
+                }
+                if let Some(entity_type) = args.entity_type {
+                    command.push_str(" --entity-type ");
+                    command.push_str(entity_type.as_str());
+                }
+                command
+            }
         }
     }
 }
@@ -169,18 +200,20 @@ pub(super) fn valid_referral_codename(value: &str) -> bool {
 
 fn parse_country_code(value: &str) -> Result<CountryCode, String> {
     if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase()) {
-        return Err("country must be a two-letter uppercase ISO country code".to_owned());
+        return Err(
+            "country must be a two-letter uppercase ISO country code, for example US".to_owned(),
+        );
     }
     Ok(CountryCode(value.to_owned()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReferralAuthMode {
+pub(super) enum ReferralAuthMode {
     Interactive { browser_enabled: bool },
     CachedOnly,
 }
 
-trait ReferralService {
+pub(super) trait ReferralService {
     fn create(
         &mut self,
         codename: &str,
@@ -255,24 +288,66 @@ impl ReferralService for CommercialLifecycleService {
 }
 
 pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, ui: &mut Ui) -> Result<()> {
+    super::commercial_config::reject_test_control_outside_test_host()?;
+    #[cfg(ctx_pro_test_helper)]
+    super::test_control::prepare()?;
     args.validate_invocation()?;
     let json_output = args.json_output();
+    #[cfg(ctx_pro_test_helper)]
+    let test_control_active = super::test_control::is_active()?;
+    #[cfg(ctx_pro_test_helper)]
+    let _lifecycle_lock = if test_control_active {
+        None
+    } else {
+        prepare_referral_identity(&data_root, json_output)?;
+        let lifecycle_lock =
+            super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?;
+        Some(lifecycle_lock.ok_or_else(referral_lifecycle_lock_required)?)
+    };
+    #[cfg(not(ctx_pro_test_helper))]
     prepare_referral_identity(&data_root, json_output)?;
+    #[cfg(not(ctx_pro_test_helper))]
     let lifecycle_lock =
         super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?;
+    #[cfg(not(ctx_pro_test_helper))]
     let _lifecycle_lock = lifecycle_lock.ok_or_else(|| {
         anyhow::anyhow!(
             "authentication_required: rerun the referral command without --format=json to sign in"
         )
     })?;
-    let mut service = CommercialLifecycleService::production(&data_root)?;
-    run_with_service(
-        args,
-        &mut service,
-        &mut io::stdout().lock(),
-        ui,
-        &open_browser,
-    )
+    #[cfg(ctx_pro_test_helper)]
+    let result = if let Some(mut service) = super::test_control::referral_service()? {
+        run_with_service(
+            args,
+            &mut service,
+            &mut io::stdout().lock(),
+            ui,
+            &open_browser,
+        )
+    } else {
+        let mut service = CommercialLifecycleService::production(&data_root)?;
+        run_with_service(
+            args,
+            &mut service,
+            &mut io::stdout().lock(),
+            ui,
+            &open_browser,
+        )
+    };
+    #[cfg(not(ctx_pro_test_helper))]
+    let result = {
+        let mut service = CommercialLifecycleService::production(&data_root)?;
+        run_with_service(
+            args,
+            &mut service,
+            &mut io::stdout().lock(),
+            ui,
+            &open_browser,
+        )
+    };
+    #[cfg(ctx_pro_test_helper)]
+    let result = super::test_control::finish(result);
+    result
 }
 
 pub(crate) fn show_cta_once<D>(data_root: &Path, eligible: bool, output: &mut D) -> bool
@@ -402,6 +477,13 @@ fn prepare_referral_identity(data_root: &Path, json_output: bool) -> Result<()> 
     Ok(())
 }
 
+#[cfg(ctx_pro_test_helper)]
+fn referral_lifecycle_lock_required() -> anyhow::Error {
+    anyhow::anyhow!(
+        "authentication_required: rerun the referral command without --format=json to sign in"
+    )
+}
+
 fn run_with_service(
     args: ReferralArgs,
     service: &mut dyn ReferralService,
@@ -409,73 +491,77 @@ fn run_with_service(
     ui: &mut Ui,
     opener: &impl Fn(&str) -> Result<()>,
 ) -> Result<()> {
-    args.validate_invocation()?;
     let json_output = args.json_output();
-    match args.command {
-        ReferralCommand::Create(args) => {
-            let auth_mode = if json_output {
-                ReferralAuthMode::CachedOnly
-            } else {
-                ReferralAuthMode::Interactive {
-                    browser_enabled: true,
+    let retry_command = args.retry_command();
+    let result = (|| {
+        args.validate_invocation()?;
+        match args.command {
+            ReferralCommand::Create(args) => {
+                let auth_mode = if json_output {
+                    ReferralAuthMode::CachedOnly
+                } else {
+                    ReferralAuthMode::Interactive {
+                        browser_enabled: true,
+                    }
+                };
+                let result = service.create(args.codename.as_str(), auth_mode, ui)?;
+                if args.format.is_json() {
+                    write_json(output, &create_output(&result))
+                } else {
+                    let document = render_create_human(ui.stdout_context(), &result);
+                    ui.write_stdout(&document)?;
+                    Ok(())
                 }
-            };
-            let result = service.create(args.codename.as_str(), auth_mode, ui)?;
-            if args.format.is_json() {
-                write_json(output, &create_output(&result))
-            } else {
-                let document = render_create_human(ui.stdout_context(), &result);
+            }
+            ReferralCommand::Status(args) => {
+                let auth_mode = if json_output {
+                    ReferralAuthMode::CachedOnly
+                } else {
+                    ReferralAuthMode::Interactive {
+                        browser_enabled: true,
+                    }
+                };
+                let result = service.status(auth_mode, ui)?;
+                if args.format.is_json() {
+                    write_json(output, &status_output(&result))
+                } else {
+                    let document = render_status_human(ui.stdout_context(), &result);
+                    ui.write_stdout(&document)?;
+                    Ok(())
+                }
+            }
+            ReferralCommand::Payout(args) => {
+                let auth_mode = if json_output {
+                    ReferralAuthMode::CachedOnly
+                } else {
+                    ReferralAuthMode::Interactive {
+                        browser_enabled: !args.no_open,
+                    }
+                };
+                let result = service.payout(
+                    args.country.as_ref().map(CountryCode::as_str),
+                    args.entity_type.map(ReferralEntityType::as_str),
+                    auth_mode,
+                    ui,
+                )?;
+                if args.format.is_json() {
+                    return write_json(output, &payout_output(&result, false));
+                }
+                let mut browser_opened = false;
+                if !args.no_open {
+                    browser_opened = opener(&result.url).is_ok();
+                }
+                let document = render_payout_human(ui.stdout_context(), &result, browser_opened);
                 ui.write_stdout(&document)?;
+                if !args.no_open {
+                    let notice = render_payout_browser_notice(ui.stderr_context(), browser_opened);
+                    ui.write_stderr(&notice)?;
+                }
                 Ok(())
             }
         }
-        ReferralCommand::Status(args) => {
-            let auth_mode = if json_output {
-                ReferralAuthMode::CachedOnly
-            } else {
-                ReferralAuthMode::Interactive {
-                    browser_enabled: true,
-                }
-            };
-            let result = service.status(auth_mode, ui)?;
-            if args.format.is_json() {
-                write_json(output, &status_output(&result))
-            } else {
-                let document = render_status_human(ui.stdout_context(), &result);
-                ui.write_stdout(&document)?;
-                Ok(())
-            }
-        }
-        ReferralCommand::Payout(args) => {
-            let auth_mode = if json_output {
-                ReferralAuthMode::CachedOnly
-            } else {
-                ReferralAuthMode::Interactive {
-                    browser_enabled: !args.no_open,
-                }
-            };
-            let result = service.payout(
-                args.country.as_ref().map(CountryCode::as_str),
-                args.entity_type.map(ReferralEntityType::as_str),
-                auth_mode,
-                ui,
-            )?;
-            if args.format.is_json() {
-                return write_json(output, &payout_output(&result, false));
-            }
-            let mut browser_opened = false;
-            if !args.no_open {
-                browser_opened = opener(&result.url).is_ok();
-            }
-            let document = render_payout_human(ui.stdout_context(), &result, browser_opened);
-            ui.write_stdout(&document)?;
-            if !args.no_open {
-                let notice = render_payout_browser_notice(ui.stderr_context(), browser_opened);
-                ui.write_stderr(&notice)?;
-            }
-            Ok(())
-        }
-    }
+    })();
+    super::human_result(result, !json_output, &retry_command, ui)
 }
 
 fn write_json(output: &mut impl io::Write, value: &impl Serialize) -> Result<()> {
@@ -630,19 +716,43 @@ mod tests {
     }
 
     #[test]
+    fn invalid_country_names_a_valid_copyable_example() {
+        assert_eq!(
+            parse_country_code("us").unwrap_err(),
+            "country must be a two-letter uppercase ISO country code, for example US"
+        );
+    }
+
+    #[test]
     fn referral_help_states_the_recurring_commission_and_direct_cap() {
         let mut command = Cli::command();
         let referral = command
             .find_subcommand_mut("referral")
             .expect("referral subcommand");
         let help = referral.render_long_help().to_string();
+        let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(help.contains("Refer a developer. Earn $10/month toward your agent bill."));
         assert!(help.contains("Up to $120 per friend."));
-        assert!(help.contains("first 12 distinct qualifying paid monthly invoices"));
-        assert!(help.contains("first two commissions remain pending until invoice 2 settles"));
-        assert!(help.contains("invoices 3-12 each have their own 14-day hold and reconciliation"));
+        assert!(normalized.contains("first 12 distinct qualifying paid monthly invoices"));
+        assert!(normalized.contains("first two commissions remain pending until invoice 2 settles"));
+        assert!(
+            normalized.contains("invoices 3-12 each have their own 14-day hold and reconciliation")
+        );
         assert!(!help.contains("Get $20"));
         assert!(!help.contains("one-time"));
+    }
+
+    #[test]
+    fn referral_create_help_describes_the_public_share_command_codename() {
+        let mut command = Cli::command();
+        let create = command
+            .find_subcommand_mut("referral")
+            .expect("referral subcommand")
+            .find_subcommand_mut("create")
+            .expect("referral create subcommand");
+        let help = create.render_long_help().to_string();
+        assert!(help.contains("Public codename used in the share command"));
+        assert!(!help.contains("referral link"));
     }
 
     #[test]
@@ -672,8 +782,15 @@ mod tests {
     }
 
     #[test]
-    fn create_and_status_json_preserve_the_exact_machine_contract() {
+    fn success_json_preserves_the_exact_machine_contract() {
         let create = create_result();
+        let mut create_bytes = Vec::new();
+        write_json(&mut create_bytes, &create_output(&create)).unwrap();
+        assert_eq!(
+            create_bytes,
+            br#"{"schema_version":1,"payload_type":"referral_create","codename":"agent-smith","share_command":"ctx pro --referral agent-smith","disposition":"created"}
+"#
+        );
         assert_eq!(
             serde_json::to_value(create_output(&create)).unwrap(),
             serde_json::json!({
@@ -686,6 +803,13 @@ mod tests {
         );
 
         let status = status_result();
+        let mut status_bytes = Vec::new();
+        write_json(&mut status_bytes, &status_output(&status)).unwrap();
+        assert_eq!(
+            status_bytes,
+            br#"{"schema_version":1,"payload_type":"referral_status","codename":"agent-smith","share_command":"ctx pro --referral agent-smith","attributed":4,"subscribed":3,"earned_cents":7000,"pending_cents":2000,"manual_review_cents":2000,"payable_cents":2000,"processing_cents":1000,"paid_cents":2000,"debt_cents":2000,"currency":"usd","payout_state":"paused"}
+"#
+        );
         assert_eq!(
             serde_json::to_value(status_output(&status)).unwrap(),
             serde_json::json!({
@@ -705,6 +829,20 @@ mod tests {
                 "currency": "usd",
                 "payout_state": "paused",
             })
+        );
+
+        let payout = ReferralPayoutResult {
+            kind: "payout_onboarding_created".to_owned(),
+            payout_state: "onboarding_pending".to_owned(),
+            url: "https://connect.stripe.com/setup/s/test".to_owned(),
+            expires_at_unix: 1_800_000_000,
+        };
+        let mut payout_bytes = Vec::new();
+        write_json(&mut payout_bytes, &payout_output(&payout, false)).unwrap();
+        assert_eq!(
+            payout_bytes,
+            br#"{"schema_version":1,"payload_type":"referral_payout","payout_state":"onboarding_pending","onboarding_url":"https://connect.stripe.com/setup/s/test","expires_at_unix":1800000000,"browser_opened":false}
+"#
         );
     }
 

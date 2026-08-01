@@ -367,6 +367,15 @@ pub(super) fn enum_text<T: serde::Serialize>(value: T) -> String {
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "unknown".to_owned())
+        .replace('_', " ")
+}
+
+pub(super) fn enum_heading<T: serde::Serialize>(value: T) -> String {
+    let mut text = enum_text(value);
+    if let Some(first) = text.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    text
 }
 
 pub(super) fn display_width(text: &str) -> usize {

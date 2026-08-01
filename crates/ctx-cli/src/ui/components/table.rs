@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::layout::{display_width, pad, pad_after, wrap_text};
 use crate::ui::{Document, Line, RenderContext, Span, Token};
 
@@ -9,6 +11,7 @@ const MIN_COLUMN_WIDTH: usize = 8;
 pub(crate) struct Table {
     columns: Vec<String>,
     rows: Vec<Vec<String>>,
+    intact_columns: BTreeSet<usize>,
 }
 
 impl Table {
@@ -20,7 +23,19 @@ impl Table {
         Self {
             columns: columns.into_iter().map(Into::into).collect(),
             rows: Vec::new(),
+            intact_columns: BTreeSet::new(),
         }
+    }
+
+    /// Keep semantic atoms in these columns on one line. Their natural widths
+    /// become part of the table's fit calculation; when the fixed cells and a
+    /// useful wrapping column cannot fit together, the table stacks instead.
+    pub(crate) fn keep_columns_intact<I>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.intact_columns.extend(columns);
+        self
     }
 
     pub(crate) fn push_row<I, S>(&mut self, row: I)
@@ -47,6 +62,10 @@ impl Table {
     pub(crate) fn rows(&self) -> &[Vec<String>] {
         &self.rows
     }
+
+    fn keeps_column_intact(&self, column: usize) -> bool {
+        self.intact_columns.contains(&column)
+    }
 }
 
 pub(crate) fn table(context: &RenderContext, table: &Table) -> Document {
@@ -55,7 +74,7 @@ pub(crate) fn table(context: &RenderContext, table: &Table) -> Document {
     }
 
     let natural = natural_widths(table);
-    let minimum = minimum_widths(table);
+    let minimum = minimum_widths(table, &natural);
     let gap_width = COLUMN_GAP.saturating_mul(table.columns.len().saturating_sub(1));
     let minimum_total = minimum
         .iter()
@@ -94,11 +113,18 @@ fn natural_widths(table: &Table) -> Vec<usize> {
         .collect()
 }
 
-fn minimum_widths(table: &Table) -> Vec<usize> {
+fn minimum_widths(table: &Table, natural: &[usize]) -> Vec<usize> {
     table
         .columns
         .iter()
-        .map(|heading| display_width(heading).max(MIN_COLUMN_WIDTH))
+        .enumerate()
+        .map(|(column, heading)| {
+            if table.keeps_column_intact(column) {
+                natural.get(column).copied().unwrap_or_default()
+            } else {
+                display_width(heading).max(MIN_COLUMN_WIDTH)
+            }
+        })
         .collect()
 }
 
@@ -142,7 +168,8 @@ fn wide_table(table: &Table, widths: &[usize]) -> Document {
             .iter()
             .enumerate()
             .map(|(column, width)| {
-                wrap_text(row.get(column).map_or("", String::as_str), Some(*width))
+                let width = (!table.keeps_column_intact(column)).then_some(*width);
+                wrap_text(row.get(column).map_or("", String::as_str), width)
             })
             .collect::<Vec<_>>();
         push_visual_row(&mut document, &cells, widths, Token::Text);
@@ -192,7 +219,12 @@ fn stacked_table(context: &RenderContext, table: &Table) -> Document {
         }
         for (column, heading) in table.columns.iter().enumerate() {
             document.push_line(Line::styled(heading, Token::Label));
-            for value in wrap_text(row.get(column).map_or("", String::as_str), value_width) {
+            let width = if table.keeps_column_intact(column) {
+                None
+            } else {
+                value_width
+            };
+            for value in wrap_text(row.get(column).map_or("", String::as_str), width) {
                 document.push_line(
                     Line::new()
                         .with(Span::text(pad(indent)))
