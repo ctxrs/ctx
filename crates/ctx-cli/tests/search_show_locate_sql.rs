@@ -566,7 +566,7 @@ fn bounded_sql_preview_has_copyable_human_recovery_and_unchanged_raw_controls() 
 fn show_does_not_initialize_store() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", "deadbeef"]));
-    assert!(stderr.contains("Core index is not initialized"));
+    assert!(stderr.contains("the Core index does not exist; retry with daemon refresh enabled"));
     assert!(!temp.path().join("work.sqlite").exists());
 }
 

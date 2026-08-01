@@ -366,6 +366,9 @@ fn show_requires_a_core_generation_without_initializing_the_store() {
     let event_id = "019fa000-0000-7000-8000-000000000099";
 
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", event_id]));
-    assert!(stderr.contains("Core index is not initialized"), "{stderr}");
+    assert!(
+        stderr.contains("the Core index does not exist; retry with daemon refresh enabled"),
+        "{stderr}"
+    );
     assert!(!temp.path().join("work.sqlite").exists());
 }
