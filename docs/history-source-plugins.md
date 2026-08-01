@@ -4,7 +4,7 @@ History source plugins let local tools export their history into ctx without
 ctx owning those tools' storage schemas. The stable 1.0 route is intentionally
 narrow: a manifest identifies a durable provider-owned
 `ctx-history-jsonl-v1` file, and the CLI registers that file with the normal
-daemon-owned source-backed generation path.
+daemon-owned Core refresh path.
 
 ctx does not load plugin code in-process and does not provide a second history
 store for plugins. Import copies policy-selected normalized history into Core;
@@ -22,11 +22,11 @@ Put a manifest at one of:
 `ctx sources` and `ctx sources --format json` discover manifests without
 executing commands. A durable regular-file source is reported as `available`,
 `importable: true`, and `import_mode: explicit_source_backed`. Its
-`history_source` is the filterable `provider_key/source_id` route identity;
-`plugin_source` is the `plugin/source` import-selection alias. Command-only
-compatibility sources are reported as `unsupported` and never importable.
-Invalid manifests are listed as non-importable `history_source_plugin` rows
-with their validation error.
+compatibility import mode describes source acquisition. Its `history_source` is
+the filterable `provider_key/source_id` route identity; `plugin_source` is the
+`plugin/source` import-selection alias. Command-only compatibility sources are
+reported as `unsupported` and never importable. Invalid manifests are listed as
+non-importable `history_source_plugin` rows with their validation error.
 
 Manifest example:
 
@@ -89,9 +89,9 @@ durable path; the persistent daemon then watches and refreshes the registered
 provider source normally. `--reset-cursor` is invalid because ctx owns no
 plugin cursor.
 
-## Source-Backed Publication
+## Core Publication
 
-An accepted import has one authority path:
+An accepted import has one acquisition and publication path:
 
 1. The CLI validates that the selected manifest identifies a regular
    provider-owned file.
@@ -99,8 +99,8 @@ An accepted import has one authority path:
    declared source identity without copying the body.
 3. ctx registers that same file as the explicit custom
    `ctx_history_jsonl_v1` source route.
-4. The normal source-refresh endpoint publishes a fresh source-backed
-   generation, or returns an authoritative no-op receipt.
+4. The normal Core-refresh endpoint publishes a fresh Core generation, or
+   returns an authoritative no-op receipt.
 
 Cold imports, appends, rewrites, replacements, and no-ops all use the shared
 custom JSONL source-family path. There is no fallback to the old Store database,

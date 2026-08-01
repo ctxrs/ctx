@@ -6,24 +6,25 @@ the local retrieval product.
 ## Required Invariants
 
 - `ctx setup` reads supported provider history and writes only under the
-  configured ctx data root: SQLite index/config data, and optional daemon
-  lock/status/job state when daemon autostart runs.
+  configured ctx data root: Core generations, derived projections, config data,
+  and optional daemon lock/status/job state when daemon autostart runs.
 - `ctx sources` writes nothing in local-only security mode.
-- `ctx import` writes only under the configured ctx data root: SQLite
-  index/config data, and optional daemon lock/status/job state when daemon
-  autostart runs.
-- `ctx search` may refresh a bounded batch of discovered native provider
-  history into the configured ctx data root before querying. Default search must
-  not download embedding models, start semantic indexing, start a daemon, or
-  write the semantic sidecar.
+- `ctx import` writes only under the configured ctx data root: Core generations,
+  derived projections, config data, and optional daemon lock/status/job state
+  when daemon autostart runs.
+- `ctx search` may request a bounded daemon-owned refresh of discovered native
+  provider history before querying the active Core generation. The query process
+  does not write Core generations or projections. Without semantic opt-in,
+  default search must not download embedding models or start semantic indexing.
 - `ctx show` writes nothing in local-only security mode, except
   `ctx show session --out` writes only the explicit path when one is provided.
 - `ctx status` does not mutate canonical history or local Pro graph data:
   missing stores stay missing, and existing stores are not migrated, repaired,
   or used to create search projections. Pro entitlement authorization may
   advance nonsecret anti-clock-rollback security metadata.
-- `ctx sql` opens only the existing SQLite index, rejects write statements and
-  multiple statements, and does not run background upgrade checks.
+- `ctx sql` opens only the existing relational metadata projection, rejects
+  write statements and multiple statements, and does not run background
+  upgrade checks.
 - In local-only security mode, setup/import/default search do not use network
   access or API keys. Explicit semantic use still must not call hosted model
   APIs, and search must not download the local embedding model when the required

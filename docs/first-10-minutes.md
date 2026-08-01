@@ -33,8 +33,9 @@ ctx status --format json
 
 `ctx setup` creates local storage, discovers supported provider history,
 inventories local history sources, imports discovered native provider sources,
-and optimizes the local search index. It does not execute history-source plugin
-commands. The default root is `~/.ctx`. Use a temporary root for trials:
+and publishes a self-contained Core generation with its derived projections. It
+does not execute history-source plugin commands. The default root is `~/.ctx`.
+Use a temporary root for trials:
 
 ```bash
 ctx --data-root /tmp/ctx-first-10 setup
@@ -101,8 +102,9 @@ ctx search "build failure" --term checksum --term release --limit 5
 ```
 
 `--limit` is capped at `200`. Search defaults to `--refresh background`, which
-serves existing indexes while daemon maintenance refreshes history and semantic
-coverage when enabled; use `--refresh off` to search only the existing index.
+serves the active Core generation while daemon maintenance requests a Core
+refresh and semantic catch-up when enabled; use `--refresh off` for a read-only
+query of the active Core generation.
 
 Inside Codex, ctx excludes the active session tree by default when it can
 identify it, so your current prompt and subagents do not dominate results. Add

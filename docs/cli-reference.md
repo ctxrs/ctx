@@ -69,8 +69,8 @@ ctx daemon enable
   source catalog state, semantic generation and coverage,
   relational projection state, daemon state, initialization state, compact
   local usage health, local-only marker, and read-only marker. It does not
-  include usage counts or estimates, initialize or repair derived Core storage,
-  or open old history.
+  include usage counts or estimates, initialize or repair Core generations or
+  derived projections, or open old history.
 - `stats` is the read-only, local, offline report for History retrieval, Code
   provenance, Measured delivery, and Estimated savings. Measured facts and
   model-based estimates are separate in JSON; the estimate model and
@@ -245,15 +245,16 @@ Native JSON rows include `provider`, `path`, `exists`, `source_format`,
 `unsupported_reason`. Plugin JSON rows use
 `kind: "history_source_plugin"` and include `plugin`, `plugin_source`,
 `history_source`, `provider_key`, `source_id`, `manifest_path`, `enabled`,
-and source-authority fields. Durable regular-file rows report
+and acquisition-source fields. Durable regular-file rows report
 `status: "available"`, `importable: true`,
 `import_mode: "explicit_source_backed"`, and
-`provider_source_authority: true`. Command-only compatibility rows report
-`status: "unsupported"`, `importable: false`, and no provider-source
-authority. Invalid installed plugin manifests appear as non-importable plugin
-rows with `status: "invalid"` and an `error`. `sources` reads path metadata and
-plugin manifests, writes nothing to provider files or source repositories, and
-does not execute plugin commands.
+`provider_source_authority: true`. These compatibility field names describe
+the acquisition route, not query-time content authority. Command-only
+compatibility rows report `status: "unsupported"`, `importable: false`, and no
+provider-source acquisition authority. Invalid installed plugin manifests
+appear as non-importable plugin rows with `status: "invalid"` and an `error`.
+`sources` reads path metadata and plugin manifests, writes nothing to provider
+files or source repositories, and does not execute plugin commands.
 
 A detected current format that ctx cannot import has `status: "unsupported"`
 and `import_support: "unsupported"`. A supported source that requires user
@@ -307,22 +308,22 @@ ctx import --format json
 ctx import --progress json --format json
 ```
 
-`import` explicitly rebuilds source-backed history from provider sources. The
+`import` explicitly rebuilds Core history from provider sources. The
 normal first-run path is `ctx setup`, which already imports discovered native
 provider sources. Use `import` to repair, re-run, resume, or target a specific
 provider/path. It creates the data root if needed, reads provider transcript
-files, builds a private immutable Tantivy candidate containing indexed-only
-meaningful text plus identity and filter metadata, verifies it, and atomically
-publishes it under `search/lexical`. Before returning, it waits for the required
-daemon-owned `relational.sqlite` projection to reach that exact Core
-generation. Pro and semantic catch-up remain independently scheduled and do
-not extend the foreground import boundary. It does not write `config.toml` for
-implicit defaults.
+files, builds a private immutable Core/Tantivy candidate containing complete
+normalized stored records plus lexical fields, identities, and filter metadata,
+verifies it, and atomically publishes it under `search/lexical`. Before
+returning, it waits for the required daemon-owned `relational.sqlite`
+projection to reach that exact Core generation. Pro and semantic catch-up
+remain independently scheduled and do not extend the foreground import
+boundary. It does not write `config.toml` for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v1` path; the
 importer validates its schema and source identity, registers that same path as
-the custom route, and waits for daemon-owned source-backed publication.
+the custom acquisition route, and waits for daemon-owned Core publication.
 Command-only manifests are reported as unsupported and are never copied into
 ctx storage. Plugins are not imported by `import --all` or setup.
 
@@ -690,16 +691,16 @@ Semantic retrieval reads an existing compatible generation under
 `search/semantic`; search does not initialize semantic storage, download
 embedding models, or run semantic indexing. Use `--refresh off` to query the
 published generations without refreshing or scheduling work, or
-`--refresh wait` to run foreground source refresh and fail when it cannot
+`--refresh wait` to request foreground Core refresh and fail when it cannot
 complete. Results are rendered from Core under every refresh mode. Foreground
 refresh skips isolated malformed records with a
 warning and publishes valid records; source-level and system-level failures
 remain fatal. Explicit-only native sources such as
 NanoClaw, plus search-only sources without native import support, are searched
-from the existing index until they are explicitly imported through a supported
-path. Supported AstrBot `data_v4.db` locations participate in bounded native
-discovery and may also be imported with an explicit `--path`. Search requires a
-non-empty query, at least one non-empty `--term`, or
+from the active Core generation until they are explicitly imported through a
+supported path. Supported AstrBot `data_v4.db` locations participate in bounded
+native discovery and may also be imported with an explicit `--path`. Search
+requires a non-empty query, at least one non-empty `--term`, or
 `--file <path>`; provider, workspace, time, session, event, source, and result
 flags only narrow an actual search. Default results are session-diverse: ctx
 returns the strongest matching span from each session, plus
@@ -858,10 +859,11 @@ ctx docs man --out ~/.local/share/man/man1
 `docs` exposes a curated copy of the public ctx docs inside the binary. It is
 intended for humans and agents that need local command help without opening the
 website. `docs list`, `docs search`, and `docs show` read embedded text and do
-not touch provider history or derived search storage. `docs show --out PATH`
-writes one embedded topic to that explicit path. `docs man --print PAGE` prints
-one generated man page to stdout; `docs man --out DIR` writes generated
-section-1 man pages for `ctx` and its public subcommands.
+not touch provider history, Core generations, or derived projections.
+`docs show --out PATH` writes one embedded topic to that explicit path.
+`docs man --print PAGE` prints one generated man page to stdout.
+`docs man --out DIR` writes generated section-1 man pages for `ctx` and its
+public subcommands.
 
 Agents should usually use `ctx docs search` or `ctx docs show` rather than
 shelling through `man`, because the docs commands return concise markdown/text
@@ -878,15 +880,16 @@ ctx integrations install mcp
 exposes eight tools: six OSS tools (`status`, `sources`, `search`, `sql`,
 `show_session`, `show_event`) and two Pro tools (`pro_status`, `blame`).
 `pro_status` remains read-only. Pro blame advertises `readOnlyHint: false`
-because bounded local catch-up updates the canonical Core index, writes the
+because bounded local catch-up reads the active Core generation, writes the
 encrypted derived Pro graph, and writes the projection acknowledgement. It
 never writes provider history or repositories. Its final serialized response,
 including exact structured content plus text fallback, is capped at 1 MiB; an
 over-cap page fails intact with guidance to lower `limit` or use CLI JSON. The
-MCP search and SQL tools query the existing index only; they do not refresh or
-import provider history, and MCP search currently uses the lexical search path
-only. Tool results include MCP text content plus
-`structuredContent` JSON. Treat all MCP output as private local history: it may
+MCP `search` tool queries the active Core generation, and the `sql` tool queries
+the existing relational metadata projection. Neither refreshes or imports
+provider history; MCP search currently uses the lexical search path only. Tool
+results include MCP text content plus `structuredContent` JSON. Treat all MCP
+output as private local history: it may
 include absolute paths, source metadata, snippets, transcript
 text, and raw SQL result fields, and the MCP host may log or forward tool
 output.
