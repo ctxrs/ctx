@@ -87,12 +87,12 @@ fn render_status_text(value: &Value) -> String {
         );
         push_component_summary(
             &mut out,
-            "pro_source_manifest_receipt",
+            "pro_core_materialization_receipt",
             pro_projection.get("receipt"),
         );
         push_key_value(
             &mut out,
-            "pro_source_manifest_receipt_generation",
+            "pro_core_materialization_receipt_generation",
             pro_projection
                 .get("receipt")
                 .and_then(|receipt| receipt.get("core_generation_id")),
