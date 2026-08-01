@@ -54,7 +54,7 @@ fn fresh_sql_compatibility_initializes_only_the_relational_projection() {
 }
 
 #[test]
-fn committed_source_generation_without_relational_projection_fails_closed() {
+fn committed_core_generation_without_relational_projection_fails_closed() {
     let temp = tempfile::tempdir().unwrap();
     let generation_root = temp.path().join("search").join("lexical");
     std::fs::create_dir_all(&generation_root).unwrap();
@@ -63,9 +63,7 @@ fn committed_source_generation_without_relational_projection_fails_closed() {
     let error = SqlCompatibility::open_for_data_root(temp.path())
         .err()
         .expect("missing relational projection should fail");
-    assert!(error
-        .to_string()
-        .contains("source-backed SQL projection is missing"));
+    assert!(error.to_string().contains("Core SQL projection is missing"));
     assert!(!database_path(temp.path().to_path_buf()).exists());
     assert!(!sql_compatibility_path(temp.path()).exists());
 }

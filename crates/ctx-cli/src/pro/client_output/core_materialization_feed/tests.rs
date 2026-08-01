@@ -7,6 +7,7 @@ use ctx_history_core::{
     SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_pro_host_protocol::MAX_CORE_RECORD_PAGE_WIRE_BYTES;
 use tempfile::tempdir;
 
 use super::*;
@@ -104,6 +105,10 @@ fn encoded_record_bytes(page: &CoreRecordPage) -> usize {
         .iter()
         .map(|record| serde_json::to_vec(record).unwrap().len())
         .sum()
+}
+
+fn encoded_page_bytes(page: &CoreRecordPage) -> usize {
+    serde_json::to_vec(page).unwrap().len()
 }
 
 fn receipt_for(index: &VerifiedIndex, revision: &str) -> CoreMaterializationReceipt {
@@ -411,7 +416,7 @@ fn record_page_item_boundary_uses_one_exchange_per_page() {
 }
 
 #[test]
-fn encoded_payload_boundary_splits_pages_below_sixteen_mib() {
+fn escaped_records_share_one_page_within_content_and_wire_bounds() {
     let temp = tempdir().unwrap();
     let source = source("encoded-boundary.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -427,20 +432,15 @@ fn encoded_payload_boundary_splits_pages_below_sixteen_mib() {
 
     let report = sync_core_feed(&index, None, &mut consumer).unwrap();
     assert_eq!(report.materialized_records, 2);
-    assert_eq!(report.record_pages, 2);
-    assert_eq!(consumer.record_exchanges, 2);
-    assert_eq!(
-        consumer
-            .record_pages
-            .iter()
-            .map(|page| page.records.len())
-            .collect::<Vec<_>>(),
-        vec![1, 1]
-    );
-    assert!(consumer.record_pages.iter().all(|page| {
-        encoded_record_bytes(page) <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES
-            && page.content_bytes().unwrap() <= MAX_CORE_RECORD_PAGE_CONTENT_BYTES
-    }));
+    assert_eq!(report.record_pages, 1);
+    assert_eq!(consumer.record_exchanges, 1);
+    assert_eq!(consumer.record_pages.len(), 1);
+    let page = &consumer.record_pages[0];
+    assert_eq!(page.records.len(), 2);
+    assert_eq!(page.content_bytes().unwrap(), 10 * 1024 * 1024);
+    assert!(encoded_record_bytes(page) > MAX_CORE_RECORD_PAGE_CONTENT_BYTES);
+    assert!(encoded_record_bytes(page) <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES);
+    assert!(encoded_page_bytes(page) <= MAX_CORE_RECORD_PAGE_WIRE_BYTES);
 }
 
 #[test]
@@ -462,6 +462,7 @@ fn escaped_single_record_above_content_byte_count_still_transports() {
         encoded_record_bytes(&consumer.record_pages[0])
             <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES
     );
+    assert!(encoded_page_bytes(&consumer.record_pages[0]) <= MAX_CORE_RECORD_PAGE_WIRE_BYTES);
 }
 
 #[test]
