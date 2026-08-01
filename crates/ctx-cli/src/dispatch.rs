@@ -516,16 +516,42 @@ fn render_stable_pro_error_json(error: &anyhow::Error) -> Result<bool> {
 }
 
 fn write_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
+    write_clap_output_with_line_ends(error, ui, false)
+}
+
+fn write_human_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
+    write_clap_output_with_line_ends(error, ui, true)
+}
+
+fn write_clap_output_with_line_ends(
+    error: &clap::Error,
+    ui: &mut Ui,
+    trim_line_ends: bool,
+) -> Result<()> {
     let rendered = error.render();
     if error.use_stderr() {
-        if ui.stderr_context().color_enabled() {
-            write!(ui.stderr_writer(), "{}", rendered.ansi())?;
+        let rendered = if ui.stderr_context().color_enabled() {
+            rendered.ansi().to_string()
         } else {
-            write!(ui.stderr_writer(), "{rendered}")?;
-        }
-    } else if ui.stdout_context().color_enabled() {
-        write!(ui.stdout_writer(), "{}", rendered.ansi())?;
+            rendered.to_string()
+        };
+        let rendered = if trim_line_ends {
+            crate::ui::trim_terminal_line_ends(&rendered)
+        } else {
+            rendered
+        };
+        write!(ui.stderr_writer(), "{rendered}")?;
     } else {
+        let rendered = if ui.stdout_context().color_enabled() {
+            rendered.ansi().to_string()
+        } else {
+            rendered.to_string()
+        };
+        let rendered = if trim_line_ends {
+            crate::ui::trim_terminal_line_ends(&rendered)
+        } else {
+            rendered
+        };
         write!(ui.stdout_writer(), "{rendered}")?;
     }
     Ok(())

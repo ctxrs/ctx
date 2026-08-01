@@ -65,7 +65,11 @@ fn write_adapted_clap_output(
             return Ok(());
         }
     }
-    super::write_clap_output(error, ui)
+    if machine_output {
+        super::write_clap_output(error, ui)
+    } else {
+        super::write_human_clap_output(error, ui)
+    }
 }
 
 fn human_clap_document(
@@ -90,9 +94,11 @@ fn human_clap_document(
         }
         ErrorKind::InvalidSubcommand if leaf.as_deref() == Some("ctx") => {
             let invalid = clap_context_text(error, ClapContextKind::InvalidSubcommand)?;
+            let detail = clap_context_text(error, ClapContextKind::SuggestedSubcommand)
+                .map(|suggested| format!("A similar subcommand exists: '{suggested}'."));
             (
                 format!("unrecognized subcommand '{invalid}'"),
-                None,
+                detail,
                 Some("ctx [OPTIONS] <COMMAND>".to_owned()),
                 Some("ctx --help"),
             )

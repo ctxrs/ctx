@@ -83,9 +83,14 @@ fn root_errors_wrap_at_terminal_width_with_public_ctx_usage() {
         assert!(!missing.contains("[subcommands:"), "{missing}");
         assert_width_safe(&missing, width, &[]);
 
-        let invalid = human_output(&["/tmp/copied-ctx", "definitely-not-a-command"], width);
+        let invalid = human_output(&["/tmp/copied-ctx", "frobnicate"], width);
+        let normalized = normalized(&invalid);
         assert!(invalid.contains("unrecognized subcommand"), "{invalid}");
-        assert!(invalid.contains("definitely-not-a-command"), "{invalid}");
+        assert!(invalid.contains("frobnicate"), "{invalid}");
+        assert!(
+            normalized.contains("A similar subcommand exists: 'locate'."),
+            "{invalid}"
+        );
         assert!(invalid.contains("ctx [OPTIONS] <COMMAND>"), "{invalid}");
         assert!(!invalid.contains("/tmp/copied-ctx"), "{invalid}");
         assert_width_safe(&invalid, width, &[]);
@@ -169,6 +174,10 @@ fn machine_parse_errors_remain_raw_clap_bytes() {
             &["ctx", "sources", "--provider", "unknown", "--format=json"][..],
             "run `ctx sources --all` to inspect every supported provider location",
         ),
+        (
+            &["ctx", "frobnicate", "--format=json"][..],
+            "tip: a similar subcommand exists: 'locate'",
+        ),
     ] {
         let (error, arguments) = error_and_arguments(arguments);
         let expected = error.to_string();
@@ -212,14 +221,84 @@ fn human_parse_errors_use_the_selected_styled_stderr() {
     assert!(plain.contains("ctx sources [OPTIONS]"), "{plain}");
 }
 
+fn rendered_help(path: &[&str], width: usize) -> (String, String) {
+    let mut root = Cli::command().term_width(width);
+    root.build();
+    let mut command = &mut root;
+    for segment in path {
+        command = command
+            .find_subcommand_mut(segment)
+            .unwrap_or_else(|| panic!("missing help path {path:?}"));
+    }
+    let rendered = command.render_long_help();
+    let plain = crate::ui::trim_terminal_line_ends(&rendered.to_string());
+    let styled = rendered.ansi().to_string();
+    (plain, crate::ui::trim_terminal_line_ends(&styled))
+}
+
 #[test]
-fn clap_help_keeps_the_terminal_design_width_ceiling() {
-    let help = Cli::try_parse_from(["ctx", "sources", "--help"])
-        .unwrap_err()
-        .to_string();
-    assert!(help.contains("Usage: ctx sources [OPTIONS]"));
-    assert!(
-        help.lines().all(|line| line.trim_end().width() <= 100),
-        "{help}"
-    );
+fn clap_help_has_no_authored_trailing_cells_at_supported_widths() {
+    for width in [32, 80, 100, 120] {
+        for path in [
+            &[][..],
+            &["search"][..],
+            &["sources"][..],
+            &["referral", "create"][..],
+            &["referral", "status"][..],
+        ] {
+            let (plain, styled) = rendered_help(path, width);
+            assert!(plain
+                .split_whitespace()
+                .collect::<String>()
+                .contains("Usage:ctx"));
+            assert!(
+                plain
+                    .lines()
+                    .all(|line| !line.ends_with([' ', '\t'])
+                        && (width < 80 || line.width() <= width)),
+                "help path {path:?} retained trailing cells or overflowed width {width}:\n{plain}"
+            );
+            assert!(
+                styled.contains('\u{1b}'),
+                "help path {path:?} was not styled"
+            );
+            assert_eq!(
+                anstream::adapter::strip_str(&styled).to_string(),
+                plain,
+                "styled/plain mismatch for help path {path:?} at width {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn affected_help_paths_trim_line_ends_in_the_human_clap_pipeline() {
+    for arguments in [
+        &["ctx", "sources", "--help"][..],
+        &["ctx", "referral", "create", "--help"][..],
+        &["ctx", "referral", "status", "--help"][..],
+    ] {
+        let (error, os_arguments) = error_and_arguments(arguments);
+        let stdout = SharedBytes::default();
+        let stdout_copy = stdout.clone();
+        let mut ui = Ui::with_writers(
+            stdout,
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
+            SharedBytes::default(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
+        );
+        write_adapted_clap_output(&error, &os_arguments, false, &mut ui).unwrap();
+        ui.flush().unwrap();
+
+        let styled = String::from_utf8(stdout_copy.bytes()).unwrap();
+        let plain = anstream::adapter::strip_str(&styled).to_string();
+        assert!(styled.contains('\u{1b}'), "{arguments:?}");
+        assert!(plain.contains("Usage: ctx"), "{arguments:?}:\n{plain}");
+        assert!(
+            plain
+                .lines()
+                .all(|line| !line.ends_with([' ', '\t']) && line.width() <= 100),
+            "{arguments:?}:\n{plain}"
+        );
+    }
 }

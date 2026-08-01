@@ -670,6 +670,10 @@ mod tests {
 
         let unwrapped = help.split_whitespace().collect::<String>();
         assert!(
+            unwrapped.contains("Usage:ctx"),
+            "{command} help at width {width} lost the public program name:\n{help}"
+        );
+        assert!(
             !unwrapped.contains(CONFIGURED_DATA_ROOT),
             "{command} help at width {width} leaked the configured data root:\n{help}"
         );
@@ -692,7 +696,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = DataRootEnvGuard::set();
 
-        for width in [32, 80] {
+        for width in [32, 80, 100, 120] {
             let help = Cli::command()
                 .term_width(width)
                 .render_long_help()
@@ -708,7 +712,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = DataRootEnvGuard::set();
 
-        for width in [32, 80] {
+        for width in [32, 80, 100, 120] {
             let mut command = Cli::command().term_width(width);
             command.build();
             let help = command
